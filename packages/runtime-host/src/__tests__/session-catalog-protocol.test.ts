@@ -90,6 +90,19 @@ describe('Session catalog protocol', () => {
     );
   });
 
+  test('rejects sparse live running-turn arrays', () => {
+    const runningTurnIds = Array<string>(1);
+
+    assert.throws(
+      () =>
+        decodeSessionCatalogItem({
+          ...projection(),
+          liveRunState: { schemaVersion: 1, runningTurnIds },
+        }),
+      isProtocolError,
+    );
+  });
+
   test('identifies Session creation inputs that expose Host paths', () => {
     assert.equal(
       HOST_OPERATION_SPECS['session.create'].usesHostPaths?.({

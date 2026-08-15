@@ -844,9 +844,10 @@ function optionalLiveRunState(
   ) {
     throw invalidProtocolFrame('Invalid Session catalog running turn ids');
   }
-  const runningTurnIds = state.runningTurnIds.map((turnId) =>
-    requireEntityId(turnId, 'Session running turn id'),
-  );
+  const runningTurnIds: string[] = [];
+  for (let index = 0; index < state.runningTurnIds.length; index += 1) {
+    runningTurnIds.push(requireEntityId(state.runningTurnIds[index], 'Session running turn id'));
+  }
   if (new Set(runningTurnIds).size !== runningTurnIds.length) {
     throw invalidProtocolFrame('Duplicate Session catalog running turn id');
   }
