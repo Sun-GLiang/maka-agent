@@ -19,6 +19,7 @@ import {
 } from '@maka/storage/execution-stores';
 import {
   SESSION_CATALOG_RESULT_MAX_BYTES,
+  SESSION_CATALOG_RUNNING_TURN_MAX_ITEMS,
   SESSION_TURN_QUERY_RESULT_MAX_BYTES,
   type SessionConfigurationUpdateInput,
   type SessionTurnContribution,
@@ -193,6 +194,58 @@ test('catalog queries project known-empty and running state from Runtime authori
     schemaVersion: 1,
     runningTurnIds: ['turn-live'],
   });
+});
+
+test('catalog queries de-duplicate Runtime live turn ids in stable order', async () => {
+  const fixture = createFixture({
+    manager: {
+      runningTurnIds: () =>
+        Array.from({ length: SESSION_CATALOG_RUNNING_TURN_MAX_ITEMS + 1 }, (_, index) =>
+          index % 2 === 0 ? 'turn-a' : 'turn-b',
+        ),
+    },
+  });
+
+  const outcome = await fixture.coordinator.handlers['session.catalog.query'](
+    { kind: 'get', sessionId: fixture.sessionId },
+    context,
+  );
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok || outcome.result.kind !== 'session' || !outcome.result.session) {
+    assert.fail('Catalog get did not return a Session');
+  }
+  if ('kind' in outcome.result.session) {
+    assert.fail('Catalog get returned an unsupported Session projection');
+  }
+  assert.deepEqual(outcome.result.session.liveRunState, {
+    schemaVersion: 1,
+    runningTurnIds: ['turn-a', 'turn-b'],
+  });
+});
+
+test('catalog queries leave live run state unknown when unique turns exceed the wire limit', async () => {
+  const fixture = createFixture({
+    manager: {
+      runningTurnIds: () =>
+        Array.from(
+          { length: SESSION_CATALOG_RUNNING_TURN_MAX_ITEMS + 1 },
+          (_, index) => `turn-${index}`,
+        ),
+    },
+  });
+
+  const outcome = await fixture.coordinator.handlers['session.catalog.query'](
+    { kind: 'get', sessionId: fixture.sessionId },
+    context,
+  );
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok || outcome.result.kind !== 'session' || !outcome.result.session) {
+    assert.fail('Catalog get did not return a Session');
+  }
+  if ('kind' in outcome.result.session) {
+    assert.fail('Catalog get returned an unsupported Session projection');
+  }
+  assert.equal(Object.hasOwn(outcome.result.session, 'liveRunState'), false);
 });
 
 test('metadata commit uncertainty requests Host drain, while a typed conflict does not', async () => {

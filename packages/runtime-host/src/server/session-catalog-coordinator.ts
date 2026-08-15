@@ -36,6 +36,7 @@ import {
   SESSION_CATALOG_MODEL_MAX_BYTES,
   SESSION_CATALOG_PAGE_MAX_ITEMS,
   SESSION_CATALOG_RESULT_MAX_BYTES,
+  SESSION_CATALOG_RUNNING_TURN_MAX_ITEMS,
   type OperationError,
   type OperationOutcome,
   RuntimeHostProtocolError,
@@ -222,10 +223,10 @@ export class HostSessionCatalogCoordinator {
   }
 
   #projectCatalogQueryRecord(record: SessionCatalogRecord): SessionCatalogItem {
-    return projectSessionCatalogRecord(record, {
-      schemaVersion: SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION,
-      runningTurnIds: this.#manager.runningTurnIds(record.header.id),
-    });
+    return projectSessionCatalogRecord(
+      record,
+      projectCatalogLiveRunState(this.#manager.runningTurnIds(record.header.id)),
+    );
   }
 
   async #queryExecutionBoundary(
@@ -927,6 +928,17 @@ export function projectSessionCatalogRecord(
       reason: 'not_wire_representable',
     };
   }
+}
+
+function projectCatalogLiveRunState(
+  runningTurnIds: readonly string[],
+): SessionCatalogLiveRunState | undefined {
+  const uniqueRunningTurnIds = [...new Set(runningTurnIds)];
+  if (uniqueRunningTurnIds.length > SESSION_CATALOG_RUNNING_TURN_MAX_ITEMS) return undefined;
+  return {
+    schemaVersion: SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION,
+    runningTurnIds: uniqueRunningTurnIds,
+  };
 }
 
 function projectCatalogLabels(labels: readonly string[]): {
