@@ -288,8 +288,9 @@ export interface SessionSummary {
   blockedReason?: SessionBlockedReason;
   statusUpdatedAt?: number;
   /**
-   * The turns the runtime is running for this session right now. Omitted when
-   * there are none.
+   * The turns the runtime is running for this session right now. An explicit
+   * empty array means the runtime authoritatively knows there are none; omission
+   * means the summary source does not know the live state.
    *
    * Projected from the live runs, never persisted: "a run is in flight" is a
    * fact about the running process, so it must read false again after a crash.
@@ -303,8 +304,9 @@ export interface SessionSummary {
    * answer that from an arbitrary one of them.
    *
    * Only populated where the runtime is in a position to know: session LISTS
-   * come from the authority holding the runs. A summary returned by a mutation
-   * (rename, model change) describes the header alone and omits it.
+   * come from the authority holding the runs and include the field even when it
+   * is empty. A summary returned by a mutation (rename, model change) describes
+   * the header alone and omits it.
    */
   runningTurnIds?: string[];
   parentSessionId?: string;

@@ -40,8 +40,8 @@ import {
 } from '../protocol/turn.js';
 
 describe('Runtime Host bootstrap protocol', () => {
-  test('publishes a new compatibility epoch for legacy Automation provenance', () => {
-    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 20);
+  test('publishes a new compatibility epoch for Session catalog live-run state', () => {
+    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 21);
   });
 
   test('selects the highest mutually supported protocol and rejects a gap', () => {

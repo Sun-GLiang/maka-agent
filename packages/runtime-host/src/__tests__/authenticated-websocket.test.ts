@@ -16,6 +16,7 @@ import {
 import {
   INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID,
   RUNTIME_HOST_PROTOCOL_VERSION,
+  SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION,
   type RequestFrame,
 } from '../protocol/index.js';
 import {
@@ -27,6 +28,10 @@ import { authorizeRuntimeHostOperation } from '../server/connection-authority.js
 const PROTOCOL = {
   min: RUNTIME_HOST_PROTOCOL_VERSION,
   max: RUNTIME_HOST_PROTOCOL_VERSION,
+} as const;
+const KNOWN_EMPTY_LIVE_RUN_STATE = {
+  schemaVersion: SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION,
+  runningTurnIds: [],
 } as const;
 
 test('one Local IPC owner and one authenticated WebSocket Client control the same Session', {
@@ -198,7 +203,10 @@ test('one Local IPC owner and one authenticated WebSocket Client control the sam
         kind: 'get',
         sessionId: 'shared-session',
       }),
-      { kind: 'session', session: created },
+      {
+        kind: 'session',
+        session: { ...created, liveRunState: KNOWN_EMPTY_LIVE_RUN_STATE },
+      },
     );
 
     const catalogChanged = new Promise<string>((resolve) => {
@@ -217,7 +225,10 @@ test('one Local IPC owner and one authenticated WebSocket Client control the sam
         sessionId: 'shared-session',
       }),
       renamed.kind === 'committed'
-        ? { kind: 'session', session: renamed.session }
+        ? {
+            kind: 'session',
+            session: { ...renamed.session, liveRunState: KNOWN_EMPTY_LIVE_RUN_STATE },
+          }
         : assert.fail('Remote Session rename did not commit'),
     );
 

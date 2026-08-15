@@ -235,6 +235,42 @@ const longTitleSessions = [
   }),
 ];
 
+const liveRunAuthoritySessions: SessionSummary[] = [
+  {
+    ...makeSession({
+      id: 'live-unknown',
+      name: 'Unknown：兼容旧 Host 的 persisted fallback',
+      status: 'running',
+      lastMessageAt: NOW - 4 * 60 * 1000,
+    }),
+  },
+  {
+    ...makeSession({
+      id: 'live-known-empty',
+      name: 'Known empty：忽略崩溃遗留的 running',
+      status: 'running',
+      lastMessageAt: NOW - 3 * 60 * 1000,
+    }),
+    runningTurnIds: [],
+  },
+  {
+    ...makeSession({
+      id: 'live-remote-running',
+      name: 'Remote running：来自机器人或第二窗口',
+      lastMessageAt: NOW - 2 * 60 * 1000,
+    }),
+    runningTurnIds: ['turn-remote'],
+  },
+  {
+    ...makeSession({
+      id: 'live-local-race',
+      name: 'Local streaming：catalog 刷新前仍显示运行',
+      lastMessageAt: NOW - 1 * 60 * 1000,
+    }),
+    runningTurnIds: [],
+  },
+];
+
 // Real path: a fresh workspace with no tasks yet — the rail's list before
 // anything is created.
 export const Empty: Story = {
@@ -255,6 +291,21 @@ export const ConversationStates: Story = {
         activeId: 'status-waiting',
         streamingSessionIds: new Set(['status-running']),
         staleSessionIds: new Set(['status-blocked']),
+      })} />
+    </StoryFrame>
+  ),
+};
+
+// Real path: Runtime Host catalog refreshes distinguish an older Host (unknown),
+// an authoritative empty run set, a run started by another Client, and the
+// renderer-local synchronization window immediately after send.
+export const LiveRunAuthorityStates: Story = {
+  render: () => (
+    <StoryFrame>
+      <SessionListPanel {...panelProps({
+        sessions: liveRunAuthoritySessions,
+        activeId: 'live-remote-running',
+        streamingSessionIds: new Set(['live-local-race']),
       })} />
     </StoryFrame>
   ),

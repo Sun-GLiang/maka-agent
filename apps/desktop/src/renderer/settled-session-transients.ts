@@ -32,7 +32,8 @@ export function settledSessionTransientIds(options: {
     // entirely by a crash — so anything the runtime still reports as running
     // keeps its transients regardless of what the header says.
     if (session.runningTurnIds?.length) return [];
-    if (session.status === 'running' || session.status === 'waiting_for_user') return [];
+    if (session.status === 'waiting_for_user') return [];
+    if (session.runningTurnIds === undefined && session.status === 'running') return [];
     const projection = options.liveTurnBySession[session.id];
     if (projection?.unconfirmed) return [];
     if (session.id === options.activeId && projection?.terminal) return [];

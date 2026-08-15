@@ -8,10 +8,88 @@ import {
   HOST_OPERATION_SPECS,
   RuntimeHostProtocolError,
   SESSION_CATALOG_PAGE_MAX_ITEMS,
+  SESSION_CATALOG_RUNNING_TURN_MAX_ITEMS,
   type SessionCatalogProjection,
 } from '../protocol/index.js';
 
 describe('Session catalog protocol', () => {
+  test('decodes versioned live run state without collapsing absent and known-empty', () => {
+    const unknown = projection();
+    const knownEmpty = {
+      ...projection(),
+      liveRunState: { schemaVersion: 1, runningTurnIds: [] },
+    };
+    const running = {
+      ...projection(),
+      liveRunState: { schemaVersion: 1, runningTurnIds: ['turn-1', 'turn-2'] },
+    };
+
+    assert.deepEqual(decodeSessionCatalogItem(unknown), unknown);
+    assert.deepEqual(decodeSessionCatalogItem(knownEmpty), knownEmpty);
+    assert.deepEqual(decodeSessionCatalogItem(running), running);
+  });
+
+  test('rejects malformed or open live run state', () => {
+    const liveRunState = { schemaVersion: 1, runningTurnIds: ['turn-1'] };
+
+    assert.throws(
+      () =>
+        decodeSessionCatalogItem({
+          ...projection(),
+          liveRunState: { ...liveRunState, extra: true },
+        }),
+      isProtocolError,
+    );
+    assert.throws(
+      () =>
+        decodeSessionCatalogItem({
+          ...projection(),
+          liveRunState: { ...liveRunState, schemaVersion: 2 },
+        }),
+      isProtocolError,
+    );
+    assert.throws(
+      () =>
+        decodeSessionCatalogItem({
+          ...projection(),
+          liveRunState: { ...liveRunState, runningTurnIds: ['turn-1', 'turn-1'] },
+        }),
+      isProtocolError,
+    );
+    assert.throws(
+      () =>
+        decodeSessionCatalogItem({
+          ...projection(),
+          liveRunState: { ...liveRunState, runningTurnIds: 'turn-1' },
+        }),
+      isProtocolError,
+    );
+  });
+
+  test('bounds the live running-turn collection explicitly', () => {
+    const atLimit = Array.from(
+      { length: SESSION_CATALOG_RUNNING_TURN_MAX_ITEMS },
+      (_, index) => `turn-${index}`,
+    );
+    const projectionAtLimit = {
+      ...projection(),
+      liveRunState: { schemaVersion: 1, runningTurnIds: atLimit },
+    };
+
+    assert.deepEqual(decodeSessionCatalogItem(projectionAtLimit), projectionAtLimit);
+    assert.throws(
+      () =>
+        decodeSessionCatalogItem({
+          ...projection(),
+          liveRunState: {
+            schemaVersion: 1,
+            runningTurnIds: [...atLimit, 'turn-overflow'],
+          },
+        }),
+      isProtocolError,
+    );
+  });
+
   test('identifies Session creation inputs that expose Host paths', () => {
     assert.equal(
       HOST_OPERATION_SPECS['session.create'].usesHostPaths?.({

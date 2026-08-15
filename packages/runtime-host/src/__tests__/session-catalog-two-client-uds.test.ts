@@ -28,6 +28,7 @@ import {
   RUNTIME_HOST_COMPATIBILITY_EPOCH,
   RUNTIME_HOST_PROTOCOL_VERSION,
   RuntimeHostProtocolError,
+  SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION,
   type ClientFrame,
   type SessionCatalogItem,
   type SessionCatalogProjection,
@@ -43,6 +44,10 @@ const CURRENT_PROTOCOL = {
 } as const;
 const PROCESS_TIMEOUT_MS = 10_000;
 const WIRE_OVERSIZED_MODEL_ID = '😀'.repeat(256);
+const KNOWN_EMPTY_LIVE_RUN_STATE = {
+  schemaVersion: SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION,
+  runningTurnIds: [],
+} as const;
 
 test('two Clients share stable Session creation, CAS configuration, and catalog continuity', {
   skip: process.platform === 'win32' ? 'Windows SQLite shutdown lifecycle' : false,
@@ -278,7 +283,10 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
         assert.fail('One Session configuration must commit');
       }
       const configuredSession = requireSessionProjection(committedConfiguration.session);
-      assert.deepEqual(await querySession(desktop, created.id), configuredSession);
+      assert.deepEqual(await querySession(desktop, created.id), {
+        ...configuredSession,
+        liveRunState: KNOWN_EMPTY_LIVE_RUN_STATE,
+      });
       const unchangedConfiguration = await desktop.request('session.configuration.update', {
         sessionId: configuredSession.id,
         expectedRevision: configuredSession.revision,
@@ -347,7 +355,10 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
         relocatedSession.workspace.hostCwd === (await realpath(firstCwd)) ||
           relocatedSession.workspace.hostCwd === (await realpath(secondCwd)),
       );
-      assert.deepEqual(await querySession(tui, narrowedSession.id), relocatedSession);
+      assert.deepEqual(await querySession(tui, narrowedSession.id), {
+        ...relocatedSession,
+        liveRunState: KNOWN_EMPTY_LIVE_RUN_STATE,
+      });
 
       await setDefaultModel(desktop, connectionId, WIRE_OVERSIZED_MODEL_ID);
       const rejectedSessionId = 'wire-oversized-default-model';
@@ -380,7 +391,10 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
         }),
         operationError('invalid_request'),
       );
-      assert.deepEqual(await querySession(desktop, relocatedSession.id), relocatedSession);
+      assert.deepEqual(await querySession(desktop, relocatedSession.id), {
+        ...relocatedSession,
+        liveRunState: KNOWN_EMPTY_LIVE_RUN_STATE,
+      });
       await setDefaultModel(tui, connectionId, 'gpt-5');
 
       const read = requireSessionProjection(
@@ -700,10 +714,10 @@ test('stable Session creation survives response loss and Host restart', {
     host = await startHost(root, capability.rootId);
     const retrying = await connectClient(root, 'desktop');
     try {
-      assert.deepEqual(
-        requireSessionProjection(await retrying.request('session.create', input)),
-        committed,
-      );
+      const retried = requireSessionProjection(await retrying.request('session.create', input));
+      const { liveRunState, ...persistedCommitted } = committed;
+      assert.deepEqual(liveRunState, KNOWN_EMPTY_LIVE_RUN_STATE);
+      assert.deepEqual(retried, persistedCommitted);
     } finally {
       await retrying.close();
     }

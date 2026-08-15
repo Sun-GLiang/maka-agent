@@ -124,6 +124,9 @@ test('reduces turn pages to their encoded wire budget without skipping contribut
 test('metadata replacement preserves execution-semantic labels and ignores injected ones', async () => {
   const fixture = createFixture({
     labels: ['old-user-label', DEEP_RESEARCH_SESSION_LABEL],
+    manager: {
+      runningTurnIds: () => ['turn-live'],
+    },
   });
 
   const outcome = await fixture.coordinator.handlers['session.metadata.update'](
@@ -145,7 +148,51 @@ test('metadata replacement preserves execution-semantic labels and ignores injec
     assert.fail('Metadata replacement returned an unsupported Session projection');
   }
   assert.deepEqual(outcome.result.session.labels, ['new-user-label', DEEP_RESEARCH_SESSION_LABEL]);
+  assert.equal(Object.hasOwn(outcome.result.session, 'liveRunState'), false);
   assert.equal(fixture.drainRequests(), 0);
+});
+
+test('catalog queries project known-empty and running state from Runtime authority', async () => {
+  let runningTurnIds: readonly string[] = [];
+  const fixture = createFixture({
+    manager: {
+      runningTurnIds: () => [...runningTurnIds],
+    },
+  });
+
+  const emptyOutcome = await fixture.coordinator.handlers['session.catalog.query'](
+    { kind: 'get', sessionId: fixture.sessionId },
+    context,
+  );
+  assert.equal(emptyOutcome.ok, true);
+  if (!emptyOutcome.ok || emptyOutcome.result.kind !== 'session' || !emptyOutcome.result.session) {
+    assert.fail('Catalog get did not return a Session');
+  }
+  if ('kind' in emptyOutcome.result.session) {
+    assert.fail('Catalog get returned an unsupported Session projection');
+  }
+  assert.deepEqual(emptyOutcome.result.session.liveRunState, {
+    schemaVersion: 1,
+    runningTurnIds: [],
+  });
+
+  runningTurnIds = ['turn-live'];
+  const runningOutcome = await fixture.coordinator.handlers['session.catalog.query'](
+    { kind: 'list_start' },
+    context,
+  );
+  assert.equal(runningOutcome.ok, true);
+  if (!runningOutcome.ok || runningOutcome.result.kind !== 'page') {
+    assert.fail('Catalog list did not return a page');
+  }
+  const session = runningOutcome.result.sessions[0];
+  if (!session || 'kind' in session) {
+    assert.fail('Catalog list returned an unsupported Session projection');
+  }
+  assert.deepEqual(session.liveRunState, {
+    schemaVersion: 1,
+    runningTurnIds: ['turn-live'],
+  });
 });
 
 test('metadata commit uncertainty requests Host drain, while a typed conflict does not', async () => {
@@ -914,6 +961,7 @@ function createFixture(
   };
   const runtimePolicy = runtimePolicyFixture(options.connection ?? {});
   const manager: ConfigurationAuthority = {
+    runningTurnIds: () => [],
     transitionSessionConfiguration: async (_sessionId, input) => {
       header = {
         ...header,

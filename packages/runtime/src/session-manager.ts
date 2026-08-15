@@ -979,10 +979,10 @@ export class SessionManager {
     const sessions = await this.deps.store.list(filter);
     const runningTurnIds = this.runtimeKernel.runningTurnIds?.bind(this.runtimeKernel);
     if (!runningTurnIds) return sessions;
-    return sessions.map((session) => {
-      const turnIds = runningTurnIds(session.id);
-      return turnIds.length === 0 ? session : { ...session, runningTurnIds: turnIds };
-    });
+    return sessions.map((session) => ({
+      ...session,
+      runningTurnIds: runningTurnIds(session.id),
+    }));
   }
 
   async listChildSessions(parentSessionId: string): Promise<SessionSummary[]> {

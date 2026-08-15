@@ -294,6 +294,9 @@ export function toDesktopHostSessionSummary(
       ? {}
       : { lastMessagePreview: session.lastMessagePreview }),
     status: session.status,
+    ...(session.liveRunState === undefined
+      ? {}
+      : { runningTurnIds: [...session.liveRunState.runningTurnIds] }),
     ...(session.blockedReason === undefined ? {} : { blockedReason: session.blockedReason }),
     ...(session.statusUpdatedAt === undefined ? {} : { statusUpdatedAt: session.statusUpdatedAt }),
     ...(session.parentSessionId === undefined ? {} : { parentSessionId: session.parentSessionId }),

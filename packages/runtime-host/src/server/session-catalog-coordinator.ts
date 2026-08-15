@@ -30,6 +30,7 @@ import {
 } from '@maka/runtime/session-manager';
 import {
   decodeSessionCatalogProjection,
+  SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION,
   SESSION_CATALOG_LABEL_MAX_BYTES,
   SESSION_CATALOG_LABEL_MAX_ITEMS,
   SESSION_CATALOG_MODEL_MAX_BYTES,
@@ -40,6 +41,7 @@ import {
   RuntimeHostProtocolError,
   type SessionCatalogFilter,
   type SessionCatalogItem,
+  type SessionCatalogLiveRunState,
   type SessionCatalogProjection,
   type SessionCatalogQueryInput,
   type SessionCatalogQueryResult,
@@ -86,7 +88,7 @@ type SessionRuntimePolicyStores = {
 
 type SessionConfigurationAuthority = Pick<
   SessionManager,
-  'transitionSessionConfiguration' | 'relocateSessionWorkspace'
+  'transitionSessionConfiguration' | 'relocateSessionWorkspace' | 'runningTurnIds'
 >;
 type SessionContinuity = Pick<SessionContinuityCoordinator, 'refreshCanonical'>;
 
@@ -181,7 +183,7 @@ export class HostSessionCatalogCoordinator {
         const record = await this.#readCatalogRecordIfPresent(input.sessionId);
         return successQuery({
           kind: 'session',
-          session: record ? projectSessionCatalogRecord(record) : null,
+          session: record ? this.#projectCatalogQueryRecord(record) : null,
         });
       }
 
@@ -210,11 +212,20 @@ export class HostSessionCatalogCoordinator {
         });
       }
       return successQuery(
-        page(pageResult.records, pageResult.revision, pageResult.hasMore, filter),
+        page(pageResult.records, pageResult.revision, pageResult.hasMore, filter, (record) =>
+          this.#projectCatalogQueryRecord(record),
+        ),
       );
     } catch {
       return queryFailure('persistence_failed', 'Session catalog is unavailable');
     }
+  }
+
+  #projectCatalogQueryRecord(record: SessionCatalogRecord): SessionCatalogItem {
+    return projectSessionCatalogRecord(record, {
+      schemaVersion: SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION,
+      runningTurnIds: this.#manager.runningTurnIds(record.header.id),
+    });
   }
 
   async #queryExecutionBoundary(
@@ -834,7 +845,10 @@ function createRequestFingerprint(
   return `sha256:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
 }
 
-export function projectSessionCatalogRecord(record: SessionCatalogRecord): SessionCatalogItem {
+export function projectSessionCatalogRecord(
+  record: SessionCatalogRecord,
+  liveRunState?: SessionCatalogLiveRunState,
+): SessionCatalogItem {
   const { header, summary } = record;
   const projectedLabels = projectCatalogLabels(header.labels);
   const projection: SessionCatalogProjection = {
@@ -863,6 +877,7 @@ export function projectSessionCatalogRecord(record: SessionCatalogRecord): Sessi
       ? {}
       : { lastMessagePreview: summary.lastMessagePreview }),
     status: header.status,
+    ...(liveRunState === undefined ? {} : { liveRunState }),
     ...(header.blockedReason === undefined ? {} : { blockedReason: header.blockedReason }),
     ...(header.statusUpdatedAt === undefined ? {} : { statusUpdatedAt: header.statusUpdatedAt }),
     ...(header.parentSessionId === undefined ? {} : { parentSessionId: header.parentSessionId }),
@@ -944,12 +959,13 @@ function page(
   revision: SessionCatalogRevision,
   hasMore: boolean,
   filter: SessionCatalogFilter,
+  project: (record: SessionCatalogRecord) => SessionCatalogItem = projectSessionCatalogRecord,
 ): SessionCatalogQueryResult {
   const items: SessionCatalogItem[] = [];
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
     if (!record) throw new Error('Session catalog record index is invalid');
-    const item = projectSessionCatalogRecord(record);
+    const item = project(record);
     const moreItems = index + 1 < records.length || hasMore;
     const candidate = {
       kind: 'page' as const,

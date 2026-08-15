@@ -715,12 +715,9 @@ interface SessionRowSignal {
  * with unread text drew the same accent dot as one that is running. Now it
  * draws its own neutral dot and unread is still in the list behind it.
  *
- * `streaming` is the only live-run source the rail actually has. It knows only
- * about turns THIS renderer sent, which is a real limit — a task running under
- * a bot channel or a second window reads as idle here. The fix for that is a
- * live-run projection from Runtime Host, which is not in this change; there is
- * no `runningTurnIds` on a `SessionSummary` that reaches Desktop, so reading it
- * would be reading a field nothing populates.
+ * Runtime Host live-run state and renderer-local streaming are deliberately
+ * ORed. Host state covers bot channels and other windows; local streaming
+ * covers the short synchronization window before a catalog refresh arrives.
  */
 function sessionRowSignals(
   session: SessionSummary,
@@ -734,7 +731,7 @@ function sessionRowSignals(
   // the system working on it right now, which is what that semantic names.
   // Writing `accent` directly would resolve to the identical colour and reopen
   // the drift this change closed — half the row's dots deciding for themselves.
-  if (options.streaming) {
+  if (options.streaming || (session.runningTurnIds?.length ?? 0) > 0) {
     signals.push({
       variant: dotForStatus('active'),
       label: copy.respondingAriaLabel,
@@ -744,7 +741,9 @@ function sessionRowSignals(
   }
 
   const { label, variant } = presentSessionStatus(session.status, locale);
-  if (variant) {
+  const liveStateOwnsRunningStatus =
+    session.status === 'running' && session.runningTurnIds !== undefined;
+  if (variant && !liveStateOwnsRunningStatus) {
     const blockedDetail =
       session.status === 'blocked' && session.blockedReason
         ? describeBlockedReason(session.blockedReason, locale)
@@ -752,10 +751,7 @@ function sessionRowSignals(
     signals.push({
       variant,
       label,
-      // A `running` header with nothing streaming here: the run ended without
-      // its status write landing, or it is running somewhere this renderer
-      // cannot see. Still pulsing — the row should not change shape based on
-      // which projection delivered it.
+      // Persisted `running` is a fallback only when live state is unknown.
       isPulsing: session.status === 'running',
       tooltip: blockedDetail ? `${label} · ${blockedDetail}` : label,
     });

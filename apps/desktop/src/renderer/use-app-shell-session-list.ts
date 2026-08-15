@@ -3,7 +3,11 @@ import type { SessionSummary, StoredMessage } from '@maka/core/session';
 import { useUiLocale } from '@maka/ui';
 import { getDesktopConversationCopy } from './locales/conversation-copy.js';
 import { localizedShellErrorMessage } from './locales/shell-copy.js';
-import { normalizeSessionSummaryForDisplay } from './session-status-presentation';
+import {
+  mergeSessionSummaryListForDisplay,
+  mergeSessionSummaryForDisplay,
+  normalizeSessionSummaryForDisplay,
+} from './session-status-presentation';
 import {
   applyLocalSessionRead,
   applySessionReadOverrides,
@@ -34,7 +38,7 @@ export function useAppShellSessionList(toastApi: ToastApi) {
 
   function setSessions(updater: (current: SessionSummary[]) => SessionSummary[]): void {
     setSessionsState((current) => {
-      const next = updater(current);
+      const next = mergeSessionSummaryListForDisplay(current, updater(current));
       sessionsRef.current = next;
       return next;
     });
@@ -73,10 +77,13 @@ export function useAppShellSessionList(toastApi: ToastApi) {
   }
 
   function upsertSessionSummary(session: SessionSummary): void {
-    setSessions((current) => [
-      normalizeSessionSummaryForDisplay(session),
-      ...current.filter((entry) => entry.id !== session.id),
-    ]);
+    setSessions((current) => {
+      const existing = current.find((entry) => entry.id === session.id);
+      return [
+        mergeSessionSummaryForDisplay(existing, session),
+        ...current.filter((entry) => entry.id !== session.id),
+      ];
+    });
   }
 
   function markSessionReadLocally(sessionId: string, readMessages: readonly StoredMessage[]): void {
