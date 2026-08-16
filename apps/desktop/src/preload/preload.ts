@@ -31,6 +31,7 @@ import type {
   DesktopAppInfo,
 } from './bridge-contract.js';
 import type { ExternalSessionImportIpcResult } from './external-session-import-result.js';
+import type { DesktopExternalSessionCatalogItem } from './external-session-catalog.js';
 import {
   DESKTOP_TRANSCRIPT_FRAGMENT_MAX_BYTES,
   assertDesktopTranscriptBatch,
@@ -81,7 +82,6 @@ import type { SearchErrorReason, SearchRequest, SearchResult } from '@maka/core/
 import type { SessionChangedEvent, SessionSummary, TurnRecord } from '@maka/core/session';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { E2eFixtureState } from '@maka/core/e2e-fixture';
-import type { ExternalSessionSummary } from '@maka/core/external-session';
 import type {
   GitReviewReadResult,
   GitReviewSource,
@@ -1671,7 +1671,7 @@ const makaBridge = {
       includeArchived?: boolean;
       cursor?: string;
     }, host?: DesktopRuntimeHostRef): Promise<{
-      sessions: ExternalSessionSummary[];
+      sessions: DesktopExternalSessionCatalogItem[];
       nextCursor: string | null;
     }> {
       return invokeSelectedRuntimeHost(host, 'external-sessions:list', input);

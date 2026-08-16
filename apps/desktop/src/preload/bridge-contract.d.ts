@@ -44,7 +44,6 @@ import type { SearchErrorReason, SearchRequest, SearchResult } from '@maka/core/
 import type { SessionChangedEvent, SessionSummary, TurnRecord } from '@maka/core/session';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { E2eFixtureState } from '@maka/core/e2e-fixture';
-import type { ExternalSessionSummary } from '@maka/core/external-session';
 import type {
   GitReviewReadResult,
   GitReviewSource,
@@ -96,6 +95,7 @@ import type { ExternalSessionImportIpcResult } from './external-session-import-r
 import type { DesktopSessionSummary } from '../shared/desktop-session-projection.js';
 export type { DesktopSessionSummary } from '../shared/desktop-session-projection.js';
 import type { DesktopConnectionSnapshot } from '../shared/desktop-connection-snapshot.js';
+import type { DesktopExternalSessionCatalogItem } from './external-session-catalog.js';
 import type {
   DesktopDiagnosticCopyResult,
   DesktopErrorDiagnosticInput,
@@ -632,8 +632,11 @@ export interface MakaBridge {
   };
   externalSessions: {
     listSources(host?: DesktopRuntimeHostRef): Promise<{ adapterIds: string[] }>;
-    list(input: { adapterId: string; includeArchived?: boolean; cursor?: string }, host?: DesktopRuntimeHostRef): Promise<{
-      sessions: ExternalSessionSummary[];
+    list(
+      input: { adapterId: string; includeArchived?: boolean; cursor?: string },
+      host?: DesktopRuntimeHostRef,
+    ): Promise<{
+      sessions: DesktopExternalSessionCatalogItem[];
       nextCursor: string | null;
     }>;
     import(input: {
