@@ -93,6 +93,7 @@ import {
   assertSafeSessionId,
   normalizeSessionHeader,
   SessionNotFoundError,
+  type ExternalSessionImportLookupResult,
   type SessionTranscriptMessageLookupRequest,
   type SessionTranscriptPageRequest,
   type SessionTranscriptStoragePage,
@@ -1332,6 +1333,67 @@ export class SqliteSessionMetadataStore {
         this.updateCatalogProjectionSync(normalized.id, projection, false, lockConnection);
       }
       return 'imported';
+    });
+  }
+
+  async lookupExternalSessionImports(
+    adapterId: string,
+    sourceSessionIds: readonly string[],
+    recentSessionIdLimit: number,
+  ): Promise<readonly ExternalSessionImportLookupResult[]> {
+    this.assertOpen();
+    if (sourceSessionIds.length === 0) return [];
+    const placeholders = sourceSessionIds.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `
+        SELECT external_source_session_id, session_id, import_count
+        FROM (
+          SELECT
+            external_source_session_id,
+            session_id,
+            COUNT(*) OVER (
+              PARTITION BY external_source_session_id
+            ) AS import_count,
+            ROW_NUMBER() OVER (
+              PARTITION BY external_source_session_id
+              ORDER BY created_at DESC, session_id
+            ) AS recent_rank
+          FROM session_metadata
+          WHERE external_adapter_id = ?
+            AND external_source_session_id IN (${placeholders})
+            AND COALESCE(
+              json_extract(payload_json, '$.transcriptLedgerVersion'),
+              1
+            ) <> 0
+        )
+        WHERE recent_rank <= ?
+        ORDER BY external_source_session_id, recent_rank
+      `,
+      )
+      .all(adapterId, ...sourceSessionIds, recentSessionIdLimit) as unknown as Array<{
+      readonly external_source_session_id: string;
+      readonly session_id: string;
+      readonly import_count: number;
+    }>;
+    const bySource = new Map<
+      string,
+      { readonly livePublishedImportCount: number; readonly recentSessionIds: string[] }
+    >();
+    for (const row of rows) {
+      const existing = bySource.get(row.external_source_session_id);
+      if (existing) {
+        existing.recentSessionIds.push(row.session_id);
+      } else {
+        bySource.set(row.external_source_session_id, {
+          livePublishedImportCount: row.import_count,
+          recentSessionIds: [row.session_id],
+        });
+      }
+    }
+    return sourceSessionIds.flatMap((sourceSessionId) => {
+      const result = bySource.get(sourceSessionId);
+      return result ? [{ sourceSessionId, ...result }] : [];
     });
   }
 
@@ -3328,6 +3390,9 @@ export class SqliteSessionMetadataStore {
     if (Object.prototype.hasOwnProperty.call(patch, 'subagentWorkspace')) {
       throw new Error('Subagent session workspace binding is immutable');
     }
+    if (Object.prototype.hasOwnProperty.call(patch, 'externalOrigin')) {
+      throw new Error('External Session origin is immutable');
+    }
     return this.transaction(() =>
       this.updateHeaderSync(sessionId, patch, {
         ...(options.expectedVersion === undefined
@@ -3513,6 +3578,8 @@ export class SqliteSessionMetadataStore {
           subagent_request_fingerprint,
           subagent_initial_turn_id,
           subagent_initial_run_id,
+          external_adapter_id,
+          external_source_session_id,
           revision_root_session_id,
           revision_index,
           has_unread,
@@ -3521,7 +3588,7 @@ export class SqliteSessionMetadataStore {
           model,
           metadata_version,
           committed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       )
       .run(
@@ -3542,6 +3609,8 @@ export class SqliteSessionMetadataStore {
         header.subagentSpawn?.requestFingerprint ?? null,
         header.subagentSpawn?.initialTurnId ?? null,
         header.subagentSpawn?.initialRunId ?? null,
+        header.externalOrigin?.adapterId ?? null,
+        header.externalOrigin?.sourceSessionId ?? null,
         header.revisionRootSessionId ?? null,
         header.revisionIndex ?? null,
         booleanInteger(header.hasUnread),
