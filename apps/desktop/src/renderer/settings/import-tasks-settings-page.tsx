@@ -216,6 +216,7 @@ export function ImportTasksSettingsPage(props: {
       else {
         setCatalogLoading(true);
         setCatalog(EMPTY_CATALOG);
+        setImportRecovery(null);
       }
       setCatalogError(null);
       setImportError(null);
@@ -352,9 +353,8 @@ export function ImportTasksSettingsPage(props: {
               entry.sourceSessionId !== attempt.sourceSessionId,
           ),
         );
-        const recoveredSessionId = recoveredSource?.importState.importedSessionIds[0];
+        const recoveredSessionId = recoveredSource.importState.importedSessionIds[0];
         const landed =
-          recoveredSource !== undefined &&
           recoveredSessionId !== undefined &&
           (recoveredSource.importState.importedCount > attempt.importedCountBefore ||
             recoveredSessionId !== attempt.latestImportedSessionIdBefore);

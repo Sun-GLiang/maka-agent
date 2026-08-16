@@ -103,7 +103,8 @@ describe('ImportTasksSettingsPage durable import state', () => {
     await act(async () => harness.root.unmount());
   });
 
-  it('polls catalog-owned in-flight state until the imported task becomes durable', async () => {
+  it('polls catalog-owned in-flight state until the imported task becomes durable', async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
     const importing = externalSession({
       importState: { importedCount: 0, importedSessionIds: [], isImporting: true },
     });
@@ -118,7 +119,9 @@ describe('ImportTasksSettingsPage durable import state', () => {
 
     assert.equal(harness.listCalls(), 1);
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 1_025));
+      context.mock.timers.runAll();
+      await Promise.resolve();
+      await Promise.resolve();
     });
 
     assert.equal(harness.listCalls(), 2);
@@ -128,7 +131,8 @@ describe('ImportTasksSettingsPage durable import state', () => {
     await act(async () => harness.root.unmount());
   });
 
-  it('polls the whole loaded page window without dropping a later-page import', async () => {
+  it('polls the whole loaded page window without dropping a later-page import', async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
     const firstPage = externalSession({ id: 'source-first', name: 'First page source' });
     const secondPageImporting = externalSession({
       id: 'source-second',
@@ -163,7 +167,9 @@ describe('ImportTasksSettingsPage durable import state', () => {
     assert.match(harness.container.textContent, /Second page source/);
 
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 1_025));
+      context.mock.timers.runAll();
+      await Promise.resolve();
+      await Promise.resolve();
     });
 
     assert.equal(harness.listCalls(), 4);
@@ -204,6 +210,52 @@ describe('ImportTasksSettingsPage durable import state', () => {
     assert.ok(openButton);
     await act(async () => openButton.click());
     assert.deepEqual(opened, ['session-recovered']);
+
+    await act(async () => harness.root.unmount());
+  });
+
+  it('clears a recovered import banner when the catalog selection changes', async () => {
+    const initial = externalSession({ name: 'Current source conversation' });
+    const recovered = externalSession({
+      name: 'Current source conversation',
+      importState: {
+        importedCount: 1,
+        importedSessionIds: ['session-recovered-before-filter'],
+        isImporting: false,
+      },
+    });
+    const filtered = externalSession({
+      id: 'archived-source',
+      name: 'Archived catalog conversation',
+      archived: true,
+    });
+    const harness = await renderPage({
+      catalogs: [catalog(initial), catalog(recovered), catalog(filtered)],
+      importResult: { ok: false, reason: 'commit_outcome_unknown' },
+    });
+
+    const importButton = buttonWithText(harness.container, 'Import');
+    assert.ok(importButton);
+    await act(async () => {
+      importButton.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(harness.container.textContent, /The imported task is available now/);
+
+    const archivedFilter = harness.container.querySelector<HTMLInputElement>(
+      'input[type="checkbox"]',
+    );
+    assert.ok(archivedFilter);
+    await act(async () => {
+      archivedFilter.checked = true;
+      archivedFilter.dispatchEvent(new window.Event('click', { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    assert.match(harness.container.textContent, /Archived catalog conversation/);
+    assert.doesNotMatch(harness.container.textContent, /The imported task is available now/);
 
     await act(async () => harness.root.unmount());
   });
@@ -307,7 +359,8 @@ describe('ImportTasksSettingsPage durable import state', () => {
     await act(async () => harness.root.unmount());
   });
 
-  it('does not let an older catalog poll overwrite unknown-outcome recovery', async () => {
+  it('does not let an older catalog poll overwrite unknown-outcome recovery', async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
     let settlePoll: ((result: CatalogResult) => void) | undefined;
     const pendingPoll = new Promise<CatalogResult>((resolve) => {
       settlePoll = resolve;
@@ -337,7 +390,9 @@ describe('ImportTasksSettingsPage durable import state', () => {
     });
 
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 1_025));
+      context.mock.timers.runAll();
+      await Promise.resolve();
+      await Promise.resolve();
     });
     assert.equal(harness.listCalls(), 2);
 

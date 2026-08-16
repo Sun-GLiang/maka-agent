@@ -1031,7 +1031,9 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
         external_source_session_id,
         created_at DESC,
         session_id
-      );
+      )
+      WHERE external_adapter_id IS NOT NULL
+        AND external_source_session_id IS NOT NULL;
   `,
   ],
 ]);

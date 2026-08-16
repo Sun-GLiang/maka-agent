@@ -85,6 +85,16 @@ describe('SqliteSessionMetadataStore', () => {
         columns.some(({ name }) => name === 'external_source_session_id'),
         true,
       );
+      const externalOriginIndex = schema
+        .prepare(
+          `SELECT sql FROM sqlite_master
+           WHERE type = 'index' AND name = 'session_metadata_by_external_origin'`,
+        )
+        .get() as { readonly sql: string } | undefined;
+      assert.match(
+        externalOriginIndex?.sql ?? '',
+        /WHERE\s+external_adapter_id IS NOT NULL\s+AND external_source_session_id IS NOT NULL/i,
+      );
     } finally {
       schema.close();
       await rm(root, { recursive: true, force: true });
