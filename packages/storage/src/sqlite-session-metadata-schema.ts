@@ -907,8 +907,7 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
       metadata_version = metadata_version + 1,
       committed_at = MAX(
         committed_at,
-        CAST(strftime('%s', 'now') AS INTEGER) * 1000
-          + CAST(substr(strftime('%f', 'now'), 4, 3) AS INTEGER)
+        CAST(unixepoch('now', 'subsec') * 1000 AS INTEGER)
       )
     WHERE
       status IN ('review', 'done')
