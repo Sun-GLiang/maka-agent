@@ -12,6 +12,9 @@ describe('session status contract', () => {
       'archived',
       'aborted',
     ]);
+    for (const status of SESSION_STATUSES) {
+      assert.equal(isSessionStatus(status), true);
+    }
     assert.equal(isSessionStatus('review'), false);
     assert.equal(isSessionStatus('done'), false);
   });

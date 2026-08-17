@@ -136,15 +136,30 @@ describe('SqliteSessionMetadataStore', () => {
   test('migrates v24 legacy session statuses to active exactly once', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-session-status-v24-'));
     const path = join(root, 'state.sqlite');
+    const sessionIds = ['legacy-review', 'legacy-done', 'legacy-both', 'legacy-unchanged'];
+    const migrationSnapshots = new Map<
+      string,
+      {
+        readonly committedAt: number;
+        readonly metadataVersion: number;
+        readonly statusUpdatedAt?: number;
+      }
+    >();
+    const persistedRowsAfterMigration: Array<{
+      readonly sessionId: string;
+      readonly status: string;
+      readonly payloadStatus: string;
+      readonly metadataVersion: number;
+    }> = [];
     try {
       const setup = createSqliteSessionMetadataStore(path, { now: () => 10 });
-      for (const id of ['legacy-review', 'legacy-done', 'legacy-unchanged']) {
+      for (const id of sessionIds) {
         await setup.create(
           fullHeader({
             id,
             status: 'active',
             blockedReason: undefined,
-            statusUpdatedAt: id === 'legacy-done' ? 404 : 303,
+            statusUpdatedAt: id === 'legacy-done' ? 404 : id === 'legacy-both' ? 505 : 303,
           }),
         );
       }
@@ -177,6 +192,19 @@ describe('SqliteSessionMetadataStore', () => {
           .prepare(
             `
               UPDATE session_metadata
+              SET
+                status = ?,
+                payload_json = json_set(payload_json, '$.status', ?),
+                metadata_version = ?,
+                committed_at = ?
+              WHERE session_id = ?
+            `,
+          )
+          .run('review', 'done', 17, 500, 'legacy-both');
+        legacy
+          .prepare(
+            `
+              UPDATE session_metadata
               SET metadata_version = ?, committed_at = ?
               WHERE session_id = ?
             `,
@@ -196,16 +224,29 @@ describe('SqliteSessionMetadataStore', () => {
         assert.equal(migrated.schemaVersion(), 25);
         assert.deepEqual((await migrated.read('legacy-review')).header.status, 'active');
         assert.deepEqual((await migrated.read('legacy-done')).header.status, 'active');
+        assert.deepEqual((await migrated.read('legacy-both')).header.status, 'active');
         assert.equal((await migrated.read('legacy-review')).metadataVersion, 8);
         assert.equal((await migrated.read('legacy-done')).metadataVersion, 12);
+        assert.equal((await migrated.read('legacy-both')).metadataVersion, 18);
         assert.equal((await migrated.read('legacy-unchanged')).metadataVersion, 13);
         assert.ok((await migrated.read('legacy-review')).committedAt >= 100);
         assert.equal((await migrated.read('legacy-done')).committedAt, 4_000_000_000_000);
+        assert.ok((await migrated.read('legacy-both')).committedAt >= 500);
         assert.equal((await migrated.read('legacy-unchanged')).committedAt, 300);
         assert.equal((await migrated.read('legacy-review')).header.statusUpdatedAt, 303);
         assert.equal((await migrated.read('legacy-done')).header.statusUpdatedAt, 404);
+        assert.equal((await migrated.read('legacy-both')).header.statusUpdatedAt, 505);
+        for (const sessionId of sessionIds) {
+          const record = await migrated.read(sessionId);
+          migrationSnapshots.set(sessionId, {
+            committedAt: record.committedAt,
+            metadataVersion: record.metadataVersion,
+            statusUpdatedAt: record.header.statusUpdatedAt,
+          });
+        }
         const page = await migrated.listCatalogPage({}, undefined, 10);
         assert.deepEqual(page.records.map((record) => record.header.id).sort(), [
+          'legacy-both',
           'legacy-done',
           'legacy-review',
           'legacy-unchanged',
@@ -237,7 +278,14 @@ describe('SqliteSessionMetadataStore', () => {
             readonly metadataVersion: number;
           }>
         ).map((row) => ({ ...row }));
+        persistedRowsAfterMigration.push(...rows);
         assert.deepEqual(rows, [
+          {
+            sessionId: 'legacy-both',
+            status: 'active',
+            payloadStatus: 'active',
+            metadataVersion: 18,
+          },
           {
             sessionId: 'legacy-done',
             status: 'active',
@@ -263,10 +311,51 @@ describe('SqliteSessionMetadataStore', () => {
 
       const reopened = createSqliteSessionMetadataStore(path, { now: () => 30 });
       try {
-        assert.equal((await reopened.read('legacy-review')).metadataVersion, 8);
-        assert.equal((await reopened.read('legacy-done')).metadataVersion, 12);
+        for (const sessionId of sessionIds) {
+          const record = await reopened.read(sessionId);
+          assert.deepEqual(
+            {
+              committedAt: record.committedAt,
+              metadataVersion: record.metadataVersion,
+              statusUpdatedAt: record.header.statusUpdatedAt,
+            },
+            migrationSnapshots.get(sessionId),
+          );
+        }
       } finally {
         reopened.close();
+      }
+
+      const reopenedPersisted = new DatabaseSync(path);
+      try {
+        const rows = (
+          reopenedPersisted
+            .prepare(
+              `
+                SELECT
+                  session_id AS sessionId,
+                  status,
+                  json_extract(payload_json, '$.status') AS payloadStatus
+                FROM session_metadata
+                ORDER BY session_id
+              `,
+            )
+            .all() as Array<{
+            readonly sessionId: string;
+            readonly status: string;
+            readonly payloadStatus: string;
+          }>
+        ).map((row) => ({ ...row }));
+        assert.deepEqual(
+          rows,
+          persistedRowsAfterMigration.map(({ sessionId, status, payloadStatus }) => ({
+            sessionId,
+            status,
+            payloadStatus,
+          })),
+        );
+      } finally {
+        reopenedPersisted.close();
       }
     } finally {
       await rm(root, { recursive: true, force: true });
