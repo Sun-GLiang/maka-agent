@@ -42,8 +42,6 @@ const STATUS_SEMANTIC: Record<SessionStatus, StatusSemantic | undefined> = {
   running: 'active',
   waiting_for_user: 'attention',
   blocked: 'attention',
-  review: 'attention',
-  done: 'success',
   archived: 'neutral',
   aborted: 'neutral',
 };
