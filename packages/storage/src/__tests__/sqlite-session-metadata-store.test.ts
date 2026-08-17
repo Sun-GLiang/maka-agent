@@ -201,6 +201,7 @@ describe('SqliteSessionMetadataStore', () => {
         assert.equal((await migrated.read('legacy-unchanged')).metadataVersion, 13);
         assert.ok((await migrated.read('legacy-review')).committedAt >= 100);
         assert.equal((await migrated.read('legacy-done')).committedAt, 4_000_000_000_000);
+        assert.equal((await migrated.read('legacy-unchanged')).committedAt, 300);
         assert.equal((await migrated.read('legacy-review')).header.statusUpdatedAt, 303);
         assert.equal((await migrated.read('legacy-done')).header.statusUpdatedAt, 404);
         const page = await migrated.listCatalogPage({}, undefined, 10);
