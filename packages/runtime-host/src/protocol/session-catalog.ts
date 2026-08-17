@@ -4,7 +4,6 @@ import { isPermissionMode, type PermissionMode } from '@maka/core/permission';
 import { isSessionStartMode, type SessionStartMode } from '@maka/core/explore-agent';
 import {
   isSessionBlockedReason,
-  isSessionStatus,
   isSessionToolProfile,
   type SessionBlockedReason,
   type SessionStatus,
@@ -26,6 +25,7 @@ import {
 } from './codec.js';
 import { invalidProtocolFrame } from './errors.js';
 import { defineHostPathOperation, defineOperation } from './operation-spec.js';
+import { decodeSessionStatus } from './session-status.js';
 import {
   decodeWorkspaceProjection,
   decodeWorkspaceTarget,
@@ -868,8 +868,7 @@ function optionalThinkingLevel(
 }
 
 function sessionStatus(value: unknown): SessionStatus {
-  if (!isSessionStatus(value)) throw invalidProtocolFrame('Invalid Session status');
-  return value;
+  return decodeSessionStatus(value);
 }
 
 function backend(value: unknown): SessionCatalogProjection['backend'] {
