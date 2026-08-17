@@ -219,6 +219,7 @@ describe('SqliteSessionMetadataStore', () => {
         legacy.close();
       }
 
+      const migrationStartedAt = Date.now();
       const migrated = createSqliteSessionMetadataStore(path, { now: () => 20 });
       try {
         assert.equal(migrated.schemaVersion(), 25);
@@ -229,9 +230,9 @@ describe('SqliteSessionMetadataStore', () => {
         assert.equal((await migrated.read('legacy-done')).metadataVersion, 12);
         assert.equal((await migrated.read('legacy-both')).metadataVersion, 18);
         assert.equal((await migrated.read('legacy-unchanged')).metadataVersion, 13);
-        assert.ok((await migrated.read('legacy-review')).committedAt >= 100);
+        assert.ok((await migrated.read('legacy-review')).committedAt >= migrationStartedAt);
         assert.equal((await migrated.read('legacy-done')).committedAt, 4_000_000_000_000);
-        assert.ok((await migrated.read('legacy-both')).committedAt >= 500);
+        assert.ok((await migrated.read('legacy-both')).committedAt >= migrationStartedAt);
         assert.equal((await migrated.read('legacy-unchanged')).committedAt, 300);
         assert.equal((await migrated.read('legacy-review')).header.statusUpdatedAt, 303);
         assert.equal((await migrated.read('legacy-done')).header.statusUpdatedAt, 404);

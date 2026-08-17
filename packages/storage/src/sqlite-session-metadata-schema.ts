@@ -908,6 +908,7 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
       committed_at = MAX(
         committed_at,
         CAST(strftime('%s', 'now') AS INTEGER) * 1000
+          + CAST(substr(strftime('%f', 'now'), 4, 3) AS INTEGER)
       )
     WHERE
       status IN ('review', 'done')

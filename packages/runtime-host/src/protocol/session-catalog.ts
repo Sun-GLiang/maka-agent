@@ -644,7 +644,7 @@ export function decodeSessionCatalogProjection(value: unknown): SessionCatalogPr
     ...optionalEntityId(record, 'lastReadMessageId'),
     ...optionalTimestamp(record, 'lastMessageAt'),
     ...optionalText(record, 'lastMessagePreview', SESSION_CATALOG_PREVIEW_MAX_BYTES),
-    status: sessionStatus(record.status),
+    status: decodeSessionStatus(record.status),
     ...optionalBlockedReason(record),
     ...optionalTimestamp(record, 'statusUpdatedAt'),
     ...optionalEntityId(record, 'parentSessionId'),
@@ -865,10 +865,6 @@ function optionalThinkingLevel(
 ): Pick<SessionCatalogProjection, 'thinkingLevel'> | Record<string, never> {
   if (!Object.hasOwn(record, 'thinkingLevel')) return {};
   return { thinkingLevel: thinkingLevel(record.thinkingLevel) };
-}
-
-function sessionStatus(value: unknown): SessionStatus {
-  return decodeSessionStatus(value);
 }
 
 function backend(value: unknown): SessionCatalogProjection['backend'] {
