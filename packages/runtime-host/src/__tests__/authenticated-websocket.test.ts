@@ -19,10 +19,8 @@ import {
   SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION,
   type RequestFrame,
 } from '../protocol/index.js';
-import {
-  openRuntimeHostAccessAuthority,
-  startExecutionRuntimeHostService,
-} from '../server/index.js';
+import { openRuntimeHostAccessAuthority } from '../server/access-authority.js';
+import { startExecutionRuntimeHostService } from '../server/execution-service.js';
 import { authorizeRuntimeHostOperation } from '../server/connection-authority.js';
 
 const PROTOCOL = {

@@ -529,6 +529,101 @@ describe('provider request tracker', () => {
     );
   });
 
+  test('redacts native compaction state from provider request captures', async () => {
+    const captures: Array<{ serializedRequest: string }> = [];
+    const tracker = new telemetry.ProviderRequestTracker({
+      traceId: 'compaction-trace',
+      turnId: 'turn-compaction',
+      now: () => 1_000,
+      newId: () => 'compaction-id',
+      persistCapture: async (capture) => {
+        captures.push(capture);
+        return { artifactId: 'compaction-artifact' };
+      },
+      recordAttempt: () => undefined,
+    });
+    const params = {
+      image: new URL('https://example.com/provider-image.png'),
+      prompt: [
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'custom',
+              kind: 'openai.compaction',
+              providerOptions: {
+                openai: {
+                  itemId: 'cmp_secret',
+                  encryptedContent: 'OPAQUE_ENCRYPTED_STATE',
+                  safeMetadata: 'preserved',
+                },
+                otherProvider: { cacheKey: 'preserved' },
+              },
+            },
+            {
+              type: 'tool-call',
+              toolCallId: 'business-call',
+              toolName: 'echo',
+              input: {
+                type: 'custom',
+                kind: 'openai.compaction',
+                providerOptions: {
+                  openai: {
+                    itemId: 'BUSINESS_ITEM_ID',
+                    encryptedContent: 'BUSINESS_OPAQUE_TEXT',
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    await tracker.trackGenerate({
+      providerId: 'openai-codex',
+      modelId: 'gpt-5.3-codex',
+      params,
+      doGenerate: async () => ({ text: 'ok' }),
+    });
+
+    assert.equal(captures.length, 1);
+    assert.doesNotMatch(captures[0]!.serializedRequest, /cmp_secret|OPAQUE_ENCRYPTED_STATE/);
+    assert.deepEqual(JSON.parse(captures[0]!.serializedRequest), {
+      image: 'https://example.com/provider-image.png',
+      prompt: [
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'custom',
+              kind: 'openai.compaction',
+              providerOptions: {
+                openai: { safeMetadata: 'preserved', redacted: true },
+                otherProvider: { cacheKey: 'preserved' },
+              },
+            },
+            {
+              type: 'tool-call',
+              toolCallId: 'business-call',
+              toolName: 'echo',
+              input: {
+                type: 'custom',
+                kind: 'openai.compaction',
+                providerOptions: {
+                  openai: {
+                    itemId: 'BUSINESS_ITEM_ID',
+                    encryptedContent: 'BUSINESS_OPAQUE_TEXT',
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ],
+    });
+  });
+
   test('awaits the durable dispatch gate before a non-streaming provider call', async () => {
     let captured = false;
     let dispatched = false;
@@ -821,6 +916,8 @@ describe('canonical model-call accounting', () => {
     /** Models a deployment with request capture switched off. */
     withoutCapture?: boolean;
     recordAttempt?: (attempt: telemetry.ProviderRequestAttemptRecord) => void;
+    callKind?: ModelCallAttempt['callKind'];
+    historyCompactRoute?: ModelCallAttempt['historyCompactRoute'];
   }): telemetry.ProviderRequestTracker {
     let n = 0;
     return new telemetry.ProviderRequestTracker({
@@ -835,7 +932,10 @@ describe('canonical model-call accounting', () => {
       accounting: {
         sessionId: 'session-1',
         resolveRunId: overrides.resolveRunId ?? (() => 'run-1'),
-        callKind: 'main',
+        callKind: overrides.callKind ?? 'main',
+        ...(overrides.historyCompactRoute
+          ? { historyCompactRoute: overrides.historyCompactRoute }
+          : {}),
         record: overrides.record,
         ...(overrides.resolveCost ? { resolveCost: overrides.resolveCost } : {}),
         ...(overrides.assertReady ? { assertReady: overrides.assertReady } : {}),
@@ -872,6 +972,58 @@ describe('canonical model-call accounting', () => {
     assert.equal(attempt.pricingRevision, 4);
     // Retries count from zero on the canonical record.
     assert.equal(attempt.attempt, 0);
+  });
+
+  test('persists a structured failure fingerprint and the selected compaction route', async () => {
+    const recorded: ModelCallAttempt[] = [];
+    const diagnosticAttempts: telemetry.ProviderRequestAttemptRecord[] = [];
+    const tracker = accountingTracker({
+      callKind: 'history_compact',
+      historyCompactRoute: 'provider_native',
+      record: ({ attempt }) => {
+        recorded.push(attempt);
+      },
+      recordAttempt: (attempt) => {
+        diagnosticAttempts.push(attempt);
+      },
+    });
+    const providerError = Object.assign(new Error('provider payload must not persist'), {
+      name: 'AI_APICallError',
+      statusCode: 429,
+      data: {
+        error: { code: 'rate_limit_exceeded', message: 'private response body' },
+      },
+      responseHeaders: { 'x-request-id': 'req-compact-1' },
+      requestBodyValues: { input: 'private request body' },
+    });
+
+    await assert.rejects(
+      tracker.trackGenerate({
+        providerId: 'openai.responses',
+        modelId: 'gpt-codex-test',
+        params: preparedParams('private prompt'),
+        doGenerate: async () => {
+          throw providerError;
+        },
+      }),
+      (error) => error === providerError,
+    );
+
+    const attempt = decodeModelCallAttempt(recorded[0]);
+    assert.equal(attempt.historyCompactRoute, 'provider_native');
+    assert.equal(attempt.errorClass, 'RateLimit');
+    assert.equal(attempt.httpStatus, 429);
+    assert.equal(attempt.providerCode, 'rate_limit_exceeded');
+    assert.equal(attempt.providerRequestId, 'req-compact-1');
+    assert.equal(attempt.retryable, false);
+    assert.deepEqual(diagnosticAttempts[0]?.failure, {
+      errorClass: 'RateLimit',
+      httpStatus: 429,
+      providerCode: 'rate_limit_exceeded',
+      providerRequestId: 'req-compact-1',
+      retryable: false,
+    });
+    assert.doesNotMatch(JSON.stringify(attempt), /private|prompt|response body/i);
   });
 
   test('a call the provider reported no usage for records usageBasis missing', async () => {

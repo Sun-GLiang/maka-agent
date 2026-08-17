@@ -1,11 +1,10 @@
 import { useRef, useState } from 'react';
-import type { SessionSummary, StoredMessage } from '@maka/core/session';
+import type { StoredMessage } from '@maka/core/session';
 import { useUiLocale } from '@maka/ui';
 import { getDesktopConversationCopy } from './locales/conversation-copy.js';
 import { localizedShellErrorMessage } from './locales/shell-copy.js';
 import {
   mergeSessionSummaryListForDisplay,
-  mergeSessionSummaryForDisplay,
   normalizeSessionSummaryForDisplay,
 } from './session-status-presentation';
 import {
@@ -15,6 +14,7 @@ import {
   type SessionListRefresher,
   type SessionReadBoundaries,
 } from './session-read-state';
+import type { DesktopSessionSummary } from '../preload/bridge-contract.js';
 
 type ToastApi = {
   error(title: string, description?: string): void;
@@ -24,19 +24,21 @@ export function useAppShellSessionList(toastApi: ToastApi) {
   const uiLocale = useUiLocale();
   const uiLocaleRef = useRef(uiLocale);
   uiLocaleRef.current = uiLocale;
-  const [sessions, setSessionsState] = useState<SessionSummary[]>([]);
+  const [sessions, setSessionsState] = useState<DesktopSessionSummary[]>([]);
   const [authoritativeSessionIds, setAuthoritativeSessionIds] =
     useState<ReadonlySet<string> | null>(null);
-  const sessionsRef = useRef<SessionSummary[]>([]);
+  const sessionsRef = useRef<DesktopSessionSummary[]>([]);
   const sessionReadBoundariesRef = useRef<SessionReadBoundaries>({});
-  const refresherRef = useRef<SessionListRefresher | null>(null);
+  const refresherRef = useRef<SessionListRefresher<DesktopSessionSummary> | null>(null);
 
-  function commitSessions(next: SessionSummary[]): void {
+  function commitSessions(next: DesktopSessionSummary[]): void {
     sessionsRef.current = next;
     setSessionsState(next);
   }
 
-  function setSessions(updater: (current: SessionSummary[]) => SessionSummary[]): void {
+  function setSessions(
+    updater: (current: DesktopSessionSummary[]) => DesktopSessionSummary[],
+  ): void {
     setSessionsState((current) => {
       const next = mergeSessionSummaryListForDisplay(current, updater(current));
       sessionsRef.current = next;
@@ -65,25 +67,24 @@ export function useAppShellSessionList(toastApi: ToastApi) {
     });
   }
 
-  async function refreshSessions(): Promise<SessionSummary[]> {
+  async function refreshSessions(): Promise<DesktopSessionSummary[]> {
     return refresherRef.current!.refresh();
   }
 
-  function seedSessions(snapshotSessions: readonly SessionSummary[]): SessionSummary[] {
+  function seedSessions(
+    snapshotSessions: readonly DesktopSessionSummary[],
+  ): DesktopSessionSummary[] {
     const next = applySessionReadOverrides([...snapshotSessions], sessionReadBoundariesRef.current)
       .map(normalizeSessionSummaryForDisplay);
     commitSessions(next);
     return next;
   }
 
-  function upsertSessionSummary(session: SessionSummary): void {
-    setSessions((current) => {
-      const existing = current.find((entry) => entry.id === session.id);
-      return [
-        mergeSessionSummaryForDisplay(existing, session),
-        ...current.filter((entry) => entry.id !== session.id),
-      ];
-    });
+  function upsertSessionSummary(session: DesktopSessionSummary): void {
+    setSessions((current) => [
+      normalizeSessionSummaryForDisplay(session),
+      ...current.filter((entry) => entry.id !== session.id),
+    ]);
   }
 
   function markSessionReadLocally(sessionId: string, readMessages: readonly StoredMessage[]): void {
@@ -95,12 +96,6 @@ export function useAppShellSessionList(toastApi: ToastApi) {
     ));
   }
 
-  function clearSessions(): void {
-    sessionReadBoundariesRef.current = {};
-    commitSessions([]);
-    setAuthoritativeSessionIds(new Set());
-  }
-
   return {
     sessions,
     authoritativeSessionIds,
@@ -110,6 +105,5 @@ export function useAppShellSessionList(toastApi: ToastApi) {
     seedSessions,
     upsertSessionSummary,
     markSessionReadLocally,
-    clearSessions,
   };
 }

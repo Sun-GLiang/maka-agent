@@ -1,8 +1,13 @@
 import type { InteractiveRuntimeHostCandidateOptions } from './server/candidate.js';
 
+export interface ParsedInteractiveRuntimeHostCandidateArguments
+  extends InteractiveRuntimeHostCandidateOptions {
+  readonly desktopE2e?: true;
+}
+
 export function parseInteractiveRuntimeHostCandidateArguments(
   args: readonly string[],
-): InteractiveRuntimeHostCandidateOptions {
+): ParsedInteractiveRuntimeHostCandidateArguments {
   const allowedKeys = new Set([
     'root',
     'expected-root-id',
@@ -10,6 +15,7 @@ export function parseInteractiveRuntimeHostCandidateArguments(
     'idle-grace-ms',
     'handshake-timeout-ms',
     'generation',
+    'desktop-e2e',
   ]);
   const values = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
@@ -37,6 +43,7 @@ export function parseInteractiveRuntimeHostCandidateArguments(
     idleGraceMs: readOptionalInteger(values, 'idle-grace-ms'),
     handshakeTimeoutMs: readOptionalInteger(values, 'handshake-timeout-ms'),
     ...(values.has('generation') ? { generation: readGeneration(values) } : {}),
+    ...(values.has('desktop-e2e') ? { desktopE2e: readDesktopE2e(values) } : {}),
   };
 }
 
@@ -44,6 +51,11 @@ function readGeneration(values: Map<string, string>): string {
   const value = values.get('generation');
   if (!value || value.length > 128) throw new Error('Invalid --generation');
   return value;
+}
+
+function readDesktopE2e(values: Map<string, string>): true {
+  if (values.get('desktop-e2e') !== '1') throw new Error('Invalid --desktop-e2e');
+  return true;
 }
 
 function readOptionalInteger(values: Map<string, string>, key: string): number | undefined {

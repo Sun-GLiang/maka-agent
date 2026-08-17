@@ -166,6 +166,9 @@ type ShellCopy = {
     directorySwitchedTitle: string;
     projectUpdateFailedTitle: string;
     projectUpdateFailedFallback: string;
+    catalogUnavailable: string;
+    retryCatalog: string;
+    runtimeHostReadiness: Record<'connecting' | 'reconnecting' | 'unavailable', string>;
     openFailedTitle(path: string): string;
     openPathLabels: Record<'workspace' | 'skills' | 'memory' | 'project', string>;
     openPathFailures: Record<
@@ -229,6 +232,8 @@ type ShellCopy = {
     deleteLabel: string;
     cancelLabel: string;
     deletedTitle(name: string): string;
+    /** The task was restored elsewhere, so the delete was called off. */
+    deleteRestoredTitle(name: string): string;
   };
   skillActions: {
     refreshSkillsFailedTitle: string;
@@ -393,6 +398,7 @@ type ShellCopy = {
     memoryLoadErrorTitle: string;
     memoryErrorFallback: string;
     openModelSettings: string;
+    configureModelsOnHost(hostName: string): string;
     sidebarCollapsed: string;
     resizeConversationList: string;
     skipErrorTitle: string;
@@ -715,6 +721,13 @@ const SHELL_COPY_BY_LOCALE = {
       directorySwitchedTitle: '已切换工作目录',
       projectUpdateFailedTitle: '项目操作失败',
       projectUpdateFailedFallback: '暂时无法更新项目，请稍后重试。',
+      catalogUnavailable: 'Runtime Host 暂时不可用',
+      retryCatalog: '重试加载',
+      runtimeHostReadiness: {
+        connecting: '连接中',
+        reconnecting: '正在重连',
+        unavailable: '不可用',
+      },
       openFailedTitle: (path: string) => `无法打开${path}`,
       openPathLabels: {
         workspace: '工作区目录',
@@ -795,6 +808,7 @@ const SHELL_COPY_BY_LOCALE = {
       deleteLabel: '删除',
       cancelLabel: '取消',
       deletedTitle: (name: string) => `已删除 ${name}`,
+      deleteRestoredTitle: (name: string) => `${name} 已被恢复，未删除`,
     },
     skillActions: {
       refreshSkillsFailedTitle: '刷新技能失败',
@@ -1076,6 +1090,8 @@ const SHELL_COPY_BY_LOCALE = {
       memoryLoadErrorTitle: '载入本地记忆状态失败',
       memoryErrorFallback: '本地记忆状态暂时无法刷新，请稍后重试。',
       openModelSettings: '打开设置 · 模型',
+      configureModelsOnHost: (hostName: string) =>
+        `请先在 ${hostName} 上配置模型连接。`,
       sidebarCollapsed: '侧边栏已收起',
       resizeConversationList: '调整任务列表宽度',
       skipErrorTitle: '跳过失败',
@@ -1181,6 +1197,13 @@ const SHELL_COPY_BY_LOCALE = {
       directorySwitchedTitle: 'Working directory changed',
       projectUpdateFailedTitle: 'Could not update project',
       projectUpdateFailedFallback: 'The project could not be updated. Try again later.',
+      catalogUnavailable: 'Runtime Hosts unavailable',
+      retryCatalog: 'Retry loading',
+      runtimeHostReadiness: {
+        connecting: 'Connecting',
+        reconnecting: 'Reconnecting',
+        unavailable: 'Unavailable',
+      },
       openFailedTitle: (path: string) => `Could not open ${path}`,
       openPathLabels: {
         workspace: 'workspace folder',
@@ -1262,6 +1285,7 @@ const SHELL_COPY_BY_LOCALE = {
       deleteLabel: 'Delete',
       cancelLabel: 'Cancel',
       deletedTitle: (name: string) => `Deleted ${name}`,
+      deleteRestoredTitle: (name: string) => `${name} was restored, so it was kept`,
     },
     skillActions: {
       refreshSkillsFailedTitle: 'Could not refresh Skills',
@@ -1584,6 +1608,8 @@ const SHELL_COPY_BY_LOCALE = {
       memoryLoadErrorTitle: 'Could not load local memory status',
       memoryErrorFallback: 'Local memory status could not be refreshed. Try again later.',
       openModelSettings: 'Open Settings · Models',
+      configureModelsOnHost: (hostName: string) =>
+        `Configure a model connection on ${hostName} before starting a task.`,
       sidebarCollapsed: 'Sidebar is collapsed',
       resizeConversationList: 'Resize task list',
       skipErrorTitle: 'Could not skip onboarding',

@@ -47,6 +47,7 @@ export interface ConnectOrSpawnRuntimeHostInput {
   connectTimeoutMs?: number;
   handshakeTimeoutMs?: number;
   candidateEntrypoint: string | URL;
+  desktopE2e?: boolean;
   signal?: AbortSignal;
 }
 
@@ -249,6 +250,7 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
           entrypoint: input.candidateEntrypoint,
           initialConnectionTimeoutMs: Math.ceil(remaining),
           ...(input.generation === undefined ? {} : { generation: input.generation }),
+          ...(input.desktopE2e ? { desktopE2e: true } : {}),
         });
         const attempt = await settleBeforeDeadline(launch.spawned, deadline, input.signal);
         if (attempt.startupFailure) {

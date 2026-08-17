@@ -5533,7 +5533,11 @@ describe('SessionManager permission mode updates', () => {
     const runtimeEventStore = new MemoryRuntimeEventStore();
     const backends = new BackendRegistry();
     const observed: InvocationResult[] = [];
-    backends.register('fake', (ctx) => new FinalTextTestBackend(ctx));
+    let backend: FinalTextTestBackend | undefined;
+    backends.register('fake', (ctx) => {
+      backend = new FinalTextTestBackend(ctx);
+      return backend;
+    });
     const manager = new SessionManager({
       store,
       runStore,
@@ -5549,11 +5553,16 @@ describe('SessionManager permission mode updates', () => {
     const session = await manager.createSession(makeInput());
 
     const sessionEvents = await collectSessionEvents(
-      manager.sendMessage(session.id, { turnId: 'turn-1', text: 'hello' }),
+      manager.sendMessage(session.id, {
+        turnId: 'turn-1',
+        text: 'hello',
+        toolMode: 'code_mode',
+      }),
     );
 
     expect(sessionEvents.map((event) => event.type)).toEqual(['text_complete', 'complete']);
     expect(sessionEvents.map((event) => event.id)).toEqual(['turn-1-final', 'turn-1-complete']);
+    expect(backend?.sendInputs[0]?.toolMode).toBe('code_mode');
     expect(observed.length).toBe(1);
 
     const [run] = await runStore.listSessionRuns(session.id);
@@ -10147,6 +10156,128 @@ describe('SessionManager permission mode updates', () => {
         (message) => 'turnId' in message && message.turnId === retried.turnId,
       ),
     ).toEqual([]);
+  });
+
+  test('retryChildAgent fails closed without a complete continuation composition', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    let providerDispatches = 0;
+    backends.register('fake', (ctx) => ({
+      kind: 'fake' as const,
+      sessionId: ctx.sessionId,
+      async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+        providerDispatches += 1;
+        yield {
+          type: 'error',
+          id: `${input.turnId}-error`,
+          turnId: input.turnId,
+          ts: 1,
+          recoverable: true,
+          reason: 'RateLimit',
+          message: 'provider 429',
+        };
+        yield {
+          type: 'complete',
+          id: `${input.turnId}-complete`,
+          turnId: input.turnId,
+          ts: 2,
+          stopReason: 'error',
+        };
+      },
+      async stop(): Promise<void> {},
+      async respondToSandboxBoundary(): Promise<void> {},
+      async dispose(): Promise<void> {},
+    }));
+    const inspectContinuationSafety = async () => ({
+      workspaceIdentity: '/tmp/cwd',
+      backgroundOperationsSettled: true,
+      availableToolNames: [] as string[],
+    });
+    const composeManager = (options: {
+      runtimeEventStore?: RuntimeEventStore;
+      withSafetyInspector?: boolean;
+    }) =>
+      new SessionManager({
+        store,
+        runStore,
+        runtimeEventStore: options.runtimeEventStore ?? runStore,
+        backends,
+        childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+        ...(options.withSafetyInspector ? { inspectContinuationSafety } : {}),
+        newId: nextId(),
+        now: nextNow(6_845),
+        runtimeSource: 'test',
+      });
+    const eventStoreWithoutAuthority = new Proxy(runStore, {
+      get(target, property, receiver) {
+        if (property === 'continuationAuthorityCapability') return undefined;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    const seeder = composeManager({});
+    const session = await seeder.createSession(makeInput({ permissionMode: 'ask' }));
+    const parentRun = makeRunHeader({
+      sessionId: session.id,
+      runId: 'parent-run',
+      turnId: 'parent-turn',
+      status: 'completed',
+      createdAt: 100,
+      updatedAt: 110,
+      completedAt: 110,
+    });
+    await seedRuntimeRun(runStore, parentRun, [
+      runtimeEvent({
+        id: 'parent-complete',
+        sessionId: session.id,
+        runId: parentRun.runId,
+        turnId: parentRun.turnId,
+        ts: 110,
+        status: 'completed',
+        actions: { endInvocation: true },
+      }),
+    ]);
+    const first = await seeder.spawnChildAgent(session.id, {
+      turnId: 'child-rate-limited',
+      parentRunId: parentRun.runId,
+      spec: { id: LOCAL_READ_AGENT_ID, name: 'Reader', systemPrompt: 'read only' },
+      prompt: 'inspect auth',
+    });
+    expect(first.status).toBe('failed');
+    expect(first.failureClass).toBe('RateLimit');
+    if (!first.runId) throw new Error('rate-limited child run id was not recorded');
+    const runsBeforeRetries = await runStore.listSessionRuns(session.id);
+
+    const incompleteCompositions = [
+      {
+        label: 'continuation authority and safety inspector are both missing',
+        runtimeEventStore: eventStoreWithoutAuthority,
+        withSafetyInspector: false,
+      },
+      {
+        label: 'continuation authority is missing its safety inspector',
+        runtimeEventStore: runStore,
+        withSafetyInspector: false,
+      },
+      {
+        label: 'safety inspector is missing its continuation authority',
+        runtimeEventStore: eventStoreWithoutAuthority,
+        withSafetyInspector: true,
+      },
+    ];
+    for (const composition of incompleteCompositions) {
+      const manager = composeManager(composition);
+      await expectRejects(
+        manager.retryChildAgent(session.id, {
+          parentRunId: parentRun.runId,
+          sourceRunId: first.runId,
+        }),
+        /composition is incomplete/,
+      );
+    }
+    expect(providerDispatches).toBe(1);
+    expect(await runStore.listSessionRuns(session.id)).toHaveLength(runsBeforeRetries.length);
   });
 
   test('parent and child runs can read their ledger while only parents may compact session history', async () => {
@@ -17116,7 +17247,6 @@ class MemorySessionStore implements SessionStore {
   readonly failNextReadMessagesFor = new Map<string, number>();
   readonly failListTurnsFor = new Set<string>();
   readonly failUpdateHeaderFor = new Set<string>();
-  readonly interleaveBeforeMarkSessionReadWriteFor = new Map<string, () => Promise<void> | void>();
   failNextAppendMessage: ((message: StoredMessage) => boolean) | undefined;
   failAfterNextAppendMessage: ((message: StoredMessage) => boolean) | undefined;
   disposeCount = 0;
@@ -17333,7 +17463,6 @@ class MemorySessionStore implements SessionStore {
       error.code = 'ENOENT';
       throw error;
     }
-    await this.runMarkSessionReadInterleave(sessionId);
     return header;
   }
 
@@ -17377,26 +17506,6 @@ class MemorySessionStore implements SessionStore {
     const next = { ...current, ...patch };
     this.headers.set(sessionId, next);
     return next;
-  }
-
-  async markSessionReadThrough(sessionId: string, readThroughTs: number): Promise<SessionHeader> {
-    await this.runMarkSessionReadInterleave(sessionId);
-    if (this.failUpdateHeaderFor.has(sessionId))
-      throw new Error(`Cannot update header for ${sessionId}`);
-    const current = await this.readHeader(sessionId);
-    if (!current.hasUnread) return current;
-    if (current.lastMessageAt !== undefined && current.lastMessageAt > readThroughTs)
-      return current;
-    const next = { ...current, hasUnread: false };
-    this.headers.set(sessionId, next);
-    return next;
-  }
-
-  private async runMarkSessionReadInterleave(sessionId: string): Promise<void> {
-    const hook = this.interleaveBeforeMarkSessionReadWriteFor.get(sessionId);
-    if (!hook) return;
-    this.interleaveBeforeMarkSessionReadWriteFor.delete(sessionId);
-    await hook();
   }
 
   async archive(sessionId: string): Promise<void> {

@@ -47,10 +47,10 @@ export function isActionableBlocked(reason: SessionBlockedReason | undefined): b
  * Non-actionable blocked sessions read as ordinary resumable sessions
  * (`active`), so every display consumer agrees on the same projection.
  */
-export function normalizeSessionSummaryForDisplay(session: SessionSummary): SessionSummary {
-  const liveNormalized =
+export function normalizeSessionSummaryForDisplay<T extends SessionSummary>(session: T): T {
+  const liveNormalized: T =
     session.status === 'running' && session.runningTurnIds?.length === 0
-      ? { ...session, status: 'active' as const }
+      ? ({ ...session, status: 'active' as const } as T)
       : session;
   if (
     liveNormalized.status !== 'blocked' ||
@@ -60,7 +60,7 @@ export function normalizeSessionSummaryForDisplay(session: SessionSummary): Sess
   }
   const { blockedReason: _blockedReason, ...rest } = liveNormalized;
   void _blockedReason;
-  return { ...rest, status: 'active' };
+  return { ...rest, status: 'active' } as T;
 }
 
 /**
@@ -68,13 +68,13 @@ export function normalizeSessionSummaryForDisplay(session: SessionSummary): Sess
  * run state. Preserve the last authoritative state in that case; an explicit
  * empty or non-empty array from a catalog read always replaces it.
  */
-export function mergeSessionSummaryForDisplay(
-  current: SessionSummary | undefined,
-  incoming: SessionSummary,
-): SessionSummary {
-  const merged =
+export function mergeSessionSummaryForDisplay<T extends SessionSummary>(
+  current: T | undefined,
+  incoming: T,
+): T {
+  const merged: T =
     incoming.runningTurnIds === undefined && current?.runningTurnIds !== undefined
-      ? { ...incoming, runningTurnIds: [...current.runningTurnIds] }
+      ? ({ ...incoming, runningTurnIds: [...current.runningTurnIds] } as T)
       : incoming;
   return normalizeSessionSummaryForDisplay(merged);
 }
@@ -83,10 +83,10 @@ export function mergeSessionSummaryForDisplay(
  * Apply the same live-state preservation rule at the shared list state
  * boundary, so every metadata mutation path gets it even when a refresh fails.
  */
-export function mergeSessionSummaryListForDisplay(
-  current: readonly SessionSummary[],
-  incoming: readonly SessionSummary[],
-): SessionSummary[] {
+export function mergeSessionSummaryListForDisplay<T extends SessionSummary>(
+  current: readonly T[],
+  incoming: readonly T[],
+): T[] {
   const currentById = new Map(current.map((session) => [session.id, session]));
   return incoming.map((session) =>
     mergeSessionSummaryForDisplay(currentById.get(session.id), session),

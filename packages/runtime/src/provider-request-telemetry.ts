@@ -11,6 +11,10 @@ import {
   type PreparedRequestSegment,
 } from './request-shape.js';
 import { rawFinishReasonString } from './model-protocol.js';
+import {
+  providerFailureDiagnostic,
+  type ProviderFailureDiagnostic,
+} from './provider-error-classification.js';
 import { latestContextProjectionInput } from './latest-context-snapshot.js';
 import type { ContextDiagnosticsCompaction } from './context-diagnostics.js';
 import type { ModelCallCommit } from '@maka/core/agent-run';
@@ -88,6 +92,7 @@ export interface ProviderRequestAttemptRecord extends ProviderRequestUsage {
   completedAt: number;
   status: ProviderRequestAttemptStatus;
   finishReason?: string;
+  failure?: ProviderFailureDiagnostic;
   latencyMs: number;
   timeToFirstTokenMs?: number;
 }
@@ -152,6 +157,7 @@ export interface ModelCallAccountingInput {
    */
   providerId?: string;
   callKind: ModelCallKind;
+  historyCompactRoute?: ModelCallAttempt['historyCompactRoute'];
   /**
    * Commits the attempt, and with it the derived latest-context row when this
    * request is one that answers "what is the context made of" (#2323). One
@@ -210,6 +216,12 @@ interface ProviderMiddlewareGenerateInput {
   model: { provider: string; modelId: string };
 }
 
+interface ProviderMiddlewareStreamInput {
+  doStream: () => PromiseLike<ProviderStreamResult>;
+  params: Record<string, unknown> & { abortSignal?: AbortSignal };
+  model: { provider: string; modelId: string };
+}
+
 /**
  * Wraps a language model so its single `generate` call is tracked.
  *
@@ -235,6 +247,28 @@ export function withProviderGenerateTracking(input: {
           params,
           ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
           doGenerate,
+        }),
+    },
+  });
+}
+
+/** Wraps a language model so its single streaming call is tracked. */
+export function withProviderStreamTracking(input: {
+  model: unknown;
+  wrapLanguageModel: (input: Record<string, unknown>) => unknown;
+  tracker: ProviderRequestTracker;
+  abortSignal?: AbortSignal;
+}): unknown {
+  return input.wrapLanguageModel({
+    model: input.model,
+    middleware: {
+      wrapStream: async ({ doStream, params, model }: ProviderMiddlewareStreamInput) =>
+        await input.tracker.trackStream({
+          providerId: model.provider,
+          modelId: model.modelId,
+          params,
+          ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+          doStream,
         }),
     },
   });
@@ -342,7 +376,7 @@ export class ProviderRequestTracker {
     try {
       result = await input.doStream();
     } catch (error) {
-      await attempt.finalize(abortStatus(input.abortSignal, error));
+      await attempt.finalize(abortStatus(input.abortSignal, error), { error });
       throw error;
     }
 
@@ -369,6 +403,7 @@ export class ProviderRequestTracker {
           } else if (part?.type === 'error') {
             await attempt.finalize(
               input.abortSignal?.aborted ? 'aborted' : sawOutput ? 'interrupted' : 'failed',
+              { error: part.error },
             );
           }
           controller.enqueue(next.value);
@@ -379,6 +414,7 @@ export class ProviderRequestTracker {
               : sawOutput
                 ? 'interrupted'
                 : abortStatus(input.abortSignal, error),
+            { error },
           );
           controller.error(error);
         }
@@ -411,7 +447,7 @@ export class ProviderRequestTracker {
       });
       return result;
     } catch (error) {
-      await attempt.finalize(abortStatus(input.abortSignal, error));
+      await attempt.finalize(abortStatus(input.abortSignal, error), { error });
       throw error;
     }
   }
@@ -427,7 +463,7 @@ export class ProviderRequestTracker {
     observeOutput(): void;
     finalize(
       status: ProviderRequestAttemptStatus,
-      finish?: { reason?: string; usage?: ProviderRequestUsageLike },
+      finish?: { reason?: string; usage?: ProviderRequestUsageLike; error?: unknown },
     ): Promise<void>;
   } {
     const attempt = (this.attemptsByStep.get(step) ?? 0) + 1;
@@ -452,7 +488,7 @@ export class ProviderRequestTracker {
     let abortListener: (() => void) | undefined;
     const finalize = async (
       status: ProviderRequestAttemptStatus,
-      finish?: { reason?: string; usage?: ProviderRequestUsageLike },
+      finish?: { reason?: string; usage?: ProviderRequestUsageLike; error?: unknown },
     ): Promise<void> => {
       if (settled) return;
       const provisional = status === 'aborted' && finish?.usage === undefined;
@@ -465,6 +501,8 @@ export class ProviderRequestTracker {
       const completedAt = this.input.now();
       const usage = strictProviderRequestUsage(finish?.usage);
       const contextWindow = positiveInteger(this.input.contextWindow);
+      const failure =
+        finish?.error !== undefined ? providerFailureDiagnostic(finish.error) : undefined;
       const record: ProviderRequestAttemptRecord = {
         traceId: this.input.traceId,
         attemptId,
@@ -487,6 +525,7 @@ export class ProviderRequestTracker {
         completedAt,
         status,
         ...(finish?.reason !== undefined ? { finishReason: finish.reason } : {}),
+        ...(failure !== undefined ? { failure } : {}),
         latencyMs: Math.max(0, completedAt - startedAt),
         ...(timeToFirstTokenMs !== undefined ? { timeToFirstTokenMs } : {}),
         ...(usage ?? {}),
@@ -571,6 +610,9 @@ export class ProviderRequestTracker {
       step: Math.max(0, record.step),
       attempt: Math.max(0, record.attempt - 1),
       callKind: accounting.callKind,
+      ...(accounting.historyCompactRoute !== undefined
+        ? { historyCompactRoute: accounting.historyCompactRoute }
+        : {}),
       providerId: accounting.providerId ?? record.providerId,
       modelId: record.modelId,
       ...(context.contextWindow !== undefined ? { contextWindow: context.contextWindow } : {}),
@@ -585,6 +627,7 @@ export class ProviderRequestTracker {
         : {}),
       status: record.status,
       ...(record.finishReason !== undefined ? { finishReason: record.finishReason } : {}),
+      ...(record.failure ?? {}),
       usageBasis,
       ...(usageBasis === 'missing' ? {} : modelCallUsageFields(usage)),
       costBasis: priced ? 'priced' : 'unpriced',
@@ -688,7 +731,35 @@ function preparedCapture(
 
 function secretFreeParams(params: Record<string, unknown>): Record<string, unknown> {
   const { abortSignal: _abortSignal, headers: _headers, ...safe } = params;
-  return safe;
+  if (!Array.isArray(safe.prompt)) return safe;
+  return { ...safe, prompt: safe.prompt.map(redactPromptCompactionState) };
+}
+
+function redactPromptCompactionState(value: unknown): unknown {
+  if (!isPlainRecord(value) || !Array.isArray(value.content)) return value;
+  return { ...value, content: value.content.map(redactCompactionContentPart) };
+}
+
+function redactCompactionContentPart(value: unknown): unknown {
+  if (!isPlainRecord(value) || value.type !== 'custom' || value.kind !== 'openai.compaction') {
+    return value;
+  }
+  const providerOptions = isPlainRecord(value.providerOptions) ? value.providerOptions : undefined;
+  const openai = isPlainRecord(providerOptions?.openai) ? providerOptions.openai : undefined;
+  const { itemId: _itemId, encryptedContent: _encryptedContent, ...safeOpenai } = openai ?? {};
+  return {
+    ...value,
+    providerOptions: {
+      ...(providerOptions ?? {}),
+      openai: { ...safeOpenai, redacted: true },
+    },
+  };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object') return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function abortStatus(signal: AbortSignal | undefined, error: unknown): 'failed' | 'aborted' {

@@ -1,3 +1,4 @@
+import { RuntimeHostProtocolError } from '../protocol/errors.js';
 import { createHash } from 'node:crypto';
 import { isModelExplicitlyUnsupportedForChat } from '@maka/core/model-catalog';
 import { thinkingVariantsForConnection } from '@maka/core/model-thinking';
@@ -39,7 +40,6 @@ import {
   SESSION_CATALOG_RUNNING_TURN_MAX_ITEMS,
   type OperationError,
   type OperationOutcome,
-  RuntimeHostProtocolError,
   type SessionCatalogFilter,
   type SessionCatalogItem,
   type SessionCatalogLiveRunState,

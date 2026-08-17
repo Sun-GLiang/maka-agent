@@ -1,3 +1,4 @@
+import { RuntimeHostProtocolError } from '../protocol/errors.js';
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_COUNT } from '@maka/core/attachments';
@@ -25,7 +26,6 @@ import {
   TURN_MESSAGE_CONTENT_MAX_BYTES,
   TURN_MESSAGE_TEXT_MAX_BYTES,
   RUNTIME_POLICY_OPERATION_SPECS,
-  RuntimeHostProtocolError,
 } from '../protocol/index.js';
 import { HOST_BOOTSTRAP_OPERATION_SPECS } from '../protocol/host-status.js';
 import { composeOperationSpecMaps } from '../protocol/operation-spec.js';
@@ -41,7 +41,25 @@ import {
 
 describe('Runtime Host bootstrap protocol', () => {
   test('publishes a new compatibility epoch for Session catalog live-run state', () => {
-    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 21);
+    // Epoch 22 predates the live-run projection and rejects its added catalog
+    // field, so mixed-version peers must fail during the handshake instead.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 22);
+  });
+
+  test('rejects the legacy connection update result in the current compatibility epoch', () => {
+    assert.throws(
+      () =>
+        decodeHostFrame({
+          requestId: 'connection-update-legacy',
+          operation: 'connection.catalog.update',
+          ok: true,
+          result: {
+            kind: 'invalid_default_target',
+            target: { connectionId: '2a42da77-afac-4fb1-bff1-e7d6e6e55e9f', modelId: 'gpt-5' },
+          },
+        }),
+      isInvalidFrame,
+    );
   });
 
   test('selects the highest mutually supported protocol and rejects a gap', () => {
@@ -105,6 +123,20 @@ describe('Runtime Host bootstrap protocol', () => {
       },
     };
     assert.deepEqual(decodeSessionContinuitySnapshot(waiting), waiting);
+    const retrying = {
+      ...continuitySnapshot('epoch-1'),
+      rootTurn: {
+        ...continuitySnapshot('epoch-1').rootTurn,
+        providerRetry: {
+          phase: 'scheduled' as const,
+          attempt: 8,
+          maxAttempts: 10,
+          delayMs: 40_000,
+          reason: 'rate_limit' as const,
+        },
+      },
+    };
+    assert.deepEqual(decodeSessionContinuitySnapshot(retrying), retrying);
     assert.throws(
       () =>
         decodeSessionContinuitySnapshot({

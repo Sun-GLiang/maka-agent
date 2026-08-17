@@ -43,6 +43,9 @@ interface RuntimeHostSkillsIpcDeps {
   readonly workspaceRoot: string;
   readonly mainWindowController: MainWindowController;
   readonly getSelectedWorkspaceTarget: () => Promise<WorkspaceTarget | undefined>;
+  readonly resolveNewSessionWorkspaceTarget: (
+    projectId: string | null | undefined,
+  ) => Promise<WorkspaceTarget | undefined>;
   readonly getDefaultPermissionMode: () => Promise<ChatDefaultPermissionMode>;
   readonly openPath: (path: string) => Promise<string>;
   readonly allowLocalPaths?: boolean;
@@ -88,14 +91,17 @@ export function registerRuntimeHostSkillsIpc(
       if (typeof sessionId === "string") {
         target = { kind: "session" as const, sessionId };
       } else {
-        const workspace = await deps.getSelectedWorkspaceTarget();
+        const projectId = normalizeNewSessionProjectId(newSessionContext);
+        const workspace = await deps.resolveNewSessionWorkspaceTarget(projectId);
         if (!workspace) return [];
         target = {
           kind: "new_session" as const,
           context: { workspace },
           collaborationMode:
             normalizeNewSessionCollaborationMode(newSessionContext) ?? "agent",
-          permissionMode: await deps.getDefaultPermissionMode(),
+          permissionMode:
+            normalizeNewSessionPermissionMode(newSessionContext) ??
+            await deps.getDefaultPermissionMode(),
         };
       }
       return (await deps.client.listInvocableSkills(target)).map(
@@ -395,6 +401,21 @@ function normalizeNewSessionCollaborationMode(
   if (!input || typeof input !== "object" || Array.isArray(input)) return;
   const value = (input as Record<string, unknown>).collaborationMode;
   return value === "agent" || value === "plan" ? value : undefined;
+}
+
+function normalizeNewSessionPermissionMode(
+  input: unknown,
+): ChatDefaultPermissionMode | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return;
+  const value = (input as Record<string, unknown>).permissionMode;
+  return value === "ask" || value === "bypass" ? value : undefined;
+}
+
+function normalizeNewSessionProjectId(input: unknown): string | null | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return;
+  const value = (input as Record<string, unknown>).projectId;
+  if (value === null) return null;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function resolveGovernanceItem(

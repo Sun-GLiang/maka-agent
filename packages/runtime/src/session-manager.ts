@@ -217,7 +217,6 @@ import { buildRuntimeEventModelReplayPlan } from './model-history.js';
 import { stableHash } from './request-shape.js';
 import type { SubagentExecutionRef } from './subagent-execution.js';
 import {
-  buildResumePlanFromRuntimeEvents,
   RuntimeContinuationPlanner,
   type RuntimeContinuation,
   type RuntimeContinuationPlannerInput,
@@ -678,7 +677,6 @@ export interface SessionStore {
     sessionId: string,
     input: SessionConfigurationStoreUpdate,
   ): Promise<VersionedSessionHeader>;
-  markSessionReadThrough(sessionId: string, readThroughTs: number): Promise<SessionHeader>;
   archive(sessionId: string): Promise<void>;
   unarchive(sessionId: string): Promise<void>;
   setFlagged(sessionId: string, isFlagged: boolean): Promise<void>;
@@ -1643,12 +1641,6 @@ export class SessionManager {
     await this.deps.store.setFlagged(sessionId, isFlagged);
     const header = await this.deps.store.readHeader(sessionId).catch(() => undefined);
     if (header) this.runtimeKernel.updateCachedHeader(sessionId, header);
-  }
-
-  async markSessionRead(sessionId: string, readThroughTs: number | undefined): Promise<void> {
-    if (readThroughTs === undefined || !Number.isFinite(readThroughTs)) return;
-    const next = await this.deps.store.markSessionReadThrough(sessionId, readThroughTs);
-    this.runtimeKernel.updateCachedHeader(sessionId, next);
   }
 
   async renameSession(sessionId: string, name: string): Promise<void> {
@@ -4116,33 +4108,19 @@ export class SessionManager {
     }
     this.assertChildRunHasNoSuccessor(runs, sourceRun.runId);
 
-    const hasAuthority = authority !== undefined;
-    const hasSafetyInspector = this.deps.inspectContinuationSafety !== undefined;
-    if (hasAuthority !== hasSafetyInspector) {
+    if (!authority || !this.deps.inspectContinuationSafety) {
       throw new Error(
         'Child agent retry continuation authority composition is incomplete; refusing legacy fallback',
       );
     }
-    const admissionMode = hasAuthority
-      ? ('durable_continuation' as const)
-      : ('legacy_provider_retry' as const);
-    const continuation =
-      admissionMode === 'durable_continuation'
-        ? await this.planDurableChildProviderRetry({
-            targetSessionId,
-            sourceRun,
-            runs,
-            authority: authority!,
-            inspectSafety: this.deps.inspectContinuationSafety!,
-            availableToolNames: definition.toolNames,
-          })
-        : await this.planLegacyChildProviderRetry({
-            targetSessionId,
-            rawSourceRun,
-            sourceRun,
-            runs,
-            availableToolNames: definition.toolNames,
-          });
+    const continuation = await this.planDurableChildProviderRetry({
+      targetSessionId,
+      sourceRun,
+      runs,
+      authority,
+      inspectSafety: this.deps.inspectContinuationSafety,
+      availableToolNames: definition.toolNames,
+    });
     const retryReplay = buildRuntimeEventModelReplayPlan(continuation.runtimeContext);
     const retryAnchor = retryReplay.items[0];
     if (!retryAnchor || retryAnchor.kind !== 'text' || retryAnchor.role !== 'user') {
@@ -4202,7 +4180,6 @@ export class SessionManager {
                       systemPrompt: definition.systemPrompt,
                     },
                     continuation,
-                    admissionMode,
                     linkedSession: true,
                     onRunStarted,
                   },
@@ -4225,7 +4202,6 @@ export class SessionManager {
                   systemPrompt: definition.systemPrompt,
                 },
                 continuation,
-                admissionMode,
               },
               runtimeExecution,
             ),
@@ -4349,81 +4325,6 @@ export class SessionManager {
       );
     }
     return retryPlan.continuation;
-  }
-
-  /**
-   * Preserves the pre-PR-B provider RateLimit retry for compositions that have
-   * neither continuation authority nor a safety inspector. It is intentionally
-   * not a durable continuation: no claim or continuation-start is written, and
-   * it cannot recover a claim-repair abandonment. The host authority lifecycle
-   * integration replaces this path with a typed SQLite composition.
-   */
-  private async planLegacyChildProviderRetry(input: {
-    targetSessionId: string;
-    rawSourceRun: AgentRunHeader;
-    sourceRun: AgentRunHeader;
-    runs: readonly AgentRunHeader[];
-    availableToolNames: readonly string[];
-  }): Promise<RuntimeContinuation> {
-    if (!this.deps.runtimeEventStore?.readImmutableRuntimeEvents) {
-      throw new Error('Legacy child provider retry requires immutable RuntimeEvent reads');
-    }
-    if (input.sourceRun.failureClass !== 'RateLimit') {
-      throw new Error('Legacy child provider retry only supports provider rate-limit failures');
-    }
-
-    const replaySegments: RuntimeEvent[][] = [];
-    let sourceEvents: RuntimeEvent[] | undefined;
-    let sourceReplay: RuntimeEvent[] | undefined;
-    let chainRun: AgentRunHeader | undefined = input.rawSourceRun;
-    const visited = new Set<string>();
-    while (chainRun) {
-      if (visited.has(chainRun.runId)) {
-        throw new Error('Child agent retry lineage contains a cycle');
-      }
-      visited.add(chainRun.runId);
-      const events = await this.deps.runtimeEventStore.readImmutableRuntimeEvents(
-        input.targetSessionId,
-        chainRun.runId,
-      );
-      const plan = buildResumePlanFromRuntimeEvents(events);
-      if (plan.disposition !== 'safe_replay') {
-        throw new Error(`Child agent retry source is not safely replayable: ${chainRun.runId}`);
-      }
-      replaySegments.unshift(plan.replayRuntimeEvents);
-      if (chainRun.runId === input.sourceRun.runId) {
-        sourceEvents = events;
-        sourceReplay = plan.replayRuntimeEvents;
-      }
-      const previousRunId: string | undefined =
-        chainRun.retriedFromRunId ?? chainRun.resumedFromRunId;
-      if (!previousRunId) break;
-      chainRun = input.runs.find((run) => run.runId === previousRunId);
-      if (!chainRun) throw new Error('Child agent retry lineage source is missing');
-    }
-    if (!sourceEvents || !sourceReplay) {
-      throw new Error('Child agent retry source ledger is missing');
-    }
-    const sourceInvocationId = input.sourceRun.invocationId ?? sourceEvents[0]?.invocationId;
-    if (!sourceInvocationId) throw new Error('Child agent retry source has no invocation id');
-
-    return {
-      sessionId: input.targetSessionId,
-      invocationId: this.deps.newId(),
-      runId: this.deps.newId(),
-      turnId: this.deps.newId(),
-      sourceInvocationId,
-      sourceRunId: input.sourceRun.runId,
-      sourceTurnId: input.sourceRun.turnId,
-      sourceRuntimeEventHighWater: sourceEvents.length,
-      sourceRuntimeContext: sourceReplay,
-      runtimeContext: replaySegments.flat(),
-      safetySnapshot: {
-        workspaceIdentity: input.sourceRun.workspaceIdentity ?? input.sourceRun.cwd,
-        backgroundOperationsSettled: true,
-        availableToolNames: [...input.availableToolNames],
-      },
-    };
   }
 
   private assertChildRunHasNoSuccessor(runs: readonly AgentRunHeader[], sourceRunId: string): void {

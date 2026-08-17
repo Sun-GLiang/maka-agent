@@ -254,7 +254,11 @@ import {
 } from './history-compact.js';
 import { selectSynthesisCacheForReplay } from './synthesis-cache.js';
 import {
+  canContinueHistoryCompactCheckpointForModel,
+  historyCompactCheckpointToModelMessage,
   historyCompactCheckpointToRuntimeEvent,
+  isProviderHistoryCompactCheckpoint,
+  isTextHistoryCompactCheckpoint,
   matchHistoryCompactCheckpointPrefix,
   projectHistoryCompactCheckpointReplay,
   type HistoryCompactCheckpoint,
@@ -1101,8 +1105,8 @@ export class AiSdkBackend implements AgentBackend {
       modelAdapter: this.modelAdapter,
       createProviderRequestTracker: (trackerInput) =>
         this.createProviderRequestTracker(trackerInput),
-      materializeRuntimeReplayPlan: (plan, imageBudget) =>
-        this.materializeRuntimeReplayPlan(plan, imageBudget),
+      materializeRuntimeReplayPlan: (plan, imageBudget, checkpoint) =>
+        this.materializeRuntimeReplayPlan(plan, imageBudget, undefined, checkpoint),
       canReplayProviderNative: (plan) => this.canReplayProviderNative(plan),
       appendTurnTailPrompt: (content, turnTailPrompt) =>
         this.appendTurnTailPrompt(content, turnTailPrompt),
@@ -1770,7 +1774,16 @@ export class AiSdkBackend implements AgentBackend {
     if (midTurnState) {
       // Roll-forward seed: the latest durable checkpoint (loaded or written at
       // turn start) so a mid-turn summary only re-reads the newly folded span.
-      midTurnState.previousCheckpoint = priorReplay.latestHistoryCompactCheckpoint;
+      const checkpoint = priorReplay.latestHistoryCompactCheckpoint;
+      midTurnState.previousCheckpoint =
+        checkpoint &&
+        canContinueHistoryCompactCheckpointForModel(
+          checkpoint,
+          this.input.connection,
+          this.input.modelId,
+        )
+          ? checkpoint
+          : undefined;
     }
     /**
      * The fold THIS request's prompt was built under (#2323).
@@ -1929,6 +1942,7 @@ export class AiSdkBackend implements AgentBackend {
             { ...replayPlan, items: replayItems },
             scope.imageBudget,
             settledModelOutputs,
+            projectionCheckpoint,
           );
           return projectionCheckpoint
             ? currentTurnMessages
@@ -3301,6 +3315,7 @@ export class AiSdkBackend implements AgentBackend {
     turnId: string;
     callKind: ModelCallKind;
     modelId: string;
+    historyCompactRoute?: ModelCallAttempt['historyCompactRoute'];
     /**
      * Stated by every caller, never defaulted: an unattributed provider request
      * is silently dropped by usage accounting, so the compiler has to be the
@@ -3312,6 +3327,7 @@ export class AiSdkBackend implements AgentBackend {
     const accounting = this.modelCallAccounting(input.callKind, {
       modelId: input.modelId,
       ...(input.runId ? { runId: input.runId } : {}),
+      ...(input.historyCompactRoute ? { historyCompactRoute: input.historyCompactRoute } : {}),
     });
     const runId = input.runId;
     const beforeRunProviderDispatch = this.input.beforeRunProviderDispatch;
@@ -3355,6 +3371,7 @@ export class AiSdkBackend implements AgentBackend {
       runId?: string;
       /** The model this call actually runs against; priced as that model. */
       modelId?: string;
+      historyCompactRoute?: ModelCallAttempt['historyCompactRoute'];
     },
   ): ModelCallAccountingInput | undefined {
     const record = this.input.recordModelCallAttempt;
@@ -3366,6 +3383,9 @@ export class AiSdkBackend implements AgentBackend {
       connectionSlug: this.input.connection.slug,
       providerId: this.input.connection.providerType,
       callKind,
+      ...(identity?.historyCompactRoute
+        ? { historyCompactRoute: identity.historyCompactRoute }
+        : {}),
       record,
       resolveCost: (usage: ProviderRequestUsage) => this.resolveModelCallCost(usage, modelId),
       ...(this.input.assertModelCallAccountingReady
@@ -3484,7 +3504,7 @@ export class AiSdkBackend implements AgentBackend {
     // policy happens to carry: a loaded checkpoint that missed its prefix or
     // failed the replay fit left the raw prefix in these events, and a caller
     // asking what the prompt was built from must not be told otherwise (#2323).
-    let latestHistoryCompactCheckpoint = budgeted?.historyCompactCheckpoint;
+    let projectedHistoryCompactCheckpoint = budgeted?.historyCompactCheckpoint;
     if (preparedContextBudget.diagnosticPatch) {
       contextBudgetDiagnostic = mergeContextBudgetDiagnostic(
         contextBudgetDiagnostic ??
@@ -3533,7 +3553,7 @@ export class AiSdkBackend implements AgentBackend {
               : {}),
           });
           if (writePatch.replacementCheckpoint) {
-            latestHistoryCompactCheckpoint = writePatch.replacementCheckpoint;
+            projectedHistoryCompactCheckpoint = writePatch.replacementCheckpoint;
             if (automaticMemoryDecision?.dispatch && automaticMemory) {
               this.dispatchAutomaticMemoryCompaction(scope, {
                 checkpoint: writePatch.replacementCheckpoint,
@@ -3541,7 +3561,9 @@ export class AiSdkBackend implements AgentBackend {
               });
             }
             runtimeContext = [
-              historyCompactCheckpointToRuntimeEvent(writePatch.replacementCheckpoint),
+              ...(isTextHistoryCompactCheckpoint(writePatch.replacementCheckpoint)
+                ? [historyCompactCheckpointToRuntimeEvent(writePatch.replacementCheckpoint)]
+                : []),
               ...runtimeContext.filter((event) => !event.id.startsWith('history-compact:')),
             ];
           } else {
@@ -3551,15 +3573,21 @@ export class AiSdkBackend implements AgentBackend {
             // Fail-open rebuilds the context around the older checkpoint, so
             // that one — not the fold this send failed to write — is the
             // boundary the prompt now stands on.
-            latestHistoryCompactCheckpoint = writePatch.fallbackCheckpoint;
-            runtimeContext = writePatch.fallbackCheckpoint
-              ? buildHistoryCompactCheckpointFailOpenContext(
-                  writePatch.fallbackCheckpoint,
-                  priorRuntimeContext,
-                  contextBudget,
-                  runtimeContext.filter((event) => !event.id.startsWith('history-compact:')),
-                )
-              : runtimeContext.filter((event) => !event.id.startsWith('history-compact:'));
+            if (writePatch.fallbackCheckpoint) {
+              const fallback = buildHistoryCompactCheckpointFailOpenContext(
+                writePatch.fallbackCheckpoint,
+                priorRuntimeContext,
+                contextBudget,
+                runtimeContext.filter((event) => !event.id.startsWith('history-compact:')),
+              );
+              runtimeContext = fallback.events;
+              projectedHistoryCompactCheckpoint = fallback.checkpoint;
+            } else {
+              runtimeContext = runtimeContext.filter(
+                (event) => !event.id.startsWith('history-compact:'),
+              );
+              projectedHistoryCompactCheckpoint = undefined;
+            }
           }
           contextBudgetDiagnostic = mergeContextBudgetDiagnostic(
             contextBudgetDiagnostic ??
@@ -3584,7 +3612,7 @@ export class AiSdkBackend implements AgentBackend {
             // Back to the raw prior ledger: whatever boundary the projection
             // stood on a moment ago is not in this context any more.
             runtimeContext = priorRuntimeContext;
-            latestHistoryCompactCheckpoint = undefined;
+            projectedHistoryCompactCheckpoint = undefined;
             contextBudgetDiagnostic = buildContextBudgetDiagnosticShell(
               priorRuntimeContext,
               runtimeContext,
@@ -3749,7 +3777,9 @@ export class AiSdkBackend implements AgentBackend {
     // checkpoint shaped, so it reports none rather than one the request never
     // stood on (#2323).
     const replayBoundary = (fromRuntimeReplay: boolean) =>
-      fromRuntimeReplay && latestHistoryCompactCheckpoint ? { latestHistoryCompactCheckpoint } : {};
+      fromRuntimeReplay && projectedHistoryCompactCheckpoint
+        ? { latestHistoryCompactCheckpoint: projectedHistoryCompactCheckpoint }
+        : {};
 
     const plan = buildRuntimeEventModelReplayPlan(
       runtimeContext,
@@ -3758,40 +3788,57 @@ export class AiSdkBackend implements AgentBackend {
       // prior ledger so a sliced-in tool-turn thinking still gets skipped.
       { toolActivityTurnIds: collectToolActivityTurnIds(priorRuntimeContext) },
     );
-    if (plan.items.length === 0) {
+    const hasProviderHistoryCompactCheckpoint =
+      projectedHistoryCompactCheckpoint !== undefined &&
+      isProviderHistoryCompactCheckpoint(projectedHistoryCompactCheckpoint);
+    const fallbackUsesRuntimeReplay =
+      Boolean(input.continuation) || hasProviderHistoryCompactCheckpoint;
+    // StoredMessage projection cannot represent an opaque provider checkpoint.
+    // Once one is selected, every degraded replay path must remain in the
+    // RuntimeEvent materializer so the checkpoint boundary is not bypassed.
+    const materializeReplayFallback = (): Promise<ModelMessage[]> =>
+      fallbackUsesRuntimeReplay
+        ? this.materializeRuntimeReplayTextOnly(
+            scope.imageBudget,
+            plan,
+            projectedHistoryCompactCheckpoint,
+          )
+        : Promise.resolve(projectedMessages);
+    if (plan.items.length === 0 && !hasProviderHistoryCompactCheckpoint) {
       return {
         status: 'ready',
-        messages: input.continuation
-          ? await this.materializeRuntimeReplayTextOnly(scope.imageBudget, plan)
-          : projectedMessages,
+        messages: await materializeReplayFallback(),
         gate: input.continuation ? 'runtime_replay_text_only' : 'stored_message_projection',
         diagnostics: plan.diagnostics,
         runtimeEventCount: runtimeContext.length,
         ...(contextBudgetDiagnostic ? { contextBudget: contextBudgetDiagnostic } : {}),
-        ...replayBoundary(Boolean(input.continuation)),
+        ...replayBoundary(fallbackUsesRuntimeReplay),
       };
     }
 
     if (hasBlockingReplayDiagnostics(plan)) {
       return {
         status: 'ready',
-        messages: input.continuation
-          ? await this.materializeRuntimeReplayTextOnly(scope.imageBudget, plan)
-          : projectedMessages,
+        messages: await materializeReplayFallback(),
         gate: input.continuation
           ? 'runtime_replay_text_only'
           : 'runtime_replay_unsupported_semantics',
         diagnostics: plan.diagnostics,
         runtimeEventCount: runtimeContext.length,
         ...(contextBudgetDiagnostic ? { contextBudget: contextBudgetDiagnostic } : {}),
-        ...replayBoundary(Boolean(input.continuation)),
+        ...replayBoundary(fallbackUsesRuntimeReplay),
       };
     }
 
     if (!plan.hasProviderNativeSemantics) {
       return {
         status: 'ready',
-        messages: await this.materializeRuntimeReplayPlan(plan, scope.imageBudget),
+        messages: await this.materializeRuntimeReplayPlan(
+          plan,
+          scope.imageBudget,
+          undefined,
+          projectedHistoryCompactCheckpoint,
+        ),
         gate: 'runtime_replay_text_only',
         diagnostics: plan.diagnostics,
         runtimeEventCount: runtimeContext.length,
@@ -3803,22 +3850,25 @@ export class AiSdkBackend implements AgentBackend {
     if (!this.canReplayProviderNative(plan)) {
       return {
         status: 'ready',
-        messages: input.continuation
-          ? await this.materializeRuntimeReplayTextOnly(scope.imageBudget, plan)
-          : projectedMessages,
+        messages: await materializeReplayFallback(),
         gate: input.continuation
           ? 'runtime_replay_text_only'
           : 'runtime_replay_unsupported_semantics',
         diagnostics: plan.diagnostics,
         runtimeEventCount: runtimeContext.length,
         ...(contextBudgetDiagnostic ? { contextBudget: contextBudgetDiagnostic } : {}),
-        ...replayBoundary(Boolean(input.continuation)),
+        ...replayBoundary(fallbackUsesRuntimeReplay),
       };
     }
 
     return {
       status: 'ready',
-      messages: await this.materializeRuntimeReplayPlan(plan, scope.imageBudget),
+      messages: await this.materializeRuntimeReplayPlan(
+        plan,
+        scope.imageBudget,
+        undefined,
+        projectedHistoryCompactCheckpoint,
+      ),
       gate: 'runtime_replay_provider_native',
       diagnostics: plan.diagnostics,
       runtimeEventCount: runtimeContext.length,
@@ -3859,6 +3909,7 @@ export class AiSdkBackend implements AgentBackend {
     plan: RuntimeEventModelReplayPlan,
     budget: ProviderImageBudget,
     settledModelOutputs?: ReadonlyMap<string, ToolResultOutput>,
+    historyCompactCheckpoint?: HistoryCompactCheckpoint,
   ): Promise<ModelMessage[]> {
     type ToolCallItem = Extract<RuntimeEventModelReplayItem, { kind: 'tool_call' }>;
     type ToolResultItem = Extract<RuntimeEventModelReplayItem, { kind: 'tool_result' }>;
@@ -4245,12 +4296,13 @@ export class AiSdkBackend implements AgentBackend {
       }
     }
     await flushPendingSteps();
-    return out;
+    return this.prependProviderHistoryCompactMessage(out, historyCompactCheckpoint);
   }
 
   private async materializeRuntimeReplayTextOnly(
     budget: ProviderImageBudget,
     plan: RuntimeEventModelReplayPlan,
+    historyCompactCheckpoint?: HistoryCompactCheckpoint,
   ): Promise<ModelMessage[]> {
     const messages: ModelMessage[] = [];
     for (const item of plan.items) {
@@ -4261,7 +4313,19 @@ export class AiSdkBackend implements AgentBackend {
           [item.eventId],
         );
     }
-    return messages;
+    return this.prependProviderHistoryCompactMessage(messages, historyCompactCheckpoint);
+  }
+
+  private prependProviderHistoryCompactMessage(
+    messages: ModelMessage[],
+    checkpoint: HistoryCompactCheckpoint | undefined,
+  ): ModelMessage[] {
+    if (!checkpoint || !isProviderHistoryCompactCheckpoint(checkpoint)) return messages;
+    const providerMessage = historyCompactCheckpointToModelMessage(checkpoint);
+    this.memoryReplayMessageEvents.set(providerMessage, [
+      `history-compact:${checkpoint.checkpointId}`,
+    ]);
+    return [providerMessage, ...messages];
   }
 
   private pushMemoryIndexedMessage(
@@ -4914,13 +4978,13 @@ function buildHistoryCompactCheckpointFailOpenContext(
   priorRuntimeContext: readonly RuntimeEvent[],
   policy: ContextBudgetPolicy,
   retainedCandidates: readonly RuntimeEvent[],
-): RuntimeEvent[] {
+): { events: RuntimeEvent[]; checkpoint?: HistoryCompactCheckpoint } {
   const charsPerToken = policy.charsPerToken ?? 4;
   const compactableEvents = priorRuntimeContext.filter(
     (event) => estimateRuntimeEventsTokens([event], charsPerToken) > 0,
   );
   const match = matchHistoryCompactCheckpointPrefix(checkpoint, compactableEvents);
-  if (match.reason) return [...retainedCandidates];
+  if (match.reason) return { events: [...retainedCandidates] };
   const coveredIds = new Set(match.coveredRuntimeEvents.map((event) => event.id));
   const candidates = retainedCandidates.filter((event) => !coveredIds.has(event.id));
   const turnOrder: string[] = [];
@@ -4939,7 +5003,10 @@ function buildHistoryCompactCheckpointFailOpenContext(
     match.coveredRuntimeEvents,
     [],
   );
-  let selectedTokens = estimateRuntimeEventsTokens(replayPrefix, charsPerToken);
+  let selectedTokens =
+    checkpoint.version === 3
+      ? checkpoint.estimatedTokens
+      : estimateRuntimeEventsTokens(replayPrefix, charsPerToken);
   const selectedGroups: RuntimeEvent[][] = [];
   for (let index = turnOrder.length - 1; index >= 0; index -= 1) {
     const group = byTurn.get(turnOrder[index]!) ?? [];
@@ -4954,17 +5021,18 @@ function buildHistoryCompactCheckpointFailOpenContext(
     match.coveredRuntimeEvents,
     replayTail,
   );
+  const replayTailForFit = checkpoint.version === 3 ? replayEvents : replayEvents.slice(1);
   return evaluateHistoryCompactCheckpointReplay(
     checkpoint,
-    replayEvents.slice(1),
+    replayTailForFit,
     policy?.charsPerToken,
     policy?.maxHistoryEstimatedTokens,
     {
       sourceReplayEvents: [...match.coveredRuntimeEvents, ...replayTail],
     },
   ).fits
-    ? replayEvents
-    : [...retainedCandidates];
+    ? { events: replayEvents, checkpoint }
+    : { events: [...retainedCandidates] };
 }
 
 function projectMemoryConversationPrefix(

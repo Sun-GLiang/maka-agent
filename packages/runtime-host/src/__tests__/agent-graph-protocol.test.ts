@@ -1,3 +1,4 @@
+import { RuntimeHostProtocolError } from '../protocol/errors.js';
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
@@ -13,7 +14,6 @@ import {
   decodeHostFrame,
   type AgentGraphClientSnapshot,
   type AgentGraphOperatorInspection,
-  RuntimeHostProtocolError,
 } from '../protocol/index.js';
 
 const fingerprint = `sha256:${'a'.repeat(64)}` as const;
@@ -59,6 +59,17 @@ describe('Agent Graph Client protocol', () => {
       decodeAgentGraphClientSnapshot({
         ...snapshot,
         operators: [{ ...snapshot.operators[0], privatePrompt: 'secret' }],
+      }),
+    );
+    assertInvalid(() =>
+      decodeAgentGraphClientSnapshot({
+        ...snapshot,
+        operators: [
+          {
+            ...snapshot.operators[0],
+            readiness: [{ ...snapshot.operators[0]!.readiness[0], policyKind: 'map' }],
+          },
+        ],
       }),
     );
     assertInvalid(() =>
@@ -149,7 +160,6 @@ function graphSnapshot(): AgentGraphClientSnapshot {
         readiness: [
           {
             readinessId: 'readiness:1',
-            policyKind: 'map',
             status: 'waiting',
             waitingFor: [{ kind: 'input_route', upstreamOperatorIds: ['operator:0'] }],
             omittedWaitingFor: 0,
