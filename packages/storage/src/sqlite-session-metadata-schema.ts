@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 24;
+export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 25;
 export const SQLITE_SESSION_MESSAGE_CHUNK_BYTES = 64 * 1024;
 export const SQLITE_SESSION_MESSAGE_CHUNK_MARKER = '{"$maka":"session-message-chunks-v1"}';
 
@@ -895,6 +895,23 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
 
     CREATE INDEX agent_graph_epochs_current
       ON agent_graph_epochs(root_session_id, epoch DESC);
+  `,
+  ],
+  [
+    25,
+    `
+    UPDATE session_metadata
+    SET
+      status = 'active',
+      payload_json = json_set(payload_json, '$.status', 'active'),
+      metadata_version = metadata_version + 1,
+      committed_at = MAX(
+        committed_at,
+        CAST(strftime('%s', 'now') AS INTEGER) * 1000
+      )
+    WHERE
+      status IN ('review', 'done')
+      OR json_extract(payload_json, '$.status') IN ('review', 'done');
   `,
   ],
 ]);
