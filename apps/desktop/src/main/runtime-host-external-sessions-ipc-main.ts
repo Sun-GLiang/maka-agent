@@ -11,7 +11,7 @@ import {
   decodeExternalSessionImportInput,
 } from '@maka/runtime-host/protocol';
 import type { ExternalSessionImportIpcResult } from '../preload/external-session-import-result.js';
-import type { DesktopExternalSessionCatalogItem } from '../preload/external-session-catalog.js';
+import type { DesktopHostExternalSessionCatalogItem } from '../preload/external-session-catalog.js';
 import {
   handleReconnectableRead,
   type ReconnectableReadIpcMain,
@@ -50,7 +50,7 @@ export function registerRuntimeHostExternalSessionsIpc(
       sessions: result.sessions.map(({ hostCwd, ...session }) => ({
         ...session,
         cwd: hostCwd,
-      }) satisfies DesktopExternalSessionCatalogItem),
+      }) satisfies DesktopHostExternalSessionCatalogItem),
     };
   });
   ipcMain.handle('external-sessions:import', async (_event, input: unknown) => {
