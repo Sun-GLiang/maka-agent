@@ -23,6 +23,9 @@ export function useSessionGoal(sessionId: string | undefined): GoalState | null 
       setGoal(null);
       return;
     }
+    // The previous Session's Goal is not an answer for this one, so it goes
+    // before the first fetch resolves rather than after.
+    setGoal(null);
     let cancelled = false;
     const refresh = (): void => {
       void window.maka.goal
