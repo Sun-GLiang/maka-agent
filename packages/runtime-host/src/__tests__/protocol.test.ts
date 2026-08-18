@@ -63,11 +63,11 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('publishes a new compatibility epoch for external Session import state', () => {
-    // Epoch 24 removed Session catalog filters. Requiring importState on
+    // Epoch 25 added authoritative live run state. Requiring importState on
     // external catalog items is another closed wire-schema change, so Clients
-    // and Hosts from epoch 24 must fail the handshake instead of decoding each
+    // and Hosts from epoch 25 must fail the handshake instead of decoding each
     // other's catalog responses asymmetrically.
-    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 24);
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 25);
   });
 
   test('selects the highest mutually supported protocol and rejects a gap', () => {

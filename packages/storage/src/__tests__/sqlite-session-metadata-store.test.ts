@@ -516,6 +516,9 @@ describe('SqliteSessionMetadataStore', () => {
             status_updated_at = json_extract(payload_json, '$.statusUpdatedAt');
           CREATE INDEX session_metadata_by_status
             ON session_metadata(status, status_updated_at DESC, session_id);
+          DROP INDEX session_metadata_by_external_origin;
+          ALTER TABLE session_metadata DROP COLUMN external_adapter_id;
+          ALTER TABLE session_metadata DROP COLUMN external_source_session_id;
           UPDATE session_metadata_schema SET version = 26 WHERE scope = 'session_metadata';
         `);
         legacy
