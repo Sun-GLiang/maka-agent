@@ -4,8 +4,10 @@ import { parseHTML } from 'linkedom';
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { AstryxLocaleProvider, LocaleProvider } from '@maka/ui';
+import type { DesktopRuntimeHostRef } from '../../preload/bridge-contract.js';
 import type { DesktopExternalSessionCatalogItem } from '../../preload/external-session-catalog.js';
 import { ImportTasksSettingsPage } from '../../renderer/settings/import-tasks-settings-page.js';
+import { RuntimeHostSettingsTarget } from '../../renderer/settings/runtime-host-settings-target.js';
 
 type CatalogResult = {
   sessions: DesktopExternalSessionCatalogItem[];
@@ -23,6 +25,11 @@ const originalGlobals = {
   IS_REACT_ACT_ENVIRONMENT: (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean })
     .IS_REACT_ACT_ENVIRONMENT,
 };
+
+const TEST_RUNTIME_HOST = {
+  profileId: 'test-profile',
+  hostId: 'test-host',
+} satisfies DesktopRuntimeHostRef;
 
 afterEach(() => {
   Object.assign(globalThis, originalGlobals);
@@ -52,6 +59,31 @@ describe('ImportTasksSettingsPage durable import state', () => {
     assert.ok(openButton);
     await act(async () => openButton.click());
     assert.deepEqual(opened, ['session-newest']);
+
+    await act(async () => harness.root.unmount());
+  });
+
+  it('scopes catalog reads, recovery, and import to the selected Runtime Host', async () => {
+    const source = externalSession();
+    const harness = await renderPage({
+      catalogs: [catalog(source), catalog(source)],
+      importResult: { ok: false, reason: 'commit_outcome_unknown' },
+    });
+
+    const importButton = buttonWithText(harness.container, 'Import');
+    assert.ok(importButton);
+    await act(async () => {
+      importButton.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    assert.deepEqual(harness.hostCalls(), [
+      { operation: 'listSources', host: TEST_RUNTIME_HOST },
+      { operation: 'list', host: TEST_RUNTIME_HOST },
+      { operation: 'import', host: TEST_RUNTIME_HOST },
+      { operation: 'list', host: TEST_RUNTIME_HOST },
+    ]);
 
     await act(async () => harness.root.unmount());
   });
@@ -584,6 +616,7 @@ async function renderPage(options: {
   root: Root;
   listCalls(): number;
   listInputs(): Array<{ includeArchived: boolean }>;
+  hostCalls(): Array<{ operation: 'listSources' | 'list' | 'import'; host?: DesktopRuntimeHostRef }>;
 }> {
   const { document, window } = parseHTML('<div id="root"></div>');
   const matchMedia = (media: string) => ({
@@ -609,18 +642,28 @@ async function renderPage(options: {
   });
   let listCalls = 0;
   const listInputs: Array<{ includeArchived: boolean }> = [];
+  const hostCalls: Array<{
+    operation: 'listSources' | 'list' | 'import';
+    host?: DesktopRuntimeHostRef;
+  }> = [];
   const catalogs = options.catalogs ?? [options.catalog ?? { sessions: [], nextCursor: null }];
   (window as unknown as { maka: unknown }).maka = {
     externalSessions: {
-      listSources: async () => ({ adapterIds: ['codex'] }),
-      list: async (input: { includeArchived?: boolean }) => {
+      listSources: async (host?: DesktopRuntimeHostRef) => {
+        hostCalls.push({ operation: 'listSources', host });
+        return { adapterIds: ['codex'] };
+      },
+      list: async (input: { includeArchived?: boolean }, host?: DesktopRuntimeHostRef) => {
+        hostCalls.push({ operation: 'list', host });
         listInputs.push({ includeArchived: input.includeArchived === true });
         const result = catalogs[Math.min(listCalls++, catalogs.length - 1)];
         if (result instanceof Error) throw result;
         return result;
       },
-      import: async () =>
-        options.importResult ?? Promise.reject(new Error('import is not used by this test')),
+      import: async (_input: unknown, host?: DesktopRuntimeHostRef) => {
+        hostCalls.push({ operation: 'import', host });
+        return options.importResult ?? Promise.reject(new Error('import is not used by this test'));
+      },
     },
   };
 
@@ -633,14 +676,24 @@ async function renderPage(options: {
       onOpenImported: options.onOpenImported ?? (() => undefined),
     };
     const page = createElement(ImportTasksSettingsPage, pageProps);
-    const localized = createElement(AstryxLocaleProvider, { children: page });
+    const targeted = createElement(RuntimeHostSettingsTarget, {
+      host: TEST_RUNTIME_HOST,
+      children: page,
+    });
+    const localized = createElement(AstryxLocaleProvider, { children: targeted });
     root.render(
       createElement(LocaleProvider, { locale: options.locale ?? 'en', children: localized }),
     );
     await Promise.resolve();
     await Promise.resolve();
   });
-  return { container, root, listCalls: () => listCalls, listInputs: () => listInputs };
+  return {
+    container,
+    root,
+    listCalls: () => listCalls,
+    listInputs: () => listInputs,
+    hostCalls: () => hostCalls,
+  };
 }
 
 function catalog(session: DesktopExternalSessionCatalogItem): CatalogResult {
