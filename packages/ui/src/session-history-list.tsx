@@ -734,12 +734,17 @@ function sessionRowSignals(
 ): SessionRowSignal[] {
   const copy = getConversationCopy(locale).sessions;
   const signals: SessionRowSignal[] = [];
+  const requiresUserAttention =
+    session.status === 'waiting_for_user' || session.status === 'blocked';
 
   // `active`, through the same vocabulary as everything else here: streaming is
   // the system working on it right now, which is what that semantic names.
   // Writing `accent` directly would resolve to the identical colour and reopen
   // the drift this change closed — half the row's dots deciding for themselves.
-  if (options.streaming || (session.runningTurnIds?.length ?? 0) > 0) {
+  if (
+    !requiresUserAttention &&
+    (options.streaming || (session.runningTurnIds?.length ?? 0) > 0)
+  ) {
     signals.push({
       variant: dotForStatus('active'),
       label: copy.respondingAriaLabel,

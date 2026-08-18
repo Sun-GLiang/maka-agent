@@ -80,6 +80,28 @@ test('renders Runtime Host live runs without requiring renderer-local streaming'
   assert.match(markup, /aria-label="Responding"/);
 });
 
+for (const [status, attentionLabel] of [
+  ['waiting_for_user', 'Waiting for you'],
+  ['blocked', 'Needs attention'],
+] as const) {
+  test(`prioritizes ${status} attention over a parked live run`, () => {
+    const awaitingUser = { ...session, status, runningTurnIds: ['turn-live'] };
+    const markup = renderToStaticMarkup(
+      <LocaleProvider locale="en">
+        <SessionHistoryList
+          sessions={[awaitingUser]}
+          streamingSessionIds={new Set([awaitingUser.id])}
+          onSelectSession={() => undefined}
+          rowActions={rowActions}
+        />
+      </LocaleProvider>,
+    );
+
+    assert.doesNotMatch(markup, /aria-label="Responding"/);
+    assert.match(markup, new RegExp(`aria-label="${attentionLabel}"`));
+  });
+}
+
 test('keeps known-empty idle unless renderer-local streaming is newer', () => {
   const knownEmpty = { ...session, status: 'running' as const, runningTurnIds: [] as string[] };
   const idleMarkup = renderToStaticMarkup(
