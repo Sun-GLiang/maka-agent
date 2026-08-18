@@ -2,7 +2,7 @@ import { TOOL_ACTIVITY_KINDS, TOOL_OUTPUT_DELTA_MAX_CHARS } from '@maka/core/eve
 import type { ToolResultPreviewContent } from '@maka/core/events';
 import { decodeToolResultPreviewContent } from '@maka/core/tool-result-preview';
 import type { ToolActivityKind } from '@maka/core/events';
-import { isSessionStatus, type SessionStatus } from '@maka/core/session';
+import type { SessionStatus } from '@maka/core/session';
 import {
   assertExactKeys,
   requireCount,
@@ -12,6 +12,7 @@ import {
   requireRecord,
 } from './codec.js';
 import { invalidProtocolFrame } from './errors.js';
+import { decodeSessionStatus } from './session-status.js';
 import {
   decodeSessionInteractionProjection,
   type SessionInteractionProjection,
@@ -883,7 +884,7 @@ function decodeSessionContinuityIdentity(value: unknown): SessionContinuityIdent
   return {
     sessionId: requireEntityId(record.sessionId, 'sessionId'),
     metadataRevision: requirePositiveCount(record.metadataRevision, 'metadataRevision'),
-    status: requireSessionLifecycleStatus(record.status),
+    status: decodeSessionStatus(record.status),
     createdAt: requireCount(record.createdAt, 'createdAt'),
     lastUsedAt: requireCount(record.lastUsedAt, 'lastUsedAt'),
     isArchived: record.isArchived,
@@ -961,11 +962,6 @@ function requireToolActivityKind(value: unknown): ToolActivityKind {
     return value as ToolActivityKind;
   }
   throw invalidProtocolFrame('Invalid Session tool activity kind');
-}
-
-function requireSessionLifecycleStatus(value: unknown): SessionLifecycleStatus {
-  if (isSessionStatus(value)) return value;
-  throw invalidProtocolFrame('Invalid Session lifecycle status');
 }
 
 function requireAgentGraphChangedReason(value: unknown): AgentGraphChangedReason {

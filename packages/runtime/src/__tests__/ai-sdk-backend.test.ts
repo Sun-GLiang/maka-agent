@@ -58,7 +58,6 @@ import {
 import { buildDefaultContextBudgetPolicy } from '../context-budget-policy.js';
 import { memoryArtifactStore } from './memory-artifact-store.js';
 import { buildRuntimeEventModelReplayPlan, buildSteeringEnvelope } from '../model-history.js';
-import type { ActiveFullCompactBlock } from '../active-full-compact.js';
 import type { SemanticCompactBlock } from '../semantic-compact.js';
 import { HistoryCompactSummarizerError } from '../history-compact-summarizer.js';
 import type { SandboxDiagnosticsSnapshot } from '../sandbox/diagnostics.js';
@@ -8793,50 +8792,65 @@ describe('AiSdkBackend usage telemetry', () => {
     assert.equal(usageMessage?.contextBudget?.activeDuplicateToolResults, undefined);
   });
 
-  test('active full compact sees the fresh tool result before active tool-result prune', async () => {
-    const durable = durableTurnHarness('turn-1', 'hi');
+  test('semantic compact projects a recorded block through the real backend request pipeline', async () => {
+    const durable = durableTurnHarness('turn-1', 'inspect the repository');
     const messages: unknown[] = [];
     const events: SessionEvent[] = [];
-    const recordedBlocks: ActiveFullCompactBlock[] = [];
-    const largeBody = 'ACTIVE_FULL_COMPACT_RAW_TOOL_OUTPUT'.repeat(200);
+    const recordedBlocks: SemanticCompactBlock[] = [];
+    const largeBody = 'SEMANTIC_RAW_TOOL_OUTPUT'.repeat(200);
     let streamCalls = 0;
-    let secondProviderRequestSawRecordedBlock = false;
     const model = new MockLanguageModelV4({
+      doGenerate: {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              established_findings: ['The repository inspection completed.'],
+              decisions: [],
+              failed_paths: [],
+              partial_work_product: ['The earlier Read result was inspected.'],
+              action_in_progress: 'Continue from the preserved latest tool episode.',
+            }),
+          },
+        ],
+        finishReason: { unified: 'stop', raw: 'stop' },
+        usage: {
+          inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 12, text: 12, reasoning: 0 },
+        },
+        warnings: [],
+      },
       doStream: async () => {
         streamCalls += 1;
-        if (streamCalls === 2) {
-          secondProviderRequestSawRecordedBlock = recordedBlocks.length === 1;
-        }
+        const toolCall = (toolCallId: string, toolName: string, input: unknown) =>
+          [
+            { type: 'stream-start', warnings: [] },
+            { type: 'tool-call', toolCallId, toolName, input: JSON.stringify(input) },
+            {
+              type: 'finish',
+              finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+              usage: {
+                inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                outputTokens: { total: 1, text: 1, reasoning: 0 },
+              },
+            },
+          ] as LanguageModelV4StreamPart[];
         const chunks: LanguageModelV4StreamPart[] =
           streamCalls === 1
-            ? [
-                { type: 'stream-start', warnings: [] },
-                {
-                  type: 'tool-call',
-                  toolCallId: 'tool-1',
-                  toolName: 'Read',
-                  input: JSON.stringify({ path: 'notes.md' }),
-                },
-                {
-                  type: 'finish',
-                  finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
-                  usage: {
-                    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
-                    outputTokens: { total: 1, text: 1, reasoning: 0 },
+            ? toolCall('tool-read', 'Read', { path: 'notes.md' })
+            : streamCalls === 2
+              ? toolCall('tool-bash', 'Bash', { cmd: 'continue' })
+              : [
+                  { type: 'stream-start', warnings: [] },
+                  {
+                    type: 'finish',
+                    finishReason: { unified: 'stop', raw: 'stop' },
+                    usage: {
+                      inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                      outputTokens: { total: 1, text: 1, reasoning: 0 },
+                    },
                   },
-                },
-              ]
-            : [
-                { type: 'stream-start', warnings: [] },
-                {
-                  type: 'finish',
-                  finishReason: { unified: 'stop', raw: 'stop' },
-                  usage: {
-                    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
-                    outputTokens: { total: 1, text: 1, reasoning: 0 },
-                  },
-                },
-              ];
+                ];
         return {
           stream: simulateReadableStream({ chunks, initialDelayInMs: null, chunkDelayInMs: null }),
         };
@@ -8859,28 +8873,37 @@ describe('AiSdkBackend usage telemetry', () => {
           parameters: z.object({ path: z.string() }),
           impl: async () => ({ body: largeBody }),
         },
+        {
+          name: 'Bash',
+          description: 'Bash description',
+          parameters: z.object({ cmd: z.string() }),
+          impl: async () => ({ body: 'latest tool episode' }),
+        },
       ],
       contextBudget: {
         charsPerToken: 1,
         activeToolResultPrune: { enabled: true, maxCurrentResultEstimatedTokens: 1 },
-        activeFullCompact: {
+        semanticCompact: {
           enabled: true,
+          mode: 'replace',
           minStepNumber: 1,
-          minRecentMessages: 0,
-          maxActiveEstimatedTokens: 1,
           highWaterRatio: 0.1,
-          maxSummaryEstimatedTokens: 512,
+          maxActiveEstimatedTokens: 1,
+          minSafePrefixEstimatedTokens: 1,
+          maxAcceptedProjectionEstimatedTokens: 2048,
+          minSavingsTokens: 1,
+          minSavingsRatio: 0,
         },
       },
       toolResultArchive: testToolResultArchive({
-        archiveToolResult: async () => ({ artifactId: 'artifact-tool-1' }),
+        archiveToolResult: async () => ({ artifactId: 'artifact-tool-read' }),
       }),
       loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
-      newId: idGenerator(),
-      now: monotonicClock(),
-      recordActiveFullCompactBlock: (block) => {
+      recordSemanticCompactBlock: (block) => {
         recordedBlocks.push(block);
       },
+      newId: idGenerator(),
+      now: monotonicClock(),
     });
 
     for await (const event of backend.send(durable.input())) {
@@ -8889,42 +8912,16 @@ describe('AiSdkBackend usage telemetry', () => {
     }
     await Promise.resolve();
 
-    assert.equal(streamCalls, 2);
+    assert.equal(streamCalls, 3);
+    assert.equal(model.doGenerateCalls.length, 1);
     assert.equal(recordedBlocks.length, 1);
-    assert.equal(secondProviderRequestSawRecordedBlock, true);
-    assert.equal(recordedBlocks[0]?.kind, 'maka.active_full_compact_block');
-    assert.equal(recordedBlocks[0]?.turnId, 'turn-1');
-    assert.equal((recordedBlocks[0]?.sourceRefs.length ?? 0) > 0, true);
-    assert.doesNotMatch(JSON.stringify(recordedBlocks[0]), /artifact-tool-1/);
-    const secondPromptMessages = model.doStreamCalls[1]?.prompt ?? [];
-    const secondPrompt = JSON.stringify(
-      model.doStreamCalls[1]?.prompt.map((message) => ({
-        role: message.role,
-        content: message.content,
-      })),
-    );
-    assert.match(secondPrompt, /maka_active_full_compact_block/);
-    assert.equal(
-      secondPromptMessages.some(
-        (message) =>
-          message.role === 'user' &&
-          JSON.stringify(message.content).includes('maka_active_full_compact_block'),
-      ),
-      true,
-    );
-    assert.equal(
-      secondPromptMessages.some(
-        (message) =>
-          message.role === 'system' &&
-          JSON.stringify(message.content).includes('maka_active_full_compact_block'),
-      ),
-      false,
-    );
-    assert.doesNotMatch(secondPrompt, /artifact-tool-1/);
-    assert.equal(secondPrompt.includes('ACTIVE_FULL_COMPACT_RAW_TOOL_OUTPUT'), false);
-    assert.doesNotMatch(secondPrompt, /providerSourceIds=/);
-    assert.doesNotMatch(secondPrompt, /bodySha256=/);
-    assert.doesNotMatch(secondPrompt, /source\(kind=/);
+    assert.equal(recordedBlocks[0]?.kind, 'maka.semantic_compact_block');
+    assert.equal(recordedBlocks[0]?.projection?.format, 'structured');
+    const projectedPrompt = JSON.stringify(model.doStreamCalls[2]?.prompt ?? []);
+    assert.match(projectedPrompt, /maka_semantic_compact_block/);
+    assert.match(projectedPrompt, /Continue from the preserved latest tool episode/);
+    assert.doesNotMatch(projectedPrompt, /SEMANTIC_RAW_TOOL_OUTPUT/);
+    assert.match(projectedPrompt, /latest tool episode/);
 
     const usageMessage = messages.find(
       (message) => (message as { type?: string }).type === 'token_usage',
@@ -8935,23 +8932,18 @@ describe('AiSdkBackend usage telemetry', () => {
         })
       | undefined;
     for (const contextBudget of [usageMessage?.contextBudget, usageEvent?.contextBudget]) {
-      assert.equal(contextBudget?.activePrunedToolResults, undefined);
       const decisions = contextBudget?.compactionDecisions as
         | Array<Record<string, unknown>>
         | undefined;
       assert.equal(
         decisions?.some(
           (decision) =>
-            decision.boundaryKind === 'activeFullCompact' && decision.decision === 'replaced',
+            decision.boundaryKind === 'semanticCompact' && decision.decision === 'replaced',
         ),
         true,
       );
       assert.equal(typeof contextBudget?.highWaterRequestShapeHashBefore, 'string');
       assert.equal(typeof contextBudget?.highWaterRequestShapeHashAfter, 'string');
-      assert.notEqual(
-        contextBudget?.highWaterRequestShapeHashAfter,
-        contextBudget?.highWaterRequestShapeHashBefore,
-      );
     }
   });
 

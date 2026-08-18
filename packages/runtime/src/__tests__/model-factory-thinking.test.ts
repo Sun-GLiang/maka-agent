@@ -224,6 +224,26 @@ describe('buildProviderOptions: thinking level', () => {
     assert.deepEqual(buildProviderOptions(conn('deepseek'), 'deepseek-chat', 'high'), {});
   });
 
+  test('Alibaba Token Plan sends the formal Qwen3.8 effort and disable wires', () => {
+    for (const providerType of ['alibaba-token-plan-cn', 'alibaba-token-plan'] as const) {
+      assert.deepEqual(
+        Object.values(buildProviderOptions(conn(providerType), 'qwen3.8-max', 'xhigh')),
+        [{ reasoningEffort: 'xhigh' }],
+        providerType,
+      );
+      assert.deepEqual(
+        Object.values(buildProviderOptions(conn(providerType), 'qwen3.8-max', 'medium')),
+        [{ reasoningEffort: 'medium' }],
+        providerType,
+      );
+      assert.deepEqual(
+        Object.values(buildProviderOptions(conn(providerType), 'qwen3.8-max', 'off')),
+        [{ reasoningEffort: 'none' }],
+        providerType,
+      );
+    }
+  });
+
   test('family fallback wires per-model override adapters under their SDK namespaces', () => {
     // opencode serves models across several protocols via models.dev package
     // overrides; the family fallback must emit the namespace each SDK consumes.

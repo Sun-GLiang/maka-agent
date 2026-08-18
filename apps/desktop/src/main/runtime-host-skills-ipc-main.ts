@@ -191,22 +191,6 @@ export function registerRuntimeHostSkillsIpc(
     },
   );
 
-  handleReconnectableRead(deps.ipcMain, "skills:details", async (_event, idOrRef: string) => {
-    const projection = await loadGovernance(
-      deps,
-      await requireSelectedWorkspaceTarget(deps),
-    );
-    const resolved = resolveGovernanceItem(projection.items, idOrRef);
-    if (!resolved.ok) return resolved;
-    return {
-      ok: true as const,
-      details: toSkillDetails(
-        resolved.item,
-        projection.paths.get(resolved.item.ref) ?? "",
-      ),
-    };
-  });
-
   handleReconnectableRead(
     deps.ipcMain,
     "skills:previewUpdate",
@@ -297,23 +281,6 @@ export function registerRuntimeHostSkillsIpc(
       }));
     },
   );
-
-  deps.ipcMain.handle("skills:createStarter", async () => {
-    const { result, workspace } = await mutateSkill(deps, "governance", {
-      kind: "create_starter",
-    });
-    if (result.kind === "rejected")
-      return { ok: false as const, reason: mapMutationReason(result.reason) };
-    if (!result.entry)
-      throw new Error("Runtime Host did not project the starter Skill");
-    const path = await resolveProjectedPath(deps, workspace.hostCwd, result.entry.ref);
-    return {
-      ok: true as const,
-      created: result.kind === "committed",
-      skill: toSkillEntry(result.entry, path),
-      filePath: path,
-    };
-  });
 
   deps.ipcMain.handle("skills:delete", async (_event, idOrRef: string) => {
     const { result } = await mutateResolvedSkillRaw(
