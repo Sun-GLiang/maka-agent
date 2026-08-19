@@ -133,6 +133,100 @@ describe('McpClientManager E2E', { concurrency: false }, () => {
       );
     });
 
+    test('routes initial discovery through the refresh owner when list-changed precedes the first response', async () => {
+      const fixture = await createRemoteFixture('sse');
+      const gate = fixture.holdNextToolList();
+      const manager = createManager();
+      const publications: Array<{
+        state: string;
+        statusToolCount: number;
+        snapshotToolCount: number;
+      }> = [];
+      manager.onChange((status) => {
+        publications.push({
+          state: status.state,
+          statusToolCount: status.toolCount,
+          snapshotToolCount: manager.toolSnapshot().tools.length,
+        });
+      });
+      const syncPromise = manager.sync(remoteConfig(`${fixture.url}/sse`, 'auto'));
+      await gate.started;
+
+      // The tool list changes while the first tools/list response is still in
+      // flight, and the server answers with the list it captured before the
+      // change. Dropping this notification would settle the connection on a
+      // snapshot the server already declared stale.
+      fixture.setToolListMode('replacement');
+      await fixture.notifyToolListChanged();
+      gate.release();
+
+      await syncPromise;
+      await waitFor(() => manager.toolSnapshot().tools[0]?.descriptor.name === 'replacement');
+      assert.deepEqual(
+        manager.toolSnapshot().tools.map(({ descriptor }) => descriptor.name),
+        ['replacement'],
+      );
+      // Exactly one follow-up pass through the same single-flight owner: the
+      // initial request plus the coalesced re-list the notification joined.
+      assert.equal(
+        fixture.requests.reduce(
+          (count, request) =>
+            count + request.protocolMethods.filter((method) => method === 'tools/list').length,
+          0,
+        ),
+        2,
+      );
+      assert.equal(
+        publications.some(
+          ({ state, statusToolCount, snapshotToolCount }) =>
+            state !== 'connected' && (statusToolCount > 0 || snapshotToolCount > 0),
+        ),
+        false,
+      );
+      assert.equal(
+        publications.some(
+          ({ state, statusToolCount, snapshotToolCount }) =>
+            state === 'connected' && statusToolCount === 1 && snapshotToolCount === 1,
+        ),
+        true,
+      );
+    });
+
+    test('joins an explicit refresh to initial discovery without queuing another list', async () => {
+      const fixture = await createRemoteFixture('sse');
+      const gate = fixture.holdNextToolList();
+      const manager = createManager();
+      const syncPromise = manager.sync(remoteConfig(`${fixture.url}/sse`, 'auto'));
+      await gate.started;
+
+      const refreshPromise = manager.refreshTools('remote');
+      gate.release();
+
+      const [, descriptors] = await Promise.all([syncPromise, refreshPromise]);
+      assert.deepEqual(
+        descriptors.map(({ name }) => name),
+        manager.toolSnapshot().tools.map(({ descriptor }) => descriptor.name),
+      );
+      assert.equal(countProtocolMethod(fixture, 'tools/list'), 1);
+    });
+
+    test('keeps the connection and latest initial snapshot when notifications exhaust the refresh budget', async () => {
+      const fixture = await createRemoteFixture('sse');
+      fixture.setNotifyBeforeEveryToolListResponse(true);
+      const manager = createManager();
+
+      await manager.sync(remoteConfig(`${fixture.url}/sse`, 'auto'));
+
+      assert.equal(manager.status('remote')?.state, 'connected');
+      assert.equal(countProtocolMethod(fixture, 'tools/list'), 4);
+      assert.match(manager.status('remote')?.error ?? '', /changed too frequently/u);
+      const binding = bindingFor(manager, 'remote', 'echo');
+      assert.deepEqual(await manager.callTool(binding, { value: 'still-callable' }), {
+        content: [{ type: 'text', text: 'still-callable' }],
+        structuredContent: undefined,
+      });
+    });
+
     test('bounds raw Tool definitions without replacing the callable snapshot', async () => {
       const fixture = await createRemoteFixture('streamable-http');
       const manager = createManager();
@@ -267,33 +361,96 @@ describe('McpClientManager E2E', { concurrency: false }, () => {
       assert.notEqual(bindingFor(manager, 'first', 'echo'), bindingFor(manager, 'second', 'echo'));
     });
 
-    test('coalesces a refresh signal and keeps the latest valid snapshot', async () => {
+    test('keeps a stale candidate private when list-changed arrives before publication', async () => {
+      const fixture = await createRemoteFixture('sse');
+      const manager = createManager();
+      await manager.sync(remoteConfig(`${fixture.url}/sse`, 'auto'));
+      const listsBefore = countProtocolMethod(fixture, 'tools/list');
+      const retained = manager.toolSnapshot();
+      const publishedToolNames: string[][] = [];
+      manager.onChange((status) => {
+        publishedToolNames.push(status.tools.map((tool) => tool.name));
+      });
+
+      fixture.setToolListMode('replacement');
+      const gate = fixture.holdNextToolList();
+      const refresh = manager.refreshTools('remote');
+      await gate.started;
+      fixture.setToolListMode('duplicate');
+      await fixture.notifyToolListChanged();
+      gate.release();
+
+      await assert.rejects(refresh, /duplicate tool/u);
+      assert.equal(manager.toolSnapshot(), retained);
+      assert.equal(
+        publishedToolNames.some((names) => names.includes('replacement')),
+        false,
+      );
+      assert.equal(countProtocolMethod(fixture, 'tools/list') - listsBefore, 2);
+    });
+
+    test('starts a fresh list for a refresh queued during snapshot publication', async () => {
       const fixture = await createRemoteFixture('streamable-http');
       const manager = createManager();
       await manager.sync(remoteConfig(fixture.url));
       const listsBefore = countProtocolMethod(fixture, 'tools/list');
 
       fixture.setToolListMode('replacement');
-      const gate = fixture.holdNextToolList();
-      const first = manager.refreshTools('remote');
-      await gate.started;
-      fixture.setToolListMode('duplicate');
-      const second = manager.refreshTools('remote');
-      gate.release();
+      let queued: Promise<unknown> | undefined;
+      manager.onChange((status) => {
+        if (
+          status.serverId === 'remote' &&
+          status.tools[0]?.name === 'replacement' &&
+          queued === undefined
+        ) {
+          queued = manager.refreshTools('remote');
+        }
+      });
 
-      const settled = await Promise.allSettled([first, second]);
-      assert.equal(
-        settled.every((result) => result.status === 'rejected'),
-        true,
-      );
-      for (const result of settled) {
-        if (result.status === 'rejected') assert.match(String(result.reason), /duplicate tool/u);
-      }
+      await manager.refreshTools('remote');
+      await queued;
+
+      assert.equal(countProtocolMethod(fixture, 'tools/list') - listsBefore, 2);
       assert.deepEqual(
         manager.status('remote')?.tools.map((tool) => tool.name),
         ['replacement'],
       );
-      assert.equal(countProtocolMethod(fixture, 'tools/list') - listsBefore, 2);
+    });
+
+    test('rejects descriptors retired synchronously during snapshot publication', async () => {
+      const fixture = await createRemoteFixture('streamable-http');
+      const manager = createManager();
+      await manager.sync(remoteConfig(fixture.url));
+
+      fixture.setToolListMode('replacement');
+      let disconnect: Promise<void> | undefined;
+      manager.onChange((status) => {
+        if (status.serverId === 'remote' && status.tools[0]?.name === 'replacement') {
+          disconnect ??= manager.disconnect('remote');
+        }
+      });
+
+      await assert.rejects(manager.refreshTools('remote'), /connection changed/u);
+      await disconnect;
+      assert.equal(manager.status('remote')?.state, 'disconnected');
+      assert.deepEqual(manager.toolSnapshot().tools, []);
+    });
+
+    test('releases a failed refresh so the next one can publish a replacement', async () => {
+      const fixture = await createRemoteFixture('streamable-http');
+      const manager = createManager();
+      await manager.sync(remoteConfig(fixture.url));
+
+      fixture.setToolListMode('duplicate');
+      await assert.rejects(manager.refreshTools('remote'), /duplicate tool/u);
+
+      fixture.setToolListMode('replacement');
+      await manager.refreshTools('remote');
+      assert.equal(manager.status('remote')?.error, undefined);
+      assert.deepEqual(
+        manager.status('remote')?.tools.map((tool) => tool.name),
+        ['replacement'],
+      );
     });
 
     test('bounds response-followed-by-notification rediscovery during initial sync', async () => {
@@ -381,6 +538,22 @@ describe('McpClientManager E2E', { concurrency: false }, () => {
         manager.status('remote')?.tools.map((tool) => tool.name),
         ['replacement'],
       );
+    });
+
+    test('gives spaced list-changed notifications independent refresh budgets', async () => {
+      const fixture = await createRemoteFixture('sse');
+      let now = 0;
+      const manager = createManager({ now: () => now });
+      await manager.sync(remoteConfig(`${fixture.url}/sse`, 'auto'));
+
+      for (let change = 1; change <= 4; change += 1) {
+        now += 1_000;
+        await fixture.notifyToolListChanged();
+        await waitFor(() => countProtocolMethod(fixture, 'tools/list') === change + 1);
+      }
+
+      assert.equal(manager.status('remote')?.error, undefined);
+      assert.equal(countProtocolMethod(fixture, 'tools/list'), 5);
     });
 
     test('lets configuration removal preempt active notification rediscovery', async () => {
@@ -868,6 +1041,7 @@ interface RemoteFixture {
   setToolListMode(mode: ToolListMode): void;
   setHttpFailure(method: string, body: string): void;
   holdNextToolList(): { started: Promise<void>; release(): void };
+  setNotifyBeforeEveryToolListResponse(enabled: boolean): void;
   setNotifyOnEveryToolList(enabled: boolean): void;
   setToolListClockAdvance(advance: () => void): void;
   setToolListResponseClockAdvance(advance: () => void): void;
@@ -892,6 +1066,7 @@ async function createRemoteFixture(
   let toolListMode: ToolListMode = 'valid';
   let httpFailure: { method: string; body: string } | undefined;
   let nextToolListGate: InternalToolListGate | undefined;
+  let notifyBeforeEveryToolListResponse = false;
   let notifyOnEveryToolList = false;
   let toolListClockAdvance = () => {};
   let toolListResponseClockAdvance = () => {};
@@ -945,6 +1120,7 @@ async function createRemoteFixture(
           toolListMode: () => toolListMode,
           beforeToolList,
           afterToolList: () => toolListResponseClockAdvance(),
+          notifyBeforeEveryToolListResponse: () => notifyBeforeEveryToolListResponse,
           notifyOnEveryToolList: () => notifyOnEveryToolList,
         });
         await server.connect(transport);
@@ -962,6 +1138,7 @@ async function createRemoteFixture(
           toolListMode: () => toolListMode,
           beforeToolList,
           afterToolList: () => toolListResponseClockAdvance(),
+          notifyBeforeEveryToolListResponse: () => notifyBeforeEveryToolListResponse,
           notifyOnEveryToolList: () => notifyOnEveryToolList,
         });
         sseTransports.set(transport.sessionId, { transport, server });
@@ -1016,6 +1193,9 @@ async function createRemoteFixture(
       nextToolListGate = { markStarted, waitForRelease };
       return { started, release };
     },
+    setNotifyBeforeEveryToolListResponse: (enabled) => {
+      notifyBeforeEveryToolListResponse = enabled;
+    },
     setNotifyOnEveryToolList: (enabled) => {
       notifyOnEveryToolList = enabled;
     },
@@ -1051,6 +1231,7 @@ function createProtocolServer(options: {
   toolListMode: () => ToolListMode;
   beforeToolList: () => Promise<void>;
   afterToolList: () => void;
+  notifyBeforeEveryToolListResponse: () => boolean;
   notifyOnEveryToolList: () => boolean;
 }): McpServer {
   const server = new McpServer(
@@ -1095,6 +1276,9 @@ function createProtocolServer(options: {
                     : [remoteToolDefinition('echo'), remoteToolDefinition('invalid-output')],
     };
     options.afterToolList();
+    if (options.notifyBeforeEveryToolListResponse()) {
+      await server.sendToolListChanged();
+    }
     if (options.notifyOnEveryToolList()) {
       setTimeout(() => {
         void server.sendToolListChanged().catch(() => {});

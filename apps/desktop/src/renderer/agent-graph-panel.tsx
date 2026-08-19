@@ -4,6 +4,7 @@ import type {
   AgentGraphClientOperator,
   AgentGraphClientSnapshot,
 } from '@maka/runtime/stream-graph-read-model';
+import type { AgentGraphEpochDirectory } from '@maka/runtime-host/client';
 import type { AgentGraphEpochSummary } from '@maka/runtime-host/protocol';
 import { IconButton, Selector, type SelectorOptionType } from '@maka/ui';
 import { ICON_SIZE, ChevronDown, X } from '@maka/ui/icons';
@@ -165,15 +166,25 @@ export function AgentGraphPanel(props: {
   const [selectedGraphId, setSelectedGraphId] = useState<string>();
   const [loading, setLoading] = useState(props.enabled);
   const [error, setError] = useState(false);
-  const [stopPending, setStopPending] = useState(false);
-  const [stopError, setStopError] = useState(false);
+  const [stopState, setStopState] = useState({
+    rootSessionId: props.rootSessionId,
+    graphId: undefined as string | undefined,
+    requestId: 0,
+    pending: false,
+    error: false,
+  });
   const [collapsed, setCollapsed] = useState(false);
   const [dismissedBySession, setDismissedBySession] = useState<AgentGraphPanelDismissals>({});
   const contentId = useId();
   const refreshRef = useRef<AgentGraphRefreshScheduler>(noopAgentGraphRefreshScheduler);
   const selectedGraphIdRef = useRef<string | undefined>(undefined);
   const followCurrentRef = useRef(true);
+  const stopRequestIdRef = useRef(0);
   const copy = getAgentGraphPanelCopy(props.locale);
+  const stopFeedbackMatchesSelection =
+    stopState.rootSessionId === props.rootSessionId && stopState.graphId === selectedGraphId;
+  const stopPending = stopFeedbackMatchesSelection && stopState.pending;
+  const stopError = stopFeedbackMatchesSelection && stopState.error;
 
   useEffect(() => {
     setSnapshot(undefined);
@@ -183,14 +194,31 @@ export function AgentGraphPanel(props: {
     selectedGraphIdRef.current = undefined;
     followCurrentRef.current = true;
     setError(false);
-    setStopError(false);
+    setStopState({
+      rootSessionId: props.rootSessionId,
+      graphId: undefined,
+      requestId: ++stopRequestIdRef.current,
+      pending: false,
+      error: false,
+    });
     setCollapsed(false);
     setLoading(props.enabled);
+    let cachedDirectory: AgentGraphEpochDirectory | undefined;
 
     const scheduler = createAgentGraphRefreshScheduler(async (fence) => {
-      setLoading(true);
+      if (!cachedDirectory) setLoading(true);
       try {
-        const directory = await window.maka.graphs.listEpochs(props.rootSessionId);
+        let directory: AgentGraphEpochDirectory;
+        if (!cachedDirectory) {
+          directory = await window.maka.graphs.listEpochs(props.rootSessionId);
+        } else {
+          const currentPage = await window.maka.graphs.listCurrentEpochs(props.rootSessionId);
+          directory = sameEpochPage(cachedDirectory, currentPage)
+            ? cachedDirectory
+            : await window.maka.graphs.listEpochs(props.rootSessionId);
+        }
+        if (!scheduler.isCurrent(fence)) return;
+        cachedDirectory = directory;
         const nextEpochs = directory.epochs;
         const current = nextEpochs.find((entry) => entry.current) ?? nextEpochs[0];
         const selected = followCurrentRef.current
@@ -277,16 +305,25 @@ export function AgentGraphPanel(props: {
     return null;
   }
 
-  const stopGraph = async (): Promise<void> => {
+  const stopGraph = async (expectedGraphId: string): Promise<void> => {
     if (stopPending) return;
-    setStopPending(true);
-    setStopError(false);
+    const rootSessionId = props.rootSessionId;
+    const requestId = ++stopRequestIdRef.current;
+    setStopState({ rootSessionId, graphId: expectedGraphId, requestId, pending: true, error: false });
     try {
-      await window.maka.graphs.stop(props.rootSessionId);
+      await window.maka.graphs.stop(rootSessionId, expectedGraphId);
     } catch {
-      setStopError(true);
+      setStopState((current) =>
+        current.rootSessionId === rootSessionId && current.requestId === requestId
+          ? { ...current, error: true }
+          : current,
+      );
     } finally {
-      setStopPending(false);
+      setStopState((current) =>
+        current.rootSessionId === rootSessionId && current.requestId === requestId
+          ? { ...current, pending: false }
+          : current,
+      );
     }
   };
   const stopAvailable =
@@ -353,7 +390,9 @@ export function AgentGraphPanel(props: {
               size="sm"
               label={stopPending ? copy.stopping : copy.stop}
               isDisabled={stopPending}
-              onClick={() => void stopGraph()}
+              onClick={() => {
+                if (snapshot) void stopGraph(snapshot.graphId);
+              }}
             />
           ) : null}
           {dismissAvailable && snapshot ? (
@@ -464,6 +503,21 @@ export function AgentGraphPanel(props: {
       ) : null}
     </section>
   );
+}
+
+function sameEpochPage(
+  cached: AgentGraphEpochDirectory,
+  currentPage: AgentGraphEpochDirectory,
+): boolean {
+  if (!currentPage.truncated && currentPage.epochs.length !== cached.epochs.length) return false;
+  return currentPage.epochs.every((entry, index) => {
+    const previous = cached.epochs[index];
+    return (
+      previous?.epoch === entry.epoch &&
+      previous.graphId === entry.graphId &&
+      previous.current === entry.current
+    );
+  });
 }
 
 function firstWait(operator: AgentGraphClientOperator) {

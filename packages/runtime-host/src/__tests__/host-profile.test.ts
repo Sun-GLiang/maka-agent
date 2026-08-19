@@ -542,10 +542,28 @@ describe('Runtime Host profiles', () => {
         assert.deepEqual(Object.keys(error.details), ['profileId', 'client', 'host']);
         assert.match(error.message, /RUNTIME_HOST_REMOTE_INCOMPATIBLE/u);
         assert.match(error.message, /office/u);
-        assert.match(error.message, /Client compatibility epoch 25/u);
-        assert.match(error.message, /Host compatibility epoch 24/u);
-        assert.match(error.message, /Client protocol range 0-0/u);
-        assert.match(error.message, /Host protocol range 2-3/u);
+        assert.match(
+          error.message,
+          new RegExp(`Client compatibility epoch ${RUNTIME_HOST_COMPATIBILITY_EPOCH}`, 'u'),
+        );
+        assert.match(
+          error.message,
+          new RegExp(`Host compatibility epoch ${RUNTIME_HOST_COMPATIBILITY_EPOCH - 1}`, 'u'),
+        );
+        assert.match(
+          error.message,
+          new RegExp(
+            `Client protocol range ${RUNTIME_HOST_PROTOCOL_VERSION}-${RUNTIME_HOST_PROTOCOL_VERSION}`,
+            'u',
+          ),
+        );
+        assert.match(
+          error.message,
+          new RegExp(
+            `Host protocol range ${RUNTIME_HOST_PROTOCOL_VERSION + 2}-${RUNTIME_HOST_PROTOCOL_VERSION + 3}`,
+            'u',
+          ),
+        );
         assert.match(error.message, /maka\.interactive/u);
         assert.match(error.message, /maka\.different-composition/u);
         assert.match(error.message, /composition-revision-secret/u);

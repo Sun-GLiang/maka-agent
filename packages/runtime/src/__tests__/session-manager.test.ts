@@ -77,7 +77,7 @@ import {
   RuntimeKernel,
   type RuntimeKernelLike,
 } from '../runtime-kernel.js';
-import { FAKE_ASK_USER_QUESTION_PROMPT, FakeBackend } from '../fake-backend.js';
+import { FAKE_ASK_USER_QUESTION_PROMPT, FakeBackend } from '../test-only/fake-backend.js';
 import { RuntimeReadModel, RuntimeReadModelError } from '../runtime-read-model.js';
 import type { AgentBackend } from '@maka/core/backend-types';
 import type { MakaTool } from '../tool-runtime.js';
@@ -3947,7 +3947,14 @@ describe('SessionManager manual compaction and quiescent session changes', () =>
     const modelCalls: ModelCallAttempt[] = [];
     const summarizerModel = new MockLanguageModelV4({
       doGenerate: {
-        content: [{ type: 'text', text: 'MANUAL_COMPACT_SUMMARY' }],
+        content: [
+          {
+            type: 'text',
+            // Structured so it passes the summarizer's checkpoint validation
+            // (#3029) while keeping the sentinel greppable.
+            text: '## Goal\nMANUAL_COMPACT_SUMMARY\n\n## Progress\n- done\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)',
+          },
+        ],
         finishReason: { unified: 'stop', raw: 'stop' },
         usage: {
           inputTokens: { total: 41, noCache: 41, cacheRead: 0, cacheWrite: 0 },
@@ -13291,6 +13298,7 @@ describe('SessionManager permission mode updates', () => {
         }),
       ),
       summary: 'durable checkpoint',
+      summaryFormat: 'legacy_freeform',
     });
     await seedRun(
       runStore,
@@ -13387,6 +13395,7 @@ describe('SessionManager permission mode updates', () => {
         }),
       ),
       summary: 'durable checkpoint before projection loss',
+      summaryFormat: 'legacy_freeform',
     });
     const durableEvent = makeRunEvent({
       sessionId: session.id,
@@ -16743,6 +16752,7 @@ class HistoryCompactCheckpointBackend implements AgentBackend {
         },
       ],
       summary: 'persist the bounded checkpoint',
+      summaryFormat: 'legacy_freeform',
     });
     this.ctx.recordHistoryCompactCheckpoint?.(
       { ...checkpoint, checkpointId: 'hcheckpoint-test' },
@@ -16794,6 +16804,7 @@ class HistoryCompactCheckpointCacheProbeBackend implements AgentBackend {
           },
         ],
         summary: 'share this checkpoint across session backends',
+        summaryFormat: 'legacy_freeform',
       });
       this.ctx.recordHistoryCompactCheckpoint?.(
         { ...checkpoint, checkpointId: 'hcheckpoint-shared' },
@@ -16852,6 +16863,7 @@ class HistoryCompactCheckpointMonotonicProbeBackend implements AgentBackend {
             sessionId: this.sessionId,
             coveredRuntimeEvents,
             summary: `${input.turnId} checkpoint`,
+            summaryFormat: 'legacy_freeform',
           }),
           input.turnId,
         )
@@ -16904,6 +16916,7 @@ class SameCoverageCheckpointReplacementProbeBackend implements AgentBackend {
           sessionId: this.sessionId,
           coveredRuntimeEvents,
           summary: `${input.turnId} summary`,
+          summaryFormat: 'legacy_freeform',
           ...(current ? { previousCheckpointId: current.checkpointId } : {}),
         }),
         input.turnId,
@@ -16960,6 +16973,7 @@ class SerializedCheckpointProbeBackend implements AgentBackend {
         sessionId: this.sessionId,
         coveredRuntimeEvents,
         summary: `${input.turnId} checkpoint`,
+        summaryFormat: 'legacy_freeform',
       }),
       input.turnId,
     );
@@ -17022,6 +17036,7 @@ class RecoveringCheckpointWriteProbeBackend implements AgentBackend {
           sessionId: this.sessionId,
           coveredRuntimeEvents,
           summary: `${input.turnId} checkpoint`,
+          summaryFormat: 'legacy_freeform',
         }),
         input.turnId,
       );
@@ -17083,6 +17098,7 @@ class CheckpointRecorderContractProbeBackend implements AgentBackend {
           sessionId: this.sessionId,
           coveredRuntimeEvents,
           summary: `${input.turnId} checkpoint`,
+          summaryFormat: 'legacy_freeform',
         }),
         input.turnId,
       );
@@ -17142,6 +17158,7 @@ class InitialCheckpointLoadRaceProbeBackend implements AgentBackend {
           sessionId: this.sessionId,
           coveredRuntimeEvents,
           summary: 'stale checkpoint during initial load',
+          summaryFormat: 'legacy_freeform',
         }),
         input.turnId,
       );
