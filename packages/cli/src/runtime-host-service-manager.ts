@@ -4,12 +4,17 @@ import { mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promi
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
+  isCanonicalRuntimeHostWebSocketPath,
   PROJECT_DIRECTORY_MAX_ROOTS,
   PROJECT_DIRECTORY_ROOT_LABEL_MAX_BYTES,
   RUNTIME_HOST_PROTOCOL_VERSION,
 } from '@maka/runtime-host/protocol';
 import { connectExistingRuntimeHost } from '@maka/runtime-host/client';
 import { withFileUpdateLock } from '@maka/storage/file-update-lock';
+import {
+  isRuntimeHostManagedDeploymentCli,
+  removeRuntimeHostManagedDeployment,
+} from './runtime-host-managed-deployment.js';
 
 const SERVICE_CONFIG_FILE = 'runtime-host-service.json';
 const DEFAULT_WEBSOCKET_PATH = '/runtime-host';
@@ -19,6 +24,7 @@ const SERVICE_READY_POLL_MS = 50;
 
 export interface RuntimeHostManagedServiceConfig {
   readonly schemaVersion: 1;
+  readonly managedDeploymentRoot?: string;
   readonly rootPath: string;
   readonly projectDirectoryRoots: readonly {
     readonly label: string;
@@ -93,6 +99,7 @@ export interface RuntimeHostManagedServiceInput {
   readonly projectDirectoryRoots?: readonly { readonly label: string; readonly path: string }[];
   readonly websocketPort?: number;
   readonly websocketPath?: string;
+  readonly managedDeploymentRoot?: string;
   readonly nodePath: string;
   readonly cliPath: string;
 }
@@ -185,6 +192,20 @@ async function manageRuntimeHostServiceLocked(
   if (input.action === 'uninstall') {
     const before = await readServiceConfigForRepair(configPath);
     await backend.uninstall();
+    if (before?.managedDeploymentRoot) {
+      try {
+        await removeRuntimeHostManagedDeployment(
+          before.managedDeploymentRoot,
+          resolveRuntimeHostManagedServiceId(input.clientDataRoot),
+        );
+      } catch (error) {
+        throw new RuntimeHostServiceManagerError(
+          'uninstall_incomplete',
+          `Unable to remove the managed Runtime Host deployment at ${before.managedDeploymentRoot}`,
+          { cause: error },
+        );
+      }
+    }
     await removeRuntimeHostServiceFile(configPath, 'service config');
     const service = await readServiceStatus(configPath, backend);
     if (service.installed || service.active || service.enabled || service.config !== null) {
@@ -274,6 +295,7 @@ async function prepareServiceConfig(
       'The current Maka CLI entry point could not be resolved',
     );
   }
+  const serviceId = resolveRuntimeHostManagedServiceId(input.clientDataRoot);
   const requestedRoot = resolve(input.rootPath ?? previous?.rootPath ?? input.defaultRootPath);
   const projectDirectoryRoots = await normalizeProjectDirectoryRoots(
     input.projectDirectoryRoots ?? previous?.projectDirectoryRoots ?? [],
@@ -293,14 +315,45 @@ async function prepareServiceConfig(
   const port =
     input.websocketPort ?? previous?.websocket.port ?? (await deps.allocateLoopbackPort());
   const websocketPath = input.websocketPath ?? previous?.websocket.path ?? DEFAULT_WEBSOCKET_PATH;
+  const requestedManagedDeploymentRoot =
+    input.managedDeploymentRoot ?? previous?.managedDeploymentRoot;
+  const managedDeploymentRoot = requestedManagedDeploymentRoot
+    ? await realpath(requestedManagedDeploymentRoot).catch((error) => {
+        throw new RuntimeHostServiceManagerError(
+          'invalid_launch',
+          'The managed Runtime Host deployment is unavailable',
+          { cause: error },
+        );
+      })
+    : undefined;
+  if (
+    previous?.managedDeploymentRoot &&
+    (managedDeploymentRoot !== previous.managedDeploymentRoot ||
+      !isRuntimeHostManagedDeploymentCli(previous.managedDeploymentRoot, serviceId, cliPath))
+  ) {
+    throw new RuntimeHostServiceManagerError(
+      'invalid_launch',
+      'Uninstall the managed Runtime Host service before replacing its managed package or launch path',
+    );
+  }
+  if (
+    managedDeploymentRoot &&
+    !isRuntimeHostManagedDeploymentCli(managedDeploymentRoot, serviceId, cliPath)
+  ) {
+    throw new RuntimeHostServiceManagerError(
+      'invalid_launch',
+      'The managed Runtime Host CLI must belong to its deployment root',
+    );
+  }
   const config: RuntimeHostManagedServiceConfig = {
     schemaVersion: 1,
+    ...(managedDeploymentRoot ? { managedDeploymentRoot } : {}),
     rootPath,
     projectDirectoryRoots,
     websocket: { host: '127.0.0.1', port, path: websocketPath },
     launch: { nodePath, cliPath },
   };
-  validateServiceConfig(config);
+  validateServiceConfig(config, serviceId);
   return config;
 }
 
@@ -325,7 +378,7 @@ async function readServiceConfig(path: string): Promise<RuntimeHostManagedServic
   }
   try {
     const parsed: unknown = JSON.parse(raw);
-    validateServiceConfig(parsed);
+    validateServiceConfig(parsed, resolveRuntimeHostManagedServiceId(dirname(path)));
     return parsed;
   } catch (error) {
     throw new RuntimeHostServiceManagerError(
@@ -349,7 +402,10 @@ async function readServiceConfigForRepair(
   }
 }
 
-function validateServiceConfig(value: unknown): asserts value is RuntimeHostManagedServiceConfig {
+function validateServiceConfig(
+  value: unknown,
+  serviceId: string,
+): asserts value is RuntimeHostManagedServiceConfig {
   if (!isRecord(value) || value.schemaVersion !== 1) throw new TypeError('Invalid schemaVersion');
   if (!isSafeAbsolutePath(value.rootPath)) throw new TypeError('Invalid rootPath');
   if (
@@ -384,11 +440,7 @@ function validateServiceConfig(value: unknown): asserts value is RuntimeHostMana
     !Number.isInteger(websocket.port) ||
     websocket.port < 1 ||
     websocket.port > 65_535 ||
-    typeof websocket.path !== 'string' ||
-    !websocket.path.startsWith('/') ||
-    websocket.path.includes('?') ||
-    websocket.path.includes('#') ||
-    hasControlCharacters(websocket.path)
+    !isCanonicalRuntimeHostWebSocketPath(websocket.path)
   ) {
     throw new TypeError('Invalid websocket config');
   }
@@ -399,6 +451,13 @@ function validateServiceConfig(value: unknown): asserts value is RuntimeHostMana
     !isSafeAbsolutePath(launch.cliPath)
   ) {
     throw new TypeError('Invalid launch config');
+  }
+  if (
+    value.managedDeploymentRoot !== undefined &&
+    (typeof value.managedDeploymentRoot !== 'string' ||
+      !isRuntimeHostManagedDeploymentCli(value.managedDeploymentRoot, serviceId, launch.cliPath))
+  ) {
+    throw new TypeError('Invalid managed deployment root');
   }
 }
 
@@ -452,14 +511,12 @@ async function assertPersistentCliInstallation(
   environment: NodeJS.ProcessEnv,
   homeDir: string,
 ): Promise<void> {
-  const invokedByNpx =
-    environment.npm_command === 'exec' || environment.npm_lifecycle_event === 'npx';
   const cacheRoots = await Promise.all(
     [environment.npm_config_cache, join(homeDir, '.npm')].flatMap((root) =>
       root ? [realpath(resolve(root, '_npx')).catch(() => resolve(root, '_npx'))] : [],
     ),
   );
-  if (invokedByNpx || cacheRoots.some((root) => isWithin(root, cliPath))) {
+  if (cacheRoots.some((root) => isWithin(root, cliPath))) {
     throw new RuntimeHostServiceManagerError(
       'invalid_launch',
       'A persistent Runtime Host service cannot use a temporary npx installation; install Maka globally and retry',

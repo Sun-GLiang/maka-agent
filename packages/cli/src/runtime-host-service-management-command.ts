@@ -25,7 +25,7 @@ export async function runManagedRuntimeHostServiceCli(
 ): Promise<number> {
   const deps: RuntimeHostServiceManagementCliDeps = {
     manage: manageRuntimeHostService,
-    createBackend: createPlatformServiceBackend,
+    createBackend: createPlatformRuntimeHostServiceBackend,
     writeOutput: (value) => process.stdout.write(value),
     writeError: (value) => process.stderr.write(value),
     ...overrides,
@@ -72,7 +72,9 @@ function formatHumanResult(result: RuntimeHostManagedServiceResult): string {
   return `Runtime Host service is ${service.state}.\n`;
 }
 
-function createPlatformServiceBackend(serviceId: string): RuntimeHostServiceBackend {
+export function createPlatformRuntimeHostServiceBackend(
+  serviceId: string,
+): RuntimeHostServiceBackend {
   if (process.platform === 'linux') return createSystemdUserRuntimeHostService(serviceId);
   throw new RuntimeHostServiceManagerError(
     'unsupported_platform',
