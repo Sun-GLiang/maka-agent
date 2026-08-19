@@ -42,6 +42,11 @@ export {
   type RuntimeHostReconnectLifecycle,
 } from './reconnect-lifecycle.js';
 export {
+  RUNTIME_HOST_REMOTE_INCOMPATIBLE_CODE,
+  RuntimeHostRemoteCompatibilityError,
+  type RuntimeHostRemoteCompatibilityDetails,
+} from './remote-compatibility-error.js';
+export {
   RuntimeHostSubscriptionError,
   type DecodedSessionTranscriptPage,
   type RuntimeHostSessionSubscription,
