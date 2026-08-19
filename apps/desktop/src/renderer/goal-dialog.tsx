@@ -14,7 +14,7 @@
  * budget the form is no longer showing, and a field that quietly keeps nothing
  * can arm no budget at all where the user asked for a tight one.
  */
-import { useEffect, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core/Button';
 import { Dialog, DialogHeader } from '@astryxdesign/core/Dialog';
 import { Layout, LayoutContent, LayoutFooter } from '@astryxdesign/core/Layout';
@@ -29,6 +29,10 @@ import {
   GOAL_TOKEN_BUDGET_MINIMUM,
 } from '@maka/core/goal';
 import { getShellCopy, localizedShellErrorMessage } from './locales/shell-copy.js';
+import {
+  interpretGoalArmOutcome,
+  type GoalArmReconciliationNotice,
+} from './goal-arm-outcome.js';
 
 type BudgetReading =
   | { readonly kind: 'empty' }
@@ -65,42 +69,77 @@ export function GoalDialog(props: {
   const [tokenBudgetText, setTokenBudgetText] = useState('');
   const [arming, setArming] = useState(false);
   const [error, setError] = useState<string>();
+  const [reconciliation, setReconciliation] =
+    useState<GoalArmReconciliationNotice>();
+  const armGenerationRef = useRef(0);
 
   // Each opening starts from empty: the previous Session's condition is not a
   // useful default for this one, and a stale error would outlive its cause.
-  useEffect(() => {
+  useLayoutEffect(() => {
+    armGenerationRef.current += 1;
     if (props.sessionId === undefined) return;
     setCondition('');
     setMaxIterationsText('');
     setTokenBudgetText('');
     setError(undefined);
     setArming(false);
+    setReconciliation(undefined);
   }, [props.sessionId]);
 
   const sessionId = props.sessionId;
   const maxIterations = readGoalBudget(maxIterationsText, 1, GOAL_MAX_ITERATIONS_LIMIT);
   const tokenBudget = readGoalBudget(tokenBudgetText, GOAL_TOKEN_BUDGET_MINIMUM);
+  const locked = reconciliation !== undefined;
   const canSubmit =
     condition.trim().length > 0 &&
     maxIterations.kind !== 'invalid' &&
     tokenBudget.kind !== 'invalid' &&
-    !arming;
+    !arming &&
+    !locked;
+
+  const reconciliationMessage = (() => {
+    if (!reconciliation) return undefined;
+    switch (reconciliation.kind) {
+      case 'matching_goal':
+        return copy.reconciledMatching(
+          reconciliation.goal.condition,
+          copy.statusLabels[reconciliation.goal.status],
+        );
+      case 'different_goal':
+        return copy.reconciledDifferent(
+          reconciliation.goal.condition,
+          copy.statusLabels[reconciliation.goal.status],
+        );
+      case 'no_goal':
+        return copy.reconciledNoGoal;
+      case 'unavailable':
+        return copy.reconciliationUnavailable;
+    }
+  })();
 
   async function arm(): Promise<void> {
     if (!sessionId || !canSubmit) return;
+    const armGeneration = ++armGenerationRef.current;
     setArming(true);
     setError(undefined);
     try {
-      await window.maka.goal.arm(sessionId, {
+      const outcome = await window.maka.goal.arm(sessionId, {
         condition: condition.trim(),
         maxIterations: maxIterations.kind === 'value' ? maxIterations.value : null,
         tokenBudget: tokenBudget.kind === 'value' ? tokenBudget.value : null,
       });
-      props.onClose();
+      if (armGenerationRef.current !== armGeneration) return;
+      const action = interpretGoalArmOutcome(outcome);
+      if (action.action === 'close') {
+        props.onClose();
+      } else {
+        setReconciliation(action.notice);
+      }
     } catch (cause) {
+      if (armGenerationRef.current !== armGeneration) return;
       setError(localizedShellErrorMessage(cause, copy.failedFallback, locale));
     } finally {
-      setArming(false);
+      if (armGenerationRef.current === armGeneration) setArming(false);
     }
   }
 
@@ -122,6 +161,9 @@ export function GoalDialog(props: {
           <LayoutContent padding={4}>
             <VStack gap={4}>
               <Text type="body" color="secondary">{copy.description}</Text>
+              {reconciliationMessage ? (
+                <Text type="body" color="secondary">{reconciliationMessage}</Text>
+              ) : null}
               <TextArea
                 label={copy.conditionLabel}
                 description={copy.conditionDescription}
@@ -131,7 +173,7 @@ export function GoalDialog(props: {
                 rows={3}
                 maxLength={GOAL_CONDITION_TEXT_LIMIT.codeUnits}
                 isRequired
-                isDisabled={arming}
+                isDisabled={arming || locked}
                 hasAutoFocus
                 {...(error ? { status: { type: 'error' as const, message: error } } : {})}
               />
@@ -142,7 +184,7 @@ export function GoalDialog(props: {
                   value={maxIterationsText}
                   onChange={setMaxIterationsText}
                   isOptional
-                  isDisabled={arming}
+                  isDisabled={arming || locked}
                   {...(maxIterations.kind === 'invalid'
                     ? { status: { type: 'error' as const, message: copy.maxIterationsInvalid(GOAL_MAX_ITERATIONS_LIMIT) } }
                     : {})}
@@ -153,7 +195,7 @@ export function GoalDialog(props: {
                   value={tokenBudgetText}
                   onChange={setTokenBudgetText}
                   isOptional
-                  isDisabled={arming}
+                  isDisabled={arming || locked}
                   {...(tokenBudget.kind === 'invalid'
                     ? { status: { type: 'error' as const, message: copy.tokenBudgetInvalid(GOAL_TOKEN_BUDGET_MINIMUM) } }
                     : {})}
@@ -167,7 +209,7 @@ export function GoalDialog(props: {
             <HStack gap={2} hAlign="end">
               <Button
                 variant="ghost"
-                label={copy.cancel}
+                label={locked ? copy.close : copy.cancel}
                 isDisabled={arming}
                 onClick={props.onClose}
               />

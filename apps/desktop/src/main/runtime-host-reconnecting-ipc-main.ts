@@ -2,8 +2,15 @@ import type { IpcMain } from "electron";
 import {
   isReconnectableReadFailure,
   type IpcHandler,
+  type ReconciledControlHandlers,
   type ReconnectableReadIpcMain,
 } from "./ipc-reconnect-policy.js";
+
+type ReconcileIpcHandler = (
+  context: unknown,
+  event: Parameters<IpcHandler>[0],
+  ...args: unknown[]
+) => Promise<unknown>;
 
 interface HandlerWaiter {
   readonly epoch: string;
@@ -15,11 +22,13 @@ interface BoundHandler {
   readonly epoch: string;
   readonly owner: symbol;
   readonly listener: IpcHandler;
+  readonly reconcile?: ReconcileIpcHandler;
 }
 
 interface HandlerSlot {
   readonly waiters: Set<HandlerWaiter>;
   readonly reconnectableRead: boolean;
+  readonly reconciledControl: boolean;
   readonly handlers: Map<string, BoundHandler>;
 }
 
@@ -60,9 +69,11 @@ export class RuntimeHostReconnectingIpcMain {
       epoch,
       isActive: () => this.#activeEpochs.has(epoch),
       handle: (channel, listener) =>
-        this.#handle(epoch, owner, channel, listener, false),
+        this.#handle(epoch, owner, channel, listener, false, false),
       handleReconnectableRead: (channel, listener) =>
-        this.#handle(epoch, owner, channel, listener, true),
+        this.#handle(epoch, owner, channel, listener, true, false),
+      handleReconciledControl: (channel, handlers) =>
+        this.#handleReconciledControl(epoch, owner, channel, handlers),
       removeHandler: (channel) => this.#removeHandler(owner, channel),
     };
   }
@@ -101,6 +112,8 @@ export class RuntimeHostReconnectingIpcMain {
     channel: string,
     listener: IpcHandler,
     reconnectableRead: boolean,
+    reconciledControl: boolean,
+    reconcile?: ReconcileIpcHandler,
   ): void {
     if (this.#closed) throw new Error("Desktop Runtime Host IPC router is closed");
     let slot = this.#slots.get(channel);
@@ -109,6 +122,7 @@ export class RuntimeHostReconnectingIpcMain {
         handlers: new Map(),
         waiters: new Set(),
         reconnectableRead,
+        reconciledControl,
       };
       this.#ipcMain.handle(channel, (event, ...args) =>
         this.#dispatch(created, event, args),
@@ -116,19 +130,39 @@ export class RuntimeHostReconnectingIpcMain {
       this.#slots.set(channel, created);
       slot = created;
     }
-    if (slot.reconnectableRead !== reconnectableRead) {
+    if (
+      slot.reconnectableRead !== reconnectableRead ||
+      slot.reconciledControl !== reconciledControl
+    ) {
       throw new Error(`Desktop Runtime Host IPC policy changed: ${channel}`);
     }
     if (slot.handlers.has(epoch)) {
       throw new Error(`Desktop Runtime Host IPC handler already exists: ${channel}`);
     }
-    const handler = { epoch, owner, listener };
+    const handler = { epoch, owner, listener, ...(reconcile ? { reconcile } : {}) };
     slot.handlers.set(epoch, handler);
     for (const waiter of [...slot.waiters]) {
       if (waiter.epoch !== epoch) continue;
       slot.waiters.delete(waiter);
       waiter.resolve(handler);
     }
+  }
+
+  #handleReconciledControl<Context, Result>(
+    epoch: string,
+    owner: symbol,
+    channel: string,
+    handlers: ReconciledControlHandlers<Context, Result>,
+  ): void {
+    this.#handle(
+      epoch,
+      owner,
+      channel,
+      handlers.dispatch as IpcHandler,
+      false,
+      true,
+      handlers.reconcile as unknown as ReconcileIpcHandler,
+    );
   }
 
   #removeHandler(owner: symbol, channel: string): void {
@@ -147,22 +181,43 @@ export class RuntimeHostReconnectingIpcMain {
     const epoch = this.#requireTargetEpoch(args[0]);
     let handler = slot.handlers.get(epoch);
     if (!handler) handler = await this.#waitForHandler(slot, epoch);
+    let reconciliationContext: unknown;
+    let reconciling = false;
     while (true) {
       try {
-        const result = await handler.listener(event, ...args);
+        const result = reconciling
+          ? await requireReconcileHandler(handler)(reconciliationContext, event, ...args)
+          : await handler.listener(event, ...args);
         this.#assertActive(epoch);
-        if (slot.reconnectableRead && slot.handlers.get(epoch) !== handler) {
+        if (
+          (slot.reconnectableRead || reconciling) &&
+          slot.handlers.get(epoch) !== handler
+        ) {
+          handler = await this.#waitForHandler(slot, epoch, handler);
+          continue;
+        }
+        if (slot.reconciledControl && !reconciling) {
+          const step = requireReconciledControlStep(result);
+          if (step.kind === "completed") return step.value;
+          reconciliationContext = step.context;
+          reconciling = true;
           handler = await this.#waitForHandler(slot, epoch, handler);
           continue;
         }
         return result;
       } catch (error) {
         this.#assertActive(epoch);
-        if (slot.reconnectableRead && slot.handlers.get(epoch) !== handler) {
+        if (
+          (slot.reconnectableRead || reconciling) &&
+          slot.handlers.get(epoch) !== handler
+        ) {
           handler = await this.#waitForHandler(slot, epoch, handler);
           continue;
         }
-        if (!slot.reconnectableRead || !isReconnectableReadFailure(error)) {
+        if (
+          (!slot.reconnectableRead && !reconciling) ||
+          !isReconnectableReadFailure(error)
+        ) {
           throw error;
         }
         handler = await this.#waitForHandler(slot, epoch, handler);
@@ -218,4 +273,26 @@ export class RuntimeHostReconnectingIpcMain {
       }
     }
   }
+}
+
+function requireReconcileHandler(handler: BoundHandler): ReconcileIpcHandler {
+  if (!handler.reconcile) {
+    throw new Error("Desktop Runtime Host reconciled control handler is unavailable");
+  }
+  return handler.reconcile;
+}
+
+function requireReconciledControlStep(
+  value: unknown,
+): { readonly kind: "completed"; readonly value: unknown } | {
+  readonly kind: "reconcile";
+  readonly context: unknown;
+} {
+  if (!value || typeof value !== "object") {
+    throw new Error("Desktop Runtime Host reconciled control returned an invalid step");
+  }
+  const step = value as { kind?: unknown; value?: unknown; context?: unknown };
+  if (step.kind === "completed") return { kind: "completed", value: step.value };
+  if (step.kind === "reconcile") return { kind: "reconcile", context: step.context };
+  throw new Error("Desktop Runtime Host reconciled control returned an invalid step");
 }

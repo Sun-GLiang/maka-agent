@@ -5,7 +5,18 @@ import { projectDeepResearchClientProgress } from '@maka/core/deep-research-clie
 import { type DeepResearchRun } from '@maka/core/deep-research-run';
 import { type PlanSessionState } from '@maka/core/plan';
 import { type ShellRunUpdate } from '@maka/core/events';
-import { encodeDeepResearchSnapshot } from '@maka/runtime-host/protocol';
+import {
+  encodeDeepResearchSnapshot,
+  type GoalProjection,
+} from '@maka/runtime-host/protocol';
+import {
+  RuntimeHostOperationError,
+  RuntimeHostRequestInterruptedError,
+} from '@maka/runtime-host/client';
+import type {
+  ReconciledControlHandlers,
+  ReconnectableReadIpcMain,
+} from '../ipc-reconnect-policy.js';
 import {
   projectEmbeddedDeepResearch,
   projectHostedDeepResearch,
@@ -17,9 +28,225 @@ import {
 
 type DomainClient = RuntimeHostSessionDomainsIpcDeps['client'];
 
+test('goal:arm reconciles a lost dispatched response without dispatching again', async () => {
+  const previous = goalProjection({ goalId: 'goal-old', condition: 'Old goal' });
+  const requested = {
+    condition: '  Finish the adapter  ',
+    maxIterations: 20,
+    tokenBudget: 1_000,
+  };
+  let armCalls = 0;
+  const firstIpc = reconciledIpcHarness();
+  registerDomainsIpc(
+    {
+      client: domainClient({
+        queryGoal: async () => ({ sessionId: 'session-1', goal: previous }),
+        armGoal: async () => {
+          armCalls += 1;
+          throw new RuntimeHostRequestInterruptedError(
+            'goal.arm',
+            'control',
+            'dispatched',
+            'connection_lost',
+          );
+        },
+      }),
+      emitModeChanged() {},
+    },
+    firstIpc,
+  );
+
+  const step = await firstIpc.dispatch('goal:arm', 'session-1', requested);
+  assert.equal((step as { kind: string }).kind, 'reconcile');
+
+  const replacementIpc = reconciledIpcHarness();
+  registerDomainsIpc(
+    {
+      client: domainClient({
+        queryGoal: async () => ({
+          sessionId: 'session-1',
+          goal: goalProjection({ condition: 'Finish the adapter' }),
+        }),
+        armGoal: async () => assert.fail('replacement must never re-arm the Goal'),
+      }),
+      emitModeChanged() {},
+    },
+    replacementIpc,
+  );
+
+  assert.deepEqual(
+    await replacementIpc.reconcile(
+      'goal:arm',
+      (step as { context: unknown }).context,
+      'session-1',
+      requested,
+    ),
+    {
+      kind: 'reconciled',
+      currentGoal: {
+        id: 'goal-1',
+        revision: 3,
+        sessionId: 'session-1',
+        condition: 'Finish the adapter',
+        status: 'active',
+        setAt: 1,
+        iterations: 2,
+        maxIterations: 20,
+        consecutiveNoProgress: 0,
+        blockCap: 8,
+        tokenBudget: 1_000,
+        tokensAtStart: 0,
+        tokensNow: 120,
+        tokensBaselinePending: false,
+      },
+      matchesRequestedState: true,
+    },
+  );
+  assert.equal(armCalls, 1);
+});
+
+test('goal:arm reconciliation reports different, missing, and unavailable authority', async () => {
+  const firstIpc = reconciledIpcHarness();
+  registerDomainsIpc(
+    {
+      client: domainClient({
+        queryGoal: async () => ({
+          sessionId: 'session-1',
+          goal: goalProjection({ goalId: 'goal-old', condition: 'Old goal' }),
+        }),
+        armGoal: async () => {
+          throw new RuntimeHostRequestInterruptedError(
+            'goal.arm',
+            'control',
+            'dispatched',
+            'connection_lost',
+          );
+        },
+      }),
+      emitModeChanged() {},
+    },
+    firstIpc,
+  );
+  const step = await firstIpc.dispatch('goal:arm', 'session-1', {
+    condition: 'Default budget goal',
+  });
+  const context = (step as { context: unknown }).context;
+
+  const reconcileWith = async (
+    queryGoal: DomainClient['queryGoal'],
+  ): Promise<unknown> => {
+    const ipc = reconciledIpcHarness();
+    registerDomainsIpc(
+      {
+        client: domainClient({ queryGoal }),
+        emitModeChanged() {},
+      },
+      ipc,
+    );
+    return ipc.reconcile('goal:arm', context, 'session-1', {
+      condition: 'Default budget goal',
+    });
+  };
+
+  const oldGoal = goalProjection({
+    goalId: 'goal-old',
+    condition: 'Default budget goal',
+    maxIterations: 50,
+    tokenBudget: null,
+  });
+  assert.deepEqual(
+    await reconcileWith(async () => ({ sessionId: 'session-1', goal: oldGoal })),
+    {
+      kind: 'reconciled',
+      currentGoal: {
+        id: 'goal-old',
+        revision: 3,
+        sessionId: 'session-1',
+        condition: 'Default budget goal',
+        status: 'active',
+        setAt: 1,
+        iterations: 2,
+        maxIterations: 50,
+        consecutiveNoProgress: 0,
+        blockCap: 8,
+        tokensAtStart: 0,
+        tokensNow: 120,
+        tokensBaselinePending: false,
+      },
+      matchesRequestedState: false,
+    },
+  );
+  assert.deepEqual(
+    await reconcileWith(async () => ({ sessionId: 'session-1', goal: null })),
+    { kind: 'reconciled', currentGoal: null, matchesRequestedState: false },
+  );
+  assert.deepEqual(
+    await reconcileWith(async () => {
+      throw new Error('query unavailable');
+    }),
+    { kind: 'reconciliation_unavailable' },
+  );
+  await assert.rejects(
+    reconcileWith(async () => {
+      throw new RuntimeHostRequestInterruptedError(
+        'goal.query',
+        'query',
+        'dispatched',
+        'connection_lost',
+      );
+    }),
+    RuntimeHostRequestInterruptedError,
+  );
+});
+
+test('goal:arm preserves deterministic and non-dispatched rejection semantics', async () => {
+  const errors = [
+    new RuntimeHostRequestInterruptedError(
+      'goal.arm',
+      'control',
+      'not_dispatched',
+      'connection_lost',
+    ),
+    new RuntimeHostRequestInterruptedError(
+      'goal.arm',
+      'control',
+      'dispatched',
+      'timeout',
+    ),
+    new RuntimeHostOperationError(
+      'goal.arm',
+      'host_draining',
+      'Runtime Host is draining',
+    ),
+  ];
+  for (const expected of errors) {
+    const ipc = ipcHarness();
+    let armCalls = 0;
+    registerDomainsIpc(
+      {
+        client: domainClient({
+          queryGoal: async () => ({ sessionId: 'session-1', goal: null }),
+          armGoal: async () => {
+            armCalls += 1;
+            throw expected;
+          },
+        }),
+        emitModeChanged() {},
+      },
+      ipc,
+    );
+    await assert.rejects(
+      ipc.invoke('goal:arm', 'session-1', { condition: 'Finish' }),
+      (actual) => actual === expected,
+    );
+    assert.equal(armCalls, 1);
+  }
+});
+
 test('goal:arm takes the Session from the scoped channel and refuses any other key', async () => {
   const armed: unknown[] = [];
   const client = domainClient({
+    queryGoal: async (sessionId) => ({ sessionId, goal: null }),
     armGoal: async (input) => {
       armed.push(input);
       return { sessionId: input.sessionId, goal: goalProjection() };
@@ -28,7 +255,7 @@ test('goal:arm takes the Session from the scoped channel and refuses any other k
   const ipc = ipcHarness();
   registerDomainsIpc({ client, emitModeChanged() {} }, ipc);
 
-  const goal = await ipc.invoke('goal:arm', 'session-1', {
+  const outcome = await ipc.invoke('goal:arm', 'session-1', {
     condition: 'Finish the adapter',
     maxIterations: 20,
     tokenBudget: 1_000,
@@ -41,7 +268,14 @@ test('goal:arm takes the Session from the scoped channel and refuses any other k
       tokenBudget: 1_000,
     },
   ]);
-  assert.equal((goal as { id: string }).id, 'goal-1');
+  assert.equal(
+    (outcome as { kind: string; goal: { id: string } }).kind,
+    'armed',
+  );
+  assert.equal(
+    (outcome as { kind: string; goal: { id: string } }).goal.id,
+    'goal-1',
+  );
 
   // Omitted budgets are "not chosen", which the Host reads as its defaults.
   await ipc.invoke('goal:arm', 'session-1', { condition: 'Finish the adapter' });
@@ -753,7 +987,13 @@ function domainClient(overrides: Partial<DomainClient>): DomainClient {
   } as DomainClient;
 }
 
-function goalProjection() {
+function goalProjection(
+  overrides: Partial<GoalProjection> = {},
+): GoalProjection {
+  return { ...baseGoalProjection(), ...overrides };
+}
+
+function baseGoalProjection() {
   return {
     goalId: 'goal-1',
     revision: 3,
@@ -856,10 +1096,49 @@ function ipcHarness() {
   };
 }
 
+function reconciledIpcHarness() {
+  const ordinaryHandlers = new Map<string, IpcHandler>();
+  const controlHandlers = new Map<
+    string,
+    ReconciledControlHandlers<unknown, unknown>
+  >();
+  return {
+    handle(channel: string, handler: IpcHandler) {
+      ordinaryHandlers.set(channel, handler);
+    },
+    handleReconciledControl<Context, Result>(
+      channel: string,
+      handlers: ReconciledControlHandlers<Context, Result>,
+    ) {
+      controlHandlers.set(
+        channel,
+        handlers as unknown as ReconciledControlHandlers<unknown, unknown>,
+      );
+    },
+    async dispatch(channel: string, ...args: unknown[]): Promise<unknown> {
+      const handlers = controlHandlers.get(channel);
+      assert.ok(handlers, `missing reconciled control: ${channel}`);
+      return handlers.dispatch({} as never, ...args);
+    },
+    async reconcile(
+      channel: string,
+      context: unknown,
+      ...args: unknown[]
+    ): Promise<unknown> {
+      const handlers = controlHandlers.get(channel);
+      assert.ok(handlers, `missing reconciled control: ${channel}`);
+      return handlers.reconcile(context, {} as never, ...args);
+    },
+  } satisfies ReconnectableReadIpcMain & {
+    dispatch(channel: string, ...args: unknown[]): Promise<unknown>;
+    reconcile(channel: string, context: unknown, ...args: unknown[]): Promise<unknown>;
+  };
+}
+
 function registerDomainsIpc(
   deps: Omit<RuntimeHostSessionDomainsIpcDeps, 'sessionObserver'> &
     Partial<Pick<RuntimeHostSessionDomainsIpcDeps, 'sessionObserver'>>,
-  ipcMain: Pick<IpcMain, 'handle'>,
+  ipcMain: ReconnectableReadIpcMain,
 ) {
   return registerRuntimeHostSessionDomainsIpc(
     {
