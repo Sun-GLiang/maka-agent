@@ -70,13 +70,17 @@ function formatRuntimeHostRemoteCompatibilityMessage(
     message.push(
       `Client composition id ${details.client.compositionId}`,
       `Host composition id ${details.host.compositionId}`,
-      `Host composition revision ${details.host.compositionRevision}`,
+      `Host composition revision ${formatRuntimeHostDiagnosticValue(details.host.compositionRevision)}`,
     );
   }
   message.push(
     'Use compatible Client and Host builds, restart the remote Runtime Host service after updating the Host, then retry',
   );
   return message.join('. ');
+}
+
+function formatRuntimeHostDiagnosticValue(value: string): string {
+  return value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '\uFFFD');
 }
 
 function protocolRangesOverlap(

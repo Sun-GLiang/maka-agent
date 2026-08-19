@@ -614,6 +614,25 @@ describe('Runtime Host profiles', () => {
     assert.match(different.message, /Host composition revision other-revision/u);
   });
 
+  test('sanitizes Host composition revision only in the human-readable message', () => {
+    const compositionRevision =
+      'stable\u0085forged\u2028line\u2029paragraph\u202eoverride\u2066isolate\u00adsoft';
+    const error = new RuntimeHostRemoteCompatibilityError(
+      'office',
+      incompatibleHandshake({
+        compositionId: 'maka.different-composition',
+        compositionRevision,
+      }),
+    );
+
+    assert.equal(error.details.host.compositionRevision, compositionRevision);
+    assert.doesNotMatch(error.message, /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu);
+    assert.match(
+      error.message,
+      /Host composition revision stable�forged�line�paragraph�override�isolate�soft/u,
+    );
+  });
+
   test('treats rejected remote credentials as a terminal profile failure', async () => {
     await assert.rejects(
       () =>
