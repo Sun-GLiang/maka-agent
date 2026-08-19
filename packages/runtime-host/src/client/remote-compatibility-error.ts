@@ -69,7 +69,7 @@ function formatRuntimeHostRemoteCompatibilityMessage(
   if (details.client.compositionId !== details.host.compositionId) {
     message.push(
       `Client composition id ${details.client.compositionId}`,
-      `Host composition id ${details.host.compositionId}`,
+      `Host composition id ${formatRuntimeHostDiagnosticValue(details.host.compositionId)}`,
       `Host composition revision ${formatRuntimeHostDiagnosticValue(details.host.compositionRevision)}`,
     );
   }

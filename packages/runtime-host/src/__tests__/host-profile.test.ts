@@ -632,19 +632,22 @@ describe('Runtime Host profiles', () => {
     assert.match(different.message, /Host composition revision other-revision/u);
   });
 
-  test('sanitizes Host composition revision only in the human-readable message', () => {
+  test('sanitizes Host composition identity only in the human-readable message', () => {
+    const compositionId = 'maka.different\u001b[31m\u202eline\u2066isolate';
     const compositionRevision =
       'stable\u0085forged\u2028line\u2029paragraph\u202eoverride\u2066isolate\u00adsoft';
     const error = new RuntimeHostRemoteCompatibilityError(
       'office',
       incompatibleHandshake({
-        compositionId: 'maka.different-composition',
+        compositionId,
         compositionRevision,
       }),
     );
 
+    assert.equal(error.details.host.compositionId, compositionId);
     assert.equal(error.details.host.compositionRevision, compositionRevision);
     assert.doesNotMatch(error.message, /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu);
+    assert.match(error.message, /Host composition id maka\.different�\[31m�line�isolate/u);
     assert.match(
       error.message,
       /Host composition revision stable�forged�line�paragraph�override�isolate�soft/u,
@@ -738,10 +741,10 @@ function incompatibleHandshake(overrides: Partial<HostIncompatible> = {}): HostI
     replacement: 'blocked_by_residency',
     activity: {
       connections: 1,
-      sessions: 1,
-      turns: 1,
-      detail: 'activity-secret',
-    } as never,
+      activeOperations: 1,
+      processUptimeSeconds: 1,
+      residencies: [{ label: 'activity-secret', count: 1 }],
+    },
     ...overrides,
   };
 }
