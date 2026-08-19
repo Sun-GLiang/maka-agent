@@ -260,7 +260,7 @@ function decodeExternalSessionImportState(
   ) {
     throw invalidProtocolFrame('Invalid external Session imported Session ids');
   }
-  const importedSessionIds = state.importedSessionIds.map((id) =>
+  const importedSessionIds = Array.from(state.importedSessionIds, (id) =>
     requireEntityId(id, 'imported Session id'),
   );
   const importedCount = requireCount(state.importedCount, 'external Session imported count');

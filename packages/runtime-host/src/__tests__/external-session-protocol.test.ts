@@ -173,6 +173,30 @@ describe('external Session protocol', () => {
     );
   });
 
+  test('rejects sparse imported Session id arrays', () => {
+    const importedSessionIds = Array<string>(1);
+
+    assert.throws(
+      () =>
+        decodeExternalSessionCatalogQueryResult({
+          sessions: [
+            {
+              id: 'source-1',
+              name: 'Imported source',
+              hostCwd: '/workspace',
+              importState: {
+                importedCount: 1,
+                importedSessionIds,
+                isImporting: false,
+              },
+            },
+          ],
+          nextCursor: null,
+        }),
+      isProtocolError,
+    );
+  });
+
   test('rejects open-ended, malformed, and oversized frames', () => {
     assert.throws(
       () =>
