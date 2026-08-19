@@ -7,13 +7,19 @@ import { fileURLToPath } from 'node:url';
 import {
   connectRemoteRuntimeHostProfile,
   createClientRuntimeHostProfileCatalog,
+  RuntimeHostRemoteCompatibilityError,
   RuntimeHostStartupError,
   type RuntimeHostConnection,
+  type RuntimeHostProfileCatalog,
+  type RemoteRuntimeHostProfile,
 } from '@maka/runtime-host/client';
 import {
   INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID,
   RUNTIME_HOST_COMPATIBILITY_EPOCH,
+  RUNTIME_HOST_PROTOCOL_VERSION,
   RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION,
+  type ClientSurface,
+  type HostIncompatible,
 } from '@maka/runtime-host/protocol';
 import { connectRuntimeHostCli, RuntimeHostCliConflictError } from '../runtime-host-cli-context.js';
 
@@ -253,6 +259,83 @@ test('remote CLI profile state and Client identity use the explicit Client Data 
   await context.close();
 });
 
+test('CLI and TUI remote profiles preserve shared compatibility errors', async () => {
+  const cases: readonly {
+    readonly surface: Extract<ClientSurface, 'run' | 'tui'>;
+    readonly handshake: HostIncompatible;
+  }[] = [
+    {
+      surface: 'run',
+      handshake: incompatibleRemoteHandshake({
+        compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH - 1,
+      }),
+    },
+    {
+      surface: 'tui',
+      handshake: incompatibleRemoteHandshake({
+        protocolMin: RUNTIME_HOST_PROTOCOL_VERSION + 1,
+        protocolMax: RUNTIME_HOST_PROTOCOL_VERSION + 2,
+      }),
+    },
+    {
+      surface: 'run',
+      handshake: incompatibleRemoteHandshake({
+        compositionId: 'maka.other-composition',
+        compositionRevision: 'other-revision',
+      }),
+    },
+  ];
+
+  for (const { surface, handshake } of cases) {
+    const profile: RemoteRuntimeHostProfile = {
+      id: `office-${surface}-${handshake.compositionRevision}`,
+      name: 'Office',
+      kind: 'remote',
+      transport: { kind: 'tls', url: 'wss://runtime.example.com/runtime-host' },
+      rootId: 'c'.repeat(64),
+    };
+    await assert.rejects(
+      () =>
+        connectRuntimeHostCli(
+          { rootPath: '/unused-local-root', surface, profileId: profile.id },
+          {
+            connectRemoteProfile: (input) =>
+              connectRemoteRuntimeHostProfile(input, {
+                connect: async () => ({ kind: 'incompatible', handshake }),
+              }),
+            profileCatalog: singleRemoteProfileCatalog(profile),
+            loadClientInstanceId: async () => '33333333-3333-4333-8333-333333333333',
+          },
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof RuntimeHostRemoteCompatibilityError);
+        assert.equal(error.code, 'RUNTIME_HOST_REMOTE_INCOMPATIBLE');
+        assert.equal(
+          error.message,
+          new RuntimeHostRemoteCompatibilityError(profile.id, handshake).message,
+        );
+        assert.deepEqual(error.details, {
+          profileId: profile.id,
+          client: {
+            compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
+            protocolMin: RUNTIME_HOST_PROTOCOL_VERSION,
+            protocolMax: RUNTIME_HOST_PROTOCOL_VERSION,
+            compositionId: INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID,
+          },
+          host: {
+            compatibilityEpoch: handshake.compatibilityEpoch,
+            protocolMin: handshake.protocolMin,
+            protocolMax: handshake.protocolMax,
+            compositionId: handshake.compositionId,
+            compositionRevision: handshake.compositionRevision,
+          },
+        });
+        return true;
+      },
+    );
+  }
+});
+
 function hostRegistration(overrides: Partial<{ compatibilityEpoch: number }> = {}) {
   return {
     kind: 'maka-runtime-host' as const,
@@ -269,5 +352,34 @@ function hostRegistration(overrides: Partial<{ compatibilityEpoch: number }> = {
     pid: 42,
     createdAt: '2026-08-10T00:00:00.000Z',
     ...overrides,
+  };
+}
+
+function incompatibleRemoteHandshake(overrides: Partial<HostIncompatible> = {}): HostIncompatible {
+  return {
+    kind: 'incompatible',
+    hostEpoch: 'remote-host-epoch',
+    protocolMin: RUNTIME_HOST_PROTOCOL_VERSION,
+    protocolMax: RUNTIME_HOST_PROTOCOL_VERSION,
+    compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
+    compositionId: INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID,
+    compositionRevision: 'remote-host-revision',
+    state: 'ready',
+    replacement: 'blocked_by_residency',
+    ...overrides,
+  };
+}
+
+function singleRemoteProfileCatalog(profile: RemoteRuntimeHostProfile): RuntimeHostProfileCatalog {
+  return {
+    read: async () => ({ schemaVersion: 1, profiles: [profile] }),
+    resolve: async (profileId) => {
+      assert.equal(profileId, profile.id);
+      return { profile, credential: 'opaque-token' };
+    },
+    create: async () => assert.fail('unexpected write'),
+    save: async () => assert.fail('unexpected write'),
+    remove: async () => assert.fail('unexpected write'),
+    removeIfCurrent: async () => assert.fail('unexpected write'),
   };
 }
