@@ -27,6 +27,7 @@ import { FramedTransport, RuntimeHostTransportError } from '../transport/framed-
 
 const EPOCH_27_TOLERANT_HOST_COMPATIBILITY_EPOCH = 27;
 const EPOCH_27_TOLERANT_HOST_REVISION = 'a6f33c9522ee2d4366046b84e5ed442aa1aaafe2';
+const EPOCH_27_INTOLERANT_HOST_REVISION = '0d7d174be5e7c26f9397e20d26ea322b55956c15';
 const PROTOCOL = {
   min: RUNTIME_HOST_PROTOCOL_VERSION,
   max: RUNTIME_HOST_PROTOCOL_VERSION,
@@ -88,6 +89,38 @@ test('receives structured incompatibility guidance from a tolerant epoch-27 Host
         assert.equal(result.handshake.compositionRevision, EPOCH_27_TOLERANT_HOST_REVISION);
         assert.equal(result.handshake.replacement, 'blocked_by_residency');
       }
+    },
+    { registrationCompatibilityEpoch: EPOCH_27_TOLERANT_HOST_COMPATIBILITY_EPOCH },
+  );
+});
+
+test('documents the unshipped pre-#3277 epoch-27 Host abort before admission', async () => {
+  await withForgedHandshakePeer(
+    async (transport, hostEpoch) => {
+      const rawHello = await transport.read(2_000);
+      assert.ok(rawHello && typeof rawHello === 'object');
+      assert.equal('surface' in rawHello, false);
+      try {
+        decodeEpoch27IntolerantClientHello(rawHello);
+        await writeProtocolFrame(transport, {
+          kind: 'incompatible',
+          hostEpoch,
+          protocolMin: 0,
+          protocolMax: 0,
+          compatibilityEpoch: EPOCH_27_TOLERANT_HOST_COMPATIBILITY_EPOCH,
+          compositionId: 'maka.interactive',
+          compositionRevision: EPOCH_27_INTOLERANT_HOST_REVISION,
+          state: 'ready',
+          replacement: 'blocked_by_residency',
+        });
+        transport.closeAfterFlush();
+      } catch {
+        transport.abort();
+      }
+    },
+    async (result) => {
+      assert.equal(result.kind, 'unavailable');
+      if (result.kind === 'unavailable') assert.equal(result.reason, 'handshake_failed');
     },
     { registrationCompatibilityEpoch: EPOCH_27_TOLERANT_HOST_COMPATIBILITY_EPOCH },
   );
@@ -200,6 +233,37 @@ function decodeEpoch27TolerantClientHello(value: unknown): Epoch27TolerantClient
     compatibilityEpoch: requireProtocolVersion(frame.compatibilityEpoch, 'compatibilityEpoch'),
     compositionId: requireString(frame.compositionId, 'compositionId'),
   };
+}
+
+/**
+ * Minimal historical decoder for the no-generation/no-takeover hello path at
+ * EPOCH_27_INTOLERANT_HOST_REVISION, immediately before #3277 made surface
+ * optional. The historical Host aborted the transport when this decoder threw.
+ */
+function decodeEpoch27IntolerantClientHello(value: unknown): void {
+  const frame = requireRecord(value, 'pre-#3277 epoch-27 Client hello');
+  if (frame.kind !== 'hello') throw new Error('Expected a pre-#3277 epoch-27 Client hello');
+  const protocolMin = requireProtocolVersion(frame.protocolMin, 'protocolMin');
+  const protocolMax = requireProtocolVersion(frame.protocolMax, 'protocolMax');
+  if (protocolMax < protocolMin) throw new Error('Invalid pre-#3277 epoch-27 protocol range');
+  requireString(frame.clientInstanceId, 'clientInstanceId');
+  requireEpoch27Surface(frame.surface);
+  requireProtocolVersion(frame.compatibilityEpoch, 'compatibilityEpoch');
+  requireString(frame.compositionId, 'compositionId');
+}
+
+function requireEpoch27Surface(value: unknown): void {
+  if (
+    value === 'desktop' ||
+    value === 'tui' ||
+    value === 'run' ||
+    value === 'activation' ||
+    value === 'bot' ||
+    value === 'inspect' ||
+    value === 'capability-provider'
+  )
+    return;
+  throw new Error('Invalid surface');
 }
 
 function negotiateEpoch27Protocol(protocolMin: number, protocolMax: number): number | undefined {
