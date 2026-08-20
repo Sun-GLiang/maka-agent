@@ -18,7 +18,6 @@ import {
   RUNTIME_HOST_COMPATIBILITY_EPOCH,
   RUNTIME_HOST_PROTOCOL_VERSION,
   RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION,
-  type ClientSurface,
   type HostIncompatible,
 } from '@maka/runtime-host/protocol';
 import {
@@ -50,7 +49,6 @@ test('CLI Runtime Host bootstrap launches the execution composition', async () =
   const context = await connectRuntimeHostCli(
     {
       rootPath: '/runtime-host-root',
-      surface: 'activation',
     },
     {
       connectOrSpawn: async (input) => {
@@ -80,7 +78,7 @@ test('CLI Runtime Host bootstrap launches the execution composition', async () =
 test('non-interactive CLI reports how to retire an incompatible Runtime Host', async () => {
   await assert.rejects(
     connectRuntimeHostCli(
-      { rootPath: '/runtime-host-root', surface: 'run' },
+      { rootPath: '/runtime-host-root' },
       {
         connectOrSpawn: async () => ({
           kind: 'incompatible',
@@ -123,7 +121,7 @@ test('non-interactive CLI reports how to retire an incompatible Runtime Host', a
 test('CLI explains a service Host without inventing resident work', async () => {
   await assert.rejects(
     connectRuntimeHostCli(
-      { rootPath: '/runtime-host-root', surface: 'run' },
+      { rootPath: '/runtime-host-root' },
       {
         connectOrSpawn: async () => ({
           kind: 'incompatible',
@@ -166,7 +164,7 @@ test('Runtime Host conflict waits only after an explicit wait answer', () => {
 test('CLI reports an actionable stored-data startup failure', async () => {
   await assert.rejects(
     connectRuntimeHostCli(
-      { rootPath: '/runtime-host-root', surface: 'run' },
+      { rootPath: '/runtime-host-root' },
       {
         connectOrSpawn: async () => ({
           kind: 'failed',
@@ -200,7 +198,7 @@ test('remote CLI profiles pin root identity and resolve credential outside the p
     close: async () => {},
   } as unknown as RuntimeHostConnection;
   const context = await connectRuntimeHostCli(
-    { rootPath: '/unused-local-root', surface: 'run', profileId: 'office' },
+    { rootPath: '/unused-local-root', profileId: 'office' },
     {
       connectOrSpawn: async () => {
         throw new Error('remote profile must not use local discovery');
@@ -292,7 +290,6 @@ test('remote CLI profile state and Client identity use the explicit Client Data 
     {
       rootPath: '/unused-local-root',
       clientDataRoot,
-      surface: 'run',
       profileId: 'office',
     },
     {
@@ -316,26 +313,22 @@ test('remote CLI profile state and Client identity use the explicit Client Data 
   await context.close();
 });
 
-test('CLI and TUI remote profiles preserve shared compatibility errors', async () => {
+test('remote profiles preserve shared compatibility errors', async () => {
   const cases: readonly {
-    readonly surface: Extract<ClientSurface, 'run' | 'tui'>;
     readonly handshake: HostIncompatible;
   }[] = [
     {
-      surface: 'run',
       handshake: incompatibleRemoteHandshake({
         compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH - 1,
       }),
     },
     {
-      surface: 'tui',
       handshake: incompatibleRemoteHandshake({
         protocolMin: RUNTIME_HOST_PROTOCOL_VERSION + 1,
         protocolMax: RUNTIME_HOST_PROTOCOL_VERSION + 2,
       }),
     },
     {
-      surface: 'run',
       handshake: incompatibleRemoteHandshake({
         compositionId: 'maka.other-composition',
         compositionRevision: 'other-revision',
@@ -343,9 +336,9 @@ test('CLI and TUI remote profiles preserve shared compatibility errors', async (
     },
   ];
 
-  for (const { surface, handshake } of cases) {
+  for (const [index, { handshake }] of cases.entries()) {
     const profile: RemoteRuntimeHostProfile = {
-      id: `office-${surface}-${handshake.compositionRevision}`,
+      id: `office-${index}-${handshake.compositionRevision}`,
       name: 'Office',
       kind: 'remote',
       transport: { kind: 'tls', url: 'wss://runtime.example.com/runtime-host' },
@@ -354,7 +347,7 @@ test('CLI and TUI remote profiles preserve shared compatibility errors', async (
     await assert.rejects(
       () =>
         connectRuntimeHostCli(
-          { rootPath: '/unused-local-root', surface, profileId: profile.id },
+          { rootPath: '/unused-local-root', profileId: profile.id },
           {
             connectRemoteProfile: (input) =>
               connectRemoteRuntimeHostProfile(input, {

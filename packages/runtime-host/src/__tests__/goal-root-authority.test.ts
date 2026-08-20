@@ -761,7 +761,6 @@ function operationContext() {
   return {
     hostEpoch: 'goal-root-epoch',
     connectionId: 'connection-1',
-    surface: 'tui' as const,
     principal: 'local_os_user' as const,
     acquireResidency: () => ({ release() {} }),
   };

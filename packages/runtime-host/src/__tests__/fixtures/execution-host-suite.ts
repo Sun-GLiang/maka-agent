@@ -1043,13 +1043,9 @@ export async function withExecutionRoot(
   }
 }
 
-export async function connectClient(
-  rootPath: string,
-  surface: 'desktop' | 'tui' | 'run',
-): Promise<RuntimeHostConnection> {
+export async function connectClient(rootPath: string): Promise<RuntimeHostConnection> {
   const result = await connectRuntimeHost({
     rootPath,
-    surface,
     protocol: CURRENT_PROTOCOL,
   });
   assert.equal(result.kind, 'connected');
@@ -1127,7 +1123,6 @@ export async function sendStartWithoutReadingResponse(
   await writeClientFrame(transport, {
     kind: 'hello',
     clientInstanceId: randomUUID(),
-    surface: 'desktop',
     protocolMin: CURRENT_PROTOCOL.min,
     protocolMax: CURRENT_PROTOCOL.max,
     compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,

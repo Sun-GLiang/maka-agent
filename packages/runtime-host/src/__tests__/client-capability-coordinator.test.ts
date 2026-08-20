@@ -138,7 +138,7 @@ describe('Host Client Capability coordinator', () => {
           },
         ],
       },
-      { ...connectionContext('connection-a'), surface: 'capability-provider' },
+      { ...connectionContext('connection-a') },
     );
     assert.equal(replaced.ok, true);
     assert.deepEqual(await coordinator.bindSession('session-a', 'connection-a'), { ok: true });
@@ -201,7 +201,6 @@ describe('Host Client Capability coordinator', () => {
     };
     const providerContext = {
       ...connectionContext('connection-a'),
-      surface: 'capability-provider' as const,
     };
     assert.equal(
       (await coordinator.handlers['client.capability.replace'](input, providerContext)).ok,
@@ -1184,7 +1183,6 @@ function connectionContext(connectionId: string) {
   return {
     hostEpoch: 'host',
     connectionId,
-    surface: 'desktop' as const,
     principal: 'local_os_user' as const,
     acquireResidency: () => ({ release: () => undefined }),
   };

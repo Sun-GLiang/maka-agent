@@ -88,15 +88,6 @@ export type EncodedProtocolMessage = Buffer & {
   readonly [encodedProtocolMessageBrand]: true;
 };
 
-export type ClientSurface =
-  | 'desktop'
-  | 'tui'
-  | 'run'
-  | 'activation'
-  | 'bot'
-  | 'inspect'
-  | 'capability-provider';
-
 export interface ProtocolRange {
   min: number;
   max: number;
@@ -105,7 +96,6 @@ export interface ProtocolRange {
 export interface ClientHello {
   kind: 'hello';
   clientInstanceId: string;
-  surface: ClientSurface;
   protocolMin: number;
   protocolMax: number;
   compatibilityEpoch: number;
@@ -219,7 +209,6 @@ export function decodeClientFrame(value: unknown): ClientFrame {
     return {
       kind: 'hello',
       clientInstanceId: requireClientInstanceId(frame.clientInstanceId),
-      surface: requireSurface(frame.surface),
       protocolMin,
       protocolMax,
       compatibilityEpoch: decodeCompatibilityEpoch(frame.compatibilityEpoch),
@@ -400,20 +389,6 @@ function decodeCompositionRevision(value: unknown): string {
 function decodeCompatibilityEpoch(value: unknown): number {
   // Epoch 0 represents peers and registrations that do not publish this field.
   return value === undefined ? 0 : requireCompatibilityEpoch(value);
-}
-
-function requireSurface(value: unknown): ClientSurface {
-  if (
-    value === 'desktop' ||
-    value === 'tui' ||
-    value === 'run' ||
-    value === 'activation' ||
-    value === 'bot' ||
-    value === 'inspect' ||
-    value === 'capability-provider'
-  )
-    return value;
-  throw invalidProtocolFrame('Invalid surface');
 }
 
 function requireAcceptedState(value: unknown): Exclude<HostLifecycleState, 'draining'> {

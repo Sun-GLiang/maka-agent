@@ -18,7 +18,6 @@ import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 const context: ConnectionContext = {
   hostEpoch: 'external-session-test-epoch',
   connectionId: 'external-session-test-client',
-  surface: 'desktop',
   principal: 'local_os_user',
   acquireResidency: () => ({ release: () => undefined }),
 };

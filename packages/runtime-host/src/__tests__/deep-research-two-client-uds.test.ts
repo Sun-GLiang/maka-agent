@@ -67,7 +67,7 @@ test('two Clients and a restarted production Host share one Deep Research projec
       composition: defineInteractiveRuntimeHostComposition(createExecutionRuntimeHostComposition),
     });
     owner = undefined;
-    [desktop, tui] = await Promise.all([connect(root, 'desktop'), connect(root, 'tui')]);
+    [desktop, tui] = await Promise.all([connect(root), connect(root)]);
 
     const [desktopProjection, tuiProjection] = await Promise.all([
       desktop.queryDeepResearch({ sessionId: session.id }),
@@ -108,7 +108,7 @@ test('two Clients and a restarted production Host share one Deep Research projec
       composition: defineInteractiveRuntimeHostComposition(createExecutionRuntimeHostComposition),
     });
     owner = undefined;
-    tui = await connect(root, 'tui');
+    tui = await connect(root);
 
     assert.deepEqual(await tui.queryDeepResearch({ sessionId: session.id }), desktopProjection);
   } finally {
@@ -119,11 +119,8 @@ test('two Clients and a restarted production Host share one Deep Research projec
   }
 });
 
-async function connect(
-  rootPath: string,
-  surface: 'desktop' | 'tui',
-): Promise<RuntimeHostConnection> {
-  const result = await connectRuntimeHost({ rootPath, surface, protocol: PROTOCOL });
+async function connect(rootPath: string): Promise<RuntimeHostConnection> {
+  const result = await connectRuntimeHost({ rootPath, protocol: PROTOCOL });
   assert.equal(result.kind, 'connected');
   if (result.kind !== 'connected') throw new Error('Unable to connect to Runtime Host');
   return result.connection;

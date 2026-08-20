@@ -753,7 +753,6 @@ function runFixture(input: {
       connection,
       connectionCatalog(),
       {
-        surface: 'run',
         workspaceRoot: '/data',
         cwd: '/workspace',
         ...(input.graph ? { enableAgentGraph: true } : {}),

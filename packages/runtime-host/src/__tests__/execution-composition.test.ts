@@ -264,7 +264,6 @@ test('hosted execution settles while its tracked environment resource remains ve
     const operationContext = {
       hostEpoch: 'hosted-environment-test',
       connectionId: 'hosted-environment-test',
-      surface: 'run' as const,
       principal: 'runtime_host' as const,
       acquireResidency: () => ({ release() {} }),
     };
@@ -363,7 +362,6 @@ test('production composition commits automatic titles through Host-owned Session
         {
           hostEpoch: 'execution-composition-test',
           connectionId: 'title-client',
-          surface: 'tui',
           principal: 'local_os_user',
           acquireResidency: () => ({ release() {} }),
         },
@@ -401,7 +399,6 @@ test('a legacy fake-backend session is refused with the product reason, not a re
         {
           hostEpoch: 'execution-composition-test',
           connectionId: 'legacy-fake-client',
-          surface: 'tui',
           principal: 'local_os_user',
           acquireResidency: () => ({ release() {} }),
         },
@@ -440,7 +437,6 @@ test('production composition orphans ownerless ShellRuns before serving Resource
         {
           hostEpoch: 'execution-composition-test',
           connectionId: 'recovery-client',
-          surface: 'tui',
           principal: 'local_os_user',
           acquireResidency: () => ({ release() {} }),
         },
@@ -494,7 +490,6 @@ test('production Skill catalog resolves a Graph child durable tool surface', asy
         {
           hostEpoch: 'execution-composition-test',
           connectionId: 'graph-child-skill-client',
-          surface: 'desktop',
           principal: 'local_os_user',
           acquireResidency: () => ({ release() {} }),
         },
@@ -530,7 +525,6 @@ test('new Full Access Plan Skill previews use the mutating tool surface', async 
       const connection = {
         hostEpoch: 'execution-composition-test',
         connectionId: 'new-session-skill-client',
-        surface: 'desktop' as const,
         principal: 'local_os_user' as const,
         acquireResidency: () => ({ release() {} }),
       };
@@ -652,7 +646,6 @@ test('Skill capability previews omit unavailable Tavily search surfaces', async 
       const connectionContext = {
         hostEpoch: 'execution-composition-test',
         connectionId: 'web-search-skill-preview-client',
-        surface: 'desktop' as const,
         principal: 'local_os_user' as const,
         acquireResidency: () => ({ release() {} }),
       };
@@ -790,7 +783,6 @@ test('production composition validates graph stop before aborting a claimed chil
       const clientContext = {
         hostEpoch: 'execution-composition-test',
         connectionId: 'graph-stop-client',
-        surface: 'tui' as const,
         principal: 'local_os_user' as const,
         acquireResidency: () => ({ release() {} }),
       };

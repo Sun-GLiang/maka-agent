@@ -29,7 +29,6 @@ import { HostRuntimePolicyCoordinator } from '../server/runtime-policy-coordinat
 const context: ConnectionContext = {
   hostEpoch: 'runtime-policy-test-epoch',
   connectionId: 'runtime-policy-test-connection',
-  surface: 'desktop',
   principal: 'local_os_user',
   acquireResidency: () => ({ release: () => undefined }),
 };

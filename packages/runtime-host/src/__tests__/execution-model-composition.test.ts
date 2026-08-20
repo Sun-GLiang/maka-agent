@@ -572,7 +572,6 @@ test('production backend creation continues after a Session Client Capability is
   const context: ConnectionContext = {
     hostEpoch: 'backend-creation-epoch',
     connectionId: 'provider-a',
-    surface: 'desktop',
     principal: 'local_os_user',
     acquireResidency: () => ({ release() {} }),
   };
@@ -660,7 +659,6 @@ test('production backend preserves coordinator Client Capability semantics acros
     const context = {
       hostEpoch: 'client-capability-host-epoch',
       connectionId: 'client-capability-provider',
-      surface: 'tui',
       principal: 'local_os_user',
       acquireResidency: () => ({ release() {} }),
     } satisfies ConnectionContext;
@@ -817,7 +815,6 @@ test('hosted execution freezes the headless coding provider wire contract', asyn
   const context: ConnectionContext = {
     hostEpoch: 'hosted-profile-wire-epoch',
     connectionId: 'hosted-profile-wire-client',
-    surface: 'run',
     principal: 'runtime_host',
     acquireResidency: () => residencies.acquire('hosted-profile-wire-operation'),
   };
@@ -972,7 +969,6 @@ test('production Host executes a canonical ai-sdk Session against a real provide
   const connectionContext: ConnectionContext = {
     hostEpoch: 'real-model-test-epoch',
     connectionId: 'real-model-test-client',
-    surface: 'tui',
     principal: 'local_os_user',
     acquireResidency: () => ({ release() {} }),
   };
@@ -1320,7 +1316,6 @@ test('production Host executes and durably supervises an Agent Graph over a real
   const context: ConnectionContext = {
     hostEpoch: 'agent-graph-test-epoch',
     connectionId: 'agent-graph-test-client',
-    surface: 'tui',
     principal: 'local_os_user',
     acquireResidency: () => {
       liveResidencies += 1;
@@ -1523,7 +1518,6 @@ test('production Host executes a durable runnable child with an exact tool ceili
   const context: ConnectionContext = {
     hostEpoch: 'child-agent-test-epoch',
     connectionId: 'child-agent-test-client',
-    surface: 'tui',
     principal: 'local_os_user',
     acquireResidency: () => ({ release() {} }),
   };
@@ -1704,7 +1698,6 @@ test('production Host publishes and retires an implementation child patch', asyn
   const context: ConnectionContext = {
     hostEpoch: 'child-agent-test-epoch',
     connectionId: 'child-agent-test-client',
-    surface: 'tui',
     principal: 'local_os_user',
     acquireResidency: () => ({ release() {} }),
   };

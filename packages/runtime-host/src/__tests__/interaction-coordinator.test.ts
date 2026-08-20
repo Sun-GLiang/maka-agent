@@ -793,7 +793,6 @@ function connection(): ConnectionContext {
   return {
     hostEpoch: 'host_epoch_1',
     connectionId: 'connection_1',
-    surface: 'desktop',
     principal: 'local_os_user',
     acquireResidency: () => ({ release: () => {} }),
   };

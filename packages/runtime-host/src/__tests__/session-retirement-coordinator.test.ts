@@ -21,7 +21,6 @@ import { HostSessionRetirementCoordinator } from '../server/session-retirement-c
 const CONNECTION_CONTEXT: ConnectionContext = {
   hostEpoch: 'retirement-test',
   connectionId: 'retirement-test-connection',
-  surface: 'tui',
   principal: 'local_os_user',
   acquireResidency: () => ({ release() {} }),
 };

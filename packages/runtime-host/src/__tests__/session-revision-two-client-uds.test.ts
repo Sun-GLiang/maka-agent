@@ -121,8 +121,8 @@ async function verifyConcurrentRevisionAuthority(
   graphChildSessionId: string,
   continuationSourceSessionId: string,
 ): Promise<void> {
-  const desktop = await connectClient(root, 'desktop');
-  const tui = await connectClient(root, 'tui');
+  const desktop = await connectClient(root);
+  const tui = await connectClient(root);
   try {
     const source = await querySession(desktop, sourceSessionId);
     const continuationSource = await querySession(desktop, continuationSourceSessionId);
@@ -399,7 +399,7 @@ async function verifyRestartRecoveryAndAdmission(
   root: string,
   sourceSessionId: string,
 ): Promise<void> {
-  const restarted = await connectClient(root, 'desktop');
+  const restarted = await connectClient(root);
   try {
     assert.deepEqual(
       await restarted.request('session.catalog.query', {
@@ -485,7 +485,7 @@ async function verifyRestartRecoveryAndAdmission(
 }
 
 async function verifySecondRestartRetention(root: string, sourceSessionId: string): Promise<void> {
-  const recovered = await connectClient(root, 'desktop');
+  const recovered = await connectClient(root);
   try {
     assert.deepEqual(
       await recovered.request('session.catalog.query', {
@@ -1508,13 +1508,9 @@ async function terminateChild(child: ChildProcess): Promise<void> {
   );
 }
 
-async function connectClient(
-  rootPath: string,
-  surface: 'desktop' | 'tui',
-): Promise<RuntimeHostConnection> {
+async function connectClient(rootPath: string): Promise<RuntimeHostConnection> {
   const result = await connectRuntimeHost({
     rootPath,
-    surface,
     protocol: CURRENT_PROTOCOL,
   });
   assert.equal(result.kind, 'connected');
