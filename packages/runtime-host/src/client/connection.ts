@@ -1388,9 +1388,11 @@ interface ExchangeRuntimeHostHandshakeInput {
 
 interface LegacySurfaceClientHello extends ClientHello {
   /**
-   * Old Hosts require this field while decoding the bootstrap hello. Keep the
-   * sentinel private until a surface-tolerant Host is the minimum supported
-   * version; it is not part of the Client identity seen by new Hosts.
+   * Hosts from compatibility epoch 27 may require this field while decoding
+   * the bootstrap hello. Keep the sentinel private until the minimum supported
+   * compatibility epoch is greater than 27; the removal change must bump the
+   * epoch so old Hosts take the structured incompatibility path. Tracked by
+   * #3297. This is not part of the Client identity seen by new Hosts.
    */
   readonly surface: 'desktop';
 }

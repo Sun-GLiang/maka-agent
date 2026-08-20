@@ -1759,7 +1759,7 @@ describe('non-serving Runtime Host kernel', () => {
     });
   });
 
-  test('accepts a Client hello without a surface identity', async () => {
+  test('accepts Client hellos with and without the legacy surface identity', async () => {
     await withHostPaths(async (paths) => {
       const candidate = await startTestRuntimeHostCandidate(paths, {
         rootPath: paths.root,
@@ -1768,23 +1768,36 @@ describe('non-serving Runtime Host kernel', () => {
       assert.equal(candidate.kind, 'winner');
       if (candidate.kind !== 'winner') return;
 
-      const transport = new FramedTransport(await openSocket(candidate.host.endpoint));
       try {
-        await writeRawLocalIpc(
-          transport,
-          encodeLegacyProtocolFrame({
+        for (const hello of [
+          {
             kind: 'hello',
             clientInstanceId: 'client-without-surface',
             protocolMin: CURRENT_PROTOCOL.min,
             protocolMax: CURRENT_PROTOCOL.max,
             compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
             compositionId: 'maka.interactive',
-          }),
-        );
-        const response = decodeHostFrame(await transport.read(2_000));
-        assert.ok('kind' in response && response.kind === 'accepted');
+          },
+          {
+            kind: 'hello',
+            clientInstanceId: 'legacy-client-with-surface',
+            surface: 'tui',
+            protocolMin: CURRENT_PROTOCOL.min,
+            protocolMax: CURRENT_PROTOCOL.max,
+            compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
+            compositionId: 'maka.interactive',
+          },
+        ]) {
+          const transport = new FramedTransport(await openSocket(candidate.host.endpoint));
+          try {
+            await writeRawLocalIpc(transport, encodeLegacyProtocolFrame(hello));
+            const response = decodeHostFrame(await transport.read(2_000));
+            assert.ok('kind' in response && response.kind === 'accepted');
+          } finally {
+            transport.abort();
+          }
+        }
       } finally {
-        transport.abort();
         await candidate.host.close();
       }
     });

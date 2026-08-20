@@ -313,6 +313,71 @@ test('remote CLI profile state and Client identity use the explicit Client Data 
   await context.close();
 });
 
+test('remote CLI enables SSH prompts only for an explicitly interactive TTY', async (t) => {
+  const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  const stdoutIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+  t.after(() => {
+    if (stdinIsTTY) Object.defineProperty(process.stdin, 'isTTY', stdinIsTTY);
+    else Reflect.deleteProperty(process.stdin, 'isTTY');
+    if (stdoutIsTTY) Object.defineProperty(process.stdout, 'isTTY', stdoutIsTTY);
+    else Reflect.deleteProperty(process.stdout, 'isTTY');
+  });
+  Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
+  Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true });
+
+  const rootId = 'd'.repeat(64);
+  const profile: RemoteRuntimeHostProfile = {
+    id: 'office',
+    name: 'Office',
+    kind: 'remote',
+    transport: {
+      kind: 'ssh',
+      destination: 'operator@runtime.example.com',
+      remotePort: 7443,
+      websocketPath: '/runtime-host',
+    },
+    rootId,
+  };
+  const sshInteractions: string[] = [];
+  const connect = async (interactiveSsh?: boolean) =>
+    connectRuntimeHostCli(
+      {
+        rootPath: '/unused-local-root',
+        profileId: profile.id,
+        ...(interactiveSsh === undefined ? {} : { interactiveSsh }),
+      },
+      {
+        connectRemoteProfile: async (input) => {
+          assert.ok(input.sshInteraction);
+          sshInteractions.push(input.sshInteraction);
+          return {
+            rootId,
+            hostEpoch: 'host-remote',
+            connectionId: `connection-${sshInteractions.length}`,
+            selectedProtocol: 0,
+            closed: new Promise<void>(() => {}),
+            status: async () => ({ state: 'ready' }),
+            subscribeConfigurationChanges: () => () => {},
+            subscribeProjectCatalogChanges: () => () => {},
+            subscribeSessionCatalogChanges: () => () => {},
+            subscribeScheduledTaskChanges: () => () => {},
+            close: async () => {},
+          } as unknown as RuntimeHostConnection;
+        },
+        profileCatalog: singleRemoteProfileCatalog(profile),
+        loadClientInstanceId: async () => '44444444-4444-4444-8444-444444444444',
+        readConnectionCatalog: async () => ({ revision: 1, defaultTarget: null, connections: [] }),
+      },
+    );
+
+  const interactive = await connect(true);
+  await interactive.close();
+  const nonInteractive = await connect();
+  await nonInteractive.close();
+
+  assert.deepEqual(sshInteractions, ['inherit', 'batch']);
+});
+
 test('remote profiles preserve shared compatibility errors', async () => {
   const cases: readonly {
     readonly handshake: HostIncompatible;
