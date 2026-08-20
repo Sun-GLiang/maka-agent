@@ -18,8 +18,8 @@
  *   - effective model is in `connection.models` (when that list is
  *     enumerated)
  *
- * @kenji + @xuan PR110a review gate: send-path / onboarding / quick
- * chat must call this helper rather than reimplementing the criteria.
+ * Product readiness projections must call this helper rather than
+ * reimplementing the criteria.
  */
 
 import {
