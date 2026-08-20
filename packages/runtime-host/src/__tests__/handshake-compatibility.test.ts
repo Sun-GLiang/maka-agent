@@ -20,21 +20,24 @@ import {
   RUNTIME_HOST_PROTOCOL_VERSION,
   RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION,
   type HostFrame,
+  type HostHandshakeResult,
   type RequestFrame,
 } from '../protocol/index.js';
 import { FramedTransport, RuntimeHostTransportError } from '../transport/framed-transport.js';
 
+const EPOCH_27_TOLERANT_HOST_COMPATIBILITY_EPOCH = 27;
+const EPOCH_27_TOLERANT_HOST_REVISION = 'a6f33c9522ee2d4366046b84e5ed442aa1aaafe2';
 const PROTOCOL = {
   min: RUNTIME_HOST_PROTOCOL_VERSION,
   max: RUNTIME_HOST_PROTOCOL_VERSION,
 } as const;
 
-test('emits the legacy desktop surface shim in the raw Client hello', async () => {
+test('omits the legacy surface identity from the raw Client hello', async () => {
   await withForgedHandshakePeer(
     async (transport, hostEpoch, rootId) => {
       const rawHello = await transport.read(2_000);
       assert.ok(rawHello && typeof rawHello === 'object');
-      assert.equal((rawHello as Record<string, unknown>).surface, 'desktop');
+      assert.equal('surface' in rawHello, false);
       const hello = decodeClientFrame(rawHello);
       assert.ok('kind' in hello && hello.kind === 'hello');
       await writeProtocolFrame(transport, {
@@ -53,6 +56,40 @@ test('emits the legacy desktop surface shim in the raw Client hello', async () =
     async (result) => {
       assert.equal(result.kind, 'connected');
     },
+  );
+});
+
+test('receives structured incompatibility guidance from a tolerant epoch-27 Host', async () => {
+  await withForgedHandshakePeer(
+    async (transport, hostEpoch, rootId) => {
+      const rawHello = await transport.read(2_000);
+      assert.ok(rawHello && typeof rawHello === 'object');
+      assert.equal('surface' in rawHello, false);
+      const { hello, response } = await admitEpoch27TolerantClientHello({
+        rawHello,
+        transport,
+        hostEpoch,
+        rootId,
+      });
+      assert.equal(response.kind, 'incompatible');
+      assert.equal(response.compositionRevision, EPOCH_27_TOLERANT_HOST_REVISION);
+      assert.ok(hello.compatibilityEpoch > EPOCH_27_TOLERANT_HOST_COMPATIBILITY_EPOCH);
+      assert.equal(hello.protocolMin, RUNTIME_HOST_PROTOCOL_VERSION + 1);
+      assert.equal(hello.protocolMax, RUNTIME_HOST_PROTOCOL_VERSION + 1);
+      await transport.closed;
+    },
+    async (result) => {
+      assert.equal(result.kind, 'incompatible');
+      if (result.kind === 'incompatible') {
+        assert.equal(
+          result.handshake.compatibilityEpoch,
+          EPOCH_27_TOLERANT_HOST_COMPATIBILITY_EPOCH,
+        );
+        assert.equal(result.handshake.compositionRevision, EPOCH_27_TOLERANT_HOST_REVISION);
+        assert.equal(result.handshake.replacement, 'blocked_by_residency');
+      }
+    },
+    { registrationCompatibilityEpoch: EPOCH_27_TOLERANT_HOST_COMPATIBILITY_EPOCH },
   );
 });
 
@@ -93,9 +130,106 @@ test('rejects an epoch-23 Host before any domain command', async () => {
   assert.equal(admittedRequest, undefined);
 });
 
+interface Epoch27TolerantClientHello {
+  readonly kind: 'hello';
+  readonly clientInstanceId: string;
+  readonly protocolMin: number;
+  readonly protocolMax: number;
+  readonly compatibilityEpoch: number;
+  readonly compositionId: string;
+}
+
+/**
+ * Minimal historical fixture for the no-generation/no-takeover admission path
+ * in the post-#3277 epoch-27 Host at EPOCH_27_TOLERANT_HOST_REVISION. Keep its
+ * decoder and compatibility value independent of the current implementation.
+ */
+async function admitEpoch27TolerantClientHello(input: {
+  readonly rawHello: unknown;
+  readonly transport: FramedTransport;
+  readonly hostEpoch: string;
+  readonly rootId: string;
+}): Promise<{
+  readonly hello: Epoch27TolerantClientHello;
+  readonly response: HostHandshakeResult;
+}> {
+  const hello = decodeEpoch27TolerantClientHello(input.rawHello);
+  const selectedProtocol = negotiateEpoch27Protocol(hello.protocolMin, hello.protocolMax);
+  const incompatible =
+    selectedProtocol === undefined ||
+    hello.compatibilityEpoch !== EPOCH_27_TOLERANT_HOST_COMPATIBILITY_EPOCH ||
+    hello.compositionId !== 'maka.interactive';
+  const response: HostHandshakeResult = incompatible
+    ? {
+        kind: 'incompatible',
+        hostEpoch: input.hostEpoch,
+        protocolMin: 0,
+        protocolMax: 0,
+        compatibilityEpoch: EPOCH_27_TOLERANT_HOST_COMPATIBILITY_EPOCH,
+        compositionId: 'maka.interactive',
+        compositionRevision: EPOCH_27_TOLERANT_HOST_REVISION,
+        state: 'ready',
+        replacement: 'blocked_by_residency',
+      }
+    : {
+        kind: 'accepted',
+        rootId: input.rootId,
+        hostEpoch: input.hostEpoch,
+        connectionId: 'epoch-27-tolerant-connection',
+        selectedProtocol,
+        compatibilityEpoch: EPOCH_27_TOLERANT_HOST_COMPATIBILITY_EPOCH,
+        compositionId: 'maka.interactive',
+        compositionRevision: EPOCH_27_TOLERANT_HOST_REVISION,
+        state: 'ready',
+      };
+  await input.transport.write(encodeProtocolMessage(response));
+  return { hello, response };
+}
+
+function decodeEpoch27TolerantClientHello(value: unknown): Epoch27TolerantClientHello {
+  const frame = requireRecord(value, 'epoch-27 Client hello');
+  if (frame.kind !== 'hello') throw new Error('Expected an epoch-27 Client hello');
+  const protocolMin = requireProtocolVersion(frame.protocolMin, 'protocolMin');
+  const protocolMax = requireProtocolVersion(frame.protocolMax, 'protocolMax');
+  if (protocolMax < protocolMin) throw new Error('Invalid epoch-27 Client protocol range');
+  return {
+    kind: 'hello',
+    clientInstanceId: requireString(frame.clientInstanceId, 'clientInstanceId'),
+    protocolMin,
+    protocolMax,
+    compatibilityEpoch: requireProtocolVersion(frame.compatibilityEpoch, 'compatibilityEpoch'),
+    compositionId: requireString(frame.compositionId, 'compositionId'),
+  };
+}
+
+function negotiateEpoch27Protocol(protocolMin: number, protocolMax: number): number | undefined {
+  const selected = Math.min(protocolMax, 0);
+  return selected >= Math.max(protocolMin, 0) ? selected : undefined;
+}
+
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Invalid ${label}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireProtocolVersion(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error(`Invalid ${label}`);
+  }
+  return value as number;
+}
+
+function requireString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length === 0) throw new Error(`Invalid ${label}`);
+  return value;
+}
+
 async function withForgedHandshakePeer(
   serve: (transport: FramedTransport, hostEpoch: string, rootId: string) => Promise<void>,
   run: (result: ConnectRuntimeHostResult) => Promise<void>,
+  options: { readonly registrationCompatibilityEpoch?: number } = {},
 ): Promise<void> {
   const base = await mkdtemp(join(tmpdir(), 'maka-runtime-host-handshake-'));
   const rootPath = join(base, 'root');
@@ -142,7 +276,8 @@ async function withForgedHandshakePeer(
       endpoint: endpoint.path,
       protocolMin: RUNTIME_HOST_PROTOCOL_VERSION,
       protocolMax: RUNTIME_HOST_PROTOCOL_VERSION,
-      compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
+      compatibilityEpoch:
+        options.registrationCompatibilityEpoch ?? RUNTIME_HOST_COMPATIBILITY_EPOCH,
       compositionId: 'maka.interactive',
       compositionRevision: '1',
       state: 'ready',

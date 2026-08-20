@@ -72,7 +72,10 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 27 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 28 as const;
+// 28: Clients stop sending the retired surface identity in their bootstrap
+// hello. Epoch-27 Hosts from the tolerant rollout reject the new Client with
+// a structured incompatibility response instead of admitting domain work.
 // 27: Runtime Policy carries the Host-owned shell preference used by tool,
 // PTY, and prompt composition. Older peers cannot safely preserve that field.
 // Transcript pages amortize storage and network round trips with a 512 KiB raw
