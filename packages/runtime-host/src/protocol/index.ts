@@ -72,13 +72,7 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 30 as const;
-// 30: Clients stop sending the retired surface identity in their bootstrap
-// hello. Epoch-27 Hosts from the tolerant rollout reject the new Client with
-// a structured incompatibility response instead of admitting domain work.
-// No tagged release carried the surface-requiring epoch-27 decoder: the latest
-// release predated epoch 27, and #3277 made decoding tolerant before the next
-// release. A pinned regression documents the bare abort in that unreleased gap.
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 29 as const;
 // 29: `goal.arm` is a new wire operation. An older Host decodes it as unknown
 // and tears the connection down, so the pair must be refused up front.
 // 28: Relay model profiles carry the Fast service-tier declaration. Older

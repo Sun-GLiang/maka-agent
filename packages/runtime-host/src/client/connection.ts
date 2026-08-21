@@ -1386,6 +1386,17 @@ interface ExchangeRuntimeHostHandshakeInput {
   readonly connectionResource?: RuntimeHostConnectionResource;
 }
 
+interface LegacySurfaceClientHello extends ClientHello {
+  /**
+   * Released Hosts through v0.1.11 require this field while decoding the
+   * bootstrap hello, before compatibility negotiation can run. Keep the
+   * sentinel private until the minimum supported Host release has a tolerant
+   * decoder. Tracked by #3297. This is not part of the Client identity seen by
+   * current Hosts.
+   */
+  readonly surface: 'desktop';
+}
+
 async function exchangeRuntimeHostHandshake(
   input: ExchangeRuntimeHostHandshakeInput,
 ): Promise<
@@ -1394,9 +1405,10 @@ async function exchangeRuntimeHostHandshake(
   | { kind: 'draining' }
 > {
   const helloProtocol = input.helloProtocol ?? input.protocol;
-  const hello: ClientHello = {
+  const hello: LegacySurfaceClientHello = {
     kind: 'hello',
     clientInstanceId: input.clientInstanceId,
+    surface: 'desktop',
     protocolMin: helloProtocol.min,
     protocolMax: helloProtocol.max,
     compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,

@@ -26,7 +26,7 @@ import {
   shouldRetryRuntimeHostConflict,
 } from '../runtime-host-cli-context.js';
 
-const LEGACY_SURFACE_COMPATIBILITY_EPOCH = 27;
+const V0_1_11_HOST_COMPATIBILITY_EPOCH = 25;
 
 test('CLI Runtime Host bootstrap launches the execution composition', async () => {
   let candidateEntrypoint: string | URL | undefined;
@@ -78,7 +78,7 @@ test('CLI Runtime Host bootstrap launches the execution composition', async () =
 });
 
 test('non-interactive CLI reports how to retire an incompatible Runtime Host', async () => {
-  assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > LEGACY_SURFACE_COMPATIBILITY_EPOCH);
+  assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > V0_1_11_HOST_COMPATIBILITY_EPOCH);
   await assert.rejects(
     connectRuntimeHostCli(
       { rootPath: '/runtime-host-root' },
@@ -86,14 +86,14 @@ test('non-interactive CLI reports how to retire an incompatible Runtime Host', a
         connectOrSpawn: async () => ({
           kind: 'incompatible',
           registration: hostRegistration({
-            compatibilityEpoch: LEGACY_SURFACE_COMPATIBILITY_EPOCH,
+            compatibilityEpoch: V0_1_11_HOST_COMPATIBILITY_EPOCH,
           }),
           handshake: {
             kind: 'incompatible',
             hostEpoch: 'host-old',
             protocolMin: 0,
             protocolMax: 0,
-            compatibilityEpoch: LEGACY_SURFACE_COMPATIBILITY_EPOCH,
+            compatibilityEpoch: V0_1_11_HOST_COMPATIBILITY_EPOCH,
             compositionId: INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID,
             compositionRevision: 'legacy',
             state: 'ready',
@@ -108,7 +108,7 @@ test('non-interactive CLI reports how to retire an incompatible Runtime Host', a
       assert.match(
         error.message,
         new RegExp(
-          `PID 42; lifecycle ephemeral; compatibility epoch ${LEGACY_SURFACE_COMPATIBILITY_EPOCH}`,
+          `PID 42; lifecycle ephemeral; compatibility epoch ${V0_1_11_HOST_COMPATIBILITY_EPOCH}`,
         ),
       );
       assert.match(
