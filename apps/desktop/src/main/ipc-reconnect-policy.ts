@@ -41,6 +41,11 @@ export interface ReconciledControlHandlers<Context, Result> {
     event: Parameters<IpcHandler>[0],
     ...args: unknown[]
   ): Promise<Result>;
+  reconciliationUnavailable(
+    context: Context,
+    event: Parameters<IpcHandler>[0],
+    ...args: unknown[]
+  ): Promise<Result>;
 }
 
 export interface ReconnectableReadIpcMain extends Pick<IpcMain, "handle"> {

@@ -261,6 +261,15 @@ test('goal:arm reconciliation reports different, missing, and unavailable author
     condition: 'Default budget goal',
   });
   const context = (step as { context: unknown }).context;
+  assert.deepEqual(
+    await firstIpc.reconciliationUnavailable(
+      'goal:arm',
+      context,
+      'session-1',
+      { condition: 'Default budget goal' },
+    ),
+    { kind: 'reconciliation_unavailable' },
+  );
 
   const reconcileWith = async (
     queryGoal: DomainClient['queryGoal'],
@@ -1360,9 +1369,23 @@ function reconciledIpcHarness() {
       assert.ok(handlers, `missing reconciled control: ${channel}`);
       return handlers.reconcile(context, {} as never, ...args);
     },
+    async reconciliationUnavailable(
+      channel: string,
+      context: unknown,
+      ...args: unknown[]
+    ): Promise<unknown> {
+      const handlers = controlHandlers.get(channel);
+      assert.ok(handlers, `missing reconciled control: ${channel}`);
+      return handlers.reconciliationUnavailable(context, {} as never, ...args);
+    },
   } satisfies ReconnectableReadIpcMain & {
     dispatch(channel: string, ...args: unknown[]): Promise<unknown>;
     reconcile(channel: string, context: unknown, ...args: unknown[]): Promise<unknown>;
+    reconciliationUnavailable(
+      channel: string,
+      context: unknown,
+      ...args: unknown[]
+    ): Promise<unknown>;
   };
 }
 

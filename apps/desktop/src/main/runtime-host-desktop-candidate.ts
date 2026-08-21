@@ -775,6 +775,10 @@ class ScopedIpcMain implements ReconnectableReadIpcMain {
         requireDesktopTargetScope(scope, this.scope);
         return handlers.reconcile(context, event, ...args);
       },
+      reconciliationUnavailable: (context, event, scope, ...args) => {
+        requireDesktopTargetScope(scope, this.scope);
+        return handlers.reconciliationUnavailable(context, event, ...args);
+      },
     };
     if (this.#ipcMain.handleReconciledControl) {
       this.#ipcMain.handleReconciledControl(channel, scopedHandlers);

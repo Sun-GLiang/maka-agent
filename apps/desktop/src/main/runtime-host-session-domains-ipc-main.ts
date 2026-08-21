@@ -169,6 +169,9 @@ export function registerRuntimeHostSessionDomainsIpc(
           return { kind: 'reconciliation_unavailable' };
         }
       },
+      reconciliationUnavailable: async () => ({
+        kind: 'reconciliation_unavailable',
+      }),
     },
   );
 

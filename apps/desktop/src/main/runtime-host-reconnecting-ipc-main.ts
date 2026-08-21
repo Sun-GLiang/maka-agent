@@ -31,6 +31,21 @@ type ReconcileIpcHandler = (
   ...args: unknown[]
 ) => Promise<unknown>;
 
+type ReconciliationUnavailableIpcHandler = ReconcileIpcHandler;
+
+const DEFAULT_RECONCILIATION_WAIT_TIMEOUT_MS = 15_000;
+
+export interface RuntimeHostReconnectingIpcMainOptions {
+  readonly reconciliationWaitTimeoutMs?: number;
+}
+
+class ReconciliationWaitExpiredError extends Error {
+  constructor() {
+    super("Runtime Host reconciliation replacement wait expired");
+    this.name = "ReconciliationWaitExpiredError";
+  }
+}
+
 interface HandlerWaiter {
   readonly epoch: string;
   readonly resolve: (handler: BoundHandler) => void;
@@ -42,6 +57,7 @@ interface BoundHandler {
   readonly owner: symbol;
   readonly listener: IpcHandler;
   readonly reconcile?: ReconcileIpcHandler;
+  readonly reconciliationUnavailable?: ReconciliationUnavailableIpcHandler;
 }
 
 interface HandlerSlot {
@@ -74,10 +90,20 @@ export class RuntimeHostReconnectingIpcMain {
   readonly #ipcMain: Pick<IpcMain, "handle" | "removeHandler">;
   readonly #slots = new Map<string, HandlerSlot>();
   readonly #activeEpochs = new Set<string>();
+  readonly #reconciliationWaitTimeoutMs: number;
   #closed = false;
 
-  constructor(ipcMain: Pick<IpcMain, "handle" | "removeHandler">) {
+  constructor(
+    ipcMain: Pick<IpcMain, "handle" | "removeHandler">,
+    options: RuntimeHostReconnectingIpcMainOptions = {},
+  ) {
     this.#ipcMain = ipcMain;
+    const reconciliationWaitTimeoutMs =
+      options.reconciliationWaitTimeoutMs ?? DEFAULT_RECONCILIATION_WAIT_TIMEOUT_MS;
+    if (!Number.isSafeInteger(reconciliationWaitTimeoutMs) || reconciliationWaitTimeoutMs <= 0) {
+      throw new TypeError("Runtime Host reconciliation wait timeout must be positive");
+    }
+    this.#reconciliationWaitTimeoutMs = reconciliationWaitTimeoutMs;
   }
 
   createTarget(epoch: string): RuntimeHostTargetIpcMain {
@@ -133,6 +159,7 @@ export class RuntimeHostReconnectingIpcMain {
     reconnectableRead: boolean,
     reconciledControl: boolean,
     reconcile?: ReconcileIpcHandler,
+    reconciliationUnavailable?: ReconciliationUnavailableIpcHandler,
   ): void {
     if (this.#closed) throw new Error("Desktop Runtime Host IPC router is closed");
     let slot = this.#slots.get(channel);
@@ -158,7 +185,13 @@ export class RuntimeHostReconnectingIpcMain {
     if (slot.handlers.has(epoch)) {
       throw new Error(`Desktop Runtime Host IPC handler already exists: ${channel}`);
     }
-    const handler = { epoch, owner, listener, ...(reconcile ? { reconcile } : {}) };
+    const handler = {
+      epoch,
+      owner,
+      listener,
+      ...(reconcile ? { reconcile } : {}),
+      ...(reconciliationUnavailable ? { reconciliationUnavailable } : {}),
+    };
     slot.handlers.set(epoch, handler);
     for (const waiter of [...slot.waiters]) {
       if (waiter.epoch !== epoch) continue;
@@ -181,6 +214,7 @@ export class RuntimeHostReconnectingIpcMain {
       false,
       true,
       handlers.reconcile as unknown as ReconcileIpcHandler,
+      handlers.reconciliationUnavailable as unknown as ReconciliationUnavailableIpcHandler,
     );
   }
 
@@ -198,10 +232,32 @@ export class RuntimeHostReconnectingIpcMain {
     args: readonly unknown[],
   ): Promise<unknown> {
     const epoch = this.#requireTargetEpoch(args[0]);
-    let handler = slot.handlers.get(epoch);
-    if (!handler) handler = await this.#waitForHandler(slot, epoch);
+    let handler: BoundHandler =
+      slot.handlers.get(epoch) ?? await this.#waitForHandler(slot, epoch);
     let reconciliationContext: unknown;
     let reconciling = false;
+    let reconciliationDeadline: number | undefined;
+    const waitForReplacement = async (
+      previous: BoundHandler,
+    ): Promise<BoundHandler | undefined> => {
+      if (!reconciling) return this.#waitForHandler(slot, epoch, previous);
+      const remainingMs = Math.max(
+        0,
+        (reconciliationDeadline ?? Date.now()) - Date.now(),
+      );
+      try {
+        return await this.#waitForHandler(slot, epoch, previous, remainingMs);
+      } catch (error) {
+        if (error instanceof ReconciliationWaitExpiredError) return undefined;
+        throw error;
+      }
+    };
+    const unavailable = (): Promise<unknown> =>
+      requireReconciliationUnavailableHandler(handler)(
+        reconciliationContext,
+        event,
+        ...args,
+      );
     while (true) {
       try {
         const result = reconciling
@@ -212,7 +268,9 @@ export class RuntimeHostReconnectingIpcMain {
           (slot.reconnectableRead || reconciling) &&
           slot.handlers.get(epoch) !== handler
         ) {
-          handler = await this.#waitForHandler(slot, epoch, handler);
+          const replacement = await waitForReplacement(handler);
+          if (!replacement) return unavailable();
+          handler = replacement;
           continue;
         }
         if (slot.reconciledControl && !reconciling) {
@@ -220,7 +278,10 @@ export class RuntimeHostReconnectingIpcMain {
           if (step.kind === "completed") return step.value;
           reconciliationContext = step.context;
           reconciling = true;
-          handler = await this.#waitForHandler(slot, epoch, handler);
+          reconciliationDeadline = Date.now() + this.#reconciliationWaitTimeoutMs;
+          const replacement = await waitForReplacement(handler);
+          if (!replacement) return unavailable();
+          handler = replacement;
           continue;
         }
         return result;
@@ -230,7 +291,9 @@ export class RuntimeHostReconnectingIpcMain {
           (slot.reconnectableRead || reconciling) &&
           slot.handlers.get(epoch) !== handler
         ) {
-          handler = await this.#waitForHandler(slot, epoch, handler);
+          const replacement = await waitForReplacement(handler);
+          if (!replacement) return unavailable();
+          handler = replacement;
           continue;
         }
         if (
@@ -239,7 +302,9 @@ export class RuntimeHostReconnectingIpcMain {
         ) {
           throw error;
         }
-        handler = await this.#waitForHandler(slot, epoch, handler);
+        const replacement = await waitForReplacement(handler);
+        if (!replacement) return unavailable();
+        handler = replacement;
       }
     }
   }
@@ -248,6 +313,7 @@ export class RuntimeHostReconnectingIpcMain {
     slot: HandlerSlot,
     epoch: string,
     previous?: BoundHandler,
+    timeoutMs?: number,
   ): Promise<BoundHandler> {
     try {
       this.#assertActive(epoch);
@@ -258,8 +324,29 @@ export class RuntimeHostReconnectingIpcMain {
     if (current !== undefined && current !== previous) {
       return Promise.resolve(current);
     }
+    if (timeoutMs !== undefined && timeoutMs <= 0) {
+      return Promise.reject(new ReconciliationWaitExpiredError());
+    }
     return new Promise((resolve, reject) => {
-      slot.waiters.add({ epoch, resolve, reject });
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const waiter: HandlerWaiter = {
+        epoch,
+        resolve: (handler) => {
+          if (timeout !== undefined) clearTimeout(timeout);
+          resolve(handler);
+        },
+        reject: (error) => {
+          if (timeout !== undefined) clearTimeout(timeout);
+          reject(error);
+        },
+      };
+      slot.waiters.add(waiter);
+      if (timeoutMs !== undefined) {
+        timeout = setTimeout(() => {
+          if (!slot.waiters.delete(waiter)) return;
+          waiter.reject(new ReconciliationWaitExpiredError());
+        }, timeoutMs);
+      }
     });
   }
 
@@ -299,6 +386,15 @@ function requireReconcileHandler(handler: BoundHandler): ReconcileIpcHandler {
     throw new Error("Desktop Runtime Host reconciled control handler is unavailable");
   }
   return handler.reconcile;
+}
+
+function requireReconciliationUnavailableHandler(
+  handler: BoundHandler,
+): ReconciliationUnavailableIpcHandler {
+  if (!handler.reconciliationUnavailable) {
+    throw new Error("Desktop Runtime Host reconciliation fallback is unavailable");
+  }
+  return handler.reconciliationUnavailable;
 }
 
 function requireReconciledControlStep(

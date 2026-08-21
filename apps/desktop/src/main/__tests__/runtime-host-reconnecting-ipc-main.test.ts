@@ -124,6 +124,51 @@ test("reconciles a dispatched control on a replacement without replaying it", as
   router.close();
 });
 
+test("bounds reconciliation when no replacement candidate becomes available", async () => {
+  const ipc = ipcHarness();
+  const router = new RuntimeHostReconnectingIpcMain(ipc, {
+    reconciliationWaitTimeoutMs: 5,
+  });
+  const firstTarget = router.createTarget("target-a") as ReconciledControlTarget;
+  let dispatches = 0;
+  firstTarget.handleReconciledControl("goal:arm", {
+    dispatch: async () => {
+      dispatches += 1;
+      return { kind: "reconcile", context: { sessionId: "session-1" } };
+    },
+    reconcile: async () => assert.fail("The unavailable candidate must not reconcile"),
+    reconciliationUnavailable: async () => ({ kind: "reconciliation_unavailable" }),
+  });
+  router.activate("target-a");
+
+  const arming = ipc.invoke("goal:arm", scope("target-a"));
+  const settled = arming.then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  firstTarget.removeHandler("goal:arm");
+
+  try {
+    assert.deepEqual(
+      await Promise.race([
+        settled,
+        new Promise<{ readonly timedOut: true }>((resolve) =>
+          setTimeout(() => resolve({ timedOut: true }), 25),
+        ),
+      ]),
+      {
+        ok: true,
+        value: { kind: "reconciliation_unavailable" },
+      },
+    );
+    assert.equal(dispatches, 1);
+  } finally {
+    router.close();
+    await settled;
+  }
+});
+
 test("retries only reconciliation when its replacement connection is lost", async () => {
   const ipc = ipcHarness();
   const router = new RuntimeHostReconnectingIpcMain(ipc);
@@ -489,6 +534,10 @@ type ReconciledControlTarget = ReturnType<
     handlers: {
       dispatch: IpcHandler;
       reconcile: (context: unknown, ...args: Parameters<IpcHandler>) => Promise<unknown>;
+      reconciliationUnavailable?: (
+        context: unknown,
+        ...args: Parameters<IpcHandler>
+      ) => Promise<unknown>;
     },
   ): void;
 };
