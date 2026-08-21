@@ -9,7 +9,6 @@ import {
   isTurnTrace,
   SESSION_TRACE_SCHEMA_VERSION,
   type SessionTraceCoverage,
-  type TraceTotals,
   type TurnTrace,
 } from '@maka/core/session-trace';
 import {
@@ -85,7 +84,6 @@ export type ExecutionInspectQueryResult =
       readonly schemaVersion: typeof SESSION_TRACE_SCHEMA_VERSION;
       readonly sessionId: string;
       readonly turns: readonly TurnTrace[];
-      readonly totals: TraceTotals;
       readonly coverage: SessionTraceCoverage;
       readonly nextCursor: string | null;
     };
@@ -233,7 +231,7 @@ export function decodeExecutionInspectQueryResult(value: unknown): ExecutionInsp
     value,
     'execution.inspect.query result',
     ['kind'],
-    ['document', 'schemaVersion', 'sessionId', 'turns', 'totals', 'coverage', 'nextCursor', 'turn'],
+    ['document', 'schemaVersion', 'sessionId', 'turns', 'coverage', 'nextCursor', 'turn'],
   );
   if (shaped.kind === 'turn_trace') {
     const record = requireExactRecord(shaped, 'Turn trace result', ['kind', 'sessionId', 'turn']);
@@ -249,7 +247,6 @@ export function decodeExecutionInspectQueryResult(value: unknown): ExecutionInsp
       'schemaVersion',
       'sessionId',
       'turns',
-      'totals',
       'coverage',
       'nextCursor',
     ]);
@@ -258,7 +255,6 @@ export function decodeExecutionInspectQueryResult(value: unknown): ExecutionInsp
       schemaVersion: record.schemaVersion,
       sessionId,
       turns: record.turns,
-      totals: record.totals,
       coverage: record.coverage,
     };
     if (
@@ -274,7 +270,6 @@ export function decodeExecutionInspectQueryResult(value: unknown): ExecutionInsp
       schemaVersion: SESSION_TRACE_SCHEMA_VERSION,
       sessionId,
       turns: decodedTrace.turns,
-      totals: decodedTrace.totals,
       coverage: decodedTrace.coverage,
       nextCursor,
     };

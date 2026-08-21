@@ -631,7 +631,7 @@ function TurnRow(props: {
         <span className="maka-inspector-turn-meta">
           {formatDuration(turn.durationMs)} ·{' '}
           <span className="maka-inspector-turn-cost">
-            {formatCost(turn.totals.costUsd, copy.costUnavailable)}
+            {formatCost(turn.costUsd, copy.costUnavailable)}
           </span>
         </span>
       </div>

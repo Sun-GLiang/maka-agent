@@ -126,16 +126,41 @@ describe('session trace projection', () => {
     assert.equal(isSessionTrace(trace), true, 'the Host protocol accepts the projected trace');
   });
 
-  test('a session of entirely unpriced calls totals to no price, not to zero', () => {
+  test('an entirely unpriced logical call keeps its step cost absent', () => {
     const trace = projectSessionTrace({
       sessionId: 'session-1',
       runtimeEvents: [],
       modelCallAttempts: [attempt({ costUsd: undefined, costBasis: 'unpriced' })],
     });
 
-    assert.equal(trace.totals.costUsd, undefined, 'absent price is not a zero price');
-    assert.equal(trace.totals.unpricedAttempts, 1);
-    assert.equal(trace.turns[0]?.steps[0]?.kind, 'model_call');
+    const call = trace.turns[0]?.steps[0];
+    assert.equal(call?.kind, 'model_call');
+    if (call?.kind !== 'model_call') return;
+    assert.equal(call.costUsd, undefined, 'absent price is not a zero price');
+    assert.equal(call.attempts[0]?.costBasis, 'unpriced');
+  });
+
+  test('a logical call sums its priced retry attempts and ignores unpriced ones', () => {
+    const trace = projectSessionTrace({
+      sessionId: 'session-1',
+      runtimeEvents: [],
+      modelCallAttempts: [
+        attempt({ attemptId: 'attempt-0', attempt: 0, costUsd: 0.001 }),
+        attempt({
+          attemptId: 'attempt-1',
+          attempt: 1,
+          costUsd: undefined,
+          costBasis: 'unpriced',
+        }),
+        attempt({ attemptId: 'attempt-2', attempt: 2, costUsd: 0.002 }),
+      ],
+    });
+
+    const call = trace.turns[0]?.steps[0];
+    assert.equal(call?.kind, 'model_call');
+    if (call?.kind !== 'model_call') return;
+    assert.equal(call.attempts.length, 3);
+    assert.equal(call.costUsd, 0.003);
   });
 
   test('attributes a turn failure to what failed first, not to the terminal error', () => {
@@ -202,8 +227,6 @@ describe('session trace projection', () => {
 
     assert.equal(trace.coverage.modelCalls, 'absent');
     assert.deepEqual(trace.coverage.turnsMissingModelCalls, [{ runId: 'run-1', turnId: 'turn-1' }]);
-    assert.equal(trace.totals.modelAttempts, 0);
-    assert.equal(trace.totals.costUsd, undefined);
   });
 
   test('known unreadable evidence makes an otherwise absent backend partial', () => {
@@ -280,9 +303,8 @@ describe('session trace projection', () => {
     if (call.kind !== 'model_call') return;
     assert.equal(call.attempts.length, 1, 'one attempt id is one attempt');
     assert.equal(call.status, 'completed', 'the later settlement wins');
-    assert.equal(trace.totals.retries, 0);
-    assert.equal(trace.totals.costUsd, 0.002, 'not double-counted against Settings → Usage');
-    assert.equal(trace.totals.unpricedAttempts, 0);
+    assert.equal(call.costUsd, 0.002, 'not double-counted against Settings → Usage');
+    assert.equal(call.attempts[0]?.costBasis, 'priced');
   });
 
   test('reports a shortfall when usage stands for more steps than there are calls', () => {

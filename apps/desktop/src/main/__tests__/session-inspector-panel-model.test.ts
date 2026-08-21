@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   SESSION_TRACE_SCHEMA_VERSION,
-  emptyTraceTotals,
   type SessionTrace,
+  type TraceModelAttempt,
+  type TraceModelCallStep,
+  type TraceStep,
 } from '@maka/core/session-trace';
 import { deriveInspectorPanelModel } from '../../renderer/session-inspector-panel-model.js';
 import {
@@ -118,6 +120,59 @@ test('does not estimate a cache-hit ratio from partial usage', () => {
   assert.equal(overview.cacheHitRate, undefined);
 });
 
+test('derives per-turn cost only from priced model-call step totals', () => {
+  const cases: readonly {
+    name: string;
+    steps: TraceStep[];
+    expected: number | undefined;
+  }[] = [
+    { name: 'empty', steps: [], expected: undefined },
+    {
+      name: 'tool-only',
+      steps: [
+        {
+          kind: 'tool',
+          id: 'tool-1',
+          turnId: 'turn-1',
+          runId: 'run-1',
+          startedAt: 1,
+          endedAt: 2,
+          durationMs: 1,
+          toolName: 'Read',
+          status: 'completed',
+        },
+      ],
+      expected: undefined,
+    },
+    { name: 'unpriced', steps: [modelCallStep('unpriced')], expected: undefined },
+    { name: 'priced', steps: [modelCallStep('priced', 0.01)], expected: 0.01 },
+    {
+      name: 'mixed',
+      steps: [modelCallStep('priced', 0.01), modelCallStep('unpriced')],
+      expected: 0.01,
+    },
+    {
+      name: 'multiple calls',
+      steps: [modelCallStep('first', 0.01), modelCallStep('second', 0.02)],
+      expected: 0.03,
+    },
+    { name: 'zero-priced', steps: [modelCallStep('free', 0)], expected: 0 },
+    {
+      name: 'retried logical call',
+      // Deliberately disagree with the nested attempts: the display boundary
+      // must trust the logical call's already-aggregated price.
+      steps: [modelCallStep('retry', 0.04, [modelAttempt(0, 0.01), modelAttempt(1, 0.02)])],
+      expected: 0.04,
+    },
+  ];
+
+  for (const { name, steps, expected } of cases) {
+    const turn = deriveInspectorPanelModel(traceWithSteps(steps)).turns[0];
+    assert.equal(turn?.costUsd, expected, name);
+    assert.equal(turn?.durationMs, 9, `${name} duration`);
+  }
+});
+
 test('shows one compact diagnostic line for a failed history-compaction call', () => {
   const trace: SessionTrace = {
     schemaVersion: SESSION_TRACE_SCHEMA_VERSION,
@@ -163,20 +218,8 @@ test('shows one compact diagnostic line for a failed history-compaction call', (
             ],
           },
         ],
-        totals: {
-          ...emptyTraceTotals(),
-          durationMs: 9,
-          modelAttempts: 1,
-          unpricedAttempts: 1,
-        },
       },
     ],
-    totals: {
-      ...emptyTraceTotals(),
-      durationMs: 9,
-      modelAttempts: 1,
-      unpricedAttempts: 1,
-    },
     coverage: {
       modelCalls: 'no_known_gap',
       turnsMissingModelCalls: [],
@@ -201,7 +244,6 @@ test('reports runs omitted only by the bounded online view separately', () => {
     schemaVersion: SESSION_TRACE_SCHEMA_VERSION,
     sessionId: 'session-1',
     turns: [],
-    totals: emptyTraceTotals(),
     coverage: {
       modelCalls: 'partial',
       turnsMissingModelCalls: [],
@@ -219,3 +261,64 @@ test('reports runs omitted only by the bounded online view separately', () => {
     oversizedRuns: 1,
   });
 });
+
+function traceWithSteps(steps: TraceStep[]): SessionTrace {
+  return {
+    schemaVersion: SESSION_TRACE_SCHEMA_VERSION,
+    sessionId: 'session-1',
+    turns: [
+      {
+        turnId: 'turn-1',
+        runId: 'run-1',
+        startedAt: 1,
+        endedAt: 10,
+        durationMs: 9,
+        steps,
+      },
+    ],
+    coverage: {
+      modelCalls: 'no_known_gap',
+      turnsMissingModelCalls: [],
+      turnsWithFewerModelCallsThanSteps: [],
+      unreadableRecords: 0,
+      oversizedRuns: 0,
+    },
+  };
+}
+
+function modelCallStep(
+  id: string,
+  costUsd?: number,
+  attempts: TraceModelAttempt[] = [modelAttempt(0, costUsd)],
+): TraceModelCallStep {
+  return {
+    kind: 'model_call',
+    id,
+    turnId: 'turn-1',
+    runId: 'run-1',
+    startedAt: 1,
+    endedAt: 10,
+    durationMs: 9,
+    callKind: 'main',
+    providerId: 'provider-1',
+    modelId: 'model-1',
+    step: 0,
+    attempts,
+    status: 'completed',
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
+}
+
+function modelAttempt(attempt: number, costUsd?: number): TraceModelAttempt {
+  return {
+    attemptId: `attempt-${attempt}`,
+    attempt,
+    status: 'completed',
+    startedAt: 1,
+    completedAt: 10,
+    latencyMs: 9,
+    ...(costUsd !== undefined ? { costUsd } : {}),
+    costBasis: costUsd === undefined ? 'unpriced' : 'priced',
+    usageBasis: 'reported',
+  };
+}

@@ -202,27 +202,6 @@ export interface TraceFailureAttribution {
   attributedToStepId?: string;
 }
 
-export interface TraceTotals {
-  durationMs: number;
-  /** Physical provider requests, retries included. */
-  modelAttempts: number;
-  /** Attempts beyond the first of their logical call. */
-  retries: number;
-  compactions: number;
-  inputTokens: number;
-  outputTokens: number;
-  /**
-   * Summed over priced records only, and absent when none were priced.
-   *
-   * Same authority as Settings → Usage, read at a different scope: both sum
-   * `ModelCallAttempt`. A total here that disagreed with that surface would be
-   * a bug in one of them, not two defensible numbers (#1679).
-   */
-  costUsd?: number;
-  /** Records that carried no price, and are therefore absent from `costUsd`. */
-  unpricedAttempts: number;
-}
-
 export interface TurnTrace {
   turnId: string;
   runId: string;
@@ -230,7 +209,6 @@ export interface TurnTrace {
   endedAt: number;
   durationMs: number;
   steps: TraceStep[];
-  totals: TraceTotals;
   failure?: TraceFailureAttribution;
 }
 
@@ -290,12 +268,11 @@ export interface SessionTrace {
   schemaVersion: typeof SESSION_TRACE_SCHEMA_VERSION;
   sessionId: string;
   turns: TurnTrace[];
-  totals: TraceTotals;
   coverage: SessionTraceCoverage;
 }
 
 const SESSION_TRACE_SHAPE = defineObjectShape<SessionTrace>()(
-  ['schemaVersion', 'sessionId', 'turns', 'totals', 'coverage'],
+  ['schemaVersion', 'sessionId', 'turns', 'coverage'],
   [],
 );
 const TRACE_COVERAGE_SHAPE = defineObjectShape<SessionTraceCoverage>()(
@@ -308,20 +285,8 @@ const TRACE_COVERAGE_SHAPE = defineObjectShape<SessionTraceCoverage>()(
   ],
   [],
 );
-const TRACE_TOTALS_SHAPE = defineObjectShape<TraceTotals>()(
-  [
-    'durationMs',
-    'modelAttempts',
-    'retries',
-    'compactions',
-    'inputTokens',
-    'outputTokens',
-    'unpricedAttempts',
-  ],
-  ['costUsd'],
-);
 const TURN_TRACE_SHAPE = defineObjectShape<TurnTrace>()(
-  ['turnId', 'runId', 'startedAt', 'endedAt', 'durationMs', 'steps', 'totals'],
+  ['turnId', 'runId', 'startedAt', 'endedAt', 'durationMs', 'steps'],
   ['failure'],
 );
 const TRACE_FAILURE_SHAPE = defineObjectShape<TraceFailureAttribution>()(
@@ -402,7 +367,6 @@ export function isSessionTrace(value: unknown): value is SessionTrace {
     typeof value.sessionId === 'string' &&
     Array.isArray(value.turns) &&
     value.turns.every(isTurnTrace) &&
-    isTraceTotals(value.totals) &&
     isTraceCoverage(value.coverage)
   );
 }
@@ -418,25 +382,7 @@ export function isTurnTrace(value: unknown): value is TurnTrace {
     isNonnegativeNumber(value.durationMs) &&
     Array.isArray(value.steps) &&
     value.steps.every(isTraceStep) &&
-    isTraceTotals(value.totals) &&
     (value.failure === undefined || isTraceFailure(value.failure))
-  );
-}
-
-function isTraceTotals(value: unknown): value is TraceTotals {
-  return (
-    isRecord(value) &&
-    hasExactShape(value, TRACE_TOTALS_SHAPE) &&
-    [
-      value.durationMs,
-      value.modelAttempts,
-      value.retries,
-      value.compactions,
-      value.inputTokens,
-      value.outputTokens,
-      value.unpricedAttempts,
-    ].every(isNonnegativeNumber) &&
-    isOptionalNonnegativeNumber(value.costUsd)
   );
 }
 
@@ -595,42 +541,6 @@ function isOptionalNonnegativeNumber(value: unknown): boolean {
   return value === undefined || isNonnegativeNumber(value);
 }
 
-/** Empty totals, so callers fold rather than special-case the first element. */
-export function emptyTraceTotals(): TraceTotals {
-  return {
-    durationMs: 0,
-    modelAttempts: 0,
-    retries: 0,
-    compactions: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    unpricedAttempts: 0,
-  };
-}
-
-/**
- * Folds one set of totals into another.
- *
- * `costUsd` stays absent until something priced arrives, so a session of
- * entirely unpriced calls totals to "no price", not to zero.
- */
-export function mergeTraceTotals(base: TraceTotals, next: TraceTotals): TraceTotals {
-  const costUsd =
-    base.costUsd === undefined && next.costUsd === undefined
-      ? undefined
-      : (base.costUsd ?? 0) + (next.costUsd ?? 0);
-  return {
-    durationMs: base.durationMs + next.durationMs,
-    modelAttempts: base.modelAttempts + next.modelAttempts,
-    retries: base.retries + next.retries,
-    compactions: base.compactions + next.compactions,
-    inputTokens: base.inputTokens + next.inputTokens,
-    outputTokens: base.outputTokens + next.outputTokens,
-    unpricedAttempts: base.unpricedAttempts + next.unpricedAttempts,
-    ...(costUsd !== undefined ? { costUsd } : {}),
-  };
-}
-
 /**
  * Combines coverage from disjoint trace partitions.
  *
@@ -692,10 +602,6 @@ export function mergeSessionTraces(traces: readonly SessionTrace[]): SessionTrac
       schemaVersion: current.schemaVersion,
       sessionId: current.sessionId,
       turns: ordered,
-      totals: ordered.reduce(
-        (total, turn) => mergeTraceTotals(total, turn.totals),
-        emptyTraceTotals(),
-      ),
       coverage: mergeDisjointTraceCoverage(current.coverage, page.coverage),
     };
   }, first);

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   SESSION_TRACE_SCHEMA_VERSION,
-  emptyTraceTotals,
   mergeDisjointTraceCoverage,
   mergeSessionTraces,
   type SessionTrace,
@@ -44,8 +43,8 @@ test('coverage merge distinguishes backend absence from a gap in only some pages
   );
 });
 
-test('page merge orders and deduplicates turns while recomputing totals', () => {
-  const page = (runId: string, startedAt: number, inputTokens: number): SessionTrace => ({
+test('page merge orders and deduplicates turns', () => {
+  const page = (runId: string, startedAt: number): SessionTrace => ({
     schemaVersion: SESSION_TRACE_SCHEMA_VERSION,
     sessionId: 'session-1',
     turns: [
@@ -56,23 +55,16 @@ test('page merge orders and deduplicates turns while recomputing totals', () => 
         endedAt: startedAt,
         durationMs: 0,
         steps: [],
-        totals: { ...emptyTraceTotals(), inputTokens },
       },
     ],
-    totals: { ...emptyTraceTotals(), inputTokens },
     coverage: coverage('no_known_gap'),
   });
 
-  const merged = mergeSessionTraces([
-    page('run-2', 2, 2),
-    page('run-1', 1, 1),
-    page('run-2', 2, 2),
-  ]);
+  const merged = mergeSessionTraces([page('run-2', 2), page('run-1', 1), page('run-2', 2)]);
   assert.deepEqual(
     merged.turns.map((turn) => turn.runId),
     ['run-1', 'run-2'],
   );
-  assert.equal(merged.totals.inputTokens, 3);
 });
 
 test('page merge has a stable order when run timestamps and identities tie', () => {
@@ -87,10 +79,8 @@ test('page merge has a stable order when run timestamps and identities tie', () 
         endedAt: 1,
         durationMs: 0,
         steps: [],
-        totals: emptyTraceTotals(),
       },
     ],
-    totals: emptyTraceTotals(),
     coverage: coverage('no_known_gap'),
   });
 

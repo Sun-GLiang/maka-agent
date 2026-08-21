@@ -2,7 +2,6 @@ import {
   type SessionTrace,
   type TraceModelCallStep,
   type TraceStep,
-  type TraceTotals,
 } from '@maka/core/session-trace';
 import { pricingModelKey } from '@maka/core/usage-stats/pricing';
 /**
@@ -45,7 +44,7 @@ export interface InspectorTurnRow {
   turnId: string;
   startedAt: number;
   durationMs: number;
-  totals: TraceTotals;
+  costUsd?: number;
   failed: boolean;
   failureCode?: string;
   steps: InspectorStepRow[];
@@ -73,16 +72,19 @@ export interface InspectorPanelModel {
 export function deriveInspectorPanelModel(trace: SessionTrace | undefined): InspectorPanelModel {
   if (!trace) return { turns: [], empty: true };
 
-  const turns = trace.turns.map<InspectorTurnRow>((turn) => ({
-    runId: turn.runId,
-    turnId: turn.turnId,
-    startedAt: turn.startedAt,
-    durationMs: turn.durationMs,
-    totals: turn.totals,
-    failed: turn.failure !== undefined,
-    ...(turn.failure?.code !== undefined ? { failureCode: turn.failure.code } : {}),
-    steps: turn.steps.map((step) => toStepRow(step, turn.failure?.attributedToStepId)),
-  }));
+  const turns = trace.turns.map<InspectorTurnRow>((turn) => {
+    const costUsd = deriveTurnCostUsd(turn.steps);
+    return {
+      runId: turn.runId,
+      turnId: turn.turnId,
+      startedAt: turn.startedAt,
+      durationMs: turn.durationMs,
+      ...(costUsd !== undefined ? { costUsd } : {}),
+      failed: turn.failure !== undefined,
+      ...(turn.failure?.code !== undefined ? { failureCode: turn.failure.code } : {}),
+      steps: turn.steps.map((step) => toStepRow(step, turn.failure?.attributedToStepId)),
+    };
+  });
 
   const coverage = coverageNotice(trace);
   return {
@@ -93,6 +95,16 @@ export function deriveInspectorPanelModel(trace: SessionTrace | undefined): Insp
     // surface, so a reported gap is never "nothing to trace".
     empty: turns.length === 0 && coverage === undefined,
   };
+}
+
+function deriveTurnCostUsd(steps: readonly TraceStep[]): number | undefined {
+  let total: number | undefined;
+  for (const step of steps) {
+    if (step.kind === 'model_call' && step.costUsd !== undefined) {
+      total = (total ?? 0) + step.costUsd;
+    }
+  }
+  return total;
 }
 
 function toStepRow(step: TraceStep, attributedToStepId: string | undefined): InspectorStepRow {

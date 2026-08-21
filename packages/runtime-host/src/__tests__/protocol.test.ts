@@ -107,7 +107,11 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('publishes a new compatibility epoch for Session trace pagination', () => {
-    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 35);
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 34);
+  });
+
+  test('publishes a new compatibility epoch for TraceTotals removal', () => {
+    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 36);
   });
 
   test('selects the highest mutually supported protocol and rejects a gap', () => {

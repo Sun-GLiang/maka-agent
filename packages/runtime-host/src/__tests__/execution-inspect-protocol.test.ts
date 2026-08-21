@@ -76,6 +76,47 @@ describe('execution inspect protocol', () => {
         result: { kind: 'turn_trace', sessionId: 'session-1', turn: turnTrace() },
       },
     );
+    assert.deepEqual(
+      decodeHostFrame({
+        requestId: 'request-trace-page',
+        operation: 'execution.inspect.query',
+        ok: true,
+        result: tracePage(),
+      }),
+      {
+        requestId: 'request-trace-page',
+        operation: 'execution.inspect.query',
+        ok: true,
+        result: tracePage(),
+      },
+    );
+  });
+
+  test('rejects legacy TraceTotals on Session pages and Turn traces', () => {
+    assert.throws(
+      () =>
+        decodeHostFrame({
+          requestId: 'request-legacy-page-totals',
+          operation: 'execution.inspect.query',
+          ok: true,
+          result: { ...tracePage(), totals: legacyTraceTotals() },
+        }),
+      isProtocolError,
+    );
+    assert.throws(
+      () =>
+        decodeHostFrame({
+          requestId: 'request-legacy-turn-totals',
+          operation: 'execution.inspect.query',
+          ok: true,
+          result: {
+            kind: 'turn_trace',
+            sessionId: 'session-1',
+            turn: { ...turnTrace(), totals: legacyTraceTotals() },
+          },
+        }),
+      isProtocolError,
+    );
   });
 
   test('rejects open shapes, inconsistent resolution, and oversized payloads', () => {
@@ -218,15 +259,6 @@ function tracePage() {
     schemaVersion: 1 as const,
     sessionId: 'session-1',
     turns: [],
-    totals: {
-      durationMs: 0,
-      modelAttempts: 0,
-      retries: 0,
-      compactions: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      unpricedAttempts: 0,
-    },
     coverage: {
       modelCalls: 'none' as const,
       turnsMissingModelCalls: [],
@@ -246,15 +278,18 @@ function turnTrace(turnId = 'turn-1') {
     endedAt: 2,
     durationMs: 1,
     steps: [],
-    totals: {
-      durationMs: 1,
-      modelAttempts: 0,
-      retries: 0,
-      compactions: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      unpricedAttempts: 0,
-    },
+  };
+}
+
+function legacyTraceTotals() {
+  return {
+    durationMs: 0,
+    modelAttempts: 0,
+    retries: 0,
+    compactions: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    unpricedAttempts: 0,
   };
 }
 

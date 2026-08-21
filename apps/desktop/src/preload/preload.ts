@@ -826,7 +826,6 @@ async function loadSessionTracePage(
     schemaVersion: page.schemaVersion,
     sessionId,
     turns: [...page.turns],
-    totals: page.totals,
     coverage: page.coverage,
   };
   if (!isSessionTrace(trace)) throw new Error('Invalid Session trace projection');

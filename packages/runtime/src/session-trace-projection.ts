@@ -5,8 +5,6 @@ import {
 } from '@maka/core/model-call-attempt';
 import { TERMINAL_RUNTIME_EVENT_STATUSES, type RuntimeEvent } from '@maka/core/runtime-event';
 import {
-  emptyTraceTotals,
-  mergeTraceTotals,
   SESSION_TRACE_SCHEMA_VERSION,
   traceTurnIdentityKey,
   type SessionTrace,
@@ -16,7 +14,6 @@ import {
   type TraceModelAttempt,
   type TraceModelCallStep,
   type TraceStep,
-  type TraceTotals,
   type TurnTrace,
 } from '@maka/core/session-trace';
 
@@ -84,16 +81,10 @@ export function projectSessionTrace(input: SessionTraceInput): SessionTrace {
     }
   }
 
-  const totals = turns.reduce<TraceTotals>(
-    (carry, turn) => mergeTraceTotals(carry, turn.totals),
-    emptyTraceTotals(),
-  );
-
   return {
     schemaVersion: SESSION_TRACE_SCHEMA_VERSION,
     sessionId: input.sessionId,
     turns,
-    totals,
     coverage: resolveCoverage(
       turnsWithModelActivity,
       turnsMissingModelCalls,
@@ -200,7 +191,6 @@ function projectTurn(
   ];
   const startedAt = Math.min(...instants);
   const endedAt = Math.max(...instants);
-  const totals = turnTotals(steps, endedAt - startedAt);
   const failure = attributeTurnFailure(steps, events);
 
   return {
@@ -209,7 +199,6 @@ function projectTurn(
     endedAt,
     durationMs: Math.max(0, endedAt - startedAt),
     steps,
-    totals,
     ...(failure ? { failure } : {}),
   };
 }
@@ -448,29 +437,6 @@ export function attributeTurnFailure(
     ...(terminalError?.kind === 'error' ? { message: terminalError.message } : {}),
     ...(firstFailure ? { attributedToStepId: firstFailure.id } : {}),
   };
-}
-
-function turnTotals(steps: readonly TraceStep[], durationMs: number): TraceTotals {
-  const totals = emptyTraceTotals();
-  totals.durationMs = Math.max(0, durationMs);
-
-  for (const step of steps) {
-    if (step.kind === 'model_call') {
-      totals.modelAttempts += step.attempts.length;
-      totals.retries += Math.max(0, step.attempts.length - 1);
-      if (step.callKind === 'history_compact' || step.callKind === 'semantic_compact') {
-        totals.compactions += 1;
-      }
-      for (const attempt of step.attempts) {
-        totals.inputTokens += attempt.inputTokens ?? 0;
-        totals.outputTokens += attempt.outputTokens ?? 0;
-        if (attempt.costUsd === undefined) totals.unpricedAttempts += 1;
-      }
-      if (step.costUsd !== undefined) totals.costUsd = (totals.costUsd ?? 0) + step.costUsd;
-    }
-  }
-
-  return totals;
 }
 
 function stepEndedAt(step: TraceStep): number {

@@ -3,7 +3,6 @@ import { afterEach, describe, it } from 'node:test';
 import { act, createElement } from 'react';
 import {
   SESSION_TRACE_SCHEMA_VERSION,
-  emptyTraceTotals,
   type SessionTrace,
 } from '@maka/core/session-trace';
 import type { SessionEvent } from '@maka/core/events';
@@ -30,7 +29,6 @@ function trace(sessionId: string): SessionTrace {
     schemaVersion: SESSION_TRACE_SCHEMA_VERSION,
     sessionId,
     turns: [],
-    totals: emptyTraceTotals(),
     coverage: {
       modelCalls: 'none',
       turnsMissingModelCalls: [],
@@ -197,7 +195,6 @@ function tracePage(
           endedAt: startedAt,
           durationMs: 0,
           steps: [],
-          totals: emptyTraceTotals(),
         },
       ],
     },
