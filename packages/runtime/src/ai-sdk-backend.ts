@@ -2574,6 +2574,7 @@ export class AiSdkBackend implements AgentBackend {
                 incompleteStreamHasNoObservableOutput;
               if (
                 (failure.retryable || idleWatchdogRecovery || incompleteStreamRecovery) &&
+                failure.kind !== 'context_overflow' &&
                 providerAttempt < MAX_PROVIDER_ATTEMPTS_PER_STEP &&
                 stepBudgetRemains &&
                 (attemptHasNoObservableOutput() || idleWatchdogRecovery || incompleteStreamRecovery)
