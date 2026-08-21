@@ -29,4 +29,28 @@ describe('failed turn recovery presentation', () => {
       { action: 'retry', label: 'No tools ran; retry directly' },
     );
   });
+
+  it('preserves higher-priority retained-output and tool guidance', () => {
+    assert.deepEqual(
+      deriveFailedTurnRecovery(
+        { ...outputFreeFailure, errorClass: 'context_overflow', partialOutputRetained: true },
+        'en',
+      ),
+      { action: 'continue', label: 'Partial output was retained; continue from here' },
+    );
+    assert.deepEqual(
+      deriveFailedTurnRecovery(
+        { ...outputFreeFailure, errorClass: 'context_overflow', toolActivityCount: 1 },
+        'en',
+      ),
+      { action: 'inspect_tool', label: 'Tool history was retained; inspect it before retrying' },
+    );
+    assert.deepEqual(
+      deriveFailedTurnRecovery(
+        { ...outputFreeFailure, errorClass: 'context_overflow', erroredToolCount: 1 },
+        'en',
+      ),
+      { action: 'inspect_tool', label: 'Inspect the tool result before retrying' },
+    );
+  });
 });
