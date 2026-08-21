@@ -1515,9 +1515,35 @@ describe('mid-turn capacity default-on safety guards (issue #882 PR 3)', () => {
     });
     await runFixtureTurn(fixture);
 
+    const firstMessages = fixture.model.doStreamCalls[0]?.prompt ?? [];
     const firstPrompt = promptJson(fixture, 0);
     assert.equal(fixture.model.doStreamCalls.length > 0, true);
-    assert.equal(firstPrompt.includes('"mediaType":"image/png"'), true);
+    assert.equal(firstPrompt.match(/"mediaType":"image\/png"/g)?.length, 2);
+    assert.equal(
+      firstMessages.some(
+        (message) =>
+          message.role === 'user' &&
+          Array.isArray(message.content) &&
+          message.content.some((part) => part.type === 'file' && part.mediaType === 'image/png'),
+      ),
+      true,
+    );
+    assert.equal(
+      firstMessages.some(
+        (message) =>
+          message.role === 'tool' &&
+          message.content.some(
+            (part) =>
+              part.type === 'tool-result' &&
+              part.toolCallId === 'prior-image-tool-1' &&
+              part.output.type === 'content' &&
+              part.output.value.some(
+                (outputPart) => outputPart.type === 'file' && outputPart.mediaType === 'image/png',
+              ),
+          ),
+      ),
+      true,
+    );
     assert.doesNotMatch(firstPrompt, /omitted after provider context overflow/);
     assert.equal(fixture.summarizerCalls, 0);
   });

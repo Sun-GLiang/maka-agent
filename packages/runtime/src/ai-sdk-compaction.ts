@@ -1331,13 +1331,11 @@ export class AiSdkCompaction {
         incomingMessages,
         acceptedProjection,
       );
-      if (state.omittedImageToolResults.size > 0) {
-        const omission = omitHistoricalImageToolResults(
+      projectedMessages =
+        projectHistoricalImageOmissions(
           projectedMessages ?? incomingMessages,
           state.omittedImageToolResults,
-        );
-        if (omission.omittedParts > 0) projectedMessages = omission.messages;
-      }
+        ) ?? projectedMessages;
       const keepProjection = (): RequestProjection | undefined =>
         projectedMessages ? { messages: projectedMessages } : undefined;
       // Step 0 is shaped by the pre_turn path; the mid-turn trigger only runs
@@ -1951,14 +1949,12 @@ export class AiSdkCompaction {
     } = input;
     return async (options) => {
       let result = await Promise.resolve(shaped(options));
-      if (state.omittedImageToolResults.size > 0) {
-        const omission = omitHistoricalImageToolResults(
-          result?.messages ?? options.messages,
-          state.omittedImageToolResults,
-        );
-        if (omission.omittedParts > 0) {
-          result = { ...(result ?? {}), messages: omission.messages };
-        }
+      const omissionProjection = projectHistoricalImageOmissions(
+        result?.messages ?? options.messages,
+        state.omittedImageToolResults,
+      );
+      if (omissionProjection) {
+        result = { ...(result ?? {}), messages: omissionProjection };
       }
       const finalPayloadChars = (): number =>
         midTurnRequestPayloadChars(
@@ -2109,6 +2105,15 @@ interface AcceptedActiveCompactionProjection {
   sourceSignatureMode: 'exact' | 'active_prune_lineage';
   projectedMessages: readonly ModelMessage[];
   semanticBlock?: SemanticCompactBlock;
+}
+
+function projectHistoricalImageOmissions(
+  messages: readonly ModelMessage[],
+  omittedImageToolResults: ReadonlyMap<string, HistoricalImageToolResult>,
+): ModelMessage[] | undefined {
+  if (omittedImageToolResults.size === 0) return undefined;
+  const omission = omitHistoricalImageToolResults(messages, omittedImageToolResults);
+  return omission.omittedParts > 0 ? omission.messages : undefined;
 }
 
 function projectAcceptedActiveCompactionMessages(
