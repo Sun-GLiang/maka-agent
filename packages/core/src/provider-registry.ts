@@ -83,6 +83,8 @@ export interface ProviderDefaults {
   status: 'ready' | 'phase3-experimental';
   protocol: 'anthropic' | 'openai' | 'google' | 'cohere';
   runtimeAdapter: ProviderRuntimeAdapter;
+  /** User-declared per-model capabilities are authoritative for this provider. */
+  relayModelProfiles?: boolean;
   modelDiscovery: ProviderModelDiscovery;
   category: ProviderCategory;
   catalogGroup?: ProviderCatalogGroup;
@@ -236,7 +238,7 @@ const zenmuxOpenAICompatibleMetadata = Object.fromEntries(
 );
 const zenmuxModelIds = toolCallingModelIds('ZenMux', zenmuxOpenAICompatibleMetadata, [
   'moonshotai/kimi-k2.5',
-]);
+]).filter((id) => GENERATED_MODELS_DEV_METADATA.zenmux[id]?.lifecycle !== 'deprecated');
 const fireworks = GENERATED_MODELS_DEV_PROVIDER_FACTS['fireworks-ai'];
 if (fireworks.id !== 'fireworks-ai') {
   throw new Error('models.dev Fireworks AI provider facts are missing stable id fireworks-ai');
@@ -290,6 +292,7 @@ const volcengineCodingPlanModelIds = [
 ] as const;
 const volcengineAgentPlanModelIds = [
   'ark-code-latest',
+  'glm-5.3',
   'doubao-seed-2.0-mini',
   'doubao-seed-2.0-lite',
   'deepseek-v4-flash',
@@ -603,8 +606,6 @@ const opencodeFreeModelIds = [
   'mimo-v2.5-free',
   'big-pickle',
   'deepseek-v4-flash-free',
-  'north-mini-code-free',
-  'laguna-s-2.1-free',
 ] as const;
 for (const id of opencodeFreeModelIds) {
   const model = GENERATED_MODELS_DEV_METADATA.opencode[id];
@@ -821,7 +822,7 @@ const providerRegistry = {
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     authKind: 'api_key',
     backendKind: 'ai-sdk',
-    fallbackModels: ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'],
+    fallbackModels: ['gemini-2.5-flash'],
     status: 'ready',
     protocol: 'google',
     runtimeAdapter: { kind: 'google' },
@@ -1727,6 +1728,7 @@ const providerRegistry = {
     status: 'ready',
     protocol: 'openai',
     runtimeAdapter: { kind: 'openai-compatible', name: 'connection', requireBaseUrl: true },
+    relayModelProfiles: true,
     modelDiscovery: { kind: 'protocol' },
     category: 'custom',
     catalogGroup: 'aggregators',
@@ -1745,6 +1747,7 @@ const providerRegistry = {
     status: 'ready',
     protocol: 'openai',
     runtimeAdapter: { kind: 'openai', apiProtocol: 'openai-responses' },
+    relayModelProfiles: true,
     modelDiscovery: { kind: 'protocol' },
     category: 'custom',
     catalogGroup: 'aggregators',

@@ -170,6 +170,7 @@ import {
   requireDesktopTargetScope,
   type DesktopTargetScope,
 } from '../shared/runtime-host-identity.js';
+import type { GoalArmRequest } from '../shared/goal-arm.js';
 import {
   projectDesktopAttachmentRefs,
   projectDesktopDailyReviewSummary,
@@ -1909,6 +1910,9 @@ const makaBridge = {
   goal: {
     get(sessionId: string): Promise<GoalState | null> {
       return invokeProjectedSessionRuntimeHost('goal:get', sessionId);
+    },
+    arm(sessionId: string, goal: GoalArmRequest): Promise<GoalState> {
+      return invokeProjectedSessionRuntimeHost('goal:arm', sessionId, goal);
     },
     clear(sessionId: string): Promise<void> {
       return invokeSessionRuntimeHost('goal:clear', sessionId);
