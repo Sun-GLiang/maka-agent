@@ -180,5 +180,8 @@ export function deriveFailedTurnRecovery(input: FailedTurnRecoveryInput, locale:
   if (input.toolActivityCount > 0) {
     return { action: 'inspect_tool', label: copy.toolRecord };
   }
+  if (lower === 'context_overflow') {
+    return { action: 'continue', label: copy.contextOverflow };
+  }
   return { action: 'retry', label: copy.retry };
 }
