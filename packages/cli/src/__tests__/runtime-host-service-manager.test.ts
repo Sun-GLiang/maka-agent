@@ -888,6 +888,7 @@ describe('managed Runtime Host service', () => {
     let startingPid: number | null = null;
     let stops = 0;
     let observedStartingFence = false;
+    let publishPidlessSuccessor = false;
     const backend: RuntimeHostServiceBackend = {
       ...createReadyBackend(),
       status: async () => ({
@@ -930,6 +931,10 @@ describe('managed Runtime Host service', () => {
         allow: boolean,
       ) => {
         assert.equal(expectedPid, 42);
+        if (publishPidlessSuccessor) {
+          serviceState = 'starting';
+          startingPid = null;
+        }
         return allow
           ? ({ kind: 'prepared', hostEpoch: 'host-1', pid: 42 } as const)
           : ({ kind: 'active_tasks' } as const);
@@ -1018,6 +1023,93 @@ describe('managed Runtime Host service', () => {
       pid: 42,
     });
     assert.equal(serviceState, 'stopped');
+
+    serviceState = 'running';
+    publishPidlessSuccessor = true;
+    const stopsBeforeSuccessor = stops;
+    await assert.rejects(
+      manageRuntimeHostService(
+        {
+          ...common,
+          action: 'retire',
+          expectedTarget,
+          allowInterruptActiveTasks: true,
+        },
+        backend,
+        deps,
+      ),
+      (error: unknown) =>
+        error instanceof RuntimeHostServiceManagerError && error.code === 'retirement_failed',
+    );
+    assert.equal(stops, stopsBeforeSuccessor);
+    assert.equal(serviceState, 'starting');
+  });
+
+  it('fails closed without stopping a successor that won the State Root', async (t) => {
+    const base = await mkdtemp(join(tmpdir(), 'maka-runtime-host-retirement-generation-'));
+    t.after(() => rm(base, { recursive: true, force: true }));
+    const clientDataRoot = join(base, 'config');
+    const root = await resolveStorageRoot({ path: join(base, 'state'), kind: 'interactive' });
+    const cliPath = join(base, 'cli.js');
+    await writeFile(cliPath, '#!/usr/bin/env node\n', 'utf8');
+    let serviceState: 'running' | 'stopped' = 'running';
+    let servicePid: number | null = 42;
+    let stops = 0;
+    let successor: Awaited<ReturnType<typeof tryAcquireInteractiveRootOwner>>;
+    const backend: RuntimeHostServiceBackend = {
+      ...createReadyBackend(),
+      status: async () => ({
+        manager: 'systemd_user',
+        installed: true,
+        enabled: true,
+        active: serviceState === 'running',
+        state: serviceState,
+        pid: serviceState === 'running' ? servicePid : null,
+        lastExitCode: 0,
+      }),
+      stop: async () => {
+        stops += 1;
+        serviceState = 'stopped';
+        servicePid = null;
+      },
+    };
+    const common = {
+      clientDataRoot,
+      defaultRootPath: root.canonicalPath,
+      nodePath: process.execPath,
+      cliPath,
+    } as const;
+    await manageRuntimeHostService({ ...common, action: 'install' }, backend, {
+      waitForReady: async () => undefined,
+    });
+    const expectedTarget = {
+      serviceId: resolveRuntimeHostManagedServiceId(clientDataRoot),
+      rootPath: root.canonicalPath,
+      rootId: root.rootId,
+    } as const;
+    await assert.rejects(
+      manageRuntimeHostService(
+        { ...common, action: 'retire', expectedTarget, allowInterruptActiveTasks: true },
+        backend,
+        {
+          prepareRetirement: async (
+            _config: RuntimeHostManagedServiceConfig,
+            expectedPid: number,
+          ) => {
+            assert.equal(expectedPid, 42);
+            successor = await tryAcquireInteractiveRootOwner(root);
+            assert.ok(successor);
+            servicePid = 43;
+            return { kind: 'prepared', hostEpoch: 'host-a', pid: expectedPid } as const;
+          },
+        },
+      ),
+      (error: unknown) =>
+        error instanceof RuntimeHostServiceManagerError && error.code === 'retirement_failed',
+    );
+    assert.equal(stops, 0);
+    assert.equal(servicePid, 43);
+    await successor?.close();
   });
 
   it('restores the deployed service when the replacement never becomes ready', async (t) => {

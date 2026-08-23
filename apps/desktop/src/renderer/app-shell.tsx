@@ -1925,6 +1925,16 @@ function AppShellContent({
     toastApi,
     upsertSessionSummary,
   });
+  const handleSwitchToBypassAndRetry = useCallback(
+    async (turnId: string) => {
+      const sessionId = activeIdRef.current;
+      if (!sessionId) return;
+      const switched = await setPermissionMode('bypass');
+      if (!switched || activeIdRef.current !== sessionId) return;
+      await handleTurnFooterAction(turnId, 'regenerate');
+    },
+    [handleTurnFooterAction, setPermissionMode],
+  );
 
   const {
     beginEditUserMessage,
@@ -3139,7 +3149,9 @@ function AppShellContent({
                   }
                   onPermissionModeChange={
                     activeBoundarySurface.localInteractionAvailable
-                      ? (mode) => setPermissionMode(mode)
+                      ? async (mode) => {
+                          await setPermissionMode(mode);
+                        }
                       : undefined
                   }
                   planModeActive={activePlanMode}
@@ -3277,6 +3289,7 @@ function AppShellContent({
                 onRetryMessages={activeId ? () => void retryMessages(activeId) : undefined}
                 deriveTurnPresentation={deriveTurnPresentation}
                 onTurnFooterAction={handleTurnFooterAction}
+                onSwitchToBypassAndRetry={handleSwitchToBypassAndRetry}
                 onEditUserMessage={(turnId) => { void beginEditUserMessage(turnId); }}
                 safeResumeAction={activeId ? {
                   pending: resumePendingSessionId === activeId,
