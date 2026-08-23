@@ -64,7 +64,7 @@ to local canvas `(0, 0)` before drawing the tip.
 - line `(1.00, 0.89)`;
 - cubic controls `(0.86, 0.63)`, `(0.69, 0.40)`, end `(0.00, 0.00)`.
 
-`CODEX_CURSOR_GLYPH` retains its public tuple shape: each curve stores its
+`CURSOR_GLYPH` retains its public tuple shape: each curve stores its
 endpoint first, followed by its two controls. The PiP SVG is the same path with
 the same local-origin hotspot. The status-item PNGs are deterministically
 rasterized from this geometry with Maka's existing blue gradient on a
@@ -73,7 +73,7 @@ transparent background. Regenerate them from the repository root with
 
 ### Motion configuration
 
-`CODEX_CURSOR_MOTION` retains its existing exported name and 30-field shape.
+`CURSOR_MOTION` retains the 30-field configuration shape.
 Its current values and independent rationale are:
 
 | Field | Replacement | Derivation |

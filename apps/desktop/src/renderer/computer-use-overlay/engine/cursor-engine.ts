@@ -41,7 +41,7 @@ const TAU = PI * 2;
 const SENTINEL = -200;
 
 // Maka's independently derived 30-field motion configuration.
-export const CODEX_CURSOR_MOTION = {
+export const CURSOR_MOTION = {
   clickAngle: -PI / 4,
   candidateCount: 9,
   boundsMargin: 23,
@@ -149,8 +149,8 @@ export function cursorPresentationReadyDeadlineMs(): number {
     value: 0,
     velocity: 0,
     target: 1,
-    response: CODEX_CURSOR_MOTION.springResponseMax,
-    damping: CODEX_CURSOR_MOTION.springDampingFraction,
+    response: CURSOR_MOTION.springResponseMax,
+    damping: CURSOR_MOTION.springDampingFraction,
   };
   let steps = 0;
   while (
@@ -209,7 +209,7 @@ const SHADOW_RGB = [0, 0, 0] as const;
  */
 const OUTLINE_RGB = [255, 255, 255] as const;
 
-export const CODEX_CURSOR_GLYPH = {
+export const CURSOR_GLYPH = {
   size: 20,
   shadowBlur: 3,
   // Rounded hotspot dart independently drawn inside a unit square. Curve tuples
@@ -344,7 +344,7 @@ export interface PathMeasurement {
  */
 function pathBounds(start: Point, end: Point, viewport: Viewport | null): PathBounds | null {
   if (!viewport) return null;
-  const margin = CODEX_CURSOR_MOTION.boundsMargin;
+  const margin = CURSOR_MOTION.boundsMargin;
   return {
     minX: Math.max(0, Math.min(margin, start[0], end[0])),
     minY: Math.max(0, Math.min(margin, start[1], end[1])),
@@ -455,7 +455,7 @@ export function planCursorPath(
   incomingHeading: number | null,
   viewport: Viewport | null,
 ): CubicCursorPath {
-  const config = CODEX_CURSOR_MOTION;
+  const config = CURSOR_MOTION;
   const dx = end[0] - start[0];
   const dy = end[1] - start[1];
   const distance = Math.hypot(dx, dy);
@@ -522,12 +522,12 @@ export function planCursorPath(
  * tangent through the shortest signed angular difference to the click angle.
  */
 export function cursorHeadingAt(tangent: Point, progress: number): number {
-  const clickAngle = CODEX_CURSOR_MOTION.clickAngle;
+  const clickAngle = CURSOR_MOTION.clickAngle;
   const magnitude = Math.hypot(tangent[0], tangent[1]);
   if (magnitude < 1e-9) return clickAngle;
   const tangentAngle = Math.atan2(tangent[1] / magnitude, tangent[0] / magnitude);
 
-  const blendStart = CODEX_CURSOR_MOTION.terminalTangentBlendStart;
+  const blendStart = CURSOR_MOTION.terminalTangentBlendStart;
   const w = clamp((progress - blendStart) / (1 - blendStart), 0, 1);
   const smoothstep = w * w * (3 - 2 * w);
   return wrapAngle(tangentAngle + wrapAngle(clickAngle - tangentAngle) * smoothstep);
@@ -535,7 +535,7 @@ export function cursorHeadingAt(tangent: Point, progress: number): number {
 
 export class CursorEngine {
   pos: [number, number] = [SENTINEL, SENTINEL];
-  heading = CODEX_CURSOR_MOTION.clickAngle;
+  heading = CURSOR_MOTION.clickAngle;
   pressed = false;
 
   private path: CubicCursorPath | null = null;
@@ -556,19 +556,19 @@ export class CursorEngine {
   private lastFrameMs: number | undefined;
 
   private readonly axis = makeSpring(
-    CODEX_CURSOR_MOTION.clickAngle,
-    CODEX_CURSOR_MOTION.scootAxisResponse,
-    CODEX_CURSOR_MOTION.scootAxisDampingFraction,
+    CURSOR_MOTION.clickAngle,
+    CURSOR_MOTION.scootAxisResponse,
+    CURSOR_MOTION.scootAxisDampingFraction,
   );
   private readonly stretchX = makeSpring(
     1,
-    CODEX_CURSOR_MOTION.scootStretchResponse,
-    CODEX_CURSOR_MOTION.scootStretchDampingFraction,
+    CURSOR_MOTION.scootStretchResponse,
+    CURSOR_MOTION.scootStretchDampingFraction,
   );
   private readonly stretchY = makeSpring(
     1,
-    CODEX_CURSOR_MOTION.scootStretchResponse,
-    CODEX_CURSOR_MOTION.scootStretchDampingFraction,
+    CURSOR_MOTION.scootStretchResponse,
+    CURSOR_MOTION.scootStretchDampingFraction,
   );
   /**
    * Maka applies one rotation term bounded by scootRotationMax. The independent
@@ -577,8 +577,8 @@ export class CursorEngine {
    */
   private readonly rotationOffset = makeSpring(
     0,
-    CODEX_CURSOR_MOTION.scootRotationResponse,
-    CODEX_CURSOR_MOTION.scootRotationDampingFraction,
+    CURSOR_MOTION.scootRotationResponse,
+    CURSOR_MOTION.scootRotationDampingFraction,
   );
 
   setSession(_sessionId: string): void {
@@ -603,7 +603,7 @@ export class CursorEngine {
     // tip already on the requested action hotspot, avoiding an off-screen glide.
     if (!this.isVisible()) {
       this.pos = [x, y];
-      this.heading = CODEX_CURSOR_MOTION.clickAngle;
+      this.heading = CURSOR_MOTION.clickAngle;
       this.target = null;
       this.clickOnArrive = false;
       this.opacity = 0;
@@ -632,16 +632,16 @@ export class CursorEngine {
     this.target = destination;
     this.moveDistance = distance;
     const response = clamp(
-      distance * CODEX_CURSOR_MOTION.springResponseScaler,
-      CODEX_CURSOR_MOTION.springResponseMin,
-      CODEX_CURSOR_MOTION.springResponseMax,
+      distance * CURSOR_MOTION.springResponseScaler,
+      CURSOR_MOTION.springResponseMin,
+      CURSOR_MOTION.springResponseMax,
     );
     this.progress = {
       value: 0,
       velocity: 0,
       target: 1,
       response,
-      damping: CODEX_CURSOR_MOTION.springDampingFraction,
+      damping: CURSOR_MOTION.springDampingFraction,
     };
     this.clickOnArrive = clickOnArrive;
   }
@@ -649,7 +649,7 @@ export class CursorEngine {
   /** Reconcile presentation with the coordinate confirmed by native execution. */
   completeAt(x: number, y: number, pulse = false, _endHeading?: number): void {
     this.pos = [x, y];
-    this.heading = CODEX_CURSOR_MOTION.clickAngle;
+    this.heading = CURSOR_MOTION.clickAngle;
     this.path = null;
     this.progress = null;
     this.target = null;
@@ -784,27 +784,27 @@ export class CursorEngine {
       this.pos = [sampled[0], sampled[1]];
       this.heading = tangentAngle;
       const speed = dt > 0 ? Math.hypot(sampled[0] - previous[0], sampled[1] - previous[1]) / dt : 0;
-      const scootEnabled = this.moveDistance >= CODEX_CURSOR_MOTION.scootDistanceThreshold;
+      const scootEnabled = this.moveDistance >= CURSOR_MOTION.scootDistanceThreshold;
       const intensity = scootEnabled ? clamp(speed / 900, 0, 1) : 0;
 
       setAngleTarget(this.axis, tangentAngle);
-      this.stretchX.target = 1 + CODEX_CURSOR_MOTION.scootStretchXAmount * intensity;
-      this.stretchY.target = 1 - CODEX_CURSOR_MOTION.scootSquashYAmount * intensity;
+      this.stretchX.target = 1 + CURSOR_MOTION.scootStretchXAmount * intensity;
+      this.stretchY.target = 1 - CURSOR_MOTION.scootSquashYAmount * intensity;
       // One rotation term: intensity * clamp(0.75 * headingDeviation + sway,
       // -1, 1) * scootRotationMax. Both inputs are unitless fractions and the
       // clamp is applied once, so the glyph cannot exceed scootRotationMax.
-      const headingDeviation = wrapAngle(tangentAngle - CODEX_CURSOR_MOTION.clickAngle) / PI;
+      const headingDeviation = wrapAngle(tangentAngle - CURSOR_MOTION.clickAngle) / PI;
       const sway = this.progress.velocity * ROTATION_SWAY_COEFFICIENT;
       this.rotationOffset.target = intensity * clamp(
         ROTATION_HEADING_WEIGHT * headingDeviation + sway,
         -1,
         1,
-      ) * CODEX_CURSOR_MOTION.scootRotationMax;
+      ) * CURSOR_MOTION.scootRotationMax;
 
       const progressSettled = springSettled(this.progress, 0.0005, 0.005);
       if (progressSettled) {
         this.pos = [this.target[0], this.target[1]];
-        this.heading = CODEX_CURSOR_MOTION.clickAngle;
+        this.heading = CURSOR_MOTION.clickAngle;
         this.path = null;
         this.progress = null;
         this.target = null;
@@ -835,7 +835,7 @@ export class CursorEngine {
   }
 
   private resetVisualSprings(): void {
-    settleSpring(this.axis, CODEX_CURSOR_MOTION.clickAngle);
+    settleSpring(this.axis, CURSOR_MOTION.clickAngle);
     settleSpring(this.stretchX, 1);
     settleSpring(this.stretchY, 1);
     settleSpring(this.rotationOffset, 0);
@@ -865,7 +865,7 @@ export class CursorEngine {
   }
 
   private paintAgentCursor(ctx: CanvasRenderingContext2D, pressedAmount: number): void {
-    const glyph = CODEX_CURSOR_GLYPH;
+    const glyph = CURSOR_GLYPH;
     const size = glyph.size;
     const point = ([x, y]: Point): Point => [x * size, y * size];
     const start = point(glyph.start);

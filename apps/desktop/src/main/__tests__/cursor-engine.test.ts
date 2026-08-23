@@ -23,8 +23,8 @@ import assert from 'node:assert/strict';
 import { DEFAULT_PRESENTATION_FINISHED_TIMEOUT_MS } from '@maka/runtime/computer-use-tools';
 
 import {
-  CODEX_CURSOR_GLYPH,
-  CODEX_CURSOR_MOTION,
+  CURSOR_GLYPH,
+  CURSOR_MOTION,
   CubicCursorPath,
   CURSOR_CLOSE_ENOUGH,
   CursorEngine,
@@ -41,8 +41,8 @@ const finite = (value: number): boolean => Number.isFinite(value);
 type Vec = readonly [number, number];
 
 const CLICK_DIRECTION: Vec = [
-  Math.cos(CODEX_CURSOR_MOTION.clickAngle),
-  Math.sin(CODEX_CURSOR_MOTION.clickAngle),
+  Math.cos(CURSOR_MOTION.clickAngle),
+  Math.sin(CURSOR_MOTION.clickAngle),
 ];
 
 /**
@@ -50,7 +50,7 @@ const CLICK_DIRECTION: Vec = [
  * given perpendicular bulge, departing straight at the target.
  */
 function candidateWithArc(start: Vec, end: Vec, arc: number): CubicCursorPath {
-  const config = CODEX_CURSOR_MOTION;
+  const config = CURSOR_MOTION;
   const dx = end[0] - start[0];
   const dy = end[1] - start[1];
   const distance = Math.hypot(dx, dy);
@@ -98,7 +98,7 @@ test('planner takes the straightest acceptable path, not the bendiest', () => {
   const start: Vec = [100, 100];
   const end: Vec = [700, 360];
   const distance = Math.hypot(end[0] - start[0], end[1] - start[1]);
-  const maxArc = Math.min(distance * CODEX_CURSOR_MOTION.arcSize, 120);
+  const maxArc = Math.min(distance * CURSOR_MOTION.arcSize, 120);
 
   const chosen = planCursorPath(start, end, null, null);
   const bulged = candidateWithArc(start, end, maxArc);
@@ -153,7 +153,7 @@ test('an interrupted move can be planned dead straight', () => {
   const end: Vec = [800, 400];
   const carried = Math.PI / 2; // travelling straight down when retargeted
   const distance = 400;
-  const maxArc = Math.min(distance * CODEX_CURSOR_MOTION.arcSize, 120);
+  const maxArc = Math.min(distance * CURSOR_MOTION.arcSize, 120);
   assert.ok(maxArc > 100, `the bulge ceiling should bite on this move, got ${maxArc}`);
 
   const straight = candidateWithArc(start, end, 0);
@@ -190,8 +190,8 @@ test('the presentation deadline covers the slowest release the gate can ask for'
     value: 0,
     velocity: 0,
     target: 1,
-    response: CODEX_CURSOR_MOTION.springResponseMax,
-    damping: CODEX_CURSOR_MOTION.springDampingFraction,
+    response: CURSOR_MOTION.springResponseMax,
+    damping: CURSOR_MOTION.springDampingFraction,
   };
   const dt = 1 / 240;
   let seconds = 0;
@@ -494,8 +494,8 @@ test('a long fast move keeps the glyph inside a single scootRotationMax', () => 
   // chasing it is underdamped, so allow it a few percent of settling overshoot.
   // The two-term version reached 1.62 rad here, well past this line.
   assert.ok(
-    widest <= CODEX_CURSOR_MOTION.scootRotationMax * 1.05,
-    `glyph rotated ${widest} rad, past the ${CODEX_CURSOR_MOTION.scootRotationMax} rad ceiling`,
+    widest <= CURSOR_MOTION.scootRotationMax * 1.05,
+    `glyph rotated ${widest} rad, past the ${CURSOR_MOTION.scootRotationMax} rad ceiling`,
   );
 });
 
@@ -579,14 +579,14 @@ test('click press animation clears over about 0.25 seconds', () => {
 
 function slowestSpringSamples(seconds = 10): number[] {
   const dt = 1 / 240;
-  const omega = (Math.PI * 2) / CODEX_CURSOR_MOTION.springResponseMax;
+  const omega = (Math.PI * 2) / CURSOR_MOTION.springResponseMax;
   let value = 0;
   let velocity = 0;
   const samples: number[] = [];
   for (let step = 0; step < seconds / dt; step++) {
     velocity += (
       omega * omega * (1 - value)
-      - 2 * CODEX_CURSOR_MOTION.springDampingFraction * omega * velocity
+      - 2 * CURSOR_MOTION.springDampingFraction * omega * velocity
     ) * dt;
     value += velocity * dt;
     samples.push(value);
@@ -671,7 +671,7 @@ test('the rendered glyph tip is the action hotspot and every path lands exactly 
   engine.paint(ctx, 0, 0);
   assert.deepEqual(engine.pos, [320, 240]);
   assert.deepEqual(translations[0], engine.pos);
-  assert.deepEqual(CODEX_CURSOR_GLYPH.start, [0, 0]);
+  assert.deepEqual(CURSOR_GLYPH.start, [0, 0]);
   assert.deepEqual(starts[0], [0, 0]);
   assert.deepEqual(curves.at(-1)?.slice(-2), [0, 0]);
 
@@ -717,13 +717,13 @@ test('terminal heading smoothsteps through the shortest signed angle', () => {
   const progress = 0.85;
   const phase = (progress - 0.80) / 0.20;
   const smoothstep = phase * phase * (3 - 2 * phase);
-  const shortest = signedAngleDifference(CODEX_CURSOR_MOTION.clickAngle - tangentAngle);
+  const shortest = signedAngleDifference(CURSOR_MOTION.clickAngle - tangentAngle);
   const expected = signedAngleDifference(tangentAngle + shortest * smoothstep);
   const actual = cursorHeadingAt(tangent, progress);
 
   assert.ok(Math.abs(signedAngleDifference(actual - expected)) < 1e-12);
   assert.ok(
-    Math.abs(signedAngleDifference(cursorHeadingAt(tangent, 1) - CODEX_CURSOR_MOTION.clickAngle))
+    Math.abs(signedAngleDifference(cursorHeadingAt(tangent, 1) - CURSOR_MOTION.clickAngle))
       < 1e-12,
   );
 });
@@ -742,7 +742,7 @@ test('independent score preserves detour ratios for positive subpixel chords', (
 });
 
 test('fresh planning spends all nine candidates on a symmetric direct-departure arc grid', () => {
-  const pairs = cursorCandidatePairs(CODEX_CURSOR_MOTION.candidateCount, 5, false);
+  const pairs = cursorCandidatePairs(CURSOR_MOTION.candidateCount, 5, false);
   assert.equal(pairs.length, 9);
   assert.deepEqual([...new Set(pairs.map(({ departureWeight }) => departureWeight))], [0]);
   assert.deepEqual(
@@ -752,7 +752,7 @@ test('fresh planning spends all nine candidates on a symmetric direct-departure 
 });
 
 test('interrupted planning selects nine candidates across all five departure weights', () => {
-  const pairs = cursorCandidatePairs(CODEX_CURSOR_MOTION.candidateCount, 5, true);
+  const pairs = cursorCandidatePairs(CURSOR_MOTION.candidateCount, 5, true);
   assert.equal(pairs.length, 9);
   assert.deepEqual(
     pairs.filter(({ departureWeight }) => departureWeight === 0).map(({ arcWeight }) => arcWeight),
