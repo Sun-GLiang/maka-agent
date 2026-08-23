@@ -33,6 +33,7 @@ import {
   manageRuntimeHostService,
   resolveRuntimeHostManagedServiceId,
   RuntimeHostServiceManagerError,
+  withRuntimeHostManagedServiceLifecycleLock,
   type RuntimeHostManagedServiceInput,
   type RuntimeHostManagedServiceResult,
   type RuntimeHostManagedServiceTarget,
@@ -47,6 +48,7 @@ export interface RuntimeHostServiceManagementCliOptions extends RuntimeHostManag
 
 export interface RuntimeHostServiceManagementCliDeps {
   readonly manage: typeof manageRuntimeHostService;
+  readonly withLifecycleLock: typeof withRuntimeHostManagedServiceLifecycleLock;
   readonly createBackend: (serviceId: string) => RuntimeHostServiceBackend;
   readonly writeOutput: (value: string) => unknown;
   readonly writeError: (value: string) => unknown;
@@ -58,6 +60,7 @@ export async function runManagedRuntimeHostServiceCli(
 ): Promise<number> {
   const deps: RuntimeHostServiceManagementCliDeps = {
     manage: manageRuntimeHostService,
+    withLifecycleLock: withRuntimeHostManagedServiceLifecycleLock,
     createBackend: createPlatformRuntimeHostServiceBackend,
     writeOutput: (value) => process.stdout.write(value),
     writeError: (value) => process.stderr.write(value),
@@ -66,15 +69,22 @@ export async function runManagedRuntimeHostServiceCli(
   try {
     const { json: _json, framed: _framed, ...input } = options;
     const serviceId = resolveRuntimeHostManagedServiceId(options.clientDataRoot);
-    const result = await deps.manage(input, deps.createBackend(serviceId));
+    const manage = () => deps.manage(input, deps.createBackend(serviceId));
+    const result =
+      options.action === 'status' || options.action === 'logs'
+        ? await manage()
+        : await deps.withLifecycleLock(options.clientDataRoot, manage);
+    const blocked = result.action === 'retire' && result.retirement.kind === 'active_tasks';
     if (options.framed) {
       deps.writeOutput(encodeRuntimeHostServiceManagementFrame(successFrame(result)));
+    } else if (options.json) {
+      deps.writeOutput(`${JSON.stringify({ ...result, ok: !blocked })}\n`);
+    } else if (blocked) {
+      deps.writeError(formatHumanResult(result));
     } else {
-      deps.writeOutput(
-        options.json ? `${JSON.stringify({ ...result, ok: true })}\n` : formatHumanResult(result),
-      );
+      deps.writeOutput(formatHumanResult(result));
     }
-    return 0;
+    return blocked ? 1 : 0;
   } catch (error) {
     const code =
       error instanceof RuntimeHostServiceManagerError ? error.code : 'internal_service_error';
@@ -140,6 +150,11 @@ function formatHumanResult(result: RuntimeHostManagedServiceResult): string {
     if (!service.installed) return 'Runtime Host service is not installed.\n';
     return `Runtime Host service is ${service.state} at ${websocketUrl(service)}\n`;
   }
+  if (result.action === 'retire') {
+    return result.retirement.kind === 'active_tasks'
+      ? 'Runtime Host service still owns active work. Retry with explicit interruption authority.\n'
+      : 'Runtime Host service is retired and its State Root writer is released.\n';
+  }
   if (result.action === 'logs') return result.logs || 'No Runtime Host service logs were found.\n';
   return `Runtime Host service is ${service.state}.\n`;
 }
@@ -157,18 +172,24 @@ function successFrame(result: RuntimeHostManagedServiceResult): RuntimeHostServi
     ...(config ? { stateRoot: config.rootPath } : {}),
     projectDirectoryRoots: [...(config?.projectDirectoryRoots ?? [])],
   };
-  return {
+  const common = {
     schemaVersion: 1,
     kind: 'result',
-    action: result.action,
     service,
     ...(process.env[RUNTIME_HOST_OPERATOR_CAPABILITY_REQUEST_ENV] ===
     RUNTIME_HOST_OPERATOR_ACCESS_MANAGEMENT_CAPABILITY
-      ? { operatorCapabilities: [RUNTIME_HOST_OPERATOR_ACCESS_MANAGEMENT_CAPABILITY] }
+      ? {
+          operatorCapabilities: [
+            RUNTIME_HOST_OPERATOR_ACCESS_MANAGEMENT_CAPABILITY,
+          ] as (typeof RUNTIME_HOST_OPERATOR_ACCESS_MANAGEMENT_CAPABILITY)[],
+        }
       : {}),
     ...(result.retainedStateRoot ? { retainedStateRoot: result.retainedStateRoot } : {}),
     ...(result.logs !== undefined ? { logs: result.logs } : {}),
-  };
+  } as const;
+  return result.action === 'retire'
+    ? { ...common, action: result.action, retirement: { ...result.retirement } }
+    : { ...common, action: result.action };
 }
 
 export function createPlatformRuntimeHostServiceBackend(

@@ -37,6 +37,16 @@ const SERVICE_ACTIONS = [
   'start',
   'stop',
   'restart',
+  'retire',
+  'logs',
+  'uninstall',
+] as const;
+const NON_RETIRE_SERVICE_ACTIONS = [
+  'install',
+  'status',
+  'start',
+  'stop',
+  'restart',
   'logs',
   'uninstall',
 ] as const;
@@ -50,6 +60,18 @@ const boundedNonEmptyString = (maxBytes: number) =>
     .string()
     .min(1)
     .refine((value) => Buffer.byteLength(value, 'utf8') <= maxBytes);
+
+const RETIREMENT_RESULT_SCHEMA = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('active_tasks') }).strict(),
+  z
+    .object({
+      kind: z.literal('retired'),
+      hostEpoch: boundedNonEmptyString(FIELD_MAX_BYTES),
+      pid: z.number().int().positive(),
+    })
+    .strict(),
+  z.object({ kind: z.literal('stopped') }).strict(),
+]);
 
 const SERVICE_SUMMARY_SCHEMA = z
   .object({
@@ -74,16 +96,27 @@ const SERVICE_SUMMARY_SCHEMA = z
   })
   .strict();
 
-const SERVICE_MANAGEMENT_FRAME_SCHEMA = z.discriminatedUnion('kind', [
+const SERVICE_RESULT_COMMON = {
+  schemaVersion: z.literal(1),
+  kind: z.literal('result'),
+  service: SERVICE_SUMMARY_SCHEMA,
+  operatorCapabilities: z.array(z.enum(OPERATOR_CAPABILITIES)).max(16).optional(),
+  retainedStateRoot: boundedString(PATH_MAX_BYTES).optional(),
+  logs: boundedString(RUNTIME_HOST_SERVICE_LOG_MAX_BYTES).optional(),
+} as const;
+
+const SERVICE_MANAGEMENT_FRAME_SCHEMA = z.union([
   z
     .object({
-      schemaVersion: z.literal(1),
-      kind: z.literal('result'),
-      action: z.enum(SERVICE_ACTIONS),
-      service: SERVICE_SUMMARY_SCHEMA,
-      operatorCapabilities: z.array(z.enum(OPERATOR_CAPABILITIES)).max(16).optional(),
-      retainedStateRoot: boundedString(PATH_MAX_BYTES).optional(),
-      logs: boundedString(RUNTIME_HOST_SERVICE_LOG_MAX_BYTES).optional(),
+      ...SERVICE_RESULT_COMMON,
+      action: z.literal('retire'),
+      retirement: RETIREMENT_RESULT_SCHEMA,
+    })
+    .strict(),
+  z
+    .object({
+      ...SERVICE_RESULT_COMMON,
+      action: z.enum(NON_RETIRE_SERVICE_ACTIONS),
     })
     .strict(),
   z

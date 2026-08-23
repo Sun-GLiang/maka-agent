@@ -47,7 +47,7 @@ import {
   matchHistoryCompactCheckpointPrefix,
   validateHistoryCompactCheckpointShape,
 } from '../history-compact-checkpoint.js';
-import { isHistoryCompactContentEvent } from '../history-compact.js';
+import { isHistoryCompactContentEvent } from '../history-compaction.js';
 import { RuntimeReadModel, type RuntimeReadModelSessionView } from '../runtime-read-model.js';
 import { buildToolOperationId } from '../runtime-commit-sink.js';
 import { buildToolResultArchiveResourceRef } from '../tool-result-archive-resource.js';
@@ -1149,7 +1149,7 @@ test('conversation copy clones one terminal Runtime ledger with new owned identi
       turnId: 'turn-1',
       ts: 2.7,
       data: { blockId: 'semantic-source', block: { sourceOwnedHash: true } },
-    });
+    } as unknown as EmittedAgentRunEvent);
     await runStore.appendEvent('session-source', 'run-source', {
       type: 'history_compact_checkpoint_recorded',
       id: 'checkpoint-source',

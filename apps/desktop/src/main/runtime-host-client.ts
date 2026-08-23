@@ -91,8 +91,10 @@ import {
   PROJECT_DIRECTORY_MAX_ENTRIES,
   type ProjectDirectoryEntry,
   type ProjectDirectoryRoot,
-  type QueueRetractInput,
-  type QueueRetractResult,
+  type QueueEntriesReorderInput,
+  type QueueEntryPromoteInput,
+  type QueueEntryRetractInput,
+  type QueueMutationResult,
   SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES,
   type SessionCatalogChangedFrame,
   type ScheduledTaskChangedFrame,
@@ -1062,10 +1064,28 @@ export class DesktopRuntimeHostClient {
     });
   }
 
-  retractQueue(
-    input: Omit<QueueRetractInput, "originHostEpoch">,
-  ): Promise<QueueRetractResult> {
-    return this.request("queue.retract", {
+  retractQueueEntry(
+    input: Omit<QueueEntryRetractInput, "originHostEpoch">,
+  ): Promise<QueueMutationResult> {
+    return this.request("queue.entry.retract", {
+      ...input,
+      originHostEpoch: this.connection.hostEpoch,
+    });
+  }
+
+  promoteQueueEntry(
+    input: Omit<QueueEntryPromoteInput, "originHostEpoch">,
+  ): Promise<QueueMutationResult> {
+    return this.request("queue.entry.promote", {
+      ...input,
+      originHostEpoch: this.connection.hostEpoch,
+    });
+  }
+
+  reorderQueueEntries(
+    input: Omit<QueueEntriesReorderInput, "originHostEpoch">,
+  ): Promise<QueueMutationResult> {
+    return this.request("queue.entries.reorder", {
       ...input,
       originHostEpoch: this.connection.hostEpoch,
     });

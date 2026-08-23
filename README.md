@@ -18,7 +18,7 @@
 -->
 
 <h1 align="center">
-  <img src="apps/desktop/assets/icon.png" alt="Maka" width="72" valign="middle" /> Apache Maka (Incubating)
+  <img src="apps/desktop/assets/app-icons/sky.png" alt="Maka" width="72" valign="middle" /> Apache Maka (Incubating)
 </h1>
 
 <p align="center"><sub>Incubating at The Apache Software Foundation</sub></p>
@@ -33,7 +33,7 @@
 </p>
 
 <p align="center">
-  <sub><a href="./README.zh-CN.md">简体中文</a></sub>
+  <a href="./README.zh-CN.md"><img src="https://img.shields.io/badge/%E4%B8%AD%E6%96%87%E6%96%87%E6%A1%A3-4C8DFF?style=flat" alt="中文文档" /></a>
 </p>
 
 <p align="center">

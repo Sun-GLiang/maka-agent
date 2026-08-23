@@ -73,6 +73,7 @@ export interface RuntimeHostSessionChannelOptions {
   onInteractionPending: (pending: InteractionPendingSnapshot) => void;
   onInteractionResolved: (pending: InteractionPendingSnapshot) => void;
   onTurnTerminal: (turn: TerminalTurnSnapshot) => void;
+  onToolResult?: (turnId: string) => void;
   onTranscriptReplaced: (turnId: string, messages: readonly StoredMessage[]) => void;
   /**
    * Fired when the folded session projection's goal changes (set / settle /
@@ -95,6 +96,7 @@ export class RuntimeHostSessionChannel {
   readonly #onInteractionPending: (pending: InteractionPendingSnapshot) => void;
   readonly #onInteractionResolved: (pending: InteractionPendingSnapshot) => void;
   readonly #onTurnTerminal: (turn: TerminalTurnSnapshot) => void;
+  readonly #onToolResult: ((turnId: string) => void) | undefined;
   readonly #onTranscriptReplaced: (turnId: string, messages: readonly StoredMessage[]) => void;
   readonly #onGoalChanged: (goal: GoalProjection | null) => void;
   readonly #onRecovered: () => void;
@@ -134,6 +136,7 @@ export class RuntimeHostSessionChannel {
     this.#onInteractionPending = options.onInteractionPending;
     this.#onInteractionResolved = options.onInteractionResolved;
     this.#onTurnTerminal = options.onTurnTerminal;
+    this.#onToolResult = options.onToolResult;
     this.#onTranscriptReplaced = options.onTranscriptReplaced;
     this.#onGoalChanged = options.onGoalChanged;
     this.#onRecovered = options.onRecovered;
@@ -635,6 +638,7 @@ export class RuntimeHostSessionChannel {
   }
 
   #emit(event: SessionEvent): void {
+    if (event.type === 'tool_result') this.#onToolResult?.(event.turnId);
     this.#queue(event.turnId).push(event);
   }
 
