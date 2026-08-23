@@ -92,8 +92,10 @@ import {
   type SessionHeaderPatch,
   type StoredMessage,
   type SubagentSessionParent,
-  decodeStoredMessage,
+  decodeCanonicalMessage,
+  decodeStoredMessage as decodePersistedStoredMessage,
 } from '@maka/core/session';
+import { markPersisted } from '@maka/core/persisted-value';
 import {
   type AgentGraphIntentAdmissionSnapshot,
   type AgentGraphTimelineMetadataSnapshot,
@@ -110,6 +112,7 @@ import {
 import { type SessionListFilter } from '@maka/core/runtime-inputs';
 import {
   assertSafeSessionId,
+  decodePersistedSessionHeader,
   normalizeSessionHeader,
   SessionNotFoundError,
   type ExternalSessionImportLookupResult,
@@ -144,6 +147,10 @@ const SQLITE_TRANSCRIPT_MESSAGE_LOOKUP_BATCH_SIZE = 256;
 const SQLITE_TURN_CONTRIBUTION_MAX_SOURCE_MESSAGES = 1_024;
 const SQLITE_TURN_CONTRIBUTION_MAX_SOURCE_BYTES = 4 * 1024 * 1024;
 const SQLITE_TURN_LANDMARK_LEGACY_NEIGHBOR_MESSAGES = 32;
+
+function decodeStoredMessage(value: unknown): StoredMessage {
+  return decodePersistedStoredMessage(markPersisted<StoredMessage>(value));
+}
 
 const require = createRequire(import.meta.url);
 const AGENT_GRAPH_CONTROL_DELETE_TABLES = SQLITE_AGENT_GRAPH_CONTROL_TABLES.filter(
@@ -1335,7 +1342,7 @@ export class SqliteSessionMetadataStore {
     // through JSON so the stored form matches what the recovery path reads.
     const encoded = messages.map((message) => {
       const json = JSON.stringify(message);
-      const canonical = decodeStoredMessage(JSON.parse(json) as unknown);
+      const canonical = decodeCanonicalMessage(JSON.parse(json) as unknown);
       return { message: canonical, json };
     });
     return this.transaction(() => {
@@ -1441,7 +1448,7 @@ export class SqliteSessionMetadataStore {
     if (messages.length === 0) return;
     const encoded = messages.map((message) => {
       const json = JSON.stringify(message);
-      const canonical = decodeStoredMessage(JSON.parse(json) as unknown);
+      const canonical = decodeCanonicalMessage(JSON.parse(json) as unknown);
       return { message: canonical, json };
     });
     this.transaction(() => {
@@ -5274,7 +5281,7 @@ function decodeRecord(row: SessionMetadataRow): SessionMetadataRecord {
     throw new Error(`Invalid SQLite session metadata record for ${row.session_id}`);
   }
   return {
-    header: normalizeSessionHeader(parsed, row.session_id),
+    header: decodePersistedSessionHeader(markPersisted<SessionHeader>(parsed), row.session_id),
     metadataVersion: row.metadata_version,
     committedAt: row.committed_at,
   };
@@ -5593,7 +5600,7 @@ function decodeStoredMessageRow(
   }
   try {
     const parsed = JSON.parse(row.record_json) as unknown;
-    return decodeStoredMessage(parsed);
+    return decodeStoredMessage(markPersisted<StoredMessage>(parsed));
   } catch (error) {
     throw new StoredSessionMessageIncompatibleError(sessionId, sequence, {
       cause: error,
@@ -5963,7 +5970,9 @@ function validateTranscriptRecord(
 ): void {
   try {
     decodeStoredMessage(
-      JSON.parse(typeof data === 'string' ? data : data.toString('utf8')) as unknown,
+      markPersisted<StoredMessage>(
+        JSON.parse(typeof data === 'string' ? data : data.toString('utf8')),
+      ),
     );
   } catch (error) {
     throw new StoredSessionMessageIncompatibleError(sessionId, sequence, {

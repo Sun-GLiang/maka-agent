@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { decodeStoredMessage } from '@maka/core/session';
+import { decodeCanonicalMessage } from '@maka/core/session';
 import { CodexSessionAdapter } from '../codex-session-adapter.js';
 import { createExternalSessionAdapterRegistry } from '../external-session-adapters.js';
 
@@ -190,7 +190,7 @@ describe('CodexSessionAdapter', () => {
       });
       assert.equal(session.messages.length, 9);
       for (const message of session.messages) {
-        assert.deepEqual(decodeStoredMessage(message), message);
+        assert.deepEqual(decodeCanonicalMessage(message), message);
       }
 
       assert.deepEqual(session.messages[0], {

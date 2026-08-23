@@ -279,4 +279,33 @@ describe('decodePersistedScheduledTask', () => {
     const notify: ScheduledTask = { ...base, effect: { kind: 'notify', channel: 'local' } };
     assert.equal(decodePersistedScheduledTask(markPersisted<ScheduledTask>(notify)), notify);
   });
+
+  it('rejects unknown permission modes in persisted execution templates', () => {
+    assert.throws(
+      () =>
+        decodePersistedScheduledTask(
+          markPersisted<ScheduledTask>({
+            ...base,
+            effect: {
+              ...base.effect,
+              execution: {
+                ...(base.effect.kind === 'agent_run' ? base.effect.execution : {}),
+                permissionMode: 'future-mode',
+              },
+            },
+          }),
+        ),
+      /Invalid persisted ScheduledTask permission mode/,
+    );
+  });
+
+  it('rejects unknown effect kinds in persisted records', () => {
+    assert.throws(
+      () =>
+        decodePersistedScheduledTask(
+          markPersisted<ScheduledTask>({ ...base, effect: { kind: 'future-effect' } }),
+        ),
+      /Invalid persisted ScheduledTask effect/,
+    );
+  });
 });

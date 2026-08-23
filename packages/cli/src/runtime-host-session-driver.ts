@@ -21,17 +21,19 @@ import { randomUUID } from 'node:crypto';
 import type { CreateSessionInput } from '@maka/core/runtime-inputs';
 import { DEFAULT_SESSION_NAME } from '@maka/core/session-name';
 import {
-  decodeStoredMessage,
+  decodeStoredMessage as decodePersistedStoredMessage,
   userFacingText,
   type SessionSummary,
   type StoredMessage,
 } from '@maka/core/session';
+import { markPersisted } from '@maka/core/persisted-value';
 import {
   type ActiveInteractionRequestEvent,
   type QueueEnqueueOutcome,
   type SessionEvent,
   type ShellRunUpdate,
 } from '@maka/core/events';
+
 import type { OrchestrationMode } from '@maka/core/orchestration';
 import type { PermissionMode } from '@maka/core/permission';
 
@@ -89,6 +91,8 @@ import {
   inspectGitCwdChanges,
   resolveMoveCwd,
 } from './session-driver-policy.js';
+const decodeStoredMessage = (value: unknown): StoredMessage =>
+  decodePersistedStoredMessage(markPersisted<StoredMessage>(value));
 const MAX_CATALOG_ATTEMPTS = 3;
 
 /** Optimistic-control retries for goal pause/resume/clear (mirrors the desktop client). */

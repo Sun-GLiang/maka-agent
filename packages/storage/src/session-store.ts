@@ -37,7 +37,7 @@ import {
 } from './operational-state-store.js';
 import { DEFAULT_SESSION_NAME, normalizeUserSessionName } from '@maka/core/session-name';
 import {
-  decodeStoredMessage,
+  decodeCanonicalMessage,
   deriveTurnRecords,
   isSessionBlockedReason,
   isSessionConversationCopy,
@@ -49,7 +49,8 @@ import {
 } from '@maka/core/session';
 import { isCollaborationMode } from '@maka/core/collaboration';
 import { isOrchestrationMode } from '@maka/core/orchestration';
-import { decodePersistedPermissionMode } from '@maka/core/permission';
+import { decodePersistedPermissionMode, isPermissionMode } from '@maka/core/permission';
+import type { PersistedValue } from '@maka/core/persisted-value';
 import { isSubagentWorkspaceBinding } from '@maka/core/subagent-workspace';
 import { WORKSPACE_AUTHORITY_SESSION_ID } from '@maka/core/workspace-version-authority';
 import type {
@@ -447,7 +448,7 @@ class SqliteSessionStore implements SessionAuthorityStore {
       throw new Error('Subagent spawn metadata requires createSubagent()');
     }
     const canonicalMessages = messages.map((message) =>
-      decodeStoredMessage(JSON.parse(JSON.stringify(message)) as unknown),
+      decodeCanonicalMessage(JSON.parse(JSON.stringify(message)) as unknown),
     );
     const header: SessionHeader = {
       ...buildSessionHeader(this.workspaceRoot, input),
@@ -1081,10 +1082,6 @@ export function normalizeSessionHeader(
   header: SessionHeader,
   sessionId: string = header.id,
 ): SessionHeader {
-  // A retired mode decodes to its live equivalent rather than failing the
-  // header: such a record is old, not malformed, and rejecting it would make
-  // the Session unopenable.
-  const permissionMode = decodePersistedPermissionMode(header.permissionMode);
   const valid =
     header.id === sessionId &&
     typeof header.workspaceRoot === 'string' &&
@@ -1118,7 +1115,7 @@ export function normalizeSessionHeader(
     typeof header.connectionLocked === 'boolean' &&
     typeof header.model === 'string' &&
     (header.toolProfile === undefined || isSessionToolProfile(header.toolProfile)) &&
-    permissionMode !== undefined &&
+    isPermissionMode(header.permissionMode) &&
     isCollaborationMode(header.collaborationMode) &&
     isOrchestrationMode(header.orchestrationMode) &&
     (header.transcriptLedgerVersion === undefined ||
@@ -1131,9 +1128,24 @@ export function normalizeSessionHeader(
   const normalizedName = normalizeSessionName(header.name);
   if (header.blockedReason === undefined) {
     const { blockedReason: _blockedReason, ...withoutBlockedReason } = header;
-    return { ...withoutBlockedReason, name: normalizedName, permissionMode };
+    return { ...withoutBlockedReason, name: normalizedName };
   }
-  return { ...header, name: normalizedName, permissionMode };
+  return { ...header, name: normalizedName };
+}
+
+export function decodePersistedSessionHeader(
+  persisted: PersistedValue<SessionHeader>,
+  sessionId?: string,
+): SessionHeader {
+  const header = persisted as unknown as SessionHeader;
+  const permissionMode = decodePersistedPermissionMode(header.permissionMode);
+  if (permissionMode === undefined) {
+    return normalizeSessionHeader(header, sessionId ?? header.id);
+  }
+  return normalizeSessionHeader(
+    permissionMode === header.permissionMode ? header : { ...header, permissionMode },
+    sessionId ?? header.id,
+  );
 }
 
 function isValidSessionExternalOrigin(origin: SessionHeader['externalOrigin']): boolean {
