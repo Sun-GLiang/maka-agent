@@ -89,7 +89,7 @@ describe('sandbox boundary failure tool result metadata', () => {
     } as const;
 
     assert.deepEqual(decodeCanonicalToolResultContent(result), result);
-    assert.deepEqual(toolResultContent(decodeStoredMessage(storedToolResult(result))), result);
+    assert.deepEqual(toolResultContent(decodePersistedMessage(storedToolResult(result))), result);
   });
 
   test('rejects malformed or widened boundary failure signals', () => {
