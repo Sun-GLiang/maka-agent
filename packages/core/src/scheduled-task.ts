@@ -34,6 +34,7 @@ import {
   type PermissionMode,
 } from './permission.js';
 import { isBotDeliveryProvider, type BotProvider } from './bot-chat-settings.js';
+import type { PersistedValue } from './persisted-value.js';
 
 export const SCHEDULED_TASK_TITLE_MAX_CHARS = 120;
 export const SCHEDULED_TASK_INTENT_MAX_CHARS = 8_000;
@@ -668,7 +669,10 @@ function fail(message: string): { ok: false; message: string } {
  * recognizes it any more. This is not a schema validator: a record that is
  * malformed in any other way stays as stored.
  */
-export function decodePersistedScheduledTask(task: ScheduledTask): ScheduledTask {
+export function decodePersistedScheduledTask(
+  persisted: PersistedValue<ScheduledTask>,
+): ScheduledTask {
+  const task = persisted as unknown as ScheduledTask;
   const { effect } = task;
   if (effect.kind !== 'agent_run') return task;
   const permissionMode = decodePersistedPermissionMode(effect.execution.permissionMode);
