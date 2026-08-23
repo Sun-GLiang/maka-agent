@@ -35,10 +35,11 @@ export type MakaCliCommand =
   | { kind: 'run'; args: string[] }
   | { kind: 'activate'; args: string[] }
   | { kind: 'eval'; args: string[] }
+  | { kind: 'acp' }
   | RuntimeHostCliCommand
   | { kind: 'help'; text: string }
   | { kind: 'version'; text: string }
-  | { kind: 'error'; message: string; exitCode: number };
+  | { kind: 'error'; message: string; exitCode: number; showHelp?: boolean };
 
 export interface MakaCliLaunchOptions {
   readonly dataProfileName: string;
@@ -61,6 +62,16 @@ export function parseMakaCliArgs(
   const [first] = argv;
   if (first === '--help' || first === '-h') return { kind: 'help', text: helpText(cliCommand) };
   if (first === '--version' || first === '-v') return { kind: 'version', text: version };
+  if (first === '--acp') {
+    return argv.length === 1
+      ? { kind: 'acp' }
+      : {
+          kind: 'error',
+          message: 'maka --acp does not accept arguments',
+          exitCode: 2,
+          showHelp: false,
+        };
+  }
   if (first?.startsWith('--')) return parseTuiArgs(argv);
   if (first === 'run' || first === '-p') return { kind: 'run', args: argv.slice(1) };
   if (first === 'activate') return { kind: 'activate', args: argv.slice(1) };
@@ -113,6 +124,7 @@ function helpText(cliCommand: string): string {
     '',
     'Commands:',
     `  ${cliCommand}              Start the TUI`,
+    `  ${cliCommand} --acp      Serve ACP v1 over stdio`,
     `  ${cliCommand} run ...      Run one non-interactive model turn`,
     `  ${cliCommand} activate ... Run one Cloud Session activation and emit JSONL`,
     `  ${cliCommand} -p ...       Alias for ${cliCommand} run`,
@@ -221,6 +233,14 @@ export async function runMakaCli(
       configureInstalledEvalBundle();
       const { runMakaEvalCli } = await import('@maka/eval');
       return runMakaEvalCli(command.args);
+    }
+    case 'acp': {
+      const { runMakaAcpStdioServer } = await import('./acp/stdio-server.js');
+      return runMakaAcpStdioServer({
+        workspaceRoot: dataRoots.workspaceRoot,
+        clientDataRoot: dataRoots.clientDataRoot,
+        version,
+      });
     }
     case 'runtime-host-serve': {
       const { runRuntimeHostServiceCli } = await import('./runtime-host-service-command.js');
@@ -470,7 +490,11 @@ export async function runMakaCli(
       process.stdout.write(`${command.text}\n`);
       return 0;
     case 'error':
-      process.stderr.write(`${command.message}\n\n${helpText(options.cliCommand)}\n`);
+      process.stderr.write(
+        'showHelp' in command && command.showHelp === false
+          ? `${command.message}\n`
+          : `${command.message}\n\n${helpText(options.cliCommand)}\n`,
+      );
       return command.exitCode;
     case 'tui': {
       const locale = resolveCliUiLocale(process.env);
