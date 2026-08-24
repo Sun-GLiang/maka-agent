@@ -31,6 +31,7 @@ import {
   applyShellRunUpdateToTranscript,
   createMakaPiTranscriptState,
   renderMakaPiActivityStrip,
+  renderMakaPiPendingQueue,
   renderMakaPiStatusLine,
   renderMakaPiTranscript,
   refreshRunningShellRunElapsed,
@@ -115,6 +116,16 @@ describe('Maka Pi TUI transcript', () => {
     assert.match(chinese, /陪你把事做完/);
     assert.match(chinese, /输入消息开始对话/);
     assert.match(chinese, /\/session\s+切换或恢复会话/);
+  });
+
+  test('renders the pending-queue edit shortcut for the current platform', () => {
+    const state = createMakaPiTranscriptState();
+    state.steering = ['Keep going'];
+    const renderFor = (platform: NodeJS.Platform) =>
+      renderMakaPiPendingQueue(state, 80, platform).map(stripAnsi);
+
+    assert.equal(renderFor('darwin').at(-1), '⌥+↑ 取回队列以重新编辑');
+    assert.equal(renderFor('linux').at(-1), 'alt+↑ 取回队列以重新编辑');
   });
 
   test('renders goal-origin prompts as autonomous provenance, not as user prompts', () => {
