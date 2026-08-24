@@ -793,6 +793,7 @@ function toProxyTestInput(proxy: NetworkProxySettings): TestProxyInput {
       type: proxy.protocol,
       host: proxy.host.trim(),
       port: proxy.port,
+      authEnabled: proxy.authEnabled,
       username:
         proxy.authEnabled && proxy.username.trim()
           ? proxy.username.trim()
