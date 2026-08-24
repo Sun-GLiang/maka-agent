@@ -23,8 +23,7 @@ export type ConversationMessageDateRelation = 'today' | 'same_year' | 'other_yea
 
 export interface ConversationMessageTimestampPresentation {
   relation: ConversationMessageDateRelation;
-  datePrefix: string;
-  fallbackText: string;
+  visibleText: string;
   absoluteLabel: string;
   isoDateTime: string;
 }
@@ -51,20 +50,6 @@ function visibleFormatOptions(
   return { year: 'numeric', month: 'short', day: 'numeric', ...clock };
 }
 
-function prefixBeforeClock(
-  parts: Intl.DateTimeFormatPart[],
-  relation: ConversationMessageDateRelation,
-): string {
-  if (relation === 'today') return '';
-  const hourIndex = parts.findIndex((part) => part.type === 'hour');
-  return hourIndex < 0
-    ? ''
-    : parts
-        .slice(0, hourIndex)
-        .map((part) => part.value)
-        .join('');
-}
-
 export function presentConversationMessageTimestamp(
   timestamp: number,
   now: number = Date.now(),
@@ -78,12 +63,10 @@ export function presentConversationMessageTimestamp(
   const relation = localDateRelation(date, nowDate);
   const intlLocale = uiLocaleToIntlLocale(locale);
   const visibleFormatter = new Intl.DateTimeFormat(intlLocale, visibleFormatOptions(relation));
-  const parts = visibleFormatter.formatToParts(date);
 
   return {
     relation,
-    datePrefix: prefixBeforeClock(parts, relation),
-    fallbackText: parts.map((part) => part.value).join(''),
+    visibleText: visibleFormatter.format(date),
     absoluteLabel: new Intl.DateTimeFormat(intlLocale, {
       dateStyle: 'medium',
       timeStyle: 'short',

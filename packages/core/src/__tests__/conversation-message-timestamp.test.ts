@@ -33,8 +33,7 @@ describe('conversation message timestamp presentation', () => {
 
     assert.ok(result);
     assert.equal(result.relation, 'today');
-    assert.equal(result.datePrefix, '');
-    assert.equal(result.fallbackText, '14:30');
+    assert.equal(result.visibleText, '14:30');
     assert.equal(result.isoDateTime, new Date(timestamp).toISOString());
   });
 
@@ -44,9 +43,8 @@ describe('conversation message timestamp presentation', () => {
 
     assert.ok(result);
     assert.equal(result.relation, 'same_year');
-    assert.equal(result.datePrefix, '8月23日 ');
-    assert.equal(result.fallbackText, '8月23日 14:30');
-    assert.doesNotMatch(result.fallbackText, /2026/);
+    assert.equal(result.visibleText, '8月23日 14:30');
+    assert.doesNotMatch(result.visibleText, /2026/);
   });
 
   it('adds the year when the local calendar years differ', () => {
@@ -55,8 +53,7 @@ describe('conversation message timestamp presentation', () => {
 
     assert.ok(result);
     assert.equal(result.relation, 'other_year');
-    assert.equal(result.datePrefix, '2025年8月23日 ');
-    assert.equal(result.fallbackText, '2025年8月23日 14:30');
+    assert.equal(result.visibleText, '2025年8月23日 14:30');
     assert.match(result.absoluteLabel, /2025/);
   });
 
@@ -66,9 +63,8 @@ describe('conversation message timestamp presentation', () => {
 
     assert.ok(result);
     assert.equal(result.relation, 'same_year');
-    assert.match(result.fallbackText, /Aug 23/);
-    assert.doesNotMatch(result.fallbackText, /2026/);
-    assert.ok(result.datePrefix.length > 'Aug 23'.length);
+    assert.match(result.visibleText, /Aug 23/);
+    assert.doesNotMatch(result.visibleText, /2026/);
   });
 
   it('uses calendar boundaries instead of elapsed 24-hour buckets', () => {

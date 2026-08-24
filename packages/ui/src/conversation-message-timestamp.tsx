@@ -17,26 +17,54 @@
  * under the License.
  */
 
-import { useEffect, useState } from 'react';
-import { Timestamp } from '@astryxdesign/core';
+import { useSyncExternalStore } from 'react';
 import {
   nextConversationMessageTimestampRefreshDelay,
   presentConversationMessageTimestamp,
 } from '@maka/core/conversation-message-timestamp';
 import { useUiLocale } from './locale-context.js';
 
+let midnightRefreshTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+const midnightRefreshListeners = new Set<() => void>();
+
+function scheduleMidnightRefresh() {
+  if (midnightRefreshTimer !== undefined || midnightRefreshListeners.size === 0) return;
+  const delay = nextConversationMessageTimestampRefreshDelay();
+  if (delay === null) return;
+  midnightRefreshTimer = globalThis.setTimeout(() => {
+    midnightRefreshTimer = undefined;
+    for (const listener of midnightRefreshListeners) listener();
+    scheduleMidnightRefresh();
+  }, delay);
+}
+
+function subscribeToMidnightRefresh(listener: () => void) {
+  midnightRefreshListeners.add(listener);
+  scheduleMidnightRefresh();
+  return () => {
+    midnightRefreshListeners.delete(listener);
+    if (midnightRefreshListeners.size === 0 && midnightRefreshTimer !== undefined) {
+      globalThis.clearTimeout(midnightRefreshTimer);
+      midnightRefreshTimer = undefined;
+    }
+  };
+}
+
+function getLocalDayStart() {
+  const localDay = new Date(Date.now());
+  localDay.setHours(0, 0, 0, 0);
+  return localDay.getTime();
+}
+
 export function ConversationMessageTimestamp(props: { value: number }) {
   const locale = useUiLocale();
-  const [now, setNow] = useState(() => Date.now());
+  const localDayStart = useSyncExternalStore(
+    subscribeToMidnightRefresh,
+    getLocalDayStart,
+    getLocalDayStart,
+  );
 
-  useEffect(() => {
-    const delay = nextConversationMessageTimestampRefreshDelay(now);
-    if (delay === null) return;
-    const timer = globalThis.setTimeout(() => setNow(Date.now()), delay);
-    return () => globalThis.clearTimeout(timer);
-  }, [now]);
-
-  const presentation = presentConversationMessageTimestamp(props.value, now, locale);
+  const presentation = presentConversationMessageTimestamp(props.value, localDayStart, locale);
   if (!presentation) return null;
 
   return (
@@ -45,14 +73,9 @@ export function ConversationMessageTimestamp(props: { value: number }) {
       data-date-relation={presentation.relation}
     >
       <span className="maka-message-time-visual" aria-hidden="true">
-        {presentation.datePrefix ? (
-          <span className="maka-message-date-prefix">{presentation.datePrefix}</span>
-        ) : null}
-        <Timestamp
-          className="maka-message-time-inline"
-          value={props.value}
-          format="time"
-        />
+        <time className="maka-message-time-inline" dateTime={presentation.isoDateTime}>
+          {presentation.visibleText}
+        </time>
       </span>
       <span className="maka-visually-hidden">{presentation.absoluteLabel}</span>
     </span>

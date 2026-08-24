@@ -58,7 +58,7 @@ function renderTimestamp(value: number, now: number) {
   }
 }
 
-test('composes a date prefix with the unchanged Astryx time rendering', () => {
+test('renders the complete visual timestamp from the UI locale', () => {
   const now = new Date(2026, 7, 24, 20, 0, 0).getTime();
   const value = new Date(2025, 7, 23, 14, 30, 0).getTime();
   const document = renderTimestamp(value, now);
@@ -66,11 +66,11 @@ test('composes a date prefix with the unchanged Astryx time rendering', () => {
 
   assert.ok(presentation);
   assert.equal(presentation.getAttribute('data-date-relation'), 'other_year');
-  assert.equal(
-    presentation.querySelector('.maka-message-date-prefix')?.textContent,
-    '2025年8月23日 ',
-  );
-  assert.ok(presentation.querySelector('time'));
+  const time = presentation.querySelector('time');
+  assert.ok(time);
+  assert.equal(time.textContent, '2025年8月23日 14:30');
+  assert.equal(time.getAttribute('dateTime'), new Date(value).toISOString());
+  assert.equal(presentation.querySelector('.maka-message-date-prefix'), null);
   assert.equal(presentation.querySelector('[aria-hidden="true"]') !== null, true);
   assert.match(
     presentation.querySelector('.maka-visually-hidden')?.textContent ?? '',
@@ -78,7 +78,7 @@ test('composes a date prefix with the unchanged Astryx time rendering', () => {
   );
 });
 
-test('omits the visual date prefix for a message from today', () => {
+test('renders only the UI-localized clock for a message from today', () => {
   const now = new Date(2026, 7, 24, 20, 0, 0).getTime();
   const value = new Date(2026, 7, 24, 14, 30, 0).getTime();
   const document = renderTimestamp(value, now);
@@ -87,7 +87,7 @@ test('omits the visual date prefix for a message from today', () => {
     document.querySelector('.maka-message-time-presentation')?.getAttribute('data-date-relation'),
     'today',
   );
-  assert.equal(document.querySelector('.maka-message-date-prefix'), null);
+  assert.equal(document.querySelector('time')?.textContent, '14:30');
 });
 
 test('TurnView routes original and steering user timestamps through the adapter', () => {
@@ -135,6 +135,127 @@ test('TurnView routes original and steering user timestamps through the adapter'
     );
   } finally {
     Date.now = originalNow;
+  }
+});
+
+test('shares one local-midnight timer across mounted timestamps', async () => {
+  const start = new Date(2026, 0, 15, 23, 59, 50).getTime();
+  const originalNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const midnightTimers = new Set<ReturnType<typeof globalThis.setTimeout>>();
+  let midnightTimerCount = 0;
+  let midnightTimerClearCount = 0;
+  Date.now = () => start;
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
+    const timer = originalSetTimeout(callback, delay, ...args);
+    if (delay === 10_000) {
+      midnightTimerCount += 1;
+      midnightTimers.add(timer);
+    }
+    return timer;
+  }) as typeof globalThis.setTimeout;
+  globalThis.clearTimeout = ((timer: ReturnType<typeof globalThis.setTimeout>) => {
+    if (midnightTimers.delete(timer)) midnightTimerClearCount += 1;
+    return originalClearTimeout(timer);
+  }) as typeof globalThis.clearTimeout;
+
+  const { document, window } = parseHTML('<div id="root"></div>');
+  Object.assign(globalThis, {
+    document,
+    window,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  const container = document.querySelector('#root');
+  assert.ok(container);
+  const root = createRoot(container);
+
+  try {
+    await act(() => {
+      root.render(
+        <LocaleProvider locale="zh">
+          <ConversationMessageTimestamp value={start - 1_000} />
+          <ConversationMessageTimestamp value={start - 2_000} />
+        </LocaleProvider>,
+      );
+    });
+    assert.equal(midnightTimerCount, 1);
+
+    await act(() => root.render(null));
+    assert.equal(midnightTimerClearCount, 1);
+
+    await act(() => {
+      root.render(
+        <LocaleProvider locale="zh">
+          <ConversationMessageTimestamp value={start - 1_000} />
+        </LocaleProvider>,
+      );
+    });
+    assert.equal(midnightTimerCount, 2);
+  } finally {
+    await act(() => root.unmount());
+    Date.now = originalNow;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
+test('rechecks the local day when subscription crosses midnight', async () => {
+  const beforeMidnight = new Date(2026, 0, 15, 23, 59, 59, 999).getTime();
+  const afterMidnight = new Date(2026, 0, 16, 0, 0, 0).getTime();
+  const originalNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const midnightTimerSentinel = {} as ReturnType<typeof globalThis.setTimeout>;
+  let currentNow = beforeMidnight;
+  Date.now = () => currentNow;
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
+    if (delay === 1) {
+      currentNow = afterMidnight;
+      return midnightTimerSentinel;
+    }
+    return originalSetTimeout(callback, delay, ...args);
+  }) as typeof globalThis.setTimeout;
+  globalThis.clearTimeout = ((timer: ReturnType<typeof globalThis.setTimeout>) => {
+    if (timer === midnightTimerSentinel) return;
+    return originalClearTimeout(timer);
+  }) as typeof globalThis.clearTimeout;
+
+  const { document, window } = parseHTML('<div id="root"></div>');
+  Object.assign(globalThis, {
+    document,
+    window,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  const container = document.querySelector('#root');
+  assert.ok(container);
+  const root = createRoot(container);
+
+  try {
+    await act(() => {
+      root.render(
+        <LocaleProvider locale="zh">
+          <ConversationMessageTimestamp value={beforeMidnight} />
+        </LocaleProvider>,
+      );
+    });
+    assert.equal(
+      container.querySelector('.maka-message-time-presentation')?.getAttribute('data-date-relation'),
+      'same_year',
+    );
+  } finally {
+    await act(() => root.unmount());
+    Date.now = originalNow;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
   }
 });
 
