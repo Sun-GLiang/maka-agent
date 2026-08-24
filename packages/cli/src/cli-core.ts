@@ -284,7 +284,11 @@ export async function runMakaCli(
     }
     case 'acp': {
       const { runMakaAcpStdioServer } = await import('./acp/stdio-server.js');
-      return runMakaAcpStdioServer({ version });
+      return runMakaAcpStdioServer({
+        workspaceRoot: dataRoots.workspaceRoot,
+        clientDataRoot: dataRoots.clientDataRoot,
+        version,
+      });
     }
     case 'runtime-host-serve': {
       const { runRuntimeHostServiceCli } = await import('./runtime-host-service-command.js');
