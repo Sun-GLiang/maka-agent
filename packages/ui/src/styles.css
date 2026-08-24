@@ -172,30 +172,29 @@
   margin: 0;
 }
 
-/* The meta row holds two different kinds of thing, so it gets two different
-   rules. The time is content — a fact about the message — and stays put; gating
-   it on hover is what hid it from touch and from assistive tech. The actions are
-   chrome and only surface on hover or focus. Astryx already splits these into a
-   `timestamp` and a `footer` slot; the gate belongs on the slot, not on the row
-   that contains both.
-
-   The `· ` between the two slots is Astryx's own separator, rendered whenever
-   the timestamp has something to be separated FROM. It is dropped rather than
-   gated: the two slots already read as separate at rest, since one is text and
-   the other a row of controls that fades in beside it, so the bullet adds a mark
-   without adding a distinction. The slots carry no class of their own, so it is
-   addressed positionally — the timestamp is the first child span and the
-   separator the one right after it (the footer's own children are buttons).
-
-   A transparent action still takes clicks, here and on the assistant footer.
-   `pointer-events: none` looks like the fix and is not obviously safe: it makes
-   the pointer fall through to the ancestor whose `:hover` is what restores the
-   button, so being clickable again depends on the browser redoing hit-testing
-   on a later mouse event. Continuous movement gets there; a jump that lands and
-   stops was not something this surface could be made to reproduce. Left as-is
-   rather than traded for a failure mode that could not be demonstrated. */
+/* Visual timestamps and message actions surface when the message has pointer
+   or keyboard intent. Opacity keeps the timestamp's geometry stable while its
+   full accessible label remains in the tree. Astryx's separator between the
+   timestamp and footer slots stays removed because the actions already read as
+   a separate control group. */
 .maka-message-meta > span + span {
   display: none;
+}
+.maka-message-time-presentation {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transition: opacity var(--duration-quick) var(--ease-out-strong);
+}
+.maka-message-time-visual {
+  display: inline-flex;
+  align-items: center;
+}
+.maka-user-message:hover .maka-message-time-presentation,
+.maka-user-message:focus-within .maka-message-time-presentation {
+  opacity: 1;
 }
 .maka-message-meta .maka-turn-footer-action {
   opacity: 0;
