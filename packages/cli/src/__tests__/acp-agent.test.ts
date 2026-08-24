@@ -23,12 +23,14 @@ import { client, methods, RequestError } from '@agentclientprotocol/sdk';
 import { createMakaAcpAgent } from '../acp/maka-acp-agent.js';
 
 describe('Maka ACP agent', () => {
-  test('returns only the Maka initialize identity', async () => {
+  test('returns the Maka identity with no advertised capabilities or authentication', async () => {
     await client({ name: 'test-client' }).connectWith(
       createMakaAcpAgent({ version: '0.2.0' }),
       async (agent) => {
         assert.deepEqual(await agent.request(methods.agent.initialize, { protocolVersion: 1 }), {
           protocolVersion: 1,
+          agentCapabilities: {},
+          authMethods: [],
           agentInfo: { name: 'maka', title: 'Maka', version: '0.2.0' },
         });
       },

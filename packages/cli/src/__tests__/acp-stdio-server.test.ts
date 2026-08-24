@@ -30,19 +30,39 @@ describe('Maka ACP stdio server', () => {
     assert.equal(harness.closeCalls(), 1);
   });
 
-  test('closes the Runtime Host context once after a protocol error', async () => {
+  test('returns a JSON-RPC parse error and closes the Runtime Host once after EOF', async () => {
     const harness = createHarness(['not json\n']);
 
     assert.equal(await harness.run(), 0);
+    assert.deepEqual(harness.stdoutMessages(), [
+      { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } },
+    ]);
+    assert.equal(harness.closeCalls(), 1);
+  });
+
+  test('propagates a stdin transport error after closing the Runtime Host once', async () => {
+    const transportError = new Error('stdin transport failed');
+    const stdin = Readable.from(
+      (async function* () {
+        throw transportError;
+      })(),
+    );
+    const harness = createHarness([], stdin);
+
+    await assert.rejects(harness.run(), (error: unknown) => error === transportError);
     assert.equal(harness.closeCalls(), 1);
   });
 });
 
-function createHarness(chunks: string[]) {
+function createHarness(
+  chunks: string[],
+  stdin = Readable.from(chunks.map((chunk) => Buffer.from(chunk))),
+) {
   let closes = 0;
-  const stdin = Readable.from(chunks.map((chunk) => Buffer.from(chunk)));
+  const stdoutChunks: Buffer[] = [];
   const stdout = new Writable({
-    write(_chunk, _encoding, callback) {
+    write(chunk, _encoding, callback) {
+      stdoutChunks.push(Buffer.from(chunk));
       callback();
     },
   });
@@ -64,5 +84,12 @@ function createHarness(chunks: string[]) {
         },
       ),
     closeCalls: () => closes,
+    stdoutMessages: () =>
+      Buffer.concat(stdoutChunks)
+        .toString('utf8')
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as unknown),
   };
 }

@@ -118,6 +118,8 @@ describe('Maka ACP child process', () => {
       await harness.withClient(async ({ context }) => {
         assert.deepEqual(await context.request(methods.agent.initialize, { protocolVersion: 1 }), {
           protocolVersion: 1,
+          agentCapabilities: {},
+          authMethods: [],
           agentInfo: { name: 'maka', title: 'Maka', version: '0.2.0' },
         });
 

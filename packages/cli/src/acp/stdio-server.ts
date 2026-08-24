@@ -45,13 +45,27 @@ export async function runMakaAcpStdioServer(
   try {
     const stdin = dependencies.stdin ?? process.stdin;
     const stdout = dependencies.stdout ?? process.stdout;
-    const stream = ndJsonStream(
-      Writable.toWeb(stdout) as WritableStream<Uint8Array>,
-      Readable.toWeb(stdin) as ReadableStream<Uint8Array>,
-    );
-    const connection = createMakaAcpAgent({ version: input.version }).connect(stream);
-    await connection.closed;
-    return 0;
+    let stdioError: Error | undefined;
+    const recordStdioError = (error: Error) => {
+      stdioError ??= error;
+    };
+    stdin.once('error', recordStdioError);
+    stdout.once('error', recordStdioError);
+    try {
+      const stream = ndJsonStream(
+        Writable.toWeb(stdout) as WritableStream<Uint8Array>,
+        Readable.toWeb(stdin) as ReadableStream<Uint8Array>,
+      );
+      const connection = createMakaAcpAgent({ version: input.version }).connect(stream);
+      await connection.closed;
+      if (stdioError) {
+        throw stdioError;
+      }
+      return 0;
+    } finally {
+      stdin.off('error', recordStdioError);
+      stdout.off('error', recordStdioError);
+    }
   } finally {
     await context.close();
   }

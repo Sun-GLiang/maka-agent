@@ -26,6 +26,8 @@ export interface MakaAcpAgentOptions {
 export function createMakaAcpAgent(options: MakaAcpAgentOptions): AgentApp {
   return agent({ name: 'maka' }).onRequest(methods.agent.initialize, () => ({
     protocolVersion: 1,
+    agentCapabilities: {},
+    authMethods: [],
     agentInfo: { name: 'maka', title: 'Maka', version: options.version },
   }));
 }
