@@ -40,6 +40,7 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 
 export interface AcpChildProcessHarnessOptions {
   readonly timeoutMs?: number;
+  readonly startRuntimeHost?: boolean;
 }
 
 export interface AcpChildProcessExit {
@@ -55,14 +56,14 @@ export interface AcpChildProcessClient {
 export type ConfigureAcpClient = (app: ClientApp) => ClientApp;
 
 /**
- * An isolated, real ACP process boundary. The Runtime Host is started before
- * the child so the child can only connect to that Host, never spawn one.
+ * An isolated, real ACP process boundary. Follow-up protocol tests can opt into
+ * a real in-process Runtime Host without allowing the child to spawn one.
  */
 export class AcpChildProcessHarness {
   readonly #root: string;
   readonly #workspaceRoot: string;
   readonly #child: ChildProcessWithoutNullStreams;
-  readonly #host: RuntimeHostKernel;
+  readonly #host: RuntimeHostKernel | undefined;
   readonly #stdout: StdoutCaptureBridge;
   readonly #stderr: Buffer[] = [];
   readonly #exit: Promise<AcpChildProcessExit>;
@@ -77,7 +78,7 @@ export class AcpChildProcessHarness {
     root: string;
     workspaceRoot: string;
     child: ChildProcessWithoutNullStreams;
-    host: RuntimeHostKernel;
+    host?: RuntimeHostKernel;
     stdoutTap: PassThrough;
     timeoutMs: number;
   }) {
@@ -183,7 +184,7 @@ export class AcpChildProcessHarness {
     for (const cleanup of [
       () => this.closeConnection(),
       () => this.stopChild(),
-      () => this.#host.close(),
+      () => this.#host?.close(),
     ]) {
       try {
         await cleanup();
@@ -277,28 +278,30 @@ export async function startAcpChildProcessHarness(
   let rootCleanupFollowsHostStartup = false;
   try {
     await mkdir(workspaceRoot, { recursive: true });
-    hostStartup = startExecutionRuntimeHostService({ rootPath: workspaceRoot });
-    try {
-      host = await withStartupTimeout(
-        hostStartup,
-        timeoutMs,
-        'Runtime Host startup',
-        workspaceRoot,
-      );
-    } catch (error) {
-      if (error instanceof StartupTimeoutError) {
-        rootCleanupFollowsHostStartup = true;
-        void hostStartup
-          .then(
-            async (lateHost) => {
-              await lateHost.close().catch(() => undefined);
-            },
-            () => undefined,
-          )
-          .then(() => rm(root, { recursive: true, force: true }).catch(() => undefined))
-          .catch(() => undefined);
+    if (options.startRuntimeHost) {
+      hostStartup = startExecutionRuntimeHostService({ rootPath: workspaceRoot });
+      try {
+        host = await withStartupTimeout(
+          hostStartup,
+          timeoutMs,
+          'Runtime Host startup',
+          workspaceRoot,
+        );
+      } catch (error) {
+        if (error instanceof StartupTimeoutError) {
+          rootCleanupFollowsHostStartup = true;
+          void hostStartup
+            .then(
+              async (lateHost) => {
+                await lateHost.close().catch(() => undefined);
+              },
+              () => undefined,
+            )
+            .then(() => rm(root, { recursive: true, force: true }).catch(() => undefined))
+            .catch(() => undefined);
+        }
+        throw error;
       }
-      throw error;
     }
     const child = spawn(
       process.execPath,
@@ -311,7 +314,7 @@ export async function startAcpChildProcessHarness(
       root,
       workspaceRoot,
       child,
-      host,
+      ...(host ? { host } : {}),
       stdoutTap,
       timeoutMs,
     });

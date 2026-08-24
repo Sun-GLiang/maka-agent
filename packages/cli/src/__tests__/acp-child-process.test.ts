@@ -111,7 +111,7 @@ describe('Maka ACP child process', () => {
     }
   });
 
-  test('serves ACP over a clean stdio boundary and exits after stdin EOF', {
+  test('serves ACP without a Runtime Host and exits after stdin EOF', {
     timeout: 30_000,
   }, async () => {
     await withAcpChildProcessHarness(async (harness) => {

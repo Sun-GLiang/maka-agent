@@ -20,16 +20,12 @@
 import { Readable, Writable } from 'node:stream';
 import { ndJsonStream } from '@agentclientprotocol/sdk';
 import { createMakaAcpAgent } from './maka-acp-agent.js';
-import { connectRuntimeHostCli } from '../runtime-host-cli-context.js';
 
 export interface MakaAcpStdioServerInput {
-  readonly workspaceRoot: string;
-  readonly clientDataRoot: string;
   readonly version: string;
 }
 
 export interface MakaAcpStdioServerDependencies {
-  readonly connectRuntimeHostCli?: typeof connectRuntimeHostCli;
   readonly stdin?: Readable;
   readonly stdout?: Writable;
 }
@@ -38,35 +34,27 @@ export async function runMakaAcpStdioServer(
   input: MakaAcpStdioServerInput,
   dependencies: MakaAcpStdioServerDependencies = {},
 ): Promise<number> {
-  const context = await (dependencies.connectRuntimeHostCli ?? connectRuntimeHostCli)({
-    rootPath: input.workspaceRoot,
-    clientDataRoot: input.clientDataRoot,
-  });
+  const stdin = dependencies.stdin ?? process.stdin;
+  const stdout = dependencies.stdout ?? process.stdout;
+  let stdioError: Error | undefined;
+  const recordStdioError = (error: Error) => {
+    stdioError ??= error;
+  };
+  stdin.once('error', recordStdioError);
+  stdout.once('error', recordStdioError);
   try {
-    const stdin = dependencies.stdin ?? process.stdin;
-    const stdout = dependencies.stdout ?? process.stdout;
-    let stdioError: Error | undefined;
-    const recordStdioError = (error: Error) => {
-      stdioError ??= error;
-    };
-    stdin.once('error', recordStdioError);
-    stdout.once('error', recordStdioError);
-    try {
-      const stream = ndJsonStream(
-        Writable.toWeb(stdout) as WritableStream<Uint8Array>,
-        Readable.toWeb(stdin) as ReadableStream<Uint8Array>,
-      );
-      const connection = createMakaAcpAgent({ version: input.version }).connect(stream);
-      await connection.closed;
-      if (stdioError) {
-        throw stdioError;
-      }
-      return 0;
-    } finally {
-      stdin.off('error', recordStdioError);
-      stdout.off('error', recordStdioError);
+    const stream = ndJsonStream(
+      Writable.toWeb(stdout) as WritableStream<Uint8Array>,
+      Readable.toWeb(stdin) as ReadableStream<Uint8Array>,
+    );
+    const connection = createMakaAcpAgent({ version: input.version }).connect(stream);
+    await connection.closed;
+    if (stdioError) {
+      throw stdioError;
     }
+    return 0;
   } finally {
-    await context.close();
+    stdin.off('error', recordStdioError);
+    stdout.off('error', recordStdioError);
   }
 }

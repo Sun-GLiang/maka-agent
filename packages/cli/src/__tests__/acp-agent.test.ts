@@ -53,4 +53,16 @@ describe('Maka ACP agent', () => {
       },
     );
   });
+
+  test('selects v1 when the client requests an unsupported lower or higher version', async () => {
+    for (const protocolVersion of [0, 2]) {
+      await client({ name: 'test-client' }).connectWith(
+        createMakaAcpAgent({ version: '0.2.0' }),
+        async (agent) => {
+          const response = await agent.request(methods.agent.initialize, { protocolVersion });
+          assert.equal(response.protocolVersion, 1);
+        },
+      );
+    }
+  });
 });

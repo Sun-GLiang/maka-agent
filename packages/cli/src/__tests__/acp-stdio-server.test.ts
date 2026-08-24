@@ -23,42 +23,61 @@ import { describe, test } from 'node:test';
 import { runMakaAcpStdioServer } from '../acp/stdio-server.js';
 
 describe('Maka ACP stdio server', () => {
-  test('closes the Runtime Host context once after normal EOF', async () => {
+  test('answers initialize without Runtime Host input or dependencies', async () => {
+    const harness = createHarness([
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: 1 },
+      })}\n`,
+    ]);
+
+    assert.equal(await harness.run(), 0);
+    assert.deepEqual(harness.stdoutMessages(), [
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        result: {
+          protocolVersion: 1,
+          agentCapabilities: {},
+          authMethods: [],
+          agentInfo: { name: 'maka', title: 'Maka', version: '0.2.0' },
+        },
+      },
+    ]);
+  });
+
+  test('returns zero after normal EOF', async () => {
     const harness = createHarness([]);
 
     assert.equal(await harness.run(), 0);
-    assert.equal(harness.closeCalls(), 1);
   });
 
-  test('returns a JSON-RPC parse error and closes the Runtime Host once after EOF', async () => {
+  test('returns a JSON-RPC parse error and then zero after EOF', async () => {
     const harness = createHarness(['not json\n']);
 
     assert.equal(await harness.run(), 0);
     assert.deepEqual(harness.stdoutMessages(), [
       { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } },
     ]);
-    assert.equal(harness.closeCalls(), 1);
   });
 
-  test('propagates a stdin transport error after closing the Runtime Host once', async () => {
+  test('propagates a stdin transport error', async () => {
     const transportError = new Error('stdin transport failed');
     const stdin = Readable.from(
       (async function* () {
         throw transportError;
       })(),
     );
-    const harness = createHarness([], stdin);
+    const harness = createHarness([], { stdin });
 
     await assert.rejects(harness.run(), (error: unknown) => error === transportError);
-    assert.equal(harness.closeCalls(), 1);
   });
 });
 
-function createHarness(
-  chunks: string[],
-  stdin = Readable.from(chunks.map((chunk) => Buffer.from(chunk))),
-) {
-  let closes = 0;
+function createHarness(chunks: string[], options: { readonly stdin?: Readable } = {}) {
+  const stdin = options.stdin ?? Readable.from(chunks.map((chunk) => Buffer.from(chunk)));
   const stdoutChunks: Buffer[] = [];
   const stdout = new Writable({
     write(chunk, _encoding, callback) {
@@ -67,23 +86,7 @@ function createHarness(
     },
   });
   return {
-    run: () =>
-      runMakaAcpStdioServer(
-        { workspaceRoot: '/workspace', clientDataRoot: '/client-data', version: '0.2.0' },
-        {
-          stdin,
-          stdout,
-          connectRuntimeHostCli: async () =>
-            ({
-              close: async () => {
-                closes += 1;
-              },
-            }) as Awaited<
-              ReturnType<typeof import('../runtime-host-cli-context.js').connectRuntimeHostCli>
-            >,
-        },
-      ),
-    closeCalls: () => closes,
+    run: () => runMakaAcpStdioServer({ version: '0.2.0' }, { stdin, stdout }),
     stdoutMessages: () =>
       Buffer.concat(stdoutChunks)
         .toString('utf8')
