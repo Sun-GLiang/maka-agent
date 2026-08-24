@@ -23,6 +23,7 @@ import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { ToastProvider, useToast } from '@maka/ui';
 import type {
   AppSettings,
+  RuntimeHostAppSettings,
   SettingsSection,
   ThemePalette,
   ThemePreference,
@@ -701,11 +702,29 @@ const unavailableRuntimeHostProfiles: DesktopRuntimeHostProfileSnapshot = {
 
 const STORY_RUNTIME_HOST_KEY = 'local:storybook-local-host';
 
+function storyRuntimeSettings(
+  settings: AppSettings = createDefaultSettings(),
+  passwordConfigured = false,
+): RuntimeHostAppSettings {
+  return {
+    ...settings,
+    network: {
+      proxy: {
+        ...settings.network.proxy,
+        passwordConfigured,
+      },
+    },
+  };
+}
+
 function seedGeneralSnapshotCache(cache: SettingsSnapshotCache): void {
   const settings = createDefaultSettings();
   cache.commitClientRead(settings);
   cache.commitRuntimeHostCatalogRead(runtimeHostProfiles);
-  cache.commitRuntimeHostSettingsRead(STORY_RUNTIME_HOST_KEY, settings);
+  cache.commitRuntimeHostSettingsRead(
+    STORY_RUNTIME_HOST_KEY,
+    storyRuntimeSettings(settings),
+  );
   cache.commitRuntimeHostConnectionsRead(STORY_RUNTIME_HOST_KEY, {
     connections,
     defaultSlug: 'zai-live',
@@ -726,7 +745,7 @@ function seedGeneralTwoHostSnapshotCache(cache: SettingsSnapshotCache): void {
 }
 
 let storyClientSettings = createDefaultSettings();
-let storyRuntimeHostSettings = createDefaultSettings();
+let storyRuntimeHostSettings = storyRuntimeSettings();
 
 const makaBridge = {
   runtimeHostProfiles: {
@@ -772,7 +791,16 @@ const makaBridge = {
       return { settings: storyClientSettings };
     },
     update: async (patch: Parameters<typeof window.maka.settings.update>[0]): Promise<UpdateAppSettingsResult> => {
-      storyRuntimeHostSettings = mergeSettings(storyRuntimeHostSettings, patch);
+      const merged = mergeSettings(storyRuntimeHostSettings, patch);
+      storyRuntimeHostSettings = storyRuntimeSettings(
+        merged,
+        patch.network?.proxy?.credential?.kind === 'replace'
+          ? true
+          : patch.network?.proxy?.credential?.kind === 'delete' ||
+              patch.network?.proxy?.authEnabled === false
+            ? false
+            : storyRuntimeHostSettings.network.proxy.passwordConfigured,
+      );
       return { settings: storyRuntimeHostSettings };
     },
     subscribeClientChanged: () => () => undefined,

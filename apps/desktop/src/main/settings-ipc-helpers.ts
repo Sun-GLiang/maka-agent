@@ -19,6 +19,7 @@
 
 import type {
   AppSettings,
+  RuntimeHostAppSettings,
   SettingsTestResult,
   SettingsTestResultCode,
   UpdateAppSettingsInput,
@@ -93,17 +94,6 @@ export function preserveSensitivePlaceholders(
 
   return {
     ...patch,
-    ...(patch.network?.proxy?.password === SENSITIVE_PLACEHOLDER
-      ? {
-          network: {
-            ...patch.network,
-            proxy: {
-              ...patch.network.proxy,
-              password: current.network.proxy.password,
-            },
-          },
-        }
-      : {}),
     ...(botChannels
       ? {
           botChat: {
@@ -116,20 +106,19 @@ export function preserveSensitivePlaceholders(
 }
 
 export function maskAppSettings(
+  settings: RuntimeHostAppSettings,
+  revealPatch?: UpdateAppSettingsInput,
+): RuntimeHostAppSettings;
+export function maskAppSettings(
+  settings: AppSettings,
+  revealPatch?: UpdateAppSettingsInput,
+): AppSettings;
+export function maskAppSettings(
   settings: AppSettings,
   revealPatch: UpdateAppSettingsInput = {},
 ): AppSettings {
   return {
     ...settings,
-    network: {
-      ...settings.network,
-      proxy: {
-        ...settings.network.proxy,
-        password: shouldReveal(revealPatch.network?.proxy?.password)
-          ? settings.network.proxy.password
-          : (maskSensitive(settings.network.proxy.password) ?? ""),
-      },
-    },
     botChat: {
       ...settings.botChat,
       channels: Object.fromEntries(
@@ -183,6 +172,7 @@ export function stripSettingsSecretsForExport(
 ): Record<string, unknown> {
   const proxy = { ...settings.network.proxy } as Record<string, unknown>;
   delete proxy.password;
+  delete proxy.passwordConfigured;
 
   const channels: Record<string, unknown> = {};
   for (const [provider, channel] of Object.entries(settings.botChat.channels)) {
@@ -209,6 +199,14 @@ export function stripSettingsSecretsForExport(
   };
 }
 
+export function buildSettingsUpdateResult(
+  settings: RuntimeHostAppSettings,
+  patch: UpdateAppSettingsInput,
+): UpdateAppSettingsResult<RuntimeHostAppSettings>;
+export function buildSettingsUpdateResult(
+  settings: AppSettings,
+  patch: UpdateAppSettingsInput,
+): UpdateAppSettingsResult;
 export function buildSettingsUpdateResult(
   settings: AppSettings,
   patch: UpdateAppSettingsInput,

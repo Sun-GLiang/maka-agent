@@ -19,12 +19,19 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { AppSettings } from '@maka/core/settings';
+import {
+  createDefaultSettings,
+  type RuntimeHostAppSettings,
+} from '@maka/core/settings';
 import type {
   ConnectionCatalogSnapshot,
   CredentialLocator,
 } from '@maka/core/runtime-policy';
-import { gatherRuntimeHostConfig } from '../runtime-host-config-ipc-main.js';
+import type { ConfigBundle } from '@maka/storage/config-transfer';
+import {
+  adaptRuntimeHostConfigImport,
+  gatherRuntimeHostConfig,
+} from '../runtime-host-config-ipc-main.js';
 
 const CATALOG: ConnectionCatalogSnapshot = {
   revision: 1,
@@ -66,6 +73,7 @@ test('Runtime Host config export omits settings secrets unless credentials are s
   assert.deepEqual(bundle.includedData, ['settings']);
   assert.equal(credentialExports, 0);
   assert.equal('password' in settings.network.proxy, false);
+  assert.equal('passwordConfigured' in settings.network.proxy, false);
   assert.equal('token' in settings.botChat.channels.telegram, false);
   assert.equal('appSecret' in settings.botChat.channels.telegram, false);
   assert.equal('apiKey' in settings.webSearch.providers.tavily, false);
@@ -105,23 +113,118 @@ test('Runtime Host config export reads selected credentials from Host authority'
   assert.equal(settings.botChat.channels.telegram.token, 'bot-secret');
 });
 
-function settingsWithSecrets(): AppSettings {
+test('Runtime Host config export writes an empty v1 proxy password when none is configured', async () => {
+  const bundle = await gatherRuntimeHostConfig(
+    ['settings', 'credentials'],
+    {
+      client: {
+        loadConnectionCatalog: async () => ({ ...CATALOG, connections: [] }),
+        exportConfigurationCredentials: async () => ({ credential: null }),
+      },
+      appVersion: '0.1.0',
+      getSettings: async () => settingsWithSecrets(),
+    } as never,
+  );
+
+  const settings = bundle.data.settings as Record<string, any>;
+  assert.equal(settings.network.proxy.password, '');
+  assert.equal('passwordConfigured' in settings.network.proxy, false);
+});
+
+test('Runtime Host config import adapts v1 proxy passwords only with credential consent', () => {
+  const replace = adaptRuntimeHostConfigImport(
+    importBundle(['settings', 'credentials'], 'complete-secret'),
+  );
+  assert.deepEqual(
+    (replace.data.settings as Record<string, any>).network.proxy,
+    {
+      host: '10.0.0.2',
+      credential: { kind: 'replace', secret: 'complete-secret' },
+    },
+  );
+
+  const remove = adaptRuntimeHostConfigImport(
+    importBundle(['settings', 'credentials'], ''),
+  );
+  assert.deepEqual(
+    (remove.data.settings as Record<string, any>).network.proxy.credential,
+    { kind: 'delete' },
+  );
+
+  const keep = adaptRuntimeHostConfigImport(
+    importBundle(['settings', 'credentials'], undefined),
+  );
+  assert.equal(
+    'credential' in (keep.data.settings as Record<string, any>).network.proxy,
+    false,
+  );
+
+  const ignored = adaptRuntimeHostConfigImport(
+    importBundle(['settings'], 'handcrafted-secret'),
+  );
+  assert.deepEqual(
+    (ignored.data.settings as Record<string, any>).network.proxy,
+    { host: '10.0.0.2' },
+  );
+});
+
+test('Runtime Host config import rejects a non-string v1 password during preflight', () => {
+  assert.throws(
+    () => adaptRuntimeHostConfigImport(importBundle(['settings', 'credentials'], 42)),
+    /password.*string/i,
+  );
+});
+
+test('Runtime Host config import rejects conflicting authentication before apply', () => {
+  const bundle = importBundle(
+    ['connections', 'settings', 'credentials'],
+    'complete-secret',
+  );
+  (bundle.data.settings as Record<string, any>).network.proxy.authEnabled = false;
+
+  assert.throws(
+    () => adaptRuntimeHostConfigImport(bundle),
+    /authentication.*disabled/i,
+  );
+});
+
+function settingsWithSecrets(): RuntimeHostAppSettings {
+  const settings = createDefaultSettings();
+  settings.botChat.channels.telegram.token = 'bot-secret';
+  settings.botChat.channels.telegram.appSecret = 'app-secret';
+  (settings.webSearch.providers.tavily as { apiKey: string }).apiKey =
+    'local-tavily-secret';
   return {
-    theme: 'dark',
-    network: { proxy: { host: '127.0.0.1', password: 'local-proxy-secret' } },
-    botChat: {
-      channels: {
-        telegram: {
-          chatId: '42',
-          token: 'bot-secret',
-          appSecret: 'app-secret',
-        },
+    ...settings,
+    network: {
+      proxy: {
+        ...settings.network.proxy,
+        passwordConfigured: true,
       },
     },
-    webSearch: {
-      providers: { tavily: { apiKey: 'local-tavily-secret' } },
+  };
+}
+
+function importBundle(
+  includedData: ConfigBundle['includedData'],
+  password: unknown,
+): ConfigBundle {
+  const proxy: Record<string, unknown> = {
+    host: '10.0.0.2',
+    passwordConfigured: true,
+    credential: { kind: 'replace', secret: 'injected-operation' },
+  };
+  if (password !== undefined) proxy.password = password;
+  return {
+    schemaVersion: 1,
+    exportedAt: '',
+    appVersion: '',
+    includedData,
+    data: {
+      settings: { network: { proxy } },
+      ...(includedData.includes('credentials') ? { credentials: [] } : {}),
     },
-  } as unknown as AppSettings;
+  };
 }
 
 function secretFor(locator: CredentialLocator): string | null {

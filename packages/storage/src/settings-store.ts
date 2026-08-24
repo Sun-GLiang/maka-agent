@@ -203,8 +203,8 @@ class FileSettingsStore implements SettingsStore {
     if (!Number.isInteger(proxy.port) || proxy.port <= 0 || proxy.port > 65535) {
       return { ok: false, message: '代理端口必须在 1-65535 之间' };
     }
-    if (proxy.authEnabled && (!proxy.username.trim() || !proxy.password)) {
-      return { ok: false, message: '启用代理认证后需要用户名和密码' };
+    if (proxy.authEnabled && !proxy.username.trim()) {
+      return { ok: false, message: '启用代理认证后需要用户名' };
     }
     return {
       ok: true,

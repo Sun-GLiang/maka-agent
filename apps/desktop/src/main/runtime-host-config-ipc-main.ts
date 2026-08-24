@@ -44,11 +44,16 @@ import {
   stripSettingsSecretsForExport,
 } from './settings-ipc-helpers.js';
 import {
+  runRuntimeHostSettingsExclusive,
+  type RuntimeHostSettingsModule,
+} from './runtime-host-settings-ipc-main.js';
+import {
   buildConfigBundle,
   isConfigCategory,
   parseConfigBundle,
   serializeConfigBundle,
   type ConfigCategory,
+  type ConfigBundle,
   type ConfigData,
   type ConnectionConflictStrategy,
 } from '@maka/storage/config-transfer';
@@ -58,11 +63,21 @@ interface RuntimeHostConfigIpcDeps {
   readonly client: DesktopRuntimeHostClient;
   readonly mainWindowController: ReturnType<typeof createMainWindowController>;
   readonly appVersion: string;
+  readonly settingsModule: RuntimeHostSettingsModule;
+  readonly emitConnectionsChanged: () => void;
+}
+
+interface RuntimeHostConfigGatherDeps {
+  readonly client: DesktopRuntimeHostClient;
+  readonly appVersion: string;
   readonly getSettings: () => Promise<AppSettings>;
+}
+
+interface RuntimeHostConfigTransferDeps {
+  readonly client: DesktopRuntimeHostClient;
   readonly updateSettings: (
     patch: UpdateAppSettingsInput,
   ) => Promise<AppSettings>;
-  readonly emitConnectionsChanged: () => void;
 }
 
 export function registerRuntimeHostConfigIpc(
@@ -75,7 +90,6 @@ export function registerRuntimeHostConfigIpc(
       if (categories.length === 0) {
         return { ok: false as const, reason: 'no_categories' as const };
       }
-      const bundle = await gatherRuntimeHostConfig(categories, deps);
       const today = new Date().toISOString().slice(0, 10);
       const result = await deps.mainWindowController.showSaveDialog({
         title: '导出 Maka 配置',
@@ -85,6 +99,15 @@ export function registerRuntimeHostConfigIpc(
       if (result.canceled || !result.filePath) {
         return { ok: false as const, reason: 'canceled' as const };
       }
+      const bundle = await runRuntimeHostSettingsExclusive(
+        deps.settingsModule,
+        (settings) =>
+          gatherRuntimeHostConfig(categories, {
+            client: deps.client,
+            appVersion: deps.appVersion,
+            getSettings: settings.get,
+          }),
+      );
       await writeFile(result.filePath, serializeConfigBundle(bundle), 'utf8');
       return {
         ok: true as const,
@@ -114,10 +137,26 @@ export function registerRuntimeHostConfigIpc(
           message: parsed.message,
         };
       }
-      const imported = await applyConfigImport(
-        parsed.bundle,
-        sanitizeStrategy(input?.strategy),
-        runtimeHostTransferDeps(deps),
+      let importBundle: ConfigBundle;
+      try {
+        importBundle = adaptRuntimeHostConfigImport(parsed.bundle);
+      } catch (error) {
+        return {
+          ok: false as const,
+          reason: 'malformed' as const,
+          message: error instanceof Error ? error.message : 'Invalid settings payload.',
+        };
+      }
+      const imported = await runRuntimeHostSettingsExclusive(
+        deps.settingsModule,
+        (settings) =>
+          applyConfigImport(
+            importBundle,
+            sanitizeStrategy(input?.strategy),
+            runtimeHostTransferDeps(
+              { client: deps.client, updateSettings: settings.update },
+            ),
+          ),
       );
       deps.emitConnectionsChanged();
       return {
@@ -131,7 +170,7 @@ export function registerRuntimeHostConfigIpc(
 
 export async function gatherRuntimeHostConfig(
   categories: readonly ConfigCategory[],
-  deps: RuntimeHostConfigIpcDeps,
+  deps: RuntimeHostConfigGatherDeps,
 ) {
   const selected = new Set(categories);
   const data: ConfigData = {};
@@ -183,7 +222,7 @@ async function exportConfigurationCredentials(
 }
 
 function runtimeHostTransferDeps(
-  deps: RuntimeHostConfigIpcDeps,
+  deps: RuntimeHostConfigTransferDeps,
 ): ConfigTransferDeps {
   return {
     connectionStore: {
@@ -339,16 +378,22 @@ function connectionCredentials(
 function restoreHostSettingsSecrets(
   settings: AppSettings,
   secrets: ReadonlyMap<string, string>,
-): AppSettings {
+): Record<string, unknown> {
   const proxy = secrets.get(locatorKey({ scope: 'network_proxy', kind: 'password' })) ?? '';
   const webSearch =
     secrets.get(
       locatorKey({ scope: 'web_search', provider: 'tavily', kind: 'api_key' }),
     ) ?? '';
+  const {
+    passwordConfigured: _passwordConfigured,
+    ...proxySettings
+  } = settings.network.proxy as typeof settings.network.proxy & {
+    passwordConfigured?: boolean;
+  };
   return {
     ...settings,
     network: {
-      proxy: { ...settings.network.proxy, password: proxy },
+      proxy: { ...proxySettings, password: proxy },
     },
     webSearch: {
       ...settings.webSearch,
@@ -360,6 +405,75 @@ function restoreHostSettingsSecrets(
       },
     },
   };
+}
+
+/** Convert schema-v1 wire secrets into the write-only Runtime Host contract. */
+export function adaptRuntimeHostConfigImport(bundle: ConfigBundle): ConfigBundle {
+  const settings = bundle.data.settings;
+  if (!isRecord(settings)) return bundle;
+  const network = settings.network;
+  if (!isRecord(network) || !isRecord(network.proxy)) return bundle;
+
+  const wireProxy = network.proxy;
+  const passwordPresent = Object.prototype.hasOwnProperty.call(
+    wireProxy,
+    'password',
+  );
+  const password = wireProxy.password;
+  const includesCredentials = bundle.includedData.includes('credentials');
+  if (
+    includesCredentials &&
+    passwordPresent &&
+    typeof password !== 'string'
+  ) {
+    throw new Error('Proxy password in imported settings must be a string.');
+  }
+  if (
+    includesCredentials &&
+    typeof password === 'string' &&
+    password.length > 0 &&
+    wireProxy.authEnabled === false
+  ) {
+    throw new Error(
+      'Cannot import a proxy password while proxy authentication is disabled.',
+    );
+  }
+
+  const {
+    password: _password,
+    passwordConfigured: _passwordConfigured,
+    credential: _credential,
+    ...ordinaryProxy
+  } = wireProxy;
+  const proxy = {
+    ...ordinaryProxy,
+    ...(includesCredentials && passwordPresent
+      ? {
+          credential:
+            (password as string).length === 0
+              ? ({ kind: 'delete' } as const)
+              : ({ kind: 'replace', secret: password as string } as const),
+        }
+      : {}),
+  };
+
+  return {
+    ...bundle,
+    data: {
+      ...bundle.data,
+      settings: {
+        ...settings,
+        network: {
+          ...network,
+          proxy,
+        },
+      },
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function connectionCredentialLocator(

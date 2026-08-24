@@ -190,9 +190,8 @@ import { createRuntimeHostProjectCatalog } from "./runtime-host-project-catalog.
 import { createRuntimeHostDefaultRecovery } from "./runtime-host-default-recovery.js";
 import { toDesktopHostSessionSummary } from "./runtime-host-session-catalog-ipc-main.js";
 import {
-  loadRuntimeHostSettings,
+  createRuntimeHostSettingsModule,
   registerRuntimeHostSettingsIpc,
-  updateRuntimeHostSettings,
 } from "./runtime-host-settings-ipc-main.js";
 import { registerRuntimeHostSkillsIpc } from "./runtime-host-skills-ipc-main.js";
 import { registerRuntimeHostUsageIpc } from "./runtime-host-usage-ipc-main.js";
@@ -1187,29 +1186,29 @@ function registerHostClientIpc(
     openPath: (path) => shell.openPath(path),
     allowLocalPaths: !usesHostWorkspace,
   });
-  const settingsIpcDeps = {
-    ipcMain: scopedIpc,
+  const runtimeHostSettings = createRuntimeHostSettingsModule({
     client,
     settingsStore,
     applyClientSettings: async (settings) => {
       await clientSettingsEffects.apply(settings, true);
     },
-  } satisfies Parameters<typeof registerRuntimeHostSettingsIpc>[0];
-  registerRuntimeHostSettingsIpc(settingsIpcDeps);
+  });
+  registerRuntimeHostSettingsIpc({
+    ipcMain: scopedIpc,
+    module: runtimeHostSettings,
+  });
   registerRuntimeHostConfigIpc({
     ipcMain: scopedIpc,
     client,
     mainWindowController,
     appVersion: app.getVersion(),
-    getSettings: () => loadRuntimeHostSettings(settingsIpcDeps),
-    updateSettings: (patch) =>
-      updateRuntimeHostSettings(settingsIpcDeps, patch),
+    settingsModule: runtimeHostSettings,
     emitConnectionsChanged: emitTargetConnectionListChanged,
   });
   registerRuntimeHostPermissionsIpc({
     ipcMain: scopedIpc,
     client,
-    getSettings: () => loadRuntimeHostSettings(settingsIpcDeps),
+    getSettings: () => runtimeHostSettings.get(),
     listConnections: async () =>
       projectHostConnections(await client.loadConnectionCatalog()),
     botRegistry,
@@ -1248,7 +1247,7 @@ function registerHostClientIpc(
       return selectedDesktopWorkspaceTarget(target);
     },
     getDefaultPermissionMode: () =>
-      resolveDefaultPermissionMode(() => loadRuntimeHostSettings(settingsIpcDeps)),
+      resolveDefaultPermissionMode(() => runtimeHostSettings.get()),
     openPath: (path) => shell.openPath(path),
     allowLocalPaths: !usesHostWorkspace,
   });

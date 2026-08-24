@@ -108,6 +108,7 @@ import type {
   AppIconChoice,
   AppIconTarget,
   AppSettings,
+  RuntimeHostAppSettings,
   SettingsTestResult,
   UpdateAppSettingsInput,
   UpdateAppSettingsResult,
@@ -2753,13 +2754,13 @@ const makaBridge = {
     getClient(): Promise<AppSettings> {
       return ipcRenderer.invoke('settings:client:get');
     },
-    get(host?: DesktopRuntimeHostRef): Promise<AppSettings> {
+    get(host?: DesktopRuntimeHostRef): Promise<RuntimeHostAppSettings> {
       return invokeSelectedRuntimeHost(host, 'settings:get');
     },
     updateClient(patch: UpdateAppSettingsInput): Promise<UpdateAppSettingsResult> {
       return ipcRenderer.invoke('settings:client:update', patch);
     },
-    update(patch: UpdateAppSettingsInput, host?: DesktopRuntimeHostRef): Promise<UpdateAppSettingsResult> {
+    update(patch: UpdateAppSettingsInput, host?: DesktopRuntimeHostRef): Promise<UpdateAppSettingsResult<RuntimeHostAppSettings>> {
       return invokeSelectedRuntimeHost(host, 'settings:update', patch);
     },
     subscribeClientChanged(handler: () => void): () => void {

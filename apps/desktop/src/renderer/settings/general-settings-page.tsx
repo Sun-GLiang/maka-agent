@@ -31,6 +31,7 @@ import type {
   ChatDefaultPermissionMode,
   ShellPreference,
   NetworkProxySettings,
+  RuntimeHostNetworkProxySettings,
   UpdateAppSettingsResult,
 } from '@maka/core/settings';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
@@ -60,6 +61,8 @@ import { getConversationCopy } from '@maka/ui';
 import { settingsActionErrorMessage } from "./settings-error-copy";
 import { useActionGuard, useKeyedActionGuard } from "./use-action-guard";
 import { useOptimisticSettingsDraft } from "./use-optimistic-settings-draft";
+import { useProxyPasswordDraft } from "./use-proxy-password-draft.js";
+import { runAfterProxyPasswordCommit } from "./proxy-password-draft.js";
 import { getSettingsPreferencesCopy } from "../locales/settings-preferences-copy.js";
 import { settingsTestResultMessage } from "../locales/settings-test-result-copy.js";
 import { getShellCopy } from "../locales/shell-copy.js";
@@ -746,29 +749,35 @@ function NetworkProxySection(props: {
   const host = useRuntimeHostSettingsTarget();
   const locale = useUiLocale();
   const copy = getSettingsPreferencesCopy(locale).general;
-  const persistedProxy = props.settings.network.proxy;
+  const persistedProxy = props.settings.network
+    .proxy as RuntimeHostNetworkProxySettings;
   const [testing, setTesting] = useState(false);
   const proxyTestGuard = useActionGuard<"test">();
   const toast = useToast();
+  function reportNetworkSaveError(error: unknown): void {
+    toast.error(
+      copy.saveNetworkFailed,
+      settingsActionErrorMessage(error, locale),
+      undefined,
+      { profileId: host.profileId },
+    );
+  }
   const {
     draft: proxyDraft,
     draftRef: proxyDraftRef,
     mountedRef: networkPageMountedRef,
     update,
-  } = useOptimisticSettingsDraft<NetworkProxySettings>(
+  } = useOptimisticSettingsDraft<RuntimeHostNetworkProxySettings>(
     persistedProxy,
     (patch) =>
       props
         .onUpdate({ network: { proxy: patch } })
-        .then((result) => result.settings.network.proxy),
+        .then(
+          (result) =>
+            result.settings.network.proxy as RuntimeHostNetworkProxySettings,
+    ),
     {
-      onError: (error) =>
-        toast.error(
-          copy.saveNetworkFailed,
-          settingsActionErrorMessage(error, locale),
-          undefined,
-          { profileId: host.profileId },
-        ),
+      onError: reportNetworkSaveError,
     },
   );
 
@@ -777,12 +786,27 @@ function NetworkProxySection(props: {
     return update(patch);
   }
 
+  const passwordDraft = useProxyPasswordDraft(async (secret) => {
+    try {
+      await props.onUpdate({
+        network: {
+          proxy: { credential: { kind: "replace", secret } },
+        },
+      });
+    } catch (error) {
+      reportNetworkSaveError(error);
+      throw error;
+    }
+  });
+
   async function testProxy() {
     if (!props.isInteractive) return;
     if (!proxyTestGuard.begin("test")) return;
     setTesting(true);
     try {
-      const result = await props.testNetworkProxy(toProxyTestInput(proxyDraftRef.current));
+      const result = await runAfterProxyPasswordCommit(passwordDraft, () =>
+        props.testNetworkProxy(toProxyTestInput(proxyDraftRef.current)),
+      );
       const latency =
         result.latencyMs !== undefined ? ` · ${result.latencyMs} ms` : "";
       const message = settingsTestResultMessage(result, locale);
@@ -875,7 +899,16 @@ function NetworkProxySection(props: {
                 isLabelHidden
                 value={proxyDraft.authEnabled}
                 isDisabled={!props.isInteractive}
-                onChange={(authEnabled) => void updateProxy({ authEnabled })}
+                onChange={(authEnabled) => {
+                  if (authEnabled) {
+                    void updateProxy({ authEnabled });
+                    return;
+                  }
+                  passwordDraft.cancel();
+                  void updateProxy({ authEnabled }).then((saved) => {
+                    if (saved) passwordDraft.cancel();
+                  });
+                }}
               />
             }
           />
@@ -890,8 +923,19 @@ function NetworkProxySection(props: {
                   isDisabled={!props.isInteractive}
                 />
                 <PasswordInput
-                  value={proxyDraft.password}
-                  onChange={(next) => void updateProxy({ password: next })}
+                  value={passwordDraft.value}
+                  onChange={passwordDraft.edit}
+                  onFocusExit={() => void passwordDraft.commit().catch(() => {})}
+                  onEnter={() => void passwordDraft.commit().catch(() => {})}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") passwordDraft.cancel();
+                  }}
+                  hasCopyAction={false}
+                  placeholder={
+                    proxyDraft.passwordConfigured
+                      ? copy.passwordSavedPlaceholder
+                      : undefined
+                  }
                   label={copy.password}
                   isDisabled={!props.isInteractive}
                 />
@@ -947,8 +991,6 @@ function toProxyTestInput(proxy: NetworkProxySettings): TestProxyInput {
         proxy.authEnabled && proxy.username.trim()
           ? proxy.username.trim()
           : undefined,
-      password:
-        proxy.authEnabled && proxy.password ? proxy.password : undefined,
       bypassList: proxy.bypassList,
     },
   };

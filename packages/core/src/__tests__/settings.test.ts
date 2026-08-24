@@ -319,3 +319,38 @@ describe('app icon on upgrade', () => {
     expect(migrated.appearance.appIconDark).toBe(undefined);
   });
 });
+
+test('proxy credentials never enter persisted settings', () => {
+  const defaults = createDefaultSettings();
+  expect('password' in defaults.network.proxy).toBe(false);
+  expect('passwordConfigured' in defaults.network.proxy).toBe(false);
+
+  const merged = mergeSettings(defaults, {
+    network: {
+      proxy: {
+        host: '10.0.0.2',
+        credential: { kind: 'replace', secret: 'complete-secret' },
+        password: 'legacy-secret',
+        passwordConfigured: true,
+      },
+    },
+  } as never);
+
+  expect(merged.network.proxy.host).toBe('10.0.0.2');
+  expect('credential' in merged.network.proxy).toBe(false);
+  expect('password' in merged.network.proxy).toBe(false);
+  expect('passwordConfigured' in merged.network.proxy).toBe(false);
+
+  const normalized = normalizeSettings({
+    network: {
+      proxy: {
+        password: 'legacy-secret',
+        passwordConfigured: true,
+        credential: { kind: 'delete' },
+      },
+    },
+  });
+  expect('credential' in normalized.network.proxy).toBe(false);
+  expect('password' in normalized.network.proxy).toBe(false);
+  expect('passwordConfigured' in normalized.network.proxy).toBe(false);
+});

@@ -29,21 +29,18 @@ import {
 } from "../settings-ipc-helpers.js";
 
 describe("settings IPC helpers", () => {
-  test("masks sensitive network and bot fields before returning settings to renderer", () => {
+  test("masks sensitive bot fields before returning settings to renderer", () => {
     const settings = createDefaultSettings();
-    settings.network.proxy.password = "proxy-secret";
     settings.botChat.channels.telegram.token = "telegram-secret";
     settings.botChat.channels.feishu.appSecret = "feishu-secret";
 
     const masked = maskAppSettings(settings);
 
-    assert.equal(masked.network.proxy.password, SENSITIVE_PLACEHOLDER);
     assert.equal(masked.botChat.channels.telegram.token, SENSITIVE_PLACEHOLDER);
     assert.equal(
       masked.botChat.channels.feishu.appSecret,
       SENSITIVE_PLACEHOLDER,
     );
-    assert.equal(settings.network.proxy.password, "proxy-secret");
   });
 
   test("keeps empty sensitive fields empty instead of showing a placeholder", () => {
@@ -51,7 +48,6 @@ describe("settings IPC helpers", () => {
 
     const masked = maskAppSettings(settings);
 
-    assert.equal(masked.network.proxy.password, "");
     assert.equal(masked.botChat.channels.telegram.token, "");
   });
 
@@ -72,16 +68,13 @@ describe("settings IPC helpers", () => {
 
   test("reveals sensitive fields only when the current patch explicitly changes them", () => {
     const settings = createDefaultSettings();
-    settings.network.proxy.password = "new-proxy-secret";
     settings.botChat.channels.telegram.token = "new-bot-token";
     settings.botChat.channels.feishu.appSecret = "stored-feishu-secret";
 
     const masked = maskAppSettings(settings, {
-      network: { proxy: { password: "new-proxy-secret" } },
       botChat: { channels: { telegram: { token: "new-bot-token" } } },
     });
 
-    assert.equal(masked.network.proxy.password, "new-proxy-secret");
     assert.equal(masked.botChat.channels.telegram.token, "new-bot-token");
     assert.equal(
       masked.botChat.channels.feishu.appSecret,
@@ -107,15 +100,11 @@ describe("settings IPC helpers", () => {
 
   test("preserves placeholder values as stored secrets before persisting patches", () => {
     const current = createDefaultSettings();
-    current.network.proxy.password = "stored-proxy-secret";
     current.botChat.channels.telegram.token = "stored-bot-token";
     current.botChat.channels.feishu.appSecret = "stored-feishu-secret";
 
     const patch = preserveSensitivePlaceholders(
       {
-        network: {
-          proxy: { password: SENSITIVE_PLACEHOLDER, host: "10.0.0.2" },
-        },
         botChat: {
           channels: {
             telegram: { token: SENSITIVE_PLACEHOLDER, enabled: true },
@@ -126,8 +115,6 @@ describe("settings IPC helpers", () => {
       current,
     );
 
-    assert.equal(patch.network?.proxy?.password, "stored-proxy-secret");
-    assert.equal(patch.network?.proxy?.host, "10.0.0.2");
     assert.equal(patch.botChat?.channels?.telegram?.token, "stored-bot-token");
     assert.equal(patch.botChat?.channels?.telegram?.enabled, true);
     assert.equal(

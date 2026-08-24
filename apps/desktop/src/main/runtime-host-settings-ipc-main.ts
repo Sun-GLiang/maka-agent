@@ -19,6 +19,7 @@
 
 import type {
   AppSettings,
+  RuntimeHostAppSettings,
   SettingsTestResult,
   UpdateAppSettingsInput,
   UpdateAppSettingsResult,
@@ -76,76 +77,107 @@ export interface RuntimeHostSettingsIpcDeps {
   readonly applyClientSettings: (settings: AppSettings) => Promise<void>;
 }
 
+export type RuntimeHostSettingsModuleDeps = Omit<
+  RuntimeHostSettingsIpcDeps,
+  "ipcMain"
+>;
+
+export interface RuntimeHostSettingsModule {
+  get(): Promise<RuntimeHostAppSettings>;
+  update(patch: UpdateAppSettingsInput): Promise<RuntimeHostAppSettings>;
+  testNetworkProxy(input?: TestProxyInput): Promise<SettingsTestResult>;
+}
+
+export interface RuntimeHostSettingsExclusiveAccess {
+  get(): Promise<RuntimeHostAppSettings>;
+  update(patch: UpdateAppSettingsInput): Promise<RuntimeHostAppSettings>;
+}
+
+type RuntimeHostSettingsExclusiveRunner = <T>(
+  operation: (access: RuntimeHostSettingsExclusiveAccess) => Promise<T>,
+) => Promise<T>;
+
+const exclusiveRunners = new WeakMap<
+  RuntimeHostSettingsModule,
+  RuntimeHostSettingsExclusiveRunner
+>();
+
+type RuntimeHostSettingsIpcRegistrationDeps =
+  | RuntimeHostSettingsIpcDeps
+  | {
+      readonly ipcMain: ReconnectableReadIpcMain;
+      readonly module: RuntimeHostSettingsModule;
+    };
+
+export function createRuntimeHostSettingsModule(
+  deps: RuntimeHostSettingsModuleDeps,
+): RuntimeHostSettingsModule {
+  let lane: Promise<void> = Promise.resolve();
+
+  function enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = lane.then(operation, operation);
+    lane = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  const module: RuntimeHostSettingsModule = {
+    get: () => enqueue(() => loadRuntimeHostSettingsWithoutLane(deps)),
+    update: (patch) =>
+      enqueue(() => updateRuntimeHostSettingsWithoutLane(deps, patch)),
+    testNetworkProxy: (input = {}) =>
+      enqueue(() => testNetworkProxyWithoutLane(deps.client, input)),
+  };
+  exclusiveRunners.set(module, (operation) =>
+    enqueue(() =>
+      operation({
+        get: () => loadRuntimeHostSettingsWithoutLane(deps),
+        update: (patch) => updateRuntimeHostSettingsWithoutLane(deps, patch),
+      }),
+    ),
+  );
+  return module;
+}
+
+/**
+ * Runs a compound Settings adapter operation in this Runtime Host's lane.
+ * The supplied accessors deliberately bypass re-entry into the public queue.
+ */
+export function runRuntimeHostSettingsExclusive<T>(
+  module: RuntimeHostSettingsModule,
+  operation: (access: RuntimeHostSettingsExclusiveAccess) => Promise<T>,
+): Promise<T> {
+  const run = exclusiveRunners.get(module);
+  if (!run) {
+    throw new Error('Runtime Host Settings module does not own an exclusive lane');
+  }
+  return run(operation);
+}
+
 export function registerRuntimeHostSettingsIpc(
-  deps: RuntimeHostSettingsIpcDeps,
+  deps: RuntimeHostSettingsIpcRegistrationDeps,
 ): void {
+  const module =
+    "module" in deps ? deps.module : createRuntimeHostSettingsModule(deps);
   handleReconnectableRead(deps.ipcMain, "settings:get", async () =>
-    maskAppSettings(await loadRuntimeHostSettings(deps)),
+    maskAppSettings(await module.get()),
   );
   deps.ipcMain.handle(
     "settings:testNetworkProxy",
-    async (_event, input: TestProxyInput = {}) => {
-      const current = (await deps.client.queryRuntimePolicy()).policy
-        .networkProxy;
-      const candidate = input.proxy
-        ? toRuntimeHostProxyPolicy(input.proxy, current.autoBypassDomains)
-        : undefined;
-      const password = credentialOverride(input.proxy?.password);
-      const result = await deps.client.testNetworkProxy({
-        ...(candidate ? { networkProxy: candidate } : {}),
-        ...(password ? { password } : {}),
-        ...(input.url ? { url: input.url } : {}),
-        ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
-      });
-      const tested = candidate ?? current;
-      if (!result.ok) {
-        const failure = proxyTestFailure(result);
-        return {
-          ok: false,
-          ...failure,
-          latencyMs: result.latencyMs,
-          details: { status: result.status },
-        } satisfies SettingsTestResult;
-      }
-      return {
-        ok: true,
-        code: "proxy_reachable",
-        message: `The proxy ${tested.protocol}://${tested.host}:${tested.port} is reachable.`,
-        latencyMs: result.latencyMs,
-        details: {
-          endpoint: `${tested.protocol}://${tested.host}:${tested.port}`,
-          status: result.status,
-          ip: result.ip,
-          countryCode: result.countryCode,
-          countryFlag: result.countryFlag,
-          bypassList: tested.bypassList,
-        },
-      } satisfies SettingsTestResult;
-    },
+    async (_event, input: TestProxyInput = {}) => module.testNetworkProxy(input),
   );
   deps.ipcMain.handle(
     "settings:update",
     async (
       _event,
       patch: UpdateAppSettingsInput,
-    ): Promise<UpdateAppSettingsResult> => {
-      const settings = await updateRuntimeHostSettings(deps, patch);
+    ): Promise<UpdateAppSettingsResult<RuntimeHostAppSettings>> => {
+      const settings = await module.update(patch);
       return buildSettingsUpdateResult(settings, patch);
     },
   );
-}
-
-export async function updateRuntimeHostSettings(
-  deps: RuntimeHostSettingsIpcDeps,
-  patch: UpdateAppSettingsInput,
-): Promise<AppSettings> {
-  await applyHostPatch(deps.client, patch);
-  const clientPatch = clientOwnedSettingsPatch(patch);
-  const local = hasSettingsPatch(clientPatch)
-    ? await deps.settingsStore.update(clientPatch)
-    : await deps.settingsStore.get();
-  await deps.applyClientSettings(local);
-  return loadRuntimeHostSettings(deps);
 }
 
 function toRuntimeHostProxyPolicy(
@@ -171,9 +203,50 @@ function credentialOverride(value: string | undefined): string | undefined {
   return !value || value === SENSITIVE_PLACEHOLDER ? undefined : value;
 }
 
-export async function loadRuntimeHostSettings(
-  deps: RuntimeHostSettingsIpcDeps,
-): Promise<AppSettings> {
+async function testNetworkProxyWithoutLane(
+  client: RuntimeHostSettingsClient,
+  input: TestProxyInput,
+): Promise<SettingsTestResult> {
+  const current = (await client.queryRuntimePolicy()).policy.networkProxy;
+  const candidate = input.proxy
+    ? toRuntimeHostProxyPolicy(input.proxy, current.autoBypassDomains)
+    : undefined;
+  const password = credentialOverride(input.proxy?.password);
+  const result = await client.testNetworkProxy({
+    ...(candidate ? { networkProxy: candidate } : {}),
+    ...(password ? { password } : {}),
+    ...(input.url ? { url: input.url } : {}),
+    ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
+  });
+  const tested = candidate ?? current;
+  if (!result.ok) {
+    const failure = proxyTestFailure(result);
+    return {
+      ok: false,
+      ...failure,
+      latencyMs: result.latencyMs,
+      details: { status: result.status },
+    };
+  }
+  return {
+    ok: true,
+    code: "proxy_reachable",
+    message: `The proxy ${tested.protocol}://${tested.host}:${tested.port} is reachable.`,
+    latencyMs: result.latencyMs,
+    details: {
+      endpoint: `${tested.protocol}://${tested.host}:${tested.port}`,
+      status: result.status,
+      ip: result.ip,
+      countryCode: result.countryCode,
+      countryFlag: result.countryFlag,
+      bypassList: tested.bypassList,
+    },
+  };
+}
+
+async function loadRuntimeHostSettingsWithoutLane(
+  deps: RuntimeHostSettingsModuleDeps,
+): Promise<RuntimeHostAppSettings> {
   const [local, runtimePolicy, proxyCredential, webSearchCredential] =
     await Promise.all([
       deps.settingsStore.get(),
@@ -189,7 +262,7 @@ export async function loadRuntimeHostSettings(
         ...policy.networkProxy,
         bypassList: [...policy.networkProxy.bypassList],
         autoBypassDomains: [...policy.networkProxy.autoBypassDomains],
-        password: proxyCredential?.configured ? SENSITIVE_PLACEHOLDER : "",
+        passwordConfigured: proxyCredential?.configured === true,
       },
     },
     personalization: {
@@ -210,6 +283,20 @@ export async function loadRuntimeHostSettings(
     },
     subagents: policy.subagents,
   };
+}
+
+async function updateRuntimeHostSettingsWithoutLane(
+  deps: RuntimeHostSettingsModuleDeps,
+  patch: UpdateAppSettingsInput,
+): Promise<RuntimeHostAppSettings> {
+  validateProxyPatch(patch.network?.proxy);
+  await applyHostPatchWithoutLane(deps.client, patch);
+  const clientPatch = clientOwnedSettingsPatch(patch);
+  const local = hasSettingsPatch(clientPatch)
+    ? await deps.settingsStore.update(clientPatch)
+    : await deps.settingsStore.get();
+  await deps.applyClientSettings(local);
+  return loadRuntimeHostSettingsWithoutLane(deps);
 }
 
 function projectWebSearchCredential(
@@ -234,7 +321,7 @@ function projectWebSearchCredential(
   };
 }
 
-async function applyHostPatch(
+async function applyHostPatchWithoutLane(
   client: RuntimeHostSettingsClient,
   patch: UpdateAppSettingsInput,
 ): Promise<void> {
@@ -242,18 +329,12 @@ async function applyHostPatch(
     const proxy = patch.network.proxy;
     await client.updateRuntimePolicy((policy) => ({
       kind: "set_network_proxy",
-      value: { ...policy.networkProxy, ...withoutSecret(proxy) },
+      value: { ...policy.networkProxy, ...withoutCredential(proxy) },
     }));
-    if (proxy.authEnabled === false)
+    if (proxy.authEnabled === false || proxy.credential?.kind === "delete")
       await deleteCredential(client, PROXY_CREDENTIAL);
-    else if (
-      proxy.password !== undefined &&
-      proxy.password !== SENSITIVE_PLACEHOLDER
-    ) {
-      if (proxy.password.length === 0)
-        await deleteCredential(client, PROXY_CREDENTIAL);
-      else await setCredential(client, PROXY_CREDENTIAL, proxy.password);
-    }
+    else if (proxy.credential?.kind === "replace")
+      await setCredential(client, PROXY_CREDENTIAL, proxy.credential.secret);
   }
   if (
     patch.personalization?.displayName !== undefined ||
@@ -391,9 +472,38 @@ async function deleteCredential(
   throw new Error("Credential kept changing while Desktop removed it");
 }
 
-function withoutSecret(
+function withoutCredential(
   patch: NonNullable<NonNullable<UpdateAppSettingsInput["network"]>["proxy"]>,
 ): Partial<RuntimePolicy["networkProxy"]> {
-  const { password: _password, ...value } = patch;
+  const {
+    credential: _credential,
+    password: _legacyPassword,
+    passwordConfigured: _derivedStatus,
+    ...value
+  } = patch as typeof patch & {
+    password?: unknown;
+    passwordConfigured?: unknown;
+  };
   return value;
+}
+
+function validateProxyPatch(
+  proxy: NonNullable<UpdateAppSettingsInput["network"]>["proxy"] | undefined,
+): void {
+  const operation = proxy?.credential;
+  if (!operation) return;
+  if (operation.kind === "replace") {
+    if (typeof operation.secret !== "string" || operation.secret.length === 0) {
+      throw new Error("Proxy credential replacement requires a non-empty password");
+    }
+    if (proxy.authEnabled === false) {
+      throw new Error(
+        "Cannot replace the proxy credential while authentication is disabled",
+      );
+    }
+    return;
+  }
+  if (operation.kind !== "delete") {
+    throw new Error("Unsupported proxy credential operation");
+  }
 }

@@ -41,6 +41,7 @@ import {
 import { ICON_SIZE, ArrowLeft } from '@maka/ui/icons';
 import type {
   AppSettings,
+  RuntimeHostAppSettings,
   ChatDefaultPermissionMode,
   SettingsSection,
   ThemePalette,
@@ -266,7 +267,7 @@ export function SettingsSurface(props: {
     initialClientSettings ?? defaultSettings,
   );
   const [runtimeHostSettings, setRuntimeHostSettings] = useState<
-    SettingsResourceState<AppSettings>
+    SettingsResourceState<RuntimeHostAppSettings>
   >(() => createSettingsResourceState(
     initialRuntimeHostKey,
     initialRuntimeHostKey
@@ -605,7 +606,10 @@ export function SettingsSurface(props: {
         return result;
       }
       if (acceptedHostUpdate && hostKey) {
-        setRuntimeHostSettings(completeSettingsResourceLoad(hostKey, result.settings));
+        setRuntimeHostSettings(completeSettingsResourceLoad(
+          hostKey,
+          result.settings as RuntimeHostAppSettings,
+        ));
         void reloadRuntimeHostSettings(host);
       } else if (
         clientTicket !== undefined &&

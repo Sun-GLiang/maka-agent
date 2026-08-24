@@ -99,9 +99,22 @@ export interface NetworkProxySettings {
   port: number;
   authEnabled: boolean;
   username: string;
-  password: string;
   bypassList: string[];
   autoBypassDomains: string[];
+}
+
+export type NetworkProxyCredentialOperation =
+  | { kind: 'replace'; secret: string }
+  | { kind: 'delete' };
+
+/** A write-only proxy patch. Credential operations are never persisted. */
+export type NetworkProxySettingsPatch = Partial<NetworkProxySettings> & {
+  credential?: NetworkProxyCredentialOperation;
+};
+
+/** Runtime Host read projection; the saved secret itself never crosses IPC. */
+export interface RuntimeHostNetworkProxySettings extends NetworkProxySettings {
+  readonly passwordConfigured: boolean;
 }
 
 /**
@@ -552,6 +565,12 @@ export interface AppSettings {
   subagents: SubagentSettings;
 }
 
+export interface RuntimeHostAppSettings extends Omit<AppSettings, 'network'> {
+  network: {
+    proxy: RuntimeHostNetworkProxySettings;
+  };
+}
+
 export interface UsageRequestLog {
   id: string;
   ts: number;
@@ -653,7 +672,7 @@ export type SettingsTestResultCode =
 
 export type UpdateAppSettingsInput = Partial<{
   network: Partial<{
-    proxy: Partial<NetworkProxySettings>;
+    proxy: NetworkProxySettingsPatch;
   }>;
   botChat: BotChatSettingsPatch;
   usage: Partial<UsageSettings>;
@@ -681,8 +700,8 @@ export interface UpdateAppSettingsWarnings {
   personalization?: PersonalizationSettingsWarning[];
 }
 
-export interface UpdateAppSettingsResult {
-  settings: AppSettings;
+export interface UpdateAppSettingsResult<TSettings extends AppSettings = AppSettings> {
+  settings: TSettings;
   warnings?: UpdateAppSettingsWarnings;
 }
 
@@ -706,7 +725,6 @@ export function createDefaultSettings(): AppSettings {
         port: 7890,
         authEnabled: false,
         username: '',
-        password: '',
         bypassList: ['metaso.cn', 'baidu.com'],
         autoBypassDomains: DEFAULT_PROXY_BYPASS_DOMAINS,
       },
@@ -763,6 +781,15 @@ export function createDefaultSettings(): AppSettings {
 }
 
 export function mergeSettings(current: AppSettings, patch: UpdateAppSettingsInput): AppSettings {
+  const {
+    credential: _credential,
+    password: _legacyPassword,
+    passwordConfigured: _derivedStatus,
+    ...proxyPatch
+  } = (patch.network?.proxy ?? {}) as NetworkProxySettingsPatch & {
+    password?: unknown;
+    passwordConfigured?: unknown;
+  };
   return {
     ...current,
     network: {
@@ -770,7 +797,7 @@ export function mergeSettings(current: AppSettings, patch: UpdateAppSettingsInpu
       ...(patch.network ?? {}),
       proxy: {
         ...current.network.proxy,
-        ...(patch.network?.proxy ?? {}),
+        ...proxyPatch,
       },
     },
     botChat: mergeBotChatSettings(current.botChat, patch.botChat),
