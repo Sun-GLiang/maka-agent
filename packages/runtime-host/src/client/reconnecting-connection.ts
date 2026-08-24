@@ -49,6 +49,11 @@ export interface RuntimeHostReconnectingConnection extends RuntimeHostConnection
   subscribeConnectionAvailability(
     listener: (availability: RuntimeHostConnectionAvailability) => void,
   ): () => void;
+  /** Opens only on the currently connected Host and never retries on a replacement. */
+  openSessionSubscriptionOnce(
+    input: SubscriptionOpenInput,
+    timeoutMs?: number,
+  ): Promise<RuntimeHostSessionSubscription>;
 }
 
 export type RuntimeHostConnectionAvailability =
@@ -209,6 +214,13 @@ class RuntimeHostReconnectingConnectionImpl implements RuntimeHostReconnectingCo
         previous = connection;
       }
     }
+  }
+
+  openSessionSubscriptionOnce(
+    input: SubscriptionOpenInput,
+    timeoutMs?: number,
+  ): Promise<RuntimeHostSessionSubscription> {
+    return this.#requireCurrent('subscription.open').openSessionSubscriptionOnce(input, timeoutMs);
   }
 
   async replaceClientCapabilities(
