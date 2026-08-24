@@ -1483,7 +1483,7 @@ export function renderMakaPiPendingQueue(
     lines.push(fitLine(`${ansi.dim('Queued:')} ${ansi.dim(firstLinePreview(text))}`, safeWidth));
   }
   lines.push(
-    fitLine(ansi.dim(renderTuiShortcutCopy('alt+↑ 取回队列以重新编辑', platform)), safeWidth),
+    fitLine(ansi.dim(renderTuiShortcutCopy('Alt+↑ 取回队列以重新编辑', platform)), safeWidth),
   );
   return lines;
 }

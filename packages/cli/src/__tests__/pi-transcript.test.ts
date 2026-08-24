@@ -125,7 +125,7 @@ describe('Maka Pi TUI transcript', () => {
       renderMakaPiPendingQueue(state, 80, platform).map(stripAnsi);
 
     assert.equal(renderFor('darwin').at(-1), '⌥+↑ 取回队列以重新编辑');
-    assert.equal(renderFor('linux').at(-1), 'alt+↑ 取回队列以重新编辑');
+    assert.equal(renderFor('linux').at(-1), 'Alt+↑ 取回队列以重新编辑');
   });
 
   test('renders goal-origin prompts as autonomous provenance, not as user prompts', () => {
