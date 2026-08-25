@@ -35,6 +35,8 @@ const originalGlobals = {
 const originalActEnvironment = (globalThis as typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
 }).IS_REACT_ACT_ENVIRONMENT;
+const HOST_HOUR_CYCLE = new Intl.DateTimeFormat(undefined, { hour: 'numeric' })
+  .resolvedOptions().hourCycle;
 
 afterEach(() => {
   Object.assign(globalThis, {
@@ -58,6 +60,26 @@ function renderTimestamp(value: number, now: number) {
   }
 }
 
+function expectedChineseTimestamp(
+  timestamp: number,
+  relation: 'today' | 'same_year' | 'other_year',
+): string {
+  const options: Intl.DateTimeFormatOptions = {
+    hour: 'numeric',
+    minute: '2-digit',
+    ...(HOST_HOUR_CYCLE === undefined ? {} : { hourCycle: HOST_HOUR_CYCLE }),
+  };
+  if (relation === 'same_year') {
+    options.month = 'short';
+    options.day = 'numeric';
+  } else if (relation === 'other_year') {
+    options.year = 'numeric';
+    options.month = 'short';
+    options.day = 'numeric';
+  }
+  return new Intl.DateTimeFormat('zh-CN', options).format(new Date(timestamp));
+}
+
 test('renders the complete visual timestamp from the UI locale', () => {
   const now = new Date(2026, 7, 24, 20, 0, 0).getTime();
   const value = new Date(2025, 7, 23, 14, 30, 0).getTime();
@@ -68,7 +90,7 @@ test('renders the complete visual timestamp from the UI locale', () => {
   assert.equal(presentation.getAttribute('data-date-relation'), 'other_year');
   const time = presentation.querySelector('time');
   assert.ok(time);
-  assert.equal(time.textContent, '2025年8月23日 14:30');
+  assert.equal(time.textContent, expectedChineseTimestamp(value, 'other_year'));
   assert.equal(time.getAttribute('dateTime'), new Date(value).toISOString());
   assert.equal(presentation.querySelector('.maka-message-date-prefix'), null);
   assert.equal(presentation.querySelector('[aria-hidden="true"]') !== null, true);
@@ -87,7 +109,7 @@ test('renders only the UI-localized clock for a message from today', () => {
     document.querySelector('.maka-message-time-presentation')?.getAttribute('data-date-relation'),
     'today',
   );
-  assert.equal(document.querySelector('time')?.textContent, '14:30');
+  assert.equal(document.querySelector('time')?.textContent, expectedChineseTimestamp(value, 'today'));
 });
 
 test('TurnView routes original and steering user timestamps through the adapter', () => {

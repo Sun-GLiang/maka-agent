@@ -25,6 +25,28 @@ import {
 } from '../conversation-message-timestamp.js';
 
 const TODAY_NOW = new Date(2026, 7, 24, 20, 0, 0).getTime();
+const HOST_HOUR_CYCLE = new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).resolvedOptions()
+  .hourCycle;
+
+function expectedChineseTimestamp(
+  timestamp: number,
+  relation: 'today' | 'same_year' | 'other_year',
+): string {
+  const options: Intl.DateTimeFormatOptions = {
+    hour: 'numeric',
+    minute: '2-digit',
+    ...(HOST_HOUR_CYCLE === undefined ? {} : { hourCycle: HOST_HOUR_CYCLE }),
+  };
+  if (relation === 'same_year') {
+    options.month = 'short';
+    options.day = 'numeric';
+  } else if (relation === 'other_year') {
+    options.year = 'numeric';
+    options.month = 'short';
+    options.day = 'numeric';
+  }
+  return new Intl.DateTimeFormat('zh-CN', options).format(new Date(timestamp));
+}
 
 describe('conversation message timestamp presentation', () => {
   it('shows only the clock for a message on the same local calendar day', () => {
@@ -33,7 +55,7 @@ describe('conversation message timestamp presentation', () => {
 
     assert.ok(result);
     assert.equal(result.relation, 'today');
-    assert.equal(result.visibleText, '14:30');
+    assert.equal(result.visibleText, expectedChineseTimestamp(timestamp, 'today'));
     assert.equal(result.isoDateTime, new Date(timestamp).toISOString());
   });
 
@@ -43,7 +65,7 @@ describe('conversation message timestamp presentation', () => {
 
     assert.ok(result);
     assert.equal(result.relation, 'same_year');
-    assert.equal(result.visibleText, '8月23日 14:30');
+    assert.equal(result.visibleText, expectedChineseTimestamp(timestamp, 'same_year'));
     assert.doesNotMatch(result.visibleText, /2026/);
   });
 
@@ -53,7 +75,7 @@ describe('conversation message timestamp presentation', () => {
 
     assert.ok(result);
     assert.equal(result.relation, 'other_year');
-    assert.equal(result.visibleText, '2025年8月23日 14:30');
+    assert.equal(result.visibleText, expectedChineseTimestamp(timestamp, 'other_year'));
     assert.match(result.absoluteLabel, /2025/);
   });
 
@@ -65,6 +87,39 @@ describe('conversation message timestamp presentation', () => {
     assert.equal(result.relation, 'same_year');
     assert.match(result.visibleText, /Aug 23/);
     assert.doesNotMatch(result.visibleText, /2026/);
+  });
+
+  it('preserves the host hour cycle for visible and absolute timestamp text', () => {
+    const originalDateTimeFormat = Intl.DateTimeFormat;
+    function hostPreferenceDateTimeFormat(
+      locales?: Intl.LocalesArgument,
+      options?: Intl.DateTimeFormatOptions,
+    ): Intl.DateTimeFormat {
+      if (locales === undefined && options?.hour === 'numeric' && options.minute === undefined) {
+        return new originalDateTimeFormat('en-GB', options);
+      }
+      return new originalDateTimeFormat(locales, options);
+    }
+
+    Object.defineProperty(Intl, 'DateTimeFormat', {
+      configurable: true,
+      value: hostPreferenceDateTimeFormat,
+      writable: true,
+    });
+    try {
+      const timestamp = new Date(2026, 7, 24, 14, 30, 0).getTime();
+      const result = presentConversationMessageTimestamp(timestamp, TODAY_NOW, 'en');
+
+      assert.ok(result);
+      assert.equal(result.visibleText, '14:30');
+      assert.match(result.absoluteLabel, /14:30/);
+    } finally {
+      Object.defineProperty(Intl, 'DateTimeFormat', {
+        configurable: true,
+        value: originalDateTimeFormat,
+        writable: true,
+      });
+    }
   });
 
   it('uses calendar boundaries instead of elapsed 24-hour buckets', () => {

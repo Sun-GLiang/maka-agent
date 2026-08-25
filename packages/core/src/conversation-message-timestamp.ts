@@ -28,6 +28,8 @@ export interface ConversationMessageTimestampPresentation {
   isoDateTime: string;
 }
 
+type HourCycle = Intl.DateTimeFormatOptions['hourCycle'];
+
 function localDateRelation(date: Date, now: Date): ConversationMessageDateRelation {
   if (
     date.getFullYear() === now.getFullYear() &&
@@ -39,15 +41,53 @@ function localDateRelation(date: Date, now: Date): ConversationMessageDateRelati
   return date.getFullYear() === now.getFullYear() ? 'same_year' : 'other_year';
 }
 
+function hostHourCycle(): HourCycle | undefined {
+  if (typeof Intl === 'undefined' || typeof Intl.DateTimeFormat !== 'function') {
+    return undefined;
+  }
+  return new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).resolvedOptions().hourCycle;
+}
+
 function visibleFormatOptions(
   relation: ConversationMessageDateRelation,
+  hourCycle: HourCycle | undefined,
 ): Intl.DateTimeFormatOptions {
-  const clock: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' };
+  const clock: Intl.DateTimeFormatOptions = {
+    hour: 'numeric',
+    minute: '2-digit',
+    ...(hourCycle === undefined ? {} : { hourCycle }),
+  };
   if (relation === 'today') return clock;
   if (relation === 'same_year') {
     return { month: 'short', day: 'numeric', ...clock };
   }
   return { year: 'numeric', month: 'short', day: 'numeric', ...clock };
+}
+
+function formatAbsoluteTimestamp(
+  date: Date,
+  intlLocale: string,
+  hourCycle: HourCycle | undefined,
+): string {
+  if (typeof Intl === 'undefined' || typeof Intl.DateTimeFormat !== 'function') {
+    return date.toISOString();
+  }
+  return new Intl.DateTimeFormat(intlLocale, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    ...(hourCycle === undefined ? {} : { hourCycle }),
+  }).format(date);
+}
+
+export function formatConversationMessageAbsoluteTimestamp(
+  timestamp: number,
+  locale: UiLocale,
+): string {
+  return formatAbsoluteTimestamp(
+    new Date(timestamp),
+    uiLocaleToIntlLocale(locale),
+    hostHourCycle(),
+  );
 }
 
 export function presentConversationMessageTimestamp(
@@ -62,15 +102,16 @@ export function presentConversationMessageTimestamp(
 
   const relation = localDateRelation(date, nowDate);
   const intlLocale = uiLocaleToIntlLocale(locale);
-  const visibleFormatter = new Intl.DateTimeFormat(intlLocale, visibleFormatOptions(relation));
+  const hourCycle = hostHourCycle();
+  const visibleFormatter = new Intl.DateTimeFormat(
+    intlLocale,
+    visibleFormatOptions(relation, hourCycle),
+  );
 
   return {
     relation,
     visibleText: visibleFormatter.format(date),
-    absoluteLabel: new Intl.DateTimeFormat(intlLocale, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    }).format(date),
+    absoluteLabel: formatAbsoluteTimestamp(date, intlLocale, hourCycle),
     isoDateTime: date.toISOString(),
   };
 }
