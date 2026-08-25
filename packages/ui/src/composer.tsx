@@ -1711,6 +1711,20 @@ export const Composer = forwardRef<
                 hasHistory={false}
                 triggers={triggers}
                 pasteAsToken={pasteAsToken}
+                onPaste={(_event, pasted) => {
+                  // Astryx has already offered token-adjacent, file, and
+                  // reference-sized-token pastes before it reaches this seam.
+                  // `insertHTML` creates a browser undo transaction distinct
+                  // from the keyboard input immediately before the paste.
+                  if (props.disabled || isReferenceSizedPaste(pasted)) return false;
+                  const plainTextContainer = document.createElement('div');
+                  plainTextContainer.textContent = pasted;
+                  return document.execCommand(
+                    'insertHTML',
+                    false,
+                    plainTextContainer.innerHTML.replace(/\r\n?|\n/g, '<br>'),
+                  );
+                }}
                 onFiles={onInputFiles}
                 onKeyDown={onInputKeyDown}
                 onCompositionStart={() => { compositionActiveRef.current = true; }}
