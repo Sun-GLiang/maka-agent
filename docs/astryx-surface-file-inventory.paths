@@ -160,6 +160,7 @@ packages/ui/src/chat-view.tsx
 packages/ui/src/components.tsx
 packages/ui/src/composer-message-queue.tsx
 packages/ui/src/composer.tsx
+packages/ui/src/conversation-message-timestamp.tsx
 packages/ui/src/daily-review-panel.tsx
 packages/ui/src/icons.tsx
 packages/ui/src/inline-reference.tsx
