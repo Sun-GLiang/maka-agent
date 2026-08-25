@@ -58,6 +58,55 @@ describe('ACP Session registry', () => {
     assert.equal(connectCalls, 0);
   });
 
+  test('does not start a queued connection after disposal begins', async () => {
+    let connectCalls = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () => {
+        connectCalls += 1;
+        return fakeConnection();
+      },
+    });
+
+    const list = registry.list({});
+    const dispose = registry.dispose();
+
+    await assert.rejects(
+      list,
+      (error: unknown) =>
+        error instanceof RequestError &&
+        error.code === -32603 &&
+        (error.data as { code?: string }).code === 'registry_closed',
+    );
+    await dispose;
+    assert.equal(connectCalls, 0);
+  });
+
+  test('aborts an in-flight connection before disposal waits for it', async () => {
+    let connectSignal: AbortSignal | undefined;
+    const registry = new AcpSessionRegistry({
+      connect: async (signal) => {
+        connectSignal = signal;
+        return new Promise<ReturnType<typeof fakeConnection>>((_, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+    });
+
+    const list = registry.list({});
+    await waitFor(() => connectSignal !== undefined);
+    const dispose = registry.dispose();
+
+    await assert.rejects(
+      list,
+      (error: unknown) =>
+        error instanceof RequestError &&
+        error.code === -32603 &&
+        (error.data as { code?: string }).code === 'registry_closed',
+    );
+    await dispose;
+    assert.equal(connectSignal?.aborted, true);
+  });
+
   test('shares one in-flight connection across concurrent Session methods', async () => {
     const connecting = deferred<ReturnType<typeof fakeConnection>>();
     let connectCalls = 0;
@@ -66,24 +115,28 @@ describe('ACP Session registry', () => {
         connectCalls += 1;
         return connecting.promise;
       },
+      newSessionId: () => 'session-concurrent',
     });
-    const first = registry.list({});
-    const second = registry.list({});
+    const create = registry.create({ cwd: '/workspace', mcpServers: [] });
+    const list = registry.list({});
     await waitFor(() => connectCalls === 1);
 
     connecting.resolve(
       fakeConnection({
-        request: async () => ({
-          kind: 'page',
-          revision: SESSION_REVISION,
-          sessions: [],
-          nextCursor: null,
-        }),
+        request: async (operation) =>
+          operation === 'session.catalog.query'
+            ? {
+                kind: 'page',
+                revision: SESSION_REVISION,
+                sessions: [],
+                nextCursor: null,
+              }
+            : {},
       }),
     );
 
-    assert.deepEqual(await first, { sessions: [] });
-    assert.deepEqual(await second, { sessions: [] });
+    assert.deepEqual(await create, { sessionId: 'session-concurrent' });
+    assert.deepEqual(await list, { sessions: [] });
     assert.equal(connectCalls, 1);
     await registry.dispose();
   });
@@ -315,9 +368,14 @@ describe('ACP Session registry', () => {
   });
 
   test('reports a durable session identity when subscription opening fails without rollback', async () => {
+    const operations: string[] = [];
     const registry = new AcpSessionRegistry({
       connect: async () =>
         fakeConnection({
+          request: async (operation) => {
+            operations.push(operation);
+            return {};
+          },
           open: async () => {
             throw new RuntimeHostOperationError(
               'subscription.open',
@@ -345,6 +403,7 @@ describe('ACP Session registry', () => {
       },
     );
     assert.equal(registry.inspect('session-durable'), undefined);
+    assert.deepEqual(operations, ['session.create']);
     await registry.dispose();
   });
 

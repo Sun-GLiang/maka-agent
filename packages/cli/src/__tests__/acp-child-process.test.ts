@@ -123,6 +123,11 @@ describe('Maka ACP child process', () => {
           authMethods: [],
           agentInfo: { name: 'maka', title: 'Maka', version: '0.2.0' },
         });
+        assert.equal(
+          await harness.hasRuntimeHostRootMarker(),
+          false,
+          'initialize must not begin Runtime Host discovery or candidate startup',
+        );
       });
 
       await harness.closeStdin();

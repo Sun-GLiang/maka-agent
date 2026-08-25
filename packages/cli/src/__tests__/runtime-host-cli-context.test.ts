@@ -123,6 +123,82 @@ test('CLI refuses a staged Host whose durable installation claim is missing', as
   assert.equal(closes, 1);
 });
 
+test('CLI Runtime Host bootstrap aborts a stalled catalog read and closes its connection', async () => {
+  const controller = new AbortController();
+  const catalogStarted = deferred<void>();
+  const abortReason = new Error('ACP connection closed');
+  let closes = 0;
+  let connectSignal: AbortSignal | undefined;
+  const connection = {
+    rootId: 'root-id',
+    hostEpoch: 'host-epoch',
+    connectionId: 'connection-id',
+    selectedProtocol: 0,
+    closed: new Promise<void>(() => {}),
+    status: async () => ({ state: 'ready' }),
+    subscribeConfigurationChanges: () => () => {},
+    subscribeProjectCatalogChanges: () => () => {},
+    subscribeSessionCatalogChanges: () => () => {},
+    subscribeScheduledTaskChanges: () => () => {},
+    close: async () => {
+      closes += 1;
+    },
+  } as unknown as RuntimeHostConnection;
+
+  const connecting = connectRuntimeHostCli(
+    { rootPath: '/runtime-host-root', signal: controller.signal },
+    {
+      connectOrSpawn: async (input) => {
+        connectSignal = input.signal;
+        return {
+          kind: 'connected',
+          connection,
+          registration: hostRegistration(),
+        };
+      },
+      readConnectionCatalog: async () => {
+        catalogStarted.resolve();
+        return new Promise(() => {});
+      },
+    },
+  );
+  await catalogStarted.promise;
+  controller.abort(abortReason);
+
+  await assert.rejects(connecting, (error: unknown) => error === abortReason);
+  assert.equal(connectSignal, controller.signal);
+  assert.equal(closes, 1);
+});
+
+test('CLI Runtime Host bootstrap closes an initial connection acquired after abort', async () => {
+  const controller = new AbortController();
+  const connectStarted = deferred<void>();
+  const acquired = deferred<ReturnType<typeof connectedHostResult>>();
+  const abortReason = new Error('ACP connection closed');
+  let closes = 0;
+  const connection = {
+    close: async () => {
+      closes += 1;
+    },
+  } as unknown as RuntimeHostConnection;
+
+  const connecting = connectRuntimeHostCli(
+    { rootPath: '/runtime-host-root', signal: controller.signal },
+    {
+      connectOrSpawn: async () => {
+        connectStarted.resolve();
+        return acquired.promise;
+      },
+    },
+  );
+  await connectStarted.promise;
+  controller.abort(abortReason);
+
+  await assert.rejects(connecting, (error: unknown) => error === abortReason);
+  acquired.resolve(connectedHostResult(connection));
+  await waitFor(() => closes === 1);
+});
+
 test('non-interactive CLI reports how to retire an incompatible Runtime Host', async () => {
   assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > V0_1_11_HOST_COMPATIBILITY_EPOCH);
   await assert.rejects(
@@ -528,6 +604,14 @@ function hostRegistration(overrides: Partial<HostRegistration> = {}): HostRegist
   };
 }
 
+function connectedHostResult(connection: RuntimeHostConnection) {
+  return {
+    kind: 'connected' as const,
+    connection,
+    registration: hostRegistration(),
+  };
+}
+
 function incompatibleRemoteHandshake(overrides: Partial<HostIncompatible> = {}): HostIncompatible {
   return {
     kind: 'incompatible',
@@ -556,4 +640,22 @@ function singleRemoteProfileCatalog(profile: RemoteRuntimeHostProfile): RuntimeH
     removeIfCurrent: async () => assert.fail('unexpected write'),
     rebindIfCurrent: async () => assert.fail('unexpected write'),
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail('condition was not reached');
 }

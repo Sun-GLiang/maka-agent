@@ -19,6 +19,7 @@
 
 import { Readable, Writable } from 'node:stream';
 import { ndJsonStream } from '@agentclientprotocol/sdk';
+import type { RuntimeHostConnection } from '@maka/runtime-host/client';
 import { createMakaAcpAgent } from './maka-acp-agent.js';
 import { AcpSessionRegistry } from './session-registry.js';
 import { connectRuntimeHostCli } from '../runtime-host-cli-context.js';
@@ -40,13 +41,22 @@ export async function runMakaAcpStdioServer(
   dependencies: MakaAcpStdioServerDependencies = {},
 ): Promise<number> {
   const sessionRegistry = new AcpSessionRegistry({
-    connect: async () =>
-      (
-        await (dependencies.connectRuntimeHostCli ?? connectRuntimeHostCli)({
-          rootPath: input.workspaceRoot,
-          clientDataRoot: input.clientDataRoot,
-        })
-      ).connection,
+    connect: async (signal) => {
+      const context = await (dependencies.connectRuntimeHostCli ?? connectRuntimeHostCli)({
+        rootPath: input.workspaceRoot,
+        clientDataRoot: input.clientDataRoot,
+        signal,
+      });
+      return {
+        request: context.connection.request.bind(
+          context.connection,
+        ) as RuntimeHostConnection['request'],
+        openSessionSubscriptionOnce: context.connection.openSessionSubscriptionOnce.bind(
+          context.connection,
+        ),
+        close: () => context.close(),
+      };
+    },
   });
   const stdin = dependencies.stdin ?? process.stdin;
   const stdout = dependencies.stdout ?? process.stdout;

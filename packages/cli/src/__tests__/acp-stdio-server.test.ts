@@ -174,6 +174,33 @@ describe('Maka ACP stdio server', () => {
     assert.deepEqual(methodFailure.error?.data, { method: 'session/close' });
     assert.equal(harness.connectCalls(), 1);
   });
+
+  test('keeps an unimplemented Session method Host-independent', async () => {
+    const harness = createHarness([
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: 1 },
+      })}\n`,
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/close',
+        params: { sessionId: 'missing' },
+      })}\n`,
+    ]);
+
+    assert.equal(await harness.run(), 0);
+    const response = harness
+      .stdoutMessages()
+      .find((message) => (message as { id?: unknown }).id === 2) as {
+      error?: { code?: unknown; data?: unknown };
+    };
+    assert.equal(response.error?.code, -32601);
+    assert.deepEqual(response.error?.data, { method: 'session/close' });
+    assert.equal(harness.connectCalls(), 0);
+  });
 });
 
 function createHarness(
@@ -214,7 +241,7 @@ function createHarness(
             if (options.connectError) throw options.connectError;
             return {
               connection,
-              close: async () => undefined,
+              close: () => connection.close(),
             } as Awaited<
               ReturnType<typeof import('../runtime-host-cli-context.js').connectRuntimeHostCli>
             >;

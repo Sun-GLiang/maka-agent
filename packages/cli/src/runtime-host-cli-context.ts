@@ -112,6 +112,7 @@ export async function connectRuntimeHostCli(
     readonly profileId?: string;
     readonly clientDataRoot?: string;
     readonly interactiveSsh?: boolean;
+    readonly signal?: AbortSignal;
   },
   overrides: Partial<RuntimeHostCliContextDeps> = {},
 ): Promise<RuntimeHostCliConnectionContext> {
@@ -186,20 +187,30 @@ export async function connectRuntimeHostCli(
     }
     return connected.connection;
   };
+  let initialConnection: RuntimeHostConnection | undefined;
   let connection: Awaited<ReturnType<typeof createRuntimeHostReconnectingConnection>> | undefined;
   try {
-    const initialConnection = await connect(
-      undefined,
-      input.interactiveSsh && process.stdin.isTTY && process.stdout.isTTY ? 'inherit' : 'batch',
+    initialConnection = await acquireAbortably(
+      () =>
+        connect(
+          input.signal,
+          input.interactiveSsh && process.stdin.isTTY && process.stdout.isTTY ? 'inherit' : 'batch',
+        ),
+      input.signal,
     );
     connection = await createRuntimeHostReconnectingConnection({
       initialConnection,
       connect: (signal) => connect(signal, 'batch'),
     });
+    initialConnection = undefined;
     const liveConnection = connection;
+    const catalog = await runAbortably(
+      () => deps.readConnectionCatalog(liveConnection),
+      input.signal,
+    );
     return {
       connection: liveConnection,
-      catalog: await deps.readConnectionCatalog(liveConnection),
+      catalog,
       profile,
       close: async () => {
         try {
@@ -210,10 +221,70 @@ export async function connectRuntimeHostCli(
       },
     };
   } catch (error) {
-    await connection?.close().catch(() => undefined);
+    await (connection ?? initialConnection)?.close().catch(() => undefined);
     await peerClient?.close().catch(() => undefined);
     throw error;
   }
+}
+
+function acquireAbortably<T extends { close(): Promise<void> }>(
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return operation();
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const settle = (callback: () => void) => {
+      if (settled) return false;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback();
+      return true;
+    };
+    const onAbort = () => settle(() => reject(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+    let running: Promise<T>;
+    try {
+      running = operation();
+    } catch (error) {
+      settle(() => reject(error));
+      return;
+    }
+    void running.then(
+      (value) => {
+        if (!settle(() => resolve(value))) void value.close().catch(() => undefined);
+      },
+      (error: unknown) => settle(() => reject(error)),
+    );
+  });
+}
+
+function runAbortably<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation();
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const settle = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = () => settle(() => reject(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+    let running: Promise<T>;
+    try {
+      running = operation();
+    } catch (error) {
+      settle(() => reject(error));
+      return;
+    }
+    void running.then(
+      (value) => settle(() => resolve(value)),
+      (error: unknown) => settle(() => reject(error)),
+    );
+  });
 }
 
 async function resolveHostProfile(

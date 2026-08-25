@@ -63,7 +63,7 @@ export interface AcpSessionRegistryConnection {
 }
 
 export interface AcpSessionRegistryOptions {
-  readonly connect: () => Promise<AcpSessionRegistryConnection>;
+  readonly connect: (signal: AbortSignal) => Promise<AcpSessionRegistryConnection>;
   readonly newSessionId?: () => string;
 }
 
@@ -90,12 +90,13 @@ interface AcpSessionRecord {
 
 /** Owns all Runtime Host resources associated with one ACP connection. */
 export class AcpSessionRegistry {
-  readonly #connect: () => Promise<AcpSessionRegistryConnection>;
+  readonly #connect: (signal: AbortSignal) => Promise<AcpSessionRegistryConnection>;
   readonly #newSessionId: () => string;
   readonly #records = new Map<string, AcpSessionRecord>();
   readonly #inFlightOperations = new Set<Promise<unknown>>();
   #connection: AcpSessionRegistryConnection | undefined;
   #connectTask: Promise<AcpSessionRegistryConnection> | undefined;
+  #connectAbortController: AbortController | undefined;
   #closing = false;
   #connectionCloseTask: Promise<void> | undefined;
   #disposeTask: Promise<void> | undefined;
@@ -127,6 +128,7 @@ export class AcpSessionRegistry {
 
   dispose(): Promise<void> {
     this.#closing = true;
+    this.#connectAbortController?.abort();
     this.#disposeTask ??= this.#dispose();
     return this.#disposeTask;
   }
@@ -288,12 +290,25 @@ export class AcpSessionRegistry {
   async #getConnection(): Promise<AcpSessionRegistryConnection> {
     this.#assertOpen();
     if (this.#connection) return this.#connection;
-    const connectTask = (this.#connectTask ??= Promise.resolve().then(() => this.#connect()));
+    let connectController = this.#connectAbortController;
+    if (!this.#connectTask) {
+      connectController = new AbortController();
+      this.#connectAbortController = connectController;
+      this.#connectTask = Promise.resolve().then(() => {
+        if (this.#closing) throw registryClosedError('connect');
+        connectController!.signal.throwIfAborted();
+        return this.#connect(connectController!.signal);
+      });
+    }
+    const connectTask = this.#connectTask;
     let connection: AcpSessionRegistryConnection;
     try {
       connection = await connectTask;
     } catch {
       if (this.#connectTask === connectTask) this.#connectTask = undefined;
+      if (this.#connectAbortController === connectController) {
+        this.#connectAbortController = undefined;
+      }
       if (this.#closing) throw registryClosedError('connect');
       throw RequestError.internalError(
         {
@@ -303,6 +318,9 @@ export class AcpSessionRegistry {
         },
         'Runtime Host connection failed',
       );
+    }
+    if (this.#connectAbortController === connectController) {
+      this.#connectAbortController = undefined;
     }
     if (this.#closing) {
       await this.#closeOwnedConnection().catch(() => undefined);
