@@ -28,7 +28,7 @@ import { SESSION_CONTINUITY_SCHEMA_VERSION } from '@maka/runtime-host/protocol';
 import { runMakaAcpStdioServer } from '../acp/stdio-server.js';
 
 describe('Maka ACP stdio server', () => {
-  test('answers initialize without Runtime Host input or dependencies', async () => {
+  test('answers initialize without connecting a Runtime Host', async () => {
     const harness = createHarness([
       `${JSON.stringify({
         jsonrpc: '2.0',
@@ -51,12 +51,14 @@ describe('Maka ACP stdio server', () => {
         },
       },
     ]);
+    assert.equal(harness.connectCalls(), 0);
   });
 
-  test('returns zero after normal EOF', async () => {
+  test('returns zero after normal EOF without connecting a Runtime Host', async () => {
     const harness = createHarness([]);
 
     assert.equal(await harness.run(), 0);
+    assert.equal(harness.connectCalls(), 0);
   });
 
   test('returns a JSON-RPC parse error and then zero after EOF', async () => {
@@ -80,13 +82,15 @@ describe('Maka ACP stdio server', () => {
     await assert.rejects(harness.run(), (error: unknown) => error === transportError);
   });
 
-  test('disposes ACP subscriptions before closing the Runtime Host context', async () => {
+  test('disposes ACP subscriptions before closing the lazily acquired Host connection', async () => {
     const lifecycle: string[] = [];
     const connection = {
       request: async () => ({ kind: 'unsupported_legacy_record' }),
       openSessionSubscriptionOnce: async ({ sessionId }: { sessionId: string }) =>
         closingSubscription(sessionId, lifecycle),
-      close: async () => undefined,
+      close: async () => {
+        lifecycle.push('connection.close');
+      },
     } as unknown as RuntimeHostConnection;
     const harness = createHarness(
       [
@@ -105,7 +109,6 @@ describe('Maka ACP stdio server', () => {
       ],
       {
         connection,
-        onClose: () => lifecycle.push('context.close'),
       },
     );
 
@@ -120,7 +123,56 @@ describe('Maka ACP stdio server', () => {
     assert.equal(response.jsonrpc, '2.0');
     assert.equal(response.id, 2);
     assert.equal(typeof response.result?.sessionId, 'string');
-    assert.deepEqual(lifecycle, ['subscription.close', 'context.close']);
+    assert.equal(harness.connectCalls(), 1);
+    assert.deepEqual(lifecycle, ['subscription.close', 'connection.close']);
+  });
+
+  test('returns a Host connection failure from the Session request and keeps serving ACP', async () => {
+    const harness = createHarness(
+      [
+        `${JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { protocolVersion: 1 },
+        })}\n`,
+        `${JSON.stringify({
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'session/list',
+          params: {},
+        })}\n`,
+        `${JSON.stringify({
+          jsonrpc: '2.0',
+          id: 3,
+          method: 'session/close',
+          params: { sessionId: 'missing' },
+        })}\n`,
+      ],
+      { connectError: new Error('Host unavailable') },
+    );
+
+    assert.equal(await harness.run(), 0);
+    const responses = new Map(
+      harness
+        .stdoutMessages()
+        .map((message) => [(message as { id?: unknown }).id, message] as const),
+    );
+    const connectionFailure = responses.get(2) as {
+      error?: { code?: unknown; data?: unknown };
+    };
+    assert.equal(connectionFailure.error?.code, -32603);
+    assert.deepEqual(connectionFailure.error?.data, {
+      source: 'runtime_host',
+      operation: 'connect',
+      code: 'connection_failed',
+    });
+    const methodFailure = responses.get(3) as {
+      error?: { code?: unknown; data?: unknown };
+    };
+    assert.equal(methodFailure.error?.code, -32601);
+    assert.deepEqual(methodFailure.error?.data, { method: 'session/close' });
+    assert.equal(harness.connectCalls(), 1);
   });
 });
 
@@ -129,11 +181,11 @@ function createHarness(
   options: {
     readonly stdin?: Readable;
     readonly connection?: RuntimeHostConnection;
-    readonly onClose?: () => void;
+    readonly connectError?: Error;
   } = {},
 ) {
   const stdin = options.stdin ?? Readable.from(chunks.map((chunk) => Buffer.from(chunk)));
-  let closes = 0;
+  let connects = 0;
   const connection =
     options.connection ??
     ({
@@ -157,19 +209,19 @@ function createHarness(
         {
           stdin,
           stdout,
-          connectRuntimeHostCli: async () =>
-            ({
+          connectRuntimeHostCli: async () => {
+            connects += 1;
+            if (options.connectError) throw options.connectError;
+            return {
               connection,
-              close: async () => {
-                closes += 1;
-                options.onClose?.();
-              },
-            }) as Awaited<
+              close: async () => undefined,
+            } as Awaited<
               ReturnType<typeof import('../runtime-host-cli-context.js').connectRuntimeHostCli>
-            >,
+            >;
+          },
         },
       ),
-    closeCalls: () => closes,
+    connectCalls: () => connects,
     stdoutMessages: () =>
       Buffer.concat(stdoutChunks)
         .toString('utf8')

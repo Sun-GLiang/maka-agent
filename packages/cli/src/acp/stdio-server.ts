@@ -39,47 +39,40 @@ export async function runMakaAcpStdioServer(
   input: MakaAcpStdioServerInput,
   dependencies: MakaAcpStdioServerDependencies = {},
 ): Promise<number> {
-  const context = await (dependencies.connectRuntimeHostCli ?? connectRuntimeHostCli)({
-    rootPath: input.workspaceRoot,
-    clientDataRoot: input.clientDataRoot,
-  });
-  let closeContextTask: Promise<void> | undefined;
-  const closeContext = () => (closeContextTask ??= context.close());
   const sessionRegistry = new AcpSessionRegistry({
-    connect: async () => context.connection,
+    connect: async () =>
+      (
+        await (dependencies.connectRuntimeHostCli ?? connectRuntimeHostCli)({
+          rootPath: input.workspaceRoot,
+          clientDataRoot: input.clientDataRoot,
+        })
+      ).connection,
   });
+  const stdin = dependencies.stdin ?? process.stdin;
+  const stdout = dependencies.stdout ?? process.stdout;
+  let stdioError: Error | undefined;
+  const recordStdioError = (error: Error) => {
+    stdioError ??= error;
+  };
+  stdin.once('error', recordStdioError);
+  stdout.once('error', recordStdioError);
   try {
-    const stdin = dependencies.stdin ?? process.stdin;
-    const stdout = dependencies.stdout ?? process.stdout;
-    let stdioError: Error | undefined;
-    const recordStdioError = (error: Error) => {
-      stdioError ??= error;
-    };
-    stdin.once('error', recordStdioError);
-    stdout.once('error', recordStdioError);
-    try {
-      const stream = ndJsonStream(
-        Writable.toWeb(stdout) as WritableStream<Uint8Array>,
-        Readable.toWeb(stdin) as ReadableStream<Uint8Array>,
-      );
-      const connection = createMakaAcpAgent({
-        version: input.version,
-        sessionRegistry,
-      }).connect(stream);
-      await connection.closed;
-      if (stdioError) {
-        throw stdioError;
-      }
-      return 0;
-    } finally {
-      stdin.off('error', recordStdioError);
-      stdout.off('error', recordStdioError);
+    const stream = ndJsonStream(
+      Writable.toWeb(stdout) as WritableStream<Uint8Array>,
+      Readable.toWeb(stdin) as ReadableStream<Uint8Array>,
+    );
+    const connection = createMakaAcpAgent({
+      version: input.version,
+      sessionRegistry,
+    }).connect(stream);
+    await connection.closed;
+    if (stdioError) {
+      throw stdioError;
     }
+    return 0;
   } finally {
-    try {
-      await sessionRegistry.dispose();
-    } finally {
-      await closeContext();
-    }
+    stdin.off('error', recordStdioError);
+    stdout.off('error', recordStdioError);
+    await sessionRegistry.dispose();
   }
 }

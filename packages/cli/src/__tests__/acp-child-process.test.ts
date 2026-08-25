@@ -141,53 +141,56 @@ describe('Maka ACP child process', () => {
   test('serves multiple ACP Sessions through a real Runtime Host', {
     timeout: 30_000,
   }, async () => {
-    await withAcpChildProcessHarness(async (harness) => {
-      await harness.withClient(async ({ context }) => {
-        await context.request(methods.agent.initialize, { protocolVersion: 1 });
-        const first = await context.request(methods.agent.session.new, {
-          cwd: harness.workspaceRoot,
-          mcpServers: [],
-        });
-        const second = await context.request(methods.agent.session.new, {
-          cwd: harness.workspaceRoot,
-          mcpServers: [],
-        });
-        assert.notEqual(first.sessionId, second.sessionId);
-        const listed = await context.request(methods.agent.session.list, {
-          cwd: harness.workspaceRoot,
-        });
-        assert.deepEqual(
-          new Set(listed.sessions.map((session) => session.sessionId)),
-          new Set([first.sessionId, second.sessionId]),
-        );
-        const hostCwd = await realpath(harness.workspaceRoot);
-        assert.equal(
-          listed.sessions.every((session) => session.cwd === hostCwd),
-          true,
-        );
+    await withAcpChildProcessHarness(
+      async (harness) => {
+        await harness.withClient(async ({ context }) => {
+          await context.request(methods.agent.initialize, { protocolVersion: 1 });
+          const first = await context.request(methods.agent.session.new, {
+            cwd: harness.workspaceRoot,
+            mcpServers: [],
+          });
+          const second = await context.request(methods.agent.session.new, {
+            cwd: harness.workspaceRoot,
+            mcpServers: [],
+          });
+          assert.notEqual(first.sessionId, second.sessionId);
+          const listed = await context.request(methods.agent.session.list, {
+            cwd: harness.workspaceRoot,
+          });
+          assert.deepEqual(
+            new Set(listed.sessions.map((session) => session.sessionId)),
+            new Set([first.sessionId, second.sessionId]),
+          );
+          const hostCwd = await realpath(harness.workspaceRoot);
+          assert.equal(
+            listed.sessions.every((session) => session.cwd === hostCwd),
+            true,
+          );
 
-        await assert.rejects(
-          context.request(methods.agent.session.close, { sessionId: first.sessionId }),
-          (error: unknown) => {
-            assert.ok(error instanceof RequestError);
-            assert.equal(error.code, -32601);
-            assert.deepEqual(error.data, { method: 'session/close' });
-            return true;
-          },
-        );
-      });
+          await assert.rejects(
+            context.request(methods.agent.session.close, { sessionId: first.sessionId }),
+            (error: unknown) => {
+              assert.ok(error instanceof RequestError);
+              assert.equal(error.code, -32601);
+              assert.deepEqual(error.data, { method: 'session/close' });
+              return true;
+            },
+          );
+        });
 
-      await harness.closeStdin();
-      assert.deepEqual(await harness.waitForExit(), { code: 0, signal: null });
-      assert.equal(harness.stderr, '');
+        await harness.closeStdin();
+        assert.deepEqual(await harness.waitForExit(), { code: 0, signal: null });
+        assert.equal(harness.stderr, '');
 
-      const lines = harness.stdout.split(/\r?\n/u).filter((line) => line.trim().length > 0);
-      assert.ok(lines.length >= 5, 'expected initialize, new, list, and method responses');
-      for (const line of lines) {
-        const message: unknown = JSON.parse(line);
-        assertJsonRpcMessage(message);
-      }
-    }, { startRuntimeHost: true });
+        const lines = harness.stdout.split(/\r?\n/u).filter((line) => line.trim().length > 0);
+        assert.ok(lines.length >= 5, 'expected initialize, new, list, and method responses');
+        for (const line of lines) {
+          const message: unknown = JSON.parse(line);
+          assertJsonRpcMessage(message);
+        }
+      },
+      { startRuntimeHost: true },
+    );
   });
 });
 
