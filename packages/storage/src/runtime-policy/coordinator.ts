@@ -18,6 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import {
   decodeConnectionModelId,
   decodeConnectionSlug,
@@ -32,6 +33,7 @@ import {
   serializeRequestHeaders,
   RequestCustomizationValidationError,
   normalizeCredentialSecret,
+  normalizeNetworkProxyUpdate,
   type ConnectionCatalogEntry,
   type ConnectionCatalogSnapshot,
   type ConnectionVersionBasis,
@@ -51,6 +53,8 @@ import {
   type MigrateSystemSeedInput,
   type SetDefaultConnectionTargetInput,
   type UpdateCatalogConnectionInput,
+  type UpdateNetworkProxyInput,
+  type UpdateNetworkProxyResult,
 } from '@maka/core/runtime-policy';
 import { deriveProviderAuthContract, type ProviderAuthAction } from '@maka/core/provider-auth';
 import { isRetiredProvider } from '@maka/core/provider-registry';
@@ -87,6 +91,7 @@ import {
   commitOutcomeUnknown,
   decodeConnectionInput,
   decodeCredentialInput,
+  decodePolicyInput,
   RuntimePolicyStoreError,
 } from './errors.js';
 import {
@@ -127,6 +132,13 @@ import {
   writeConnectionOnboardingIntent,
   type ConnectionOnboardingIntent,
 } from './onboarding-transaction.js';
+import {
+  clearNetworkProxyUpdateIntent,
+  prepareNetworkProxyUpdateIntent,
+  readNetworkProxyUpdateIntent,
+  writeNetworkProxyUpdateIntent,
+  type NetworkProxyUpdateIntent,
+} from './network-proxy-transaction.js';
 import { policySnapshot, RuntimePolicyDocumentOwner } from './policy-document.js';
 import { SerializedOperationLane } from '../serialized-operation-lane.js';
 
@@ -228,6 +240,7 @@ export class RuntimePolicyCoordinator {
   private readonly vault = new CredentialVaultDocumentOwner();
   private readonly tickets = new WeakMap<object, OperationTicketRecord>();
   private onboardingRecoveryRequired = false;
+  private networkProxyRecoveryRequired = false;
 
   constructor(private readonly execute: RootExecutor) {
     this.lane = new SerializedOperationLane(execute);
@@ -237,6 +250,7 @@ export class RuntimePolicyCoordinator {
     return this.lane.run(async (root) => {
       await cleanupRuntimePolicyDocumentTemps(root);
       await this.recoverConnectionOnboarding(root);
+      await this.recoverNetworkProxyUpdate(root);
       const catalog = await this.catalog.read(root);
       const vault = await this.vault.read(root);
       await this.vault.deleteOrphanedConnectionCredentials(
@@ -295,6 +309,72 @@ export class RuntimePolicyCoordinator {
           );
         }
         throw error;
+      }
+    });
+  }
+
+  updateNetworkProxy(rawInput: UpdateNetworkProxyInput): Promise<UpdateNetworkProxyResult> {
+    return this.inLane(async (root) => {
+      const input = decodePolicyInput(() => normalizeNetworkProxyUpdate(rawInput));
+      const policy = await this.policy.read(root);
+      const preparedPolicy = this.policy.prepareMutation(policy, {
+        expectedRevision: input.expectedPolicyRevision,
+        operation: { kind: 'set_network_proxy', value: input.networkProxy },
+      });
+      if (preparedPolicy.kind !== 'ready') return preparedPolicy;
+
+      const vault = await this.vault.read(root);
+      const existing = findCredential(vault, networkProxyCredentialLocator());
+      if (!matchesCredentialExpectation(existing, input.expectedCredential)) {
+        return deepFreeze({
+          kind: 'credential_stale' as const,
+          expected: input.expectedCredential,
+          actual: existing ? credentialBasis(existing) : null,
+        });
+      }
+      // Preflight every document before making the transaction intent durable.
+      // Once the intent exists, any later failure means recovery owns the target.
+      if (input.credential.kind === 'replace' && existing?.secret !== input.credential.secret) {
+        const prepared = this.vault.prepareSet(vault, {
+          locator: networkProxyCredentialLocator(),
+          expected: existing
+            ? { credentialId: existing.credentialId, revision: existing.revision }
+            : null,
+          secret: input.credential.secret,
+        });
+        if (prepared.kind !== 'ready') {
+          if (prepared.kind === 'credential_stale') return prepared;
+          throw codecError('invalid_credential_input', 'Network proxy credential is invalid');
+        }
+      } else if (input.credential.kind === 'delete' && existing) {
+        const prepared = this.vault.prepareDelete(vault, {
+          expected: credentialBasis(existing),
+        });
+        if (prepared.kind !== 'ready') {
+          if (prepared.kind === 'credential_stale') return prepared;
+          throw codecError('invalid_credential_input', 'Network proxy credential is invalid');
+        }
+      }
+
+      const intent = prepareNetworkProxyUpdateIntent(input);
+      try {
+        await writeNetworkProxyUpdateIntent(root, intent);
+      } catch (error) {
+        if (isCommitOutcomeUnknown(error)) this.networkProxyRecoveryRequired = true;
+        throw error;
+      }
+      this.networkProxyRecoveryRequired = true;
+      try {
+        const result = await this.applyNetworkProxyUpdate(root, intent);
+        await clearNetworkProxyUpdateIntent(root);
+        this.networkProxyRecoveryRequired = false;
+        return result;
+      } catch (error) {
+        if (isCommitOutcomeUnknown(error)) throw error;
+        throw commitOutcomeUnknown(
+          'Network proxy update has a durable intent and must recover before retrying',
+          error,
+        );
       }
     });
   }
@@ -1564,6 +1644,85 @@ export class RuntimePolicyCoordinator {
     }
   }
 
+  private async recoverNetworkProxyUpdate(root: string): Promise<void> {
+    const intent = await readNetworkProxyUpdateIntent(root);
+    if (!intent) {
+      this.networkProxyRecoveryRequired = false;
+      return;
+    }
+    this.networkProxyRecoveryRequired = true;
+    try {
+      await this.applyNetworkProxyUpdate(root, intent);
+      await clearNetworkProxyUpdateIntent(root);
+      this.networkProxyRecoveryRequired = false;
+    } catch (error) {
+      if (isCommitOutcomeUnknown(error)) throw error;
+      throw commitOutcomeUnknown('Network proxy update recovery did not converge', error);
+    }
+  }
+
+  private async applyNetworkProxyUpdate(
+    root: string,
+    intent: NetworkProxyUpdateIntent,
+  ): Promise<Extract<UpdateNetworkProxyResult, { readonly kind: 'committed' }>> {
+    const policy = await this.policy.read(root);
+    const vault = await this.vault.read(root);
+    const locator = networkProxyCredentialLocator();
+    const existing = findCredential(vault, locator);
+    const credentialChanged =
+      intent.credential.kind === 'replace'
+        ? existing?.secret !== intent.credential.secret
+        : intent.credential.kind === 'delete' && existing !== undefined;
+    const proxyChanged = !isDeepStrictEqual(policy.policy.networkProxy, intent.networkProxy);
+    const effectiveProxyChanged = !sameEffectiveProxyConfiguration(
+      effectiveProxyConfigurationBasis(policy.policy.networkProxy),
+      effectiveProxyConfigurationBasis(intent.networkProxy),
+    );
+    if (credentialChanged || effectiveProxyChanged) {
+      await this.catalog.clearAllConnectionLastTests(root, await this.catalog.read(root));
+    }
+
+    if (intent.credential.kind === 'replace' && credentialChanged) {
+      const prepared = this.vault.prepareSet(vault, {
+        locator,
+        expected: existing
+          ? { credentialId: existing.credentialId, revision: existing.revision }
+          : null,
+        secret: intent.credential.secret,
+      });
+      if (prepared.kind !== 'ready') {
+        throw codecError('invalid_document', 'Network proxy credential recovery became stale');
+      }
+      await this.vault.commitSet(root, prepared);
+    } else if (intent.credential.kind === 'delete' && existing) {
+      const prepared = this.vault.prepareDelete(vault, {
+        expected: credentialBasis(existing),
+      });
+      if (prepared.kind !== 'ready') {
+        throw codecError('invalid_document', 'Network proxy credential deletion became stale');
+      }
+      await this.vault.commitDelete(root, prepared);
+    }
+
+    let snapshot = policySnapshot(policy);
+    if (proxyChanged) {
+      const prepared = this.policy.prepareMutation(policy, {
+        expectedRevision: policy.revision,
+        operation: { kind: 'set_network_proxy', value: intent.networkProxy },
+      });
+      if (prepared.kind !== 'ready') {
+        throw codecError('invalid_document', 'Network proxy policy recovery became stale');
+      }
+      snapshot = (await this.policy.commitMutation(root, prepared)).snapshot;
+    }
+    const finalVault = await this.vault.read(root);
+    return deepFreeze({
+      kind: 'committed' as const,
+      snapshot,
+      credentialStatus: credentialStatus(finalVault, locator),
+    });
+  }
+
   private async applyConnectionOnboarding(
     root: string,
     intent: ConnectionOnboardingIntent,
@@ -1616,9 +1775,17 @@ export class RuntimePolicyCoordinator {
   private inLane<T>(operation: (root: string) => Promise<T>): Promise<T> {
     return this.lane.run(async (root) => {
       if (this.onboardingRecoveryRequired) await this.recoverConnectionOnboarding(root);
+      if (this.networkProxyRecoveryRequired) await this.recoverNetworkProxyUpdate(root);
       return operation(root);
     });
   }
+}
+
+function matchesCredentialExpectation(
+  actual: ReturnType<typeof findCredential>,
+  expected: CredentialVersionBasis | null,
+): boolean {
+  return expected === null ? actual === undefined : sameCredentialBasis(actual, expected);
 }
 
 function isCommitOutcomeUnknown(error: unknown): error is RuntimePolicyStoreError {

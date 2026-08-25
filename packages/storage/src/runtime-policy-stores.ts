@@ -233,6 +233,7 @@ function createWriterFacade(coordinator: RuntimePolicyCoordinator): RuntimePolic
       delete: (input) => coordinator.deleteCredential(input),
     },
     operations: {
+      updateNetworkProxy: (input) => coordinator.updateNetworkProxy(input),
       exportCredentialMaterial: (locator) => coordinator.exportCredentialMaterial(locator),
       getConnectionRequestHeaders: (connectionId) =>
         coordinator.getConnectionRequestHeaders(connectionId),

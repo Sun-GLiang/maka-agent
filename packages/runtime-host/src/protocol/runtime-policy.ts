@@ -39,6 +39,7 @@ import {
   normalizeDeleteCredentialInput,
   normalizeRemoveCatalogConnectionInput,
   normalizeOptionalRequestBodyOverlay,
+  normalizeNetworkProxyUpdate,
   normalizeRequestHeaderUpdates,
   normalizeRuntimePolicyMutation,
   normalizeSetCredentialInput,
@@ -61,6 +62,7 @@ import {
   type RequestHeaderUpdate,
   type RevisionConflict,
   type RuntimePolicySnapshot,
+  type UpdateNetworkProxyInput,
   type SetCredentialInput,
   type SetDefaultConnectionTargetInput,
   type UpdateCatalogConnectionInput,
@@ -104,6 +106,15 @@ export type RuntimePolicyMutateInput = MutateRuntimePolicyInput;
 export type RuntimePolicyMutateResult =
   | { readonly kind: 'committed'; readonly revision: number }
   | RevisionConflict;
+export type RuntimePolicyNetworkProxyUpdateInput = UpdateNetworkProxyInput;
+export type RuntimePolicyNetworkProxyUpdateResult =
+  | {
+      readonly kind: 'committed';
+      readonly revision: number;
+      readonly credentialStatus: CredentialStatus;
+    }
+  | RevisionConflict
+  | CredentialStale;
 
 export type ConnectionCatalogCursor =
   | { readonly connectionIndex: number; readonly part: 'connection' }
@@ -268,6 +279,17 @@ export const RUNTIME_POLICY_OPERATION_SPECS = {
     decodeInput: decodeRuntimePolicyMutation,
     decodeOutput: decodeRuntimePolicyMutationResult,
   }),
+  'runtime.policy.network-proxy.update': defineOperation<
+    RuntimePolicyNetworkProxyUpdateInput,
+    RuntimePolicyNetworkProxyUpdateResult,
+    (typeof MUTATION_ERRORS)[number]
+  >({
+    mode: 'command',
+    availability: 'ready',
+    errors: MUTATION_ERRORS,
+    decodeInput: decodeRuntimePolicyNetworkProxyUpdate,
+    decodeOutput: decodeRuntimePolicyNetworkProxyUpdateResult,
+  }),
   'connection.catalog.query': defineOperation<
     ConnectionCatalogQueryInput,
     ConnectionCatalogQueryResult,
@@ -411,6 +433,39 @@ function decodeRuntimePolicyMutationResult(value: unknown): RuntimePolicyMutateR
     return { kind: 'committed', revision: revision(committed.revision, 'runtime policy revision') };
   }
   return revisionConflict(item, 'runtime policy mutation result');
+}
+
+function decodeRuntimePolicyNetworkProxyUpdate(
+  value: unknown,
+): RuntimePolicyNetworkProxyUpdateInput {
+  const input = decodeDomain(() => normalizeNetworkProxyUpdate(value));
+  if (
+    input.credential.kind === 'replace' &&
+    Buffer.byteLength(input.credential.secret, 'utf8') > CREDENTIAL_SECRET_MAX_BYTES
+  ) {
+    throw invalidProtocolFrame('Invalid network proxy credential secret');
+  }
+  return input;
+}
+
+function decodeRuntimePolicyNetworkProxyUpdateResult(
+  value: unknown,
+): RuntimePolicyNetworkProxyUpdateResult {
+  const item = requireRecord(value, 'network proxy update result');
+  if (item.kind === 'committed') {
+    const committed = requireExactRecord(item, 'network proxy update committed result', [
+      'kind',
+      'revision',
+      'credentialStatus',
+    ]);
+    return {
+      kind: 'committed',
+      revision: revision(committed.revision, 'runtime policy revision'),
+      credentialStatus: decodeDomain(() => decodeCredentialStatus(committed.credentialStatus)),
+    };
+  }
+  if (item.kind === 'credential_stale') return credentialStale(item);
+  return revisionConflict(item, 'network proxy update result');
 }
 
 function decodeCatalogQueryInput(value: unknown): ConnectionCatalogQueryInput {

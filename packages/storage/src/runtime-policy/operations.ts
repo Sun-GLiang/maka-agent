@@ -28,6 +28,8 @@ import type {
   CredentialStatus,
   CredentialVersionBasis,
   RuntimePolicy,
+  UpdateNetworkProxyInput,
+  UpdateNetworkProxyResult,
   RequestHeaderUpdate,
   SavedRequestHeaders,
 } from '@maka/core/runtime-policy';
@@ -327,6 +329,7 @@ export type ReplaceConnectionRequestHeadersResult =
   | { readonly kind: 'connection_not_found' };
 
 export interface RuntimePolicyOperationCoordinator {
+  updateNetworkProxy(input: UpdateNetworkProxyInput): Promise<UpdateNetworkProxyResult>;
   exportCredentialMaterial(
     locator: CredentialLocator,
   ): Promise<RuntimePolicyCredentialMaterial | null>;

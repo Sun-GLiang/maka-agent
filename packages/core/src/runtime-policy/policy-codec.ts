@@ -23,9 +23,15 @@ import { normalizeSubagentSettings } from '../subagent-settings.js';
 import type {
   AgentRuntimeSettingsPatch,
   MutateRuntimePolicyInput,
+  NetworkProxyCredentialUpdate,
   RuntimePolicy,
   RuntimePolicyMutation,
+  UpdateNetworkProxyInput,
 } from '../runtime-policy.js';
+import {
+  decodeCredentialVersionBasis,
+  normalizeCredentialSecret,
+} from './credential-vault-codec.js';
 import { WEB_SEARCH_PROVIDERS } from '../web-search.js';
 import {
   assertCanonicalValue,
@@ -72,6 +78,56 @@ export function normalizeRuntimePolicyMutation(value: unknown): MutateRuntimePol
     expectedRevision: revisionValue(input.expectedRevision, 'runtime policy expected revision'),
     operation: normalizeMutationOperation(operation),
   };
+}
+
+export function normalizeNetworkProxyUpdate(value: unknown): UpdateNetworkProxyInput {
+  const input = exactRecord(value, 'network proxy update', [
+    'expectedPolicyRevision',
+    'expectedCredential',
+    'networkProxy',
+    'credential',
+  ]);
+  const expectedCredential =
+    input.expectedCredential === null
+      ? null
+      : decodeCredentialVersionBasis(input.expectedCredential);
+  if (expectedCredential !== null && expectedCredential.locator.scope !== 'network_proxy') {
+    throw domainError('network proxy update requires a network proxy credential basis');
+  }
+  const credential = normalizeNetworkProxyCredentialUpdate(input.credential);
+  const networkProxy = normalizeNetworkProxy(input.networkProxy);
+  if (!networkProxy.authEnabled && credential.kind !== 'delete') {
+    throw domainError('disabled proxy authentication requires credential deletion');
+  }
+  return {
+    expectedPolicyRevision: revisionValue(
+      input.expectedPolicyRevision,
+      'network proxy expected policy revision',
+    ),
+    expectedCredential,
+    networkProxy,
+    credential,
+  };
+}
+
+function normalizeNetworkProxyCredentialUpdate(value: unknown): NetworkProxyCredentialUpdate {
+  const base = exactRecord(value, 'network proxy credential update', ['kind', 'secret'], ['kind']);
+  switch (base.kind) {
+    case 'keep':
+    case 'delete': {
+      exactRecord(value, `network proxy credential ${base.kind}`, ['kind']);
+      return { kind: base.kind };
+    }
+    case 'replace': {
+      const replacement = exactRecord(value, 'network proxy credential replacement', [
+        'kind',
+        'secret',
+      ]);
+      return { kind: 'replace', secret: normalizeCredentialSecret(replacement.secret) };
+    }
+    default:
+      throw domainError(`network proxy credential update '${String(base.kind)}' is unknown`);
+  }
 }
 
 function normalizeRuntimePolicy(value: unknown): RuntimePolicy {

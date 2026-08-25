@@ -282,6 +282,7 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'queue.entry.update',
   'queue.retract',
   'runtime.policy.mutate',
+  'runtime.policy.network-proxy.update',
   'runtime.policy.query',
   'runtime.resource.controller.acquire',
   'runtime.resource.controller.control',

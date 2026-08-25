@@ -26,6 +26,7 @@ import {
 import {
   createDefaultRuntimePolicy,
   type RuntimePolicy,
+  type UpdateNetworkProxyInput,
 } from "@maka/core/runtime-policy";
 import {
   createRuntimeHostSettingsModule,
@@ -110,6 +111,13 @@ function createModuleFixture(options: {
   failFirstSet?: boolean;
 } = {}) {
   let policy = createDefaultRuntimePolicy();
+  if (options.configured) {
+    policy = {
+      ...policy,
+      networkProxy: { ...policy.networkProxy, authEnabled: true },
+    };
+  }
+  let policyRevision = 1;
   let secret = options.configured ? "saved-secret" : undefined;
   let revision = secret ? 1 : 0;
   let failFirstSet = options.failFirstSet ?? false;
@@ -118,7 +126,7 @@ function createModuleFixture(options: {
 
   const client = {
     async queryRuntimePolicy() {
-      return { revision: 1, policy };
+      return { revision: policyRevision, policy };
     },
     async updateRuntimePolicy(
       createMutation: (value: RuntimePolicy) => {
@@ -130,7 +138,53 @@ function createModuleFixture(options: {
       if (mutation.kind === "set_network_proxy") {
         policy = { ...policy, networkProxy: mutation.value };
       }
-      return { revision: 2, policy };
+      policyRevision += 1;
+      return { revision: policyRevision, policy };
+    },
+    async updateNetworkProxy(input: UpdateNetworkProxyInput) {
+      if (input.expectedPolicyRevision !== policyRevision) {
+        return {
+          kind: "revision_conflict" as const,
+          expectedRevision: input.expectedPolicyRevision,
+          actualRevision: policyRevision,
+        };
+      }
+      if (input.credential.kind === "replace") {
+        events.push(`set:${input.credential.secret}`);
+        await options.beforeSetCredential?.();
+        if (failFirstSet) {
+          failFirstSet = false;
+          throw new Error("credential write failed");
+        }
+        secret = input.credential.secret;
+        revision += 1;
+      } else if (input.credential.kind === "delete") {
+        events.push("delete");
+        secret = undefined;
+        revision += 1;
+      }
+      policy = { ...policy, networkProxy: input.networkProxy };
+      policyRevision += 1;
+      return {
+        kind: "committed" as const,
+        revision: policyRevision,
+        credentialStatus:
+          secret === undefined
+            ? {
+                locator: { scope: "network_proxy" as const, kind: "password" as const },
+                configured: false as const,
+                credentialId: null,
+                revision: null,
+                updatedAt: null,
+              }
+            : {
+                locator: { scope: "network_proxy" as const, kind: "password" as const },
+                configured: true as const,
+                credentialId: "proxy-credential",
+                revision,
+                updatedAt: 1,
+              },
+      };
     },
     async queryCredential(locator: { scope: string }) {
       if (locator.scope !== "network_proxy" || secret === undefined) return null;
@@ -314,7 +368,10 @@ test("proxy tests wait for the lane and a failed operation does not poison it", 
   });
   const replace = fixture.module.update({
     network: {
-      proxy: { credential: { kind: "replace", secret: "complete-secret" } },
+      proxy: {
+        authEnabled: true,
+        credential: { kind: "replace", secret: "complete-secret" },
+      },
     },
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -327,6 +384,29 @@ test("proxy tests wait for the lane and a failed operation does not poison it", 
   assert.deepEqual(fixture.events, ["set:complete-secret", "test"]);
 });
 
+test("a failed credential replacement does not commit proxy policy fields", async () => {
+  const fixture = createModuleFixture({ configured: true, failFirstSet: true });
+  const before = structuredClone(fixture.policy().networkProxy);
+
+  await assert.rejects(
+    fixture.module.update({
+      network: {
+        proxy: {
+          enabled: true,
+          host: "replacement.proxy.internal",
+          authEnabled: true,
+          username: "replacement-user",
+          credential: { kind: "replace", secret: "replacement-secret" },
+        },
+      },
+    }),
+    /failed/,
+  );
+
+  assert.deepEqual(fixture.policy().networkProxy, before);
+  assert.equal(fixture.secret(), "saved-secret");
+});
+
 test("compound config operations share the lane without re-entering it", async () => {
   let release!: () => void;
   const blocked = new Promise<void>((resolve) => {
@@ -335,7 +415,10 @@ test("compound config operations share the lane without re-entering it", async (
   const fixture = createModuleFixture({ beforeSetCredential: () => blocked });
   const replace = fixture.module.update({
     network: {
-      proxy: { credential: { kind: "replace", secret: "complete-secret" } },
+      proxy: {
+        authEnabled: true,
+        credential: { kind: "replace", secret: "complete-secret" },
+      },
     },
   });
   await new Promise((resolve) => setImmediate(resolve));

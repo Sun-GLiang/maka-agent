@@ -57,6 +57,7 @@ type RuntimeHostSettingsClient = Pick<
   | "queryRuntimePolicy"
   | "setCredential"
   | "testNetworkProxy"
+  | "updateNetworkProxy"
   | "updateRuntimePolicy"
 >;
 
@@ -326,15 +327,7 @@ async function applyHostPatchWithoutLane(
   patch: UpdateAppSettingsInput,
 ): Promise<void> {
   if (patch.network?.proxy) {
-    const proxy = patch.network.proxy;
-    await client.updateRuntimePolicy((policy) => ({
-      kind: "set_network_proxy",
-      value: { ...policy.networkProxy, ...withoutCredential(proxy) },
-    }));
-    if (proxy.authEnabled === false || proxy.credential?.kind === "delete")
-      await deleteCredential(client, PROXY_CREDENTIAL);
-    else if (proxy.credential?.kind === "replace")
-      await setCredential(client, PROXY_CREDENTIAL, proxy.credential.secret);
+    await updateNetworkProxy(client, patch.network.proxy);
   }
   if (
     patch.personalization?.displayName !== undefined ||
@@ -405,6 +398,43 @@ async function applyHostPatchWithoutLane(
       value: patch.subagents!,
     }));
   }
+}
+
+async function updateNetworkProxy(
+  client: RuntimeHostSettingsClient,
+  patch: NonNullable<NonNullable<UpdateAppSettingsInput["network"]>["proxy"]>,
+): Promise<void> {
+  const [policy, credential] = await Promise.all([
+    client.queryRuntimePolicy(),
+    client.queryCredential(PROXY_CREDENTIAL),
+  ]);
+  const networkProxy = {
+    ...policy.policy.networkProxy,
+    ...withoutCredential(patch),
+  };
+  const operation =
+    patch.credential?.kind === "replace"
+      ? patch.credential
+      : !networkProxy.authEnabled || patch.credential?.kind === "delete"
+        ? ({ kind: "delete" } as const)
+        : ({ kind: "keep" } as const);
+  const result = await client.updateNetworkProxy({
+    expectedPolicyRevision: policy.revision,
+    expectedCredential: credential?.configured
+      ? {
+          locator: credential.locator,
+          credentialId: credential.credentialId,
+          revision: credential.revision,
+        }
+      : null,
+    networkProxy,
+    credential: operation,
+  });
+  if (result.kind === "committed") return;
+  if (result.kind === "revision_conflict") {
+    throw new Error("Runtime Host proxy policy changed while Desktop updated it");
+  }
+  throw new Error("Runtime Host proxy credential changed while Desktop updated it");
 }
 
 async function mergePolicy<

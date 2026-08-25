@@ -3023,6 +3023,131 @@ describe('runtime policy stores', () => {
     });
   });
 
+  test('a stale client cannot recreate a proxy credential after another client disables authentication', async () => {
+    await withInteractiveOwner(async ({ stores }) => {
+      const initialPolicy = await stores.runtimePolicy.getSnapshot();
+      const configured = await stores.operations.updateNetworkProxy({
+        expectedPolicyRevision: initialPolicy.revision,
+        expectedCredential: null,
+        networkProxy: {
+          ...initialPolicy.policy.networkProxy,
+          enabled: true,
+          authEnabled: true,
+          username: 'proxy-user',
+        },
+        credential: { kind: 'replace', secret: 'initial-secret' },
+      });
+      assert.equal(configured.kind, 'committed');
+      if (configured.kind !== 'committed') return;
+      assert.equal(configured.credentialStatus.configured, true);
+      if (!configured.credentialStatus.configured) return;
+
+      // Both clients observed the same Host-owned policy and credential basis.
+      const clientAPolicyRevision = configured.snapshot.revision;
+      const clientACredential = credentialBasis(configured.credentialStatus);
+      const clientBPolicyRevision = configured.snapshot.revision;
+      const clientBCredential = credentialBasis(configured.credentialStatus);
+
+      const disabled = await stores.operations.updateNetworkProxy({
+        expectedPolicyRevision: clientBPolicyRevision,
+        expectedCredential: clientBCredential,
+        networkProxy: {
+          ...configured.snapshot.policy.networkProxy,
+          authEnabled: false,
+          username: '',
+        },
+        credential: { kind: 'delete' },
+      });
+      assert.equal(disabled.kind, 'committed');
+      if (disabled.kind !== 'committed') return;
+
+      const staleReplacement = await stores.operations.updateNetworkProxy({
+        expectedPolicyRevision: clientAPolicyRevision,
+        expectedCredential: clientACredential,
+        networkProxy: configured.snapshot.policy.networkProxy,
+        credential: { kind: 'replace', secret: 'must-not-return' },
+      });
+      assert.ok(
+        staleReplacement.kind === 'revision_conflict' ||
+          staleReplacement.kind === 'credential_stale',
+      );
+
+      const finalPolicy = await stores.runtimePolicy.getSnapshot();
+      const finalCredential = await getCredentialStatus(stores.credentialVault, proxyCredential());
+      assert.equal(finalPolicy.policy.networkProxy.authEnabled, false);
+      assert.equal(finalCredential.configured, false);
+    });
+  });
+
+  test('proxy policy and credential replacement recover from every persistence cut', {
+    skip:
+      process.platform === 'win32'
+        ? 'POSIX file handles are required to inject persistence failures'
+        : false,
+  }, async () => {
+    for (let failedSync = 1; failedSync <= 7; failedSync += 1) {
+      await withInteractiveOwner(async ({ root, stores }) => {
+        const initial = await stores.runtimePolicy.getSnapshot();
+        const target = {
+          ...initial.policy.networkProxy,
+          enabled: true,
+          host: 'recoverable.proxy.internal',
+          port: 7897,
+          authEnabled: true,
+          username: 'recoverable-user',
+        };
+        const probe = await open(root, 'r');
+        const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+          sync: typeof probe.sync;
+        };
+        const originalSync = fileHandlePrototype.sync;
+        await probe.close();
+        let syncCalls = 0;
+        const syncMock = mock.method(
+          fileHandlePrototype,
+          'sync',
+          async function (this: typeof probe) {
+            syncCalls += 1;
+            if (syncCalls === failedSync) {
+              throw new Error(`injected proxy update persistence cut ${failedSync}`);
+            }
+            return originalSync.call(this);
+          },
+        );
+
+        try {
+          await assert.rejects(
+            stores.operations.updateNetworkProxy({
+              expectedPolicyRevision: initial.revision,
+              expectedCredential: null,
+              networkProxy: target,
+              credential: { kind: 'replace', secret: 'recoverable-secret' },
+            }),
+            isStoreError(failedSync === 1 ? 'io_failed' : 'commit_outcome_unknown'),
+          );
+        } finally {
+          syncMock.mock.restore();
+        }
+        assert.equal(syncCalls, failedSync);
+
+        const policy = await stores.runtimePolicy.getSnapshot();
+        const credential = await getCredentialStatus(stores.credentialVault, proxyCredential());
+        if (failedSync === 1) {
+          assert.deepEqual(policy, initial);
+          assert.equal(credential.configured, false);
+          assert.equal(existsSync(join(root, 'runtime-policy-network-proxy.json')), false);
+          return;
+        }
+
+        assert.deepEqual(policy.policy.networkProxy, target);
+        assert.equal(credential.configured, true);
+        assert.equal(existsSync(join(root, 'runtime-policy-network-proxy.json')), false);
+        const material = await stores.operations.exportCredentialMaterial(proxyCredential());
+        assert.equal(material?.secret, 'recoverable-secret');
+      });
+    }
+  });
+
   test('blocks WebFetch while privacy mode is active', async () => {
     await withInteractiveOwner(async ({ stores }) => {
       const policy = await stores.runtimePolicy.mutate({

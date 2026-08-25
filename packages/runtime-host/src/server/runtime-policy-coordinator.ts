@@ -96,6 +96,7 @@ export class HostRuntimePolicyCoordinator {
   readonly handlers: RuntimePolicyOperationHandlerMap = {
     'runtime.policy.query': () => this.#queryPolicy(),
     'runtime.policy.mutate': (input) => this.#mutatePolicy(input),
+    'runtime.policy.network-proxy.update': (input) => this.#updateNetworkProxy(input),
     'connection.catalog.query': (input) => this.#queryCatalog(input),
     'connection.catalog.create': (input) => this.#createConnection(input),
     'connection.catalog.update': (input) => this.#updateConnection(input),
@@ -141,6 +142,33 @@ export class HostRuntimePolicyCoordinator {
         );
       }
       return projectPolicyMutation(await this.#stores.runtimePolicy.mutate(input));
+    });
+  }
+
+  async #updateNetworkProxy(
+    input: Parameters<RuntimePolicyOperationHandlerMap['runtime.policy.network-proxy.update']>[0],
+  ): Promise<OperationOutcome<'runtime.policy.network-proxy.update'>> {
+    return this.#storeMutation(async () => {
+      try {
+        await this.validateMutation({
+          expectedRevision: input.expectedPolicyRevision,
+          operation: { kind: 'set_network_proxy', value: input.networkProxy },
+        });
+      } catch (error) {
+        throw new RuntimePolicyStoreError(
+          'invalid_policy_input',
+          'Network proxy update failed Host validation',
+          { cause: error },
+        );
+      }
+      const result = await this.#stores.operations.updateNetworkProxy(input);
+      return result.kind === 'committed'
+        ? {
+            kind: 'committed' as const,
+            revision: result.snapshot.revision,
+            credentialStatus: result.credentialStatus,
+          }
+        : result;
     });
   }
 

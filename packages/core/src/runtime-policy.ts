@@ -44,6 +44,7 @@ export {
 export {
   decodeCanonicalRuntimePolicy,
   decodeRuntimePolicyV2,
+  normalizeNetworkProxyUpdate,
   normalizeRuntimePolicyMutation,
 } from './runtime-policy/policy-codec.js';
 export {
@@ -183,6 +184,35 @@ export interface MutateRuntimePolicyInput {
 export type MutateRuntimePolicyResult =
   | { readonly kind: 'committed'; readonly snapshot: RuntimePolicySnapshot }
   | RevisionConflict;
+
+export type NetworkProxyCredentialUpdate =
+  | { readonly kind: 'keep' }
+  | { readonly kind: 'replace'; readonly secret: string }
+  | { readonly kind: 'delete' };
+
+/**
+ * One optimistic basis for the Host-owned proxy policy and credential pair.
+ * The Runtime Host validates both generations before publishing either side.
+ */
+export interface UpdateNetworkProxyInput {
+  readonly expectedPolicyRevision: Revision;
+  readonly expectedCredential: CredentialVersionBasis | null;
+  readonly networkProxy: RuntimePolicy['networkProxy'];
+  readonly credential: NetworkProxyCredentialUpdate;
+}
+
+export type UpdateNetworkProxyResult =
+  | {
+      readonly kind: 'committed';
+      readonly snapshot: RuntimePolicySnapshot;
+      readonly credentialStatus: CredentialStatus;
+    }
+  | RevisionConflict
+  | {
+      readonly kind: 'credential_stale';
+      readonly expected: CredentialVersionBasis | null;
+      readonly actual: CredentialVersionBasis | null;
+    };
 
 export function createDefaultRuntimePolicy(): RuntimePolicy {
   return {

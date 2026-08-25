@@ -231,6 +231,10 @@ describe('Runtime Host bootstrap protocol', () => {
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 50);
   });
 
+  test('publishes a new compatibility epoch for compound proxy updates', () => {
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 61);
+  });
+
   test('adds credential rotation without changing existing credential inputs', () => {
     const issueInput = {
       principalKind: 'remote_owner',
@@ -853,6 +857,66 @@ describe('Runtime Host bootstrap protocol', () => {
           operation: 'runtime.policy.query',
           ok: false,
           error: { code: 'commit_outcome_unknown', message: 'not declared for query' },
+        }),
+      isInvalidFrame,
+    );
+  });
+
+  test('keeps compound proxy credentials write-only on the protocol', () => {
+    const operation = RUNTIME_POLICY_OPERATION_SPECS['runtime.policy.network-proxy.update'];
+    const input = {
+      expectedPolicyRevision: 4,
+      expectedCredential: null,
+      networkProxy: {
+        enabled: true,
+        protocol: 'http' as const,
+        host: '127.0.0.1',
+        port: 7897,
+        authEnabled: true,
+        username: 'proxy-user',
+        bypassList: ['localhost'],
+        autoBypassDomains: ['127.0.0.1'],
+      },
+      credential: { kind: 'replace' as const, secret: 'write-only-secret' },
+    };
+    assert.deepEqual(operation.decodeInput(input), input);
+    assert.deepEqual(
+      operation.decodeOutput({
+        kind: 'committed',
+        revision: 5,
+        credentialStatus: {
+          locator: { scope: 'network_proxy', kind: 'password' },
+          configured: true,
+          credentialId: '00000000-0000-4000-8000-000000000001',
+          revision: 2,
+          updatedAt: 1,
+        },
+      }),
+      {
+        kind: 'committed',
+        revision: 5,
+        credentialStatus: {
+          locator: { scope: 'network_proxy', kind: 'password' },
+          configured: true,
+          credentialId: '00000000-0000-4000-8000-000000000001',
+          revision: 2,
+          updatedAt: 1,
+        },
+      },
+    );
+    assert.throws(
+      () =>
+        operation.decodeOutput({
+          kind: 'committed',
+          revision: 5,
+          credentialStatus: {
+            locator: { scope: 'network_proxy', kind: 'password' },
+            configured: true,
+            credentialId: '00000000-0000-4000-8000-000000000001',
+            revision: 2,
+            updatedAt: 1,
+            secret: 'must-not-cross-wire',
+          },
         }),
       isInvalidFrame,
     );

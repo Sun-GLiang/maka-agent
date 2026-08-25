@@ -334,6 +334,12 @@ export class DesktopRuntimeHostClient {
     throw revisionConflict("Runtime Policy update", "workspace");
   }
 
+  updateNetworkProxy(
+    input: OperationInput<"runtime.policy.network-proxy.update">,
+  ): Promise<OperationOutput<"runtime.policy.network-proxy.update">> {
+    return this.request("runtime.policy.network-proxy.update", input);
+  }
+
   queryMemory(input: MemoryQueryInput): Promise<MemoryQueryResult> {
     return this.request("memory.query", input);
   }

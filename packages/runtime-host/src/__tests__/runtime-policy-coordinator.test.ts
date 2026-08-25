@@ -464,6 +464,79 @@ test('projects runtime policy CAS results without returning the committed snapsh
   });
 });
 
+test('two clients cannot recreate a proxy credential after authentication is disabled', async () => {
+  await withCoordinator(async ({ coordinator, stores }) => {
+    const initial = await stores.runtimePolicy.getSnapshot();
+    const configured = await coordinator.handlers['runtime.policy.network-proxy.update'](
+      {
+        expectedPolicyRevision: initial.revision,
+        expectedCredential: null,
+        networkProxy: {
+          ...initial.policy.networkProxy,
+          enabled: true,
+          authEnabled: true,
+          username: 'proxy-user',
+        },
+        credential: { kind: 'replace', secret: 'initial-secret' },
+      },
+      context,
+    );
+    assert.equal(configured.ok, true);
+    if (!configured.ok || configured.result.kind !== 'committed') return;
+    assert.equal(configured.result.credentialStatus.configured, true);
+    if (!configured.result.credentialStatus.configured) return;
+    assert.equal(JSON.stringify(configured).includes('initial-secret'), false);
+    const sharedCredentialBasis = {
+      locator: configured.result.credentialStatus.locator,
+      credentialId: configured.result.credentialStatus.credentialId,
+      revision: configured.result.credentialStatus.revision,
+    };
+    const configuredPolicy = await stores.runtimePolicy.getSnapshot();
+
+    const disabled = await coordinator.handlers['runtime.policy.network-proxy.update'](
+      {
+        expectedPolicyRevision: configured.result.revision,
+        expectedCredential: sharedCredentialBasis,
+        networkProxy: {
+          ...configuredPolicy.policy.networkProxy,
+          authEnabled: false,
+          username: '',
+        },
+        credential: { kind: 'delete' },
+      },
+      context,
+    );
+    assert.equal(disabled.ok, true);
+    if (!disabled.ok || disabled.result.kind !== 'committed') return;
+
+    // Client A prepared its request from the shared pre-disable basis, but its
+    // Host command arrives after client B's disable command has committed.
+    const stale = await coordinator.handlers['runtime.policy.network-proxy.update'](
+      {
+        expectedPolicyRevision: configured.result.revision,
+        expectedCredential: sharedCredentialBasis,
+        networkProxy: configuredPolicy.policy.networkProxy,
+        credential: { kind: 'replace', secret: 'must-not-return' },
+      },
+      context,
+    );
+    assert.equal(stale.ok, true);
+    if (!stale.ok) return;
+    assert.ok(
+      stale.result.kind === 'revision_conflict' || stale.result.kind === 'credential_stale',
+    );
+
+    const finalPolicy = await stores.runtimePolicy.getSnapshot();
+    const finalCredential = await stores.credentialVault.getStatus({
+      scope: 'network_proxy',
+      kind: 'password',
+    });
+    assert.equal(finalPolicy.policy.networkProxy.authEnabled, false);
+    assert.equal(finalCredential.kind, 'status');
+    if (finalCredential.kind === 'status') assert.equal(finalCredential.status.configured, false);
+  });
+});
+
 test('rejects a Host-invalid shell preference before it reaches durable policy', async () => {
   await withCoordinator(async ({ stores }) => {
     const coordinator = new HostRuntimePolicyCoordinator(

@@ -93,7 +93,9 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 61 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 62 as const;
+// 62: Proxy policy and credentials commit through one recoverable Host command.
+// Older peers can split the writes and violate the shared credential basis.
 // 61: Session explicit model targets carry immutable Connection identity,
 // configuration updates are Host-merged patches, and projections expose the
 // required nullable binding ID. Older peers cannot preserve these invariants.
