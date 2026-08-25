@@ -28,12 +28,10 @@ import {
   type Dispatch,
   type SetStateAction,
 } from 'react';
-import type { ScheduledTask } from '@maka/core/scheduled-task';
 import type { ProjectRecord } from '@maka/core/project';
 import type {
   FollowUpMode,
   InlineReference,
-  MessageQueueEntryProjection,
   QuoteRef,
 } from '@maka/core/events';
 import type { SessionSummary } from '@maka/core/session';
@@ -47,8 +45,6 @@ import { resolveUiLocale } from '@maka/core/ui-locale';
 import { slashCommandsForSurface } from '@maka/core/slash-command-catalog';
 import { hasSettledInitialOnboarding } from '@maka/core/onboarding-milestone';
 import {
-  ScheduledTasksPage,
-  DailyReviewPage,
   ChatSurfaceLayout,
   type ComposerHandle,
   type ComposerSendMetadata,
@@ -57,14 +53,12 @@ import {
   MakaUriContext,
   AstryxLocaleProvider,
   LocaleProvider,
-  ModuleHubSelector,
   ToastProvider,
   type ToastDiagnosticTarget,
   type ToastErrorAction,
   type NavSelection,
   SessionListPanel,
   type SessionHistoryGroup,
-  SkillsPage,
   type SessionViewMode,
   TitlebarSessionIdentity,
   type TurnFooterActionMeta,
@@ -74,7 +68,6 @@ import {
   deriveTitlebarProjectName,
   enqueueInteraction,
   getConversationCopy,
-  getSharedUiCopy,
   reconcileInteractions,
 } from '@maka/ui';
 import type { ConnectionEvent } from '@maka/core/connections';
@@ -100,6 +93,7 @@ import {
   useWorkbarController,
 } from './features/workbar';
 import { GoalHost, useGoalController } from './features/goals';
+import { ModuleHubHost, useModuleHubController } from './features/module-hub';
 import { UNRESOLVED_NEW_TASK_DRAFT_KEY } from './new-task-reload-intent';
 import { useNewTaskChoice } from './use-new-task-choice';
 import { NEW_TASK_PENDING_KEY } from './pending-items';
@@ -109,13 +103,11 @@ import {
   mergeWorkspaceReferences,
   resolveFollowUpModeAtSubmit,
 } from './follow-up-submit-routing';
-import { retractQueueEntryToDraft } from './app-shell-queue-entry-actions';
 import {
   PlanExecutionPanel,
   PlanProposalCard,
   usePlanModeState,
 } from './plan-mode-panel';
-import { McpPage } from './mcp-page';
 import { getOnboardingActivationCandidate, useOnboardingSnapshot } from './use-onboarding-snapshot';
 import type {
   AppUpdateStatus,
@@ -170,13 +162,10 @@ import { AppShellOverlays } from './app-shell-overlays';
 import type { ArchivedTasksBridge } from './settings/tasks-settings-page';
 import { CustomPetCompanion } from './custom-pet-companion';
 import { derivePetActivityState } from './custom-pet-companion-model';
-import { createAppShellDailyReviewBridge } from './app-shell-daily-review-bridge';
 import {
   defaultRuntimeHostDiagnosticTarget,
   runOnDefaultRuntimeHost,
 } from './default-runtime-host-operation.js';
-import { useAppShellModuleData } from './use-module-data';
-import { useKeepSystemAwake } from './use-keep-system-awake';
 import { useAppShellProjectContext } from './use-project-context';
 import {
   createAppShellSessionDisplayBatch,
@@ -199,7 +188,6 @@ import {
   type TurnRevisionDraft,
 } from './app-shell-revision-actions';
 import { createAppShellSessionStartActions } from './app-shell-session-start-actions';
-import { createAppShellDailyReviewActions } from './app-shell-daily-review-actions';
 import { createAppShellSessionRowActions } from './app-shell-session-row-actions';
 import { createAppShellSessionSettingsActions } from './app-shell-session-settings-actions';
 import { createAppShellStopAction } from './app-shell-stop-action';
@@ -428,7 +416,6 @@ function AppShellContent({
   // Plan toggle and one orchestration value, not one fused choice.
   const [newChatPlanModeActive, setNewChatPlanModeActive] = useState(false);
   const [newChatOrchestrationMode, setNewChatOrchestrationMode] = useState<OrchestrationMode>('default');
-  const [scheduledTaskCreateRequestNonce, setScheduledTaskCreateRequestNonce] = useState(0);
   const [newTaskPermissionChoice, setNewTaskPermissionChoice, clearNewTaskPermissionChoice] =
     useNewTaskChoice<ChatDefaultPermissionMode>(currentNewTaskDraftKey);
   const [historyLoadPendingSessionId, setHistoryLoadPendingSessionId] = useState<string>();
@@ -692,29 +679,6 @@ function AppShellContent({
         );
       });
   }, [updateReminder, shellCopy, toastApi, uiLocale]);
-  const moduleHubCopy = getSharedUiCopy(uiLocale).moduleHubs;
-  const extensionsHubHeader = {
-    title: moduleHubCopy.extensions.title,
-    subtitle: moduleHubCopy.extensions.description,
-    badge: (
-      <ModuleHubSelector
-        hub="extensions"
-        value={navSelection.section === 'extensions' ? navSelection.module : navigationState.moduleMemory.extensions}
-        onChange={(module) => setNavSelection({ section: 'extensions', module })}
-      />
-    ),
-  };
-  const automationsHubHeader = {
-    title: moduleHubCopy.automations.title,
-    subtitle: moduleHubCopy.automations.description,
-    badge: (
-      <ModuleHubSelector
-        hub="automations"
-        value={navSelection.section === 'automations' ? navSelection.module : navigationState.moduleMemory.automations}
-        onChange={(module) => setNavSelection({ section: 'automations', module })}
-      />
-    ),
-  };
   // Persisted composer defaults seed the empty-state model, project path, and
   // recent workspace history so the home view is populated before the async
   // `app:info` round-trip completes on mount.
@@ -724,16 +688,6 @@ function AppShellContent({
   const [viewMode, setViewMode] = useState<SessionViewMode>(() => readSessionListViewMode());
   const composerRef = useRef<ComposerHandle>(null);
   const retractedWorkspaceReferencesRef = useRef<Record<string, InlineReference[]>>({});
-  const queueEntryDraftDeps = {
-    activeIdRef,
-    composerRef,
-    restoreAttachments,
-    restoreQuotes,
-    setRestoredWorkspaceReferences: (sessionId, references) => {
-      retractedWorkspaceReferencesRef.current[sessionId] = [...references];
-    },
-    requestFocus: (callback) => window.requestAnimationFrame(callback),
-  } satisfies Parameters<typeof retractQueueEntryToDraft>[0];
   // The rail's toggle has to reach Astryx's resizable state, not just this
   // boolean — see the prop's note on SessionListPanel. The sidenav is mounted
   // for the whole shell, so the handle is always live by the time it is called.
@@ -781,19 +735,6 @@ function AppShellContent({
       }),
     [sessions, onboarding.snapshot?.sessionSendOutcomes],
   );
-  // PR-DAILY-REVIEW-MVP-0: bridge for the main Daily Review module.
-  // Memoized so the panel's `useEffect` cleanup keys
-  // off a stable reference instead of refetching on every render.
-  const dailyReviewBridge = useMemo(() => createAppShellDailyReviewBridge(uiLocale), [uiLocale]);
-  const {
-    appendDailyReviewMarkdown,
-    copyDailyReviewMarkdown,
-    saveDailyReviewMarkdown,
-  } = useStableActions(createAppShellDailyReviewActions, {
-    uiLocale,
-    composerRef,
-    toastApi,
-  });
   const activeInteraction = activeInteractionFor(interactionBySession, activeId);
   const activeSandboxBoundary =
     activeInteraction?.type === 'sandbox_boundary_request' ? activeInteraction : undefined;
@@ -1475,55 +1416,7 @@ function AppShellContent({
     },
     [activeId, activeStreamingLive, shellCopy.slashCommands, turnActive],
   );
-  function isScheduledTasksSurfaceActive(): boolean {
-    return navSelectionRef.current.section === 'automations' && navSelectionRef.current.module === 'scheduled-tasks';
-  }
-
-  function isSkillsSurfaceActive(): boolean {
-    return navSelectionRef.current.section === 'extensions' && navSelectionRef.current.module === 'skills';
-  }
-
-  function isDailyReviewSurfaceActive(): boolean {
-    return navSelectionRef.current.section === 'automations' && navSelectionRef.current.module === 'daily-review';
-  }
-
-  const {
-    skills,
-    managedSkillSources,
-    bundledSkillCatalog,
-    scheduledTasks,
-    refreshScheduledTasks,
-    createScheduledTask,
-    updateScheduledTask,
-    toggleScheduledTask,
-    triggerScheduledTaskNow,
-    snoozeScheduledTask,
-    clearScheduledTaskRunHistory,
-    deleteScheduledTask,
-    refreshSkills,
-    refreshManagedSkillSources,
-    refreshBundledSkillCatalog,
-    importManagedSkillSource,
-    installManagedSkill,
-    installBundledSkill,
-    previewManagedSkillUpdate,
-    updateManagedSkill,
-    setSkillEnabled,
-    setSkillPinned,
-    deleteSkill,
-    openSkill,
-  } = useAppShellModuleData({
-    uiLocale,
-    isSkillsSurfaceActive,
-    isScheduledTasksSurfaceActive,
-    toastApi,
-  });
-
-  // 保持系统唤醒 capability for the 定时任务 page: reads/writes
-  // settings.system.keepSystemAwake over the existing settings bridge. When
-  // the bridge is absent the panel hides the row (fail-soft).
-  const keepSystemAwakeController = useKeepSystemAwake();
-
+  const refreshProjectSkillsRef = useRef<() => Promise<void>>(async () => {});
   const {
     projectInfo,
     projects,
@@ -1550,13 +1443,39 @@ function AppShellContent({
     sessionProjectId: activeSession?.projectId,
     sessionProfileKind: activeDesktopSession?.profileKind,
     onProjectSelected: (ownerSessionId) => {
-      void refreshSkills();
-      void refreshManagedSkillSources();
-      void refreshBundledSkillCatalog();
+      void refreshProjectSkillsRef.current();
       if (ownerSessionId && activeIdRef.current === ownerSessionId) openNewTaskSurface();
     },
     toastApi,
   });
+  const captureActiveComposerClaim = useCallback(() => {
+    const sessionId = activeIdRef.current;
+    const composer = composerRef.current;
+    if (
+      !sessionId ||
+      !composer ||
+      navSelectionRef.current.section !== 'sessions'
+    ) {
+      return undefined;
+    }
+    return {
+      isCurrent: () =>
+        activeIdRef.current === sessionId &&
+        navSelectionRef.current.section === 'sessions' &&
+        composerRef.current === composer,
+      append: (text: string) => composer.appendText(text),
+    };
+  }, []);
+  const moduleHub = useModuleHubController({
+    selection: navSelection,
+    selectModule: setNavSelection,
+    ...(projectCapabilities.viewClientPath ? { openSkillsFolder } : {}),
+    useSkillInChat,
+    openSession: (sessionId) => openSessionInChatRef.current(sessionId),
+    appendComposerText: (text) => composerRef.current?.appendText(text),
+    captureActiveComposerClaim,
+  });
+  refreshProjectSkillsRef.current = moduleHub.commands.refreshProjectSkills;
   const workHubController = useMemo(() => createWorkHubController({
     sessions: createDesktopWorkHubSessionPort({
       sessions: window.maka.sessions,
@@ -1695,7 +1614,7 @@ function AppShellContent({
   // host-compatible projection; `@` uses workspace file search. Keep the
   // resolved project path as a refresh key for new-chat project changes.
   const { mentionSkills, mentionSkillsUnavailable, mentionSkillsLoading, searchMentionFiles } = useComposerMentions({
-    skills,
+    skillCatalogRevision: moduleHub.selectors.skillCatalogRevision,
     sessionId: activeId,
     projectPath: activeId ? projectInfo?.projectPath : newTask.projectPath,
     newTaskTarget: activeId ? undefined : newTask.target,
@@ -1732,6 +1651,8 @@ function AppShellContent({
   const workbar = useWorkbarController({
     available: workbarAvailable,
     activeSession: activeSessionForView,
+    projectId: currentProjectId,
+    projectAliases: currentProject?.aliases ?? [],
     authoritativeSessionIds: authoritativeSessionIds ?? undefined,
     shellObscured,
     modelChoices: chatModelChoices,
@@ -2184,9 +2105,19 @@ function AppShellContent({
     return ok;
   }
 
-  async function retractQueuedEntry(entry: MessageQueueEntryProjection): Promise<void> {
+  async function updateQueuedEntry(
+    entryId: string,
+    expectedQueueRevision: number,
+    text: string,
+  ): Promise<void> {
     await runQueueEntryAction((sessionId) =>
-      retractQueueEntryToDraft(queueEntryDraftDeps, sessionId, entry)
+      window.maka.sessions.updateQueueEntry(sessionId, entryId, expectedQueueRevision, text)
+    );
+  }
+
+  async function deleteQueuedEntry(entryId: string): Promise<void> {
+    await runQueueEntryAction((sessionId) =>
+      window.maka.sessions.retractQueueEntry(sessionId, entryId).then(() => undefined)
     );
   }
 
@@ -2309,17 +2240,12 @@ function AppShellContent({
     refreshConnections: refreshConnectionProjections,
     refreshMemoryActive,
     refreshMessages,
-    refreshScheduledTasks,
     refreshProjects,
     refreshShellSettings,
-    refreshSkills,
-    refreshManagedSkillSources,
-    refreshBundledSkillCatalog,
     refreshSessions,
     rendererMountedRef,
     setActiveId,
     setMessages,
-    setNavSelection,
     setSessionEventHealthBySession,
     toastApi,
   });
@@ -2513,12 +2439,6 @@ function AppShellContent({
     openNewTaskSurface();
   }
 
-  function openScheduledTaskForm() {
-    setNavSelection({ section: 'automations', module: 'scheduled-tasks' });
-    closePalette();
-    setScheduledTaskCreateRequestNonce((nonce) => nonce + 1);
-  }
-
   /**
    * PR-UI-RENDER-2 - single chokepoint for the Markdown internal-URI
    * router. Receives a typed `MakaUriDest` from the link override in
@@ -2666,7 +2586,6 @@ function AppShellContent({
         : projectCapabilities.viewClientPath,
     connections: defaultHostConnections.snapshot.connections,
     defaultConnection: defaultHostConnections.snapshot.defaultConnection,
-    dailyReviewBridge,
     messages,
     newTaskProfileId: newTask.selectedProfileId,
     settingsOpen,
@@ -2675,12 +2594,13 @@ function AppShellContent({
     themePref,
     visibleSessions,
     captureComposerImportOwner,
-    composerRef,
     createSession,
     startModeSession,
-    isComposerImportOwnerActive,
     openHelp,
-    openScheduledTaskForm,
+    openScheduledTaskCreate: () => {
+      closePalette();
+      moduleHub.commands.openScheduledTaskCreate();
+    },
     openProjectFolder,
     openSessionInChat,
     openSideConversation: () => workbar.commands.openTool('side-chat'),
@@ -2689,7 +2609,9 @@ function AppShellContent({
     openSkillsFolder,
     openWorkspaceFolder,
     refreshConnections: defaultHostConnections.refreshConnections,
-    saveDailyReviewMarkdown,
+    copyTodayDailyReview: moduleHub.commands.copyTodayDailyReview,
+    pasteTodayDailyReview: moduleHub.commands.pasteTodayDailyReview,
+    saveTodayDailyReview: moduleHub.commands.saveTodayDailyReview,
     setNavSelection,
     setPermissionMode,
     setThemePref,
@@ -2831,7 +2753,7 @@ function AppShellContent({
             selection={navSelection}
             sessions={visibleSessions}
             activeId={workHubActive ? undefined : sidebarActiveId}
-            scheduledTasks={scheduledTasks}
+            scheduledTasks={moduleHub.selectors.scheduledTasks}
             streamingSessionIds={streamingSessionIds}
             staleSessionIds={staleSessionIds}
             viewMode={viewMode}
@@ -2875,75 +2797,7 @@ function AppShellContent({
           <MakaUriContext.Provider value={dispatchMakaUri}>
           <div className="maka-detail-with-artifacts">
             <div className="mainColumn" data-home-surface={homeSurfaceActive ? 'true' : undefined}>
-              {navSelection.section === 'extensions' && navSelection.module === 'skills' ? (
-                <SkillsPage
-                  hubHeader={extensionsHubHeader}
-                  skills={skills}
-                  scheduledTasks={scheduledTasks}
-                  onRefreshSkills={() => refreshSkills()}
-                  onRefreshManagedSkillSources={() => refreshManagedSkillSources()}
-                  onOpenSkill={projectCapabilities.viewClientPath
-                    ? (skillId) => openSkill(skillId)
-                    : undefined}
-                  onUseSkill={useSkillInChat}
-                  onOpenSkillsFolder={projectCapabilities.viewClientPath
-                    ? () => openSkillsFolder()
-                    : undefined}
-                  managedSkillSources={managedSkillSources}
-                  onImportManagedSkillSource={projectCapabilities.viewClientPath
-                    ? () => importManagedSkillSource()
-                    : undefined}
-                  onInstallManagedSkill={(sourceId) => installManagedSkill(sourceId)}
-                  bundledSkillCatalog={bundledSkillCatalog}
-                  onRefreshBundledSkillCatalog={() => refreshBundledSkillCatalog()}
-                  onInstallBundledSkill={(id) => installBundledSkill(id)}
-                  onPreviewManagedSkillUpdate={(skillId) => previewManagedSkillUpdate(skillId)}
-                  onUpdateManagedSkill={(skillId, options) => updateManagedSkill(skillId, options)}
-                  onSetSkillEnabled={(skillId, enabled) => setSkillEnabled(skillId, enabled)}
-                  onSetSkillPinned={(skillRef, pinned) => setSkillPinned(skillRef, pinned)}
-                  onDeleteSkill={(skillRef) => deleteSkill(skillRef)}
-                />
-              ) : navSelection.section === 'extensions' && navSelection.module === 'mcp' ? (
-                <McpPage hubHeader={extensionsHubHeader} />
-              ) : navSelection.section === 'automations' && navSelection.module === 'scheduled-tasks' ? (
-                <ScheduledTasksPage
-                  hubHeader={automationsHubHeader}
-                  tasks={scheduledTasks}
-                  createRequestNonce={scheduledTaskCreateRequestNonce}
-                  onCreateRequestHandled={() => setScheduledTaskCreateRequestNonce(0)}
-                  keepSystemAwake={
-                    keepSystemAwakeController.supported
-                      ? keepSystemAwakeController.keepSystemAwake
-                      : undefined
-                  }
-                  onKeepSystemAwakeChange={
-                    keepSystemAwakeController.supported
-                      ? keepSystemAwakeController.setKeepSystemAwake
-                      : undefined
-                  }
-                    onRefresh={() =>
-                      refreshScheduledTasks({
-                        shouldShowError: isScheduledTasksSurfaceActive,
-                      })
-                    }
-                  onCreate={(input) => createScheduledTask(input)}
-                  onUpdate={(id, patch) => updateScheduledTask(id, patch)}
-                  onToggle={(id, enabled) => toggleScheduledTask(id, enabled)}
-                  onTriggerNow={(id) => triggerScheduledTaskNow(id)}
-                  onSnooze={(id) => snoozeScheduledTask(id)}
-                  onClearRunHistory={(id) => clearScheduledTaskRunHistory(id)}
-                  onDelete={(id) => deleteScheduledTask(id)}
-                />
-              ) : navSelection.section === 'automations' && navSelection.module === 'daily-review' ? (
-                <DailyReviewPage
-                  hubHeader={automationsHubHeader}
-                  bridge={dailyReviewBridge}
-                  onSelectSession={openSessionInChat}
-                  onCopyMarkdown={(input) => copyDailyReviewMarkdown(input, { shouldShowFeedback: isDailyReviewSurfaceActive })}
-                  onAppendMarkdown={appendDailyReviewMarkdown}
-                  onSaveMarkdown={(input) => saveDailyReviewMarkdown(input, { shouldShowFeedback: isDailyReviewSurfaceActive })}
-                />
-              ) : null}
+              <ModuleHubHost model={moduleHub.host} />
               {workHubEnabled && workHubActive && navSelection.section === 'sessions' ? (
                 <WorkHubSurface
                   controller={workHubController}
@@ -3016,9 +2870,11 @@ function AppShellContent({
                   continuing={showContinuingIndicator && !activeStreamingLive}
                   onSend={sendOwningItsTarget}
                   onStop={stop}
-                  queuedMessages={activeMessageQueue}
+                  queuedMessages={activeMessageQueue?.entries}
+                  queuedMessageRevision={activeMessageQueue?.queueRevision}
                   onPromoteQueuedEntry={activeId ? promoteQueuedEntry : undefined}
-                  onRetractQueuedEntry={activeId ? retractQueuedEntry : undefined}
+                  onUpdateQueuedEntry={activeId ? updateQueuedEntry : undefined}
+                  onDeleteQueuedEntry={activeId ? deleteQueuedEntry : undefined}
                   onReorderQueuedEntries={activeId ? reorderQueuedEntries : undefined}
                   revisionNotice={
                     revisionDraft && activeId === revisionDraft.draftSessionId

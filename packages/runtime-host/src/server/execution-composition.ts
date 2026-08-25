@@ -37,6 +37,7 @@ import {
 } from '@maka/runtime/session-manager';
 import { buildToolsForAgentDefinition } from '@maka/runtime/agent-catalog';
 import { buildHostCapabilitiesFromBinding } from '@maka/runtime/tool-catalog-derive';
+import { buildHistoryTools } from '@maka/runtime/history-tools';
 import { createLocalContinuationSafetyInspector } from '@maka/runtime/continuation-safety';
 import { createConfiguredSubagentCatalog } from '@maka/runtime/configured-subagent-catalog';
 import {
@@ -76,7 +77,7 @@ import { isSessionNotFoundError } from '@maka/storage/execution-stores';
 import { createExternalSessionAdapterRegistry } from '@maka/storage/external-sessions';
 import { createGitWorktreeChildExecutor } from '@maka/storage/git-worktree-child-executor';
 import { runWithStorageRootLease } from '@maka/storage/root-authority';
-import { openStorageWriterComposition } from '@maka/storage';
+import { openStorageWriterComposition } from '@maka/storage/storage-writer-composition';
 import { resolveWorkspaceIdentity } from '@maka/storage/workspace-identity';
 import { type ManagedWorkspaceFilesystemWorker } from '@maka/storage/managed-workspace-owner';
 import { CanonicalSessionProjectionReader } from './canonical-session-projection.js';
@@ -358,15 +359,30 @@ export async function createExecutionRuntimeHostComposition(
     const webFetchService = createHostWebFetchService({
       policy: runtimePolicyStores.operations,
     });
-    const hostTools = [
+    const historyTools = buildHistoryTools({
+      listSessions: () => requireSessionManager(manager).listSessions(),
+      readMessages: async (sessionId, abortSignal) => {
+        if (abortSignal?.aborted) return null;
+        const messages = await requireSessionManager(manager)
+          .getMessages(sessionId)
+          .catch(() => null);
+        return abortSignal?.aborted ? null : messages;
+      },
+      getPrivacyContext: async () => ({
+        incognitoActive: (await runtimePolicyStores.runtimePolicy.getSnapshot()).policy.privacy
+          .incognitoActive,
+      }),
+    });
+    const childHostTools = [
       createHostWebSearchToolFromService(webSearchService),
       createHostWebFetchToolFromService(webFetchService),
       ...runtimePolicy.modelTools,
     ];
+    const hostTools = [...childHostTools, ...historyTools];
     const childAgentTools = createHostChildAgentToolComposition({
       taskLedger,
       builtinTools,
-      hostTools,
+      hostTools: childHostTools,
       worktreePatchWriteBackAvailable: true,
     });
     const openedGraphControlStore = createAgentGraphControlStore(

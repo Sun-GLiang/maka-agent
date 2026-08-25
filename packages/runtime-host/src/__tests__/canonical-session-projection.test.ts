@@ -29,11 +29,11 @@ import {
   type ExecutionStoresWriter,
 } from '@maka/storage/execution-stores';
 import type { StoredInteractionRequest } from '@maka/storage/interaction-store';
-import { acquireOperationalStateDatabase } from '@maka/storage';
+import { acquireOperationalStateDatabase } from '@maka/storage/operational-state-store';
 import {
   createSessionEventMapMemory,
   mapSessionEventToRuntimeEvent,
-} from '@maka/runtime/ai-sdk-flow';
+} from '@maka/runtime/session-event-runtime-mapper';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import {
   TURN_MESSAGE_TEXT_MAX_BYTES,

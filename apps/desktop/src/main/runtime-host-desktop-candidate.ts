@@ -130,6 +130,7 @@ export interface DesktopRuntimeHostCandidateDeps {
       kind: 'branch' | 'revision';
       sourceSessionId: string;
       sourceTurnId: string;
+      intent?: 'side_conversation';
     }) => Promise<void>;
   }) => SessionCopyCleanupAuthority;
   readonly registerClientIpc?: (
@@ -185,6 +186,7 @@ export interface DesktopRuntimeHostCandidate {
   readonly client: DesktopRuntimeHostClient;
   readonly closed: Promise<void>;
   readonly hostLifecycleMode: HostRegistration["lifecycleMode"] | "remote";
+  readonly hostPid?: number;
   stopSession(sessionId: string): Promise<void>;
   close(): Promise<void>;
 }
@@ -194,6 +196,7 @@ class DesktopRuntimeHostCandidateImpl implements DesktopRuntimeHostCandidate {
   readonly client: DesktopRuntimeHostClient;
   readonly closed: Promise<void>;
   readonly hostLifecycleMode: HostRegistration["lifecycleMode"] | "remote";
+  readonly hostPid: number | undefined;
   readonly #client: DesktopRuntimeHostClient;
   readonly #observer: RuntimeHostSessionObserver;
   readonly #ipc: ScopedIpcMain;
@@ -219,6 +222,7 @@ class DesktopRuntimeHostCandidateImpl implements DesktopRuntimeHostCandidate {
     closeSessionObservations: () => Promise<void>;
     connectionClosed: Promise<void>;
     hostLifecycleMode: HostRegistration["lifecycleMode"] | "remote";
+    hostPid?: number;
     hasRegisteredCapabilities: () => boolean;
     stopSession: (sessionId: string) => Promise<void>;
   }) {
@@ -236,6 +240,7 @@ class DesktopRuntimeHostCandidateImpl implements DesktopRuntimeHostCandidate {
     this.#stopSession = input.stopSession;
     this.botIncoming = input.botIncoming;
     this.hostLifecycleMode = input.hostLifecycleMode;
+    this.hostPid = input.hostPid;
     this.closed = input.connectionClosed.then(() => this.close());
   }
 
@@ -301,6 +306,7 @@ export async function startDesktopRuntimeHostCandidate(
         observationRegistry,
         connection.registration.lifecycleMode,
         "local",
+        connection.registration.pid,
       ),
     };
   } catch (error) {
@@ -403,6 +409,7 @@ export async function createDesktopRuntimeHostCandidate(
   observationRegistry: RuntimeHostSessionObservationRegistry | undefined,
   hostLifecycleMode: HostRegistration["lifecycleMode"] | "remote",
   targetKind: DesktopRuntimeHostTargetPolicy["kind"],
+  hostPid?: number,
 ): Promise<DesktopRuntimeHostCandidate> {
   const target: DesktopRuntimeHostTargetPolicy = {
     kind: targetKind,
@@ -638,11 +645,12 @@ export async function createDesktopRuntimeHostCandidate(
         emitSessionsChanged("deleted", sessionId);
         return disposition;
       },
-      resumeSessionCopy: async ({ sessionId, kind, sourceSessionId, sourceTurnId }) => {
+      resumeSessionCopy: async ({ sessionId, kind, sourceSessionId, sourceTurnId, intent }) => {
         await client.copySession(kind, {
           sourceSessionId,
           targetSessionId: sessionId,
           sourceTurnId,
+          ...(intent ? { intent } : {}),
         });
       },
     });
@@ -724,6 +732,7 @@ export async function createDesktopRuntimeHostCandidate(
           : Promise.resolve(),
       connectionClosed: connection.closed,
       hostLifecycleMode,
+      ...(hostPid === undefined ? {} : { hostPid }),
       hasRegisteredCapabilities: () => capabilitiesRegistered,
       stopSession,
     });

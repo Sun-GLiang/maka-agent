@@ -101,6 +101,8 @@ import type {
   DesktopTranscriptHandle,
 } from './transcript-contract.js';
 import type { PetPackManifestV1 } from '@maka/core/pet';
+import type { WorkBoardItem, WorkBoardListQuery, WorkBoardPage } from '@maka/core/work-board';
+import type { WorkBoardMutationOptions } from '@maka/storage/work-board-store';
 import type {
   OperationInput,
   OperationOutput,
@@ -149,6 +151,7 @@ export type AppIconImportResult =
     };
 
 export type { DesktopSessionSummary } from '../shared/desktop-session-projection.js';
+export type { WorkBoardChangedEvent, WorkBoardIpcResult } from '../shared/work-board-ipc.js';
 import type { DesktopConnectionSnapshot } from '../shared/desktop-connection-snapshot.js';
 import type { DesktopExternalSessionCatalogItem } from './external-session-catalog.js';
 import type { DesktopDiagnosticInput } from './diagnostics-contract.js';
@@ -169,7 +172,7 @@ import type {
 import type { BotStatus, WechatBridgeQrCodeResult } from '@maka/runtime/bots';
 import type { ShellRunPtyDataEvent, ShellRunPtySnapshot } from '@maka/runtime/shell-run-contract';
 import type { BundledSkillCatalogEntry, ManagedSkillSourceEntry, ManagedSkillUpdatePreview, SkillEntry } from '@maka/ui';
-import type { ConfigCategory } from '@maka/storage';
+import type { ConfigCategory } from '@maka/storage/config-transfer';
 import type { OnboardingMilestone, OnboardingMilestoneId, OnboardingState } from '@maka/core/onboarding';
 import type {
   RemoteRuntimeHostProfile,
@@ -199,6 +202,10 @@ export type DesktopBranchFromTurnInput = BranchFromTurnInput & {
   /** Stable target identity for retrying one Desktop copy action. */
   copyId: string;
 };
+
+export type DesktopSideConversationBranchResult =
+  | { ok: true; session: DesktopSessionSummary }
+  | { ok: false; reason: 'session_busy' | 'operation_unavailable' };
 
 export type DesktopReviseBeforeTurnInput = ReviseBeforeTurnInput & {
   /** Stable target identity for retrying one Desktop copy action. */
@@ -424,12 +431,15 @@ export type DesktopRuntimeHostManagementResult = Extract<
   RuntimeHostServiceManagementFrame,
   { kind: 'result' }
 > & {
+  readonly action: DesktopRuntimeHostManagementAction | 'update';
   readonly accessManagementAvailable: boolean;
 };
 
 export type DesktopRuntimeHostManagementResponse =
   | DesktopRuntimeHostManagementResult
-  | Extract<RuntimeHostServiceManagementFrame, { kind: 'error' }>
+  | (Extract<RuntimeHostServiceManagementFrame, { kind: 'error' }> & {
+      readonly action: DesktopRuntimeHostManagementAction | 'update';
+    })
   | {
       readonly kind: 'uninstalled';
       readonly retainedStateRoot: string;
@@ -654,6 +664,26 @@ export interface MakaBridge {
     subscribeChanges(handler: (event: PetPackChangedEvent) => void): () => void;
   };
 
+  workBoard: {
+    list(query?: WorkBoardListQuery): Promise<WorkBoardIpcResult<WorkBoardPage>>;
+    create(item: unknown): Promise<WorkBoardIpcResult<WorkBoardItem>>;
+    update(
+      id: string,
+      patch: unknown,
+      options?: WorkBoardMutationOptions,
+    ): Promise<WorkBoardIpcResult<WorkBoardItem>>;
+    archive(
+      id: string,
+      options?: WorkBoardMutationOptions,
+    ): Promise<WorkBoardIpcResult<WorkBoardItem>>;
+    unarchive(
+      id: string,
+      options?: WorkBoardMutationOptions,
+    ): Promise<WorkBoardIpcResult<WorkBoardItem>>;
+    remove(id: string, options?: WorkBoardMutationOptions): Promise<WorkBoardIpcResult<null>>;
+    subscribeChanges(handler: (event: WorkBoardChangedEvent) => void): () => void;
+  };
+
   tasks: {
     list(sessionId: string): Promise<Task[]>;
     subscribeChanges(handler: (event: TaskLedgerChangedEvent) => void): () => void;
@@ -746,6 +776,12 @@ export interface MakaBridge {
     }>;
     retractQueueEntry(sessionId: string, entryId: string): Promise<void>;
     promoteQueueEntry(sessionId: string, entryId: string): Promise<void>;
+    updateQueueEntry(
+      sessionId: string,
+      entryId: string,
+      expectedQueueRevision: number,
+      text: string,
+    ): Promise<void>;
     reorderQueueEntries(sessionId: string, entryIds: readonly string[]): Promise<void>;
     readExecutionBoundary(sessionId: string): Promise<ExecutionBoundaryReadModel>;
     listActiveInteractions(sessionId: string): Promise<ActiveInteractionRequestEvent[]>;
@@ -763,7 +799,14 @@ export interface MakaBridge {
       | { disposition: 'park'; rejectionReasons: string[]; diagnostics: unknown[] }
     >;
     regenerateTurn(sessionId: string, input: RegenerateTurnInput): Promise<void>;
-    branchFromTurn(sessionId: string, input: DesktopBranchFromTurnInput): Promise<DesktopSessionSummary>;
+    branchFromTurn(
+      sessionId: string,
+      input: DesktopBranchFromTurnInput & { sideConversation: true },
+    ): Promise<DesktopSideConversationBranchResult>;
+    branchFromTurn(
+      sessionId: string,
+      input: DesktopBranchFromTurnInput & { sideConversation?: false },
+    ): Promise<DesktopSessionSummary>;
     reviseBeforeTurn(sessionId: string, input: DesktopReviseBeforeTurnInput): Promise<DesktopSessionSummary>;
     respondToSandboxBoundary(sessionId: string, response: SandboxBoundaryResponse): Promise<void>;
     respondToUserQuestion(sessionId: string, response: UserQuestionResponse): Promise<void>;
