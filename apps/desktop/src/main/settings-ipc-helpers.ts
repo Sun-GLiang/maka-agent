@@ -51,6 +51,11 @@ export function proxyTestFailure(result: TestProxyResult): {
       code: "proxy_configuration_missing",
       message: "The proxy host or port is missing.",
     };
+  if (lower.includes("proxy credential is not configured"))
+    return {
+      code: "proxy_credential_missing",
+      message: "The proxy credential is not configured.",
+    };
   if (lower.includes("proxy test timeout") || lower.includes("timeout"))
     return { code: "proxy_timeout", message: "The proxy test timed out." };
   if (result.status)

@@ -928,7 +928,10 @@ function NetworkProxySection(props: {
                   onFocusExit={() => void passwordDraft.commit().catch(() => {})}
                   onEnter={() => void passwordDraft.commit().catch(() => {})}
                   onKeyDown={(event) => {
-                    if (event.key === "Escape") passwordDraft.cancel();
+                    if (event.key !== "Escape") return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    passwordDraft.cancel();
                   }}
                   hasCopyAction={false}
                   placeholder={

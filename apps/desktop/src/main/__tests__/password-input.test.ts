@@ -86,9 +86,38 @@ test("proxy password can hide Copy while ordinary password inputs keep it by def
   assert.equal(copyButtons.length, 1);
 });
 
+test("IME confirmation keys do not submit or cancel the password draft", async () => {
+  const harness = await renderPasswordInputs();
+  const input = harness.document.querySelector("input") as HTMLInputElement;
+  const onKeyDown = reactProps(input).onKeyDown as (event: {
+    key: string;
+    nativeEvent: { isComposing?: boolean };
+  }) => void;
+
+  onKeyDown({ key: "Enter", nativeEvent: { isComposing: true } });
+  onKeyDown({ key: "Escape", nativeEvent: { isComposing: true } });
+  onKeyDown({ key: "Process", nativeEvent: {} });
+
+  assert.deepEqual(harness.keyEvents, { enters: 0, keys: [] });
+});
+
+test("non-composing Enter submits once and remains observable by the caller", async () => {
+  const harness = await renderPasswordInputs();
+  const input = harness.document.querySelector("input") as HTMLInputElement;
+  const onKeyDown = reactProps(input).onKeyDown as (event: {
+    key: string;
+    nativeEvent: { isComposing?: boolean };
+  }) => void;
+
+  onKeyDown({ key: "Enter", nativeEvent: { isComposing: false } });
+
+  assert.deepEqual(harness.keyEvents, { enters: 1, keys: ["Enter"] });
+});
+
 async function renderPasswordInputs(): Promise<{
   document: Document;
   readonly exits: number;
+  readonly keyEvents: { enters: number; keys: string[] };
   focusExit(from: Element, to: Element): void;
 }> {
   const { document, window } = parseHTML(
@@ -107,6 +136,8 @@ async function renderPasswordInputs(): Promise<{
   const root = createRoot(container);
   mountedRoot = root;
   let exits = 0;
+  let enters = 0;
+  const keys: string[] = [];
   await act(async () => {
     root.render(
       createElement(LocaleProvider, {
@@ -119,6 +150,12 @@ async function renderPasswordInputs(): Promise<{
                 onChange() {},
                 onFocusExit: () => {
                   exits += 1;
+                },
+                onEnter: () => {
+                  enters += 1;
+                },
+                onKeyDown: (event) => {
+                  keys.push(event.key);
                 },
                 hasCopyAction: false,
                 label: "Proxy password",
@@ -144,6 +181,9 @@ async function renderPasswordInputs(): Promise<{
     document: document as unknown as Document,
     get exits() {
       return exits;
+    },
+    get keyEvents() {
+      return { enters, keys: [...keys] };
     },
     focusExit(_from, to) {
       const handler = reactProps(group).onBlurCapture as (event: {

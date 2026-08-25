@@ -189,7 +189,10 @@ export async function gatherRuntimeHostConfig(
   if (selected.has('connections') && catalog) {
     data.connections = projectHostConnections(catalog);
   }
-  if (selected.has('settings')) {
+  // Schema v1 stores the network-proxy password and Tavily key in the
+  // settings payload. Keep a credentials-only request lossless by making the
+  // dependency explicit in the generated bundle.
+  if (selected.has('settings') || selected.has('credentials')) {
     const settings = await deps.getSettings();
     data.settings = selected.has('credentials')
       ? restoreHostSettingsSecrets(settings, secrets)

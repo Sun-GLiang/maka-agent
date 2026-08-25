@@ -100,7 +100,12 @@ class FileSettingsStore implements SettingsStore {
   private async readOrCreate(): Promise<AppSettings> {
     try {
       const text = await readFile(this.settingsPath, 'utf8');
-      return normalizeSettings(JSON.parse(text));
+      const persisted: unknown = JSON.parse(text);
+      const settings = normalizeSettings(persisted);
+      if (hasLegacyProxyCredentialFields(persisted)) {
+        await this.write(settings);
+      }
+      return settings;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       const settings = createDefaultSettings();
@@ -230,4 +235,18 @@ class FileSettingsStore implements SettingsStore {
     this.queue = next.catch(() => {});
     return next;
   }
+}
+
+function hasLegacyProxyCredentialFields(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.network) || !isRecord(value.network.proxy)) {
+    return false;
+  }
+  const proxy = value.network.proxy;
+  return ['password', 'passwordConfigured', 'credential'].some((key) =>
+    Object.prototype.hasOwnProperty.call(proxy, key),
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

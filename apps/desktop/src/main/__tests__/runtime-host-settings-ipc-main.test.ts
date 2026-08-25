@@ -94,7 +94,7 @@ test("proxy test preserves enabled authentication when credentials are empty", a
 
   assert.equal(tested.candidate.authEnabled, true);
   assert.equal(tested.result.ok, false);
-  assert.equal(tested.result.code, "proxy_unreachable");
+  assert.equal(tested.result.code, "proxy_credential_missing");
 });
 
 test("proxy test preserves disabled authentication for a local proxy", async () => {

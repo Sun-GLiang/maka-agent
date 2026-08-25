@@ -661,6 +661,7 @@ export type SettingsTestResultCode =
   | 'proxy_reachable'
   | 'proxy_disabled'
   | 'proxy_configuration_missing'
+  | 'proxy_credential_missing'
   | 'proxy_timeout'
   | 'proxy_http_error'
   | 'proxy_unreachable'

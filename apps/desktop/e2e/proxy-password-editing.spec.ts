@@ -25,6 +25,7 @@ test("proxy password drafts save once, reload safely, and authenticate offline",
 }) => {
   const username = "proxy-user";
   const password = "complete-secret";
+  const replacementPassword = "replacement-secret";
   let acceptAuthorization!: (value: string | undefined) => void;
   const authorization = new Promise<string | undefined>((resolve) => {
     acceptAuthorization = resolve;
@@ -108,12 +109,34 @@ test("proxy password drafts save once, reload safely, and authenticate offline",
     await expect(reloadedPassword).toHaveValue("");
     await expect(page.getByRole("button", { name: "复制" })).toHaveCount(0);
 
+    await reloadedPassword.pressSequentially("discarded-draft");
+    await expect(reloadedPassword).toHaveValue("discarded-draft");
+    await reloadedPassword.press("Escape");
+    await expect(reloadedPassword).toBeVisible();
+    await expect(reloadedPassword).toHaveValue("");
+
+    await reloadedPassword.pressSequentially(replacementPassword);
+    await eye.click();
+    await expect(reloadedPassword).toHaveAttribute("type", "text");
+    await expect(reloadedPassword).toHaveValue(replacementPassword);
+    await reloadedPassword.focus();
+    await reloadedPassword.press("Enter");
+    await expect(reloadedPassword).toHaveValue("");
+
+    await page.reload();
+    await page.waitForSelector(COMPOSER_INPUT);
+    await page.getByRole("button", { name: "设置" }).click();
+    await page.getByRole("button", { name: "通用", exact: true }).click();
+    await expect(
+      page.getByPlaceholder("密码已保存；输入新密码以替换"),
+    ).toHaveValue("");
+
     const tested = await page.evaluate(() =>
       window.maka.settings.testNetworkProxy({ url: "http://example.com" }),
     );
     expect(tested.ok).toBe(true);
     expect(await authorization).toBe(
-      `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
+      `Basic ${Buffer.from(`${username}:${replacementPassword}`).toString("base64")}`,
     );
   } finally {
     await new Promise<void>((resolve) => proxy.close(() => resolve()));

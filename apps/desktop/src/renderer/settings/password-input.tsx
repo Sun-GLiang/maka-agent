@@ -149,8 +149,11 @@ export function PasswordInput(props: {
         type={visible ? 'text' : 'password'}
         value={props.value}
         onChange={(value) => props.onChange(value)}
-        onEnter={props.onEnter}
-        onKeyDown={props.onKeyDown}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing || event.key === 'Process') return;
+          if (event.key === 'Enter') props.onEnter?.();
+          props.onKeyDown?.(event);
+        }}
         placeholder={props.placeholder}
         label={copy.value}
         isLabelHidden
