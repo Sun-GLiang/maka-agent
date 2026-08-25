@@ -46,7 +46,7 @@ export async function runMakaAcpStdioServer(
   let closeContextTask: Promise<void> | undefined;
   const closeContext = () => (closeContextTask ??= context.close());
   const sessionRegistry = new AcpSessionRegistry({
-    connection: context.connection,
+    connect: async () => context.connection,
   });
   try {
     const stdin = dependencies.stdin ?? process.stdin;

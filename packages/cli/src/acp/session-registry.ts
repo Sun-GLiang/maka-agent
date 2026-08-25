@@ -53,7 +53,7 @@ interface AcpSessionSubscription extends AsyncIterable<SubscriptionFrame> {
   close(): Promise<void>;
 }
 
-interface AcpSessionRegistryConnection {
+export interface AcpSessionRegistryConnection {
   readonly request: RuntimeHostConnection['request'];
   openSessionSubscriptionOnce(
     input: SubscriptionOpenInput,
@@ -63,7 +63,7 @@ interface AcpSessionRegistryConnection {
 }
 
 export interface AcpSessionRegistryOptions {
-  readonly connection: AcpSessionRegistryConnection;
+  readonly connect: () => Promise<AcpSessionRegistryConnection>;
   readonly newSessionId?: () => string;
 }
 
@@ -90,16 +90,18 @@ interface AcpSessionRecord {
 
 /** Owns all Runtime Host resources associated with one ACP connection. */
 export class AcpSessionRegistry {
-  readonly #connection: AcpSessionRegistryConnection;
+  readonly #connect: () => Promise<AcpSessionRegistryConnection>;
   readonly #newSessionId: () => string;
   readonly #records = new Map<string, AcpSessionRecord>();
   readonly #inFlightOperations = new Set<Promise<unknown>>();
+  #connection: AcpSessionRegistryConnection | undefined;
+  #connectTask: Promise<AcpSessionRegistryConnection> | undefined;
   #closing = false;
   #connectionCloseTask: Promise<void> | undefined;
   #disposeTask: Promise<void> | undefined;
 
   constructor(options: AcpSessionRegistryOptions) {
-    this.#connection = options.connection;
+    this.#connect = options.connect;
     this.#newSessionId = options.newSessionId ?? randomUUID;
   }
 
@@ -130,9 +132,10 @@ export class AcpSessionRegistry {
   }
 
   async #create(params: NewSessionRequest): Promise<NewSessionResponse> {
+    const connection = await this.#getConnection();
     const sessionId = this.#newSessionId();
     try {
-      await this.#connection.request('session.create', {
+      await connection.request('session.create', {
         sessionId,
         workspace: { kind: 'host_path', path: params.cwd },
         modelTarget: { kind: 'default' },
@@ -143,7 +146,7 @@ export class AcpSessionRegistry {
 
     let subscription: AcpSessionSubscription;
     try {
-      subscription = await this.#connection.openSessionSubscriptionOnce({
+      subscription = await connection.openSessionSubscriptionOnce({
         sessionId,
         transcript: { kind: 'none' },
       });
@@ -219,10 +222,11 @@ export class AcpSessionRegistry {
       );
     }
     const cwd = requestedCwd ?? cursor?.cwd ?? null;
+    const connection = await this.#getConnection();
     let page;
     try {
       page = await readRuntimeHostSessionCatalogPage(
-        this.#connection,
+        connection,
         cursor ? { revision: cursor.revision, cursor: cursor.cursor } : undefined,
       );
     } catch (error) {
@@ -269,8 +273,43 @@ export class AcpSessionRegistry {
   }
 
   #closeOwnedConnection(): Promise<void> {
-    this.#connectionCloseTask ??= Promise.resolve().then(() => this.#connection.close());
+    const connection = this.#connection;
+    const connectTask = this.#connectTask;
+    if (!connection && !connectTask) return Promise.resolve();
+    this.#connectionCloseTask ??= connection
+      ? Promise.resolve().then(() => connection.close())
+      : connectTask!.then(
+          (connected) => connected.close(),
+          () => undefined,
+        );
     return this.#connectionCloseTask;
+  }
+
+  async #getConnection(): Promise<AcpSessionRegistryConnection> {
+    this.#assertOpen();
+    if (this.#connection) return this.#connection;
+    const connectTask = (this.#connectTask ??= Promise.resolve().then(() => this.#connect()));
+    let connection: AcpSessionRegistryConnection;
+    try {
+      connection = await connectTask;
+    } catch {
+      if (this.#connectTask === connectTask) this.#connectTask = undefined;
+      if (this.#closing) throw registryClosedError('connect');
+      throw RequestError.internalError(
+        {
+          source: 'runtime_host',
+          operation: 'connect',
+          code: 'connection_failed',
+        },
+        'Runtime Host connection failed',
+      );
+    }
+    if (this.#closing) {
+      await this.#closeOwnedConnection().catch(() => undefined);
+      throw registryClosedError('connect');
+    }
+    this.#connection ??= connection;
+    return this.#connection;
   }
 
   async #track<T>(operation: Promise<T>): Promise<T> {
@@ -284,11 +323,15 @@ export class AcpSessionRegistry {
 
   #assertOpen(): void {
     if (!this.#closing) return;
-    throw RequestError.internalError(
-      { source: 'runtime_host', operation: 'subscription.open', code: 'registry_closed' },
-      'ACP session registry is closed',
-    );
+    throw registryClosedError('subscription.open');
   }
+}
+
+function registryClosedError(operation: 'connect' | 'subscription.open'): RequestError {
+  return RequestError.internalError(
+    { source: 'runtime_host', operation, code: 'registry_closed' },
+    'ACP session registry is closed',
+  );
 }
 
 function validateNewSessionParams(params: NewSessionRequest): void {
@@ -321,7 +364,11 @@ function requestErrorFromRuntimeHost(
 
 function runtimeHostErrorData(error: unknown, operation: string): Record<string, unknown> {
   if (error instanceof RuntimeHostOperationError) {
-    return { source: 'runtime_host', operation: error.operation, code: error.code };
+    return {
+      source: 'runtime_host',
+      operation: error.operation,
+      code: error.code,
+    };
   }
   if (error instanceof RuntimeHostRequestInterruptedError) {
     return {
@@ -381,7 +428,11 @@ function encodeAcpSessionCursor(
   ).toString('base64url');
   if (Buffer.byteLength(encoded, 'utf8') > ACP_SESSION_CURSOR_MAX_BYTES) {
     throw RequestError.internalError(
-      { source: 'runtime_host', operation: 'session.catalog.query', code: 'cursor_too_large' },
+      {
+        source: 'runtime_host',
+        operation: 'session.catalog.query',
+        code: 'cursor_too_large',
+      },
       'Runtime Host cursor cannot be represented safely in ACP',
     );
   }
@@ -442,7 +493,11 @@ async function normalizeCwd(cwd: string): Promise<string> {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR') return lexical;
     throw RequestError.internalError(
-      { source: 'filesystem', operation: 'cwd.realpath', code: code ?? 'internal_failure' },
+      {
+        source: 'filesystem',
+        operation: 'cwd.realpath',
+        code: code ?? 'internal_failure',
+      },
       'cwd could not be canonicalized',
     );
   }

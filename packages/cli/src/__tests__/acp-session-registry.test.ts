@@ -34,31 +34,141 @@ import {
   type SessionContinuitySnapshot,
   type SubscriptionFrame,
 } from '@maka/runtime-host/protocol';
-import { AcpSessionRegistry, type AcpSessionRegistryOptions } from '../acp/session-registry.js';
+import { AcpSessionRegistry, type AcpSessionRegistryConnection } from '../acp/session-registry.js';
 
 const SESSION_REVISION = `sha256:${'a'.repeat(64)}` as const;
 const NEW_SESSION_REVISION = `sha256:${'b'.repeat(64)}` as const;
 type TestableSubscription = Awaited<
-  ReturnType<AcpSessionRegistryOptions['connection']['openSessionSubscriptionOnce']>
+  ReturnType<AcpSessionRegistryConnection['openSessionSubscriptionOnce']>
 >;
 
 describe('ACP Session registry', () => {
+  test('does not connect when disposed before a Session method is used', async () => {
+    let connectCalls = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () => {
+        connectCalls += 1;
+        return fakeConnection();
+      },
+    });
+
+    await registry.dispose();
+    await registry.dispose();
+
+    assert.equal(connectCalls, 0);
+  });
+
+  test('shares one in-flight connection across concurrent Session methods', async () => {
+    const connecting = deferred<ReturnType<typeof fakeConnection>>();
+    let connectCalls = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () => {
+        connectCalls += 1;
+        return connecting.promise;
+      },
+    });
+    const first = registry.list({});
+    const second = registry.list({});
+    await waitFor(() => connectCalls === 1);
+
+    connecting.resolve(
+      fakeConnection({
+        request: async () => ({
+          kind: 'page',
+          revision: SESSION_REVISION,
+          sessions: [],
+          nextCursor: null,
+        }),
+      }),
+    );
+
+    assert.deepEqual(await first, { sessions: [] });
+    assert.deepEqual(await second, { sessions: [] });
+    assert.equal(connectCalls, 1);
+    await registry.dispose();
+  });
+
+  test('reports a stable connection error and retries on a later Session request', async () => {
+    let connectCalls = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () => {
+        connectCalls += 1;
+        if (connectCalls === 1) throw new Error('Host unavailable');
+        return fakeConnection({
+          request: async () => ({
+            kind: 'page',
+            revision: SESSION_REVISION,
+            sessions: [],
+            nextCursor: null,
+          }),
+        });
+      },
+    });
+
+    await assert.rejects(registry.list({}), (error: unknown) => {
+      assert.ok(error instanceof RequestError);
+      assert.equal(error.code, -32603);
+      assert.deepEqual(error.data, {
+        source: 'runtime_host',
+        operation: 'connect',
+        code: 'connection_failed',
+      });
+      return true;
+    });
+    assert.deepEqual(await registry.list({}), { sessions: [] });
+    assert.equal(connectCalls, 2);
+    await registry.dispose();
+  });
+
+  test('closes a connection that resolves after disposal starts', async () => {
+    const connecting = deferred<ReturnType<typeof fakeConnection>>();
+    let connectCalls = 0;
+    let closeCalls = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () => {
+        connectCalls += 1;
+        return connecting.promise;
+      },
+    });
+    const list = registry.list({});
+    await waitFor(() => connectCalls === 1);
+    const dispose = registry.dispose();
+
+    connecting.resolve(
+      fakeConnection({
+        close: async () => {
+          closeCalls += 1;
+        },
+      }),
+    );
+
+    await assert.rejects(list, (error: unknown) => {
+      assert.ok(error instanceof RequestError);
+      assert.equal(error.code, -32603);
+      assert.equal((error.data as { code?: string }).code, 'registry_closed');
+      return true;
+    });
+    await dispose;
+    assert.equal(closeCalls, 1);
+  });
+
   test('creates exact Host sessions and continuously tracks isolated subscription snapshots', async () => {
     const subscriptions = new Map<string, TestSubscription>();
     const requests: Array<{ operation: string; input: unknown }> = [];
     let nextId = 0;
     const registry = new AcpSessionRegistry({
-      connection: fakeConnection({
-        request: async (operation, input) => {
-          requests.push({ operation, input });
-          return { kind: 'unsupported_legacy_record' };
-        },
-        open: async ({ sessionId }) => {
-          const subscription = new TestSubscription(sessionId);
-          subscriptions.set(sessionId, subscription);
-          return subscription;
-        },
-      }),
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            requests.push({ operation, input });
+            return { kind: 'unsupported_legacy_record' };
+          },
+          open: async ({ sessionId }) => {
+            const subscription = new TestSubscription(sessionId);
+            subscriptions.set(sessionId, subscription);
+            return subscription;
+          },
+        }),
       newSessionId: () => `session-${++nextId}`,
     });
 
@@ -117,7 +227,7 @@ describe('ACP Session registry', () => {
   test('records subscription failures without producing an unhandled rejection', async () => {
     const subscription = new TestSubscription('session-1');
     const registry = new AcpSessionRegistry({
-      connection: fakeConnection({ open: async () => subscription }),
+      connect: async () => fakeConnection({ open: async () => subscription }),
       newSessionId: () => 'session-1',
     });
     await registry.create({ cwd: '/workspace', mcpServers: [] });
@@ -139,7 +249,7 @@ describe('ACP Session registry', () => {
   test('records an unexpected clean subscription end as a failure', async () => {
     const subscription = new TestSubscription('session-1');
     const registry = new AcpSessionRegistry({
-      connection: fakeConnection({ open: async () => subscription }),
+      connect: async () => fakeConnection({ open: async () => subscription }),
       newSessionId: () => 'session-1',
     });
     await registry.create({ cwd: '/workspace', mcpServers: [] });
@@ -157,12 +267,13 @@ describe('ACP Session registry', () => {
   test('rejects unsupported creation inputs before touching Runtime Host', async () => {
     let requests = 0;
     const registry = new AcpSessionRegistry({
-      connection: fakeConnection({
-        request: async () => {
-          requests += 1;
-          return {};
-        },
-      }),
+      connect: async () =>
+        fakeConnection({
+          request: async () => {
+            requests += 1;
+            return {};
+          },
+        }),
     });
 
     const cases: Array<readonly [string, NewSessionRequest]> = [
@@ -175,10 +286,20 @@ describe('ACP Session registry', () => {
       ],
       [
         'additionalDirectories',
-        { cwd: '/workspace', mcpServers: [], additionalDirectories: ['/other'] },
+        {
+          cwd: '/workspace',
+          mcpServers: [],
+          additionalDirectories: ['/other'],
+        },
       ],
       ['cwd', { cwd: 'relative', mcpServers: [] }],
-      ['cwd', { cwd: `/${'x'.repeat(SESSION_CATALOG_CWD_MAX_BYTES)}`, mcpServers: [] }],
+      [
+        'cwd',
+        {
+          cwd: `/${'x'.repeat(SESSION_CATALOG_CWD_MAX_BYTES)}`,
+          mcpServers: [],
+        },
+      ],
     ];
     for (const [field, input] of cases) {
       await assert.rejects(
@@ -195,15 +316,16 @@ describe('ACP Session registry', () => {
 
   test('reports a durable session identity when subscription opening fails without rollback', async () => {
     const registry = new AcpSessionRegistry({
-      connection: fakeConnection({
-        open: async () => {
-          throw new RuntimeHostOperationError(
-            'subscription.open',
-            'operation_unavailable',
-            'subscription unavailable',
-          );
-        },
-      }),
+      connect: async () =>
+        fakeConnection({
+          open: async () => {
+            throw new RuntimeHostOperationError(
+              'subscription.open',
+              'operation_unavailable',
+              'subscription unavailable',
+            );
+          },
+        }),
       newSessionId: () => 'session-durable',
     });
 
@@ -233,15 +355,16 @@ describe('ACP Session registry', () => {
     ] as const) {
       let opens = 0;
       const registry = new AcpSessionRegistry({
-        connection: fakeConnection({
-          request: async () => {
-            throw new RuntimeHostOperationError('session.create', hostCode, 'create failed');
-          },
-          open: async ({ sessionId }) => {
-            opens += 1;
-            return new TestSubscription(sessionId);
-          },
-        }),
+        connect: async () =>
+          fakeConnection({
+            request: async () => {
+              throw new RuntimeHostOperationError('session.create', hostCode, 'create failed');
+            },
+            open: async ({ sessionId }) => {
+              opens += 1;
+              return new TestSubscription(sessionId);
+            },
+          }),
         newSessionId: () => `session-${hostCode}`,
       });
 
@@ -267,12 +390,20 @@ describe('ACP Session registry', () => {
   test('closes a subscription that opens after disposal starts and never registers it', async () => {
     const opening = deferred<TestableSubscription>();
     const subscription = new TestSubscription('session-race');
+    let opens = 0;
     const registry = new AcpSessionRegistry({
-      connection: fakeConnection({ open: async () => opening.promise }),
+      connect: async () =>
+        fakeConnection({
+          open: async () => {
+            opens += 1;
+            return opening.promise;
+          },
+        }),
       newSessionId: () => 'session-race',
     });
 
     const create = registry.create({ cwd: '/workspace', mcpServers: [] });
+    await waitFor(() => opens === 1);
     const dispose = registry.dispose();
     opening.resolve(subscription);
 
@@ -290,6 +421,7 @@ describe('ACP Session registry', () => {
 
   test('connection cleanup interrupts an in-flight open before disposal waits for it', async () => {
     const opening = deferred<TestableSubscription>();
+    let opens = 0;
     let connectionCloses = 0;
     const interruption = new RuntimeHostRequestInterruptedError(
       'subscription.open',
@@ -298,18 +430,23 @@ describe('ACP Session registry', () => {
       'connection_lost',
     );
     const registry = new AcpSessionRegistry({
-      connection: fakeConnection({
-        open: async () => opening.promise,
-        close: async () => {
-          connectionCloses += 1;
-          opening.reject(interruption);
-        },
-      }),
+      connect: async () =>
+        fakeConnection({
+          open: async () => {
+            opens += 1;
+            return opening.promise;
+          },
+          close: async () => {
+            connectionCloses += 1;
+            opening.reject(interruption);
+          },
+        }),
       newSessionId: () => 'session-race',
     });
 
     const create = registry.create({ cwd: '/workspace', mcpServers: [] });
     const createRejected = assert.rejects(create, RequestError);
+    await waitFor(() => opens === 1);
     const dispose = registry.dispose();
     try {
       await waitFor(() => connectionCloses === 1);
@@ -326,19 +463,25 @@ describe('ACP Session registry', () => {
     const opening = deferred<TestableSubscription>();
     const subscription = new TestSubscription('session-race');
     subscription.closeError = new Error('subscription close failed');
+    let opens = 0;
     let connectionCloses = 0;
     const registry = new AcpSessionRegistry({
-      connection: fakeConnection({
-        open: async () => opening.promise,
-        close: async () => {
-          connectionCloses += 1;
-          subscription.end();
-        },
-      }),
+      connect: async () =>
+        fakeConnection({
+          open: async () => {
+            opens += 1;
+            return opening.promise;
+          },
+          close: async () => {
+            connectionCloses += 1;
+            subscription.end();
+          },
+        }),
       newSessionId: () => 'session-race',
     });
 
     const create = registry.create({ cwd: '/workspace', mcpServers: [] });
+    await waitFor(() => opens === 1);
     const dispose = registry.dispose();
     opening.resolve(subscription);
 
@@ -353,13 +496,14 @@ describe('ACP Session registry', () => {
     subscription.closeError = new Error('subscription close failed');
     let connectionCloses = 0;
     const registry = new AcpSessionRegistry({
-      connection: fakeConnection({
-        open: async () => subscription,
-        close: async () => {
-          connectionCloses += 1;
-          subscription.end();
-        },
-      }),
+      connect: async () =>
+        fakeConnection({
+          open: async () => subscription,
+          close: async () => {
+            connectionCloses += 1;
+            subscription.end();
+          },
+        }),
       newSessionId: () => 'session-1',
     });
     await registry.create({ cwd: '/workspace', mcpServers: [] });
@@ -380,42 +524,43 @@ describe('ACP Session registry', () => {
     const canonicalWorkspace = await realpath(workspace);
     const inputs: unknown[] = [];
     const registry = new AcpSessionRegistry({
-      connection: fakeConnection({
-        request: async (operation, input) => {
-          assert.equal(operation, 'session.catalog.query');
-          inputs.push(input);
-          if ((input as { kind: string }).kind === 'list_start') {
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            assert.equal(operation, 'session.catalog.query');
+            inputs.push(input);
+            if ((input as { kind: string }).kind === 'list_start') {
+              return {
+                kind: 'page',
+                revision: SESSION_REVISION,
+                sessions: [
+                  catalogSession('other', join(root, 'other'), 'Other', 1_000),
+                  {
+                    kind: 'unsupported_legacy_record',
+                    id: 'legacy',
+                    revision: 1,
+                    reason: 'not_wire_representable',
+                  },
+                ],
+                nextCursor: 'page-2',
+              };
+            }
             return {
               kind: 'page',
               revision: SESSION_REVISION,
               sessions: [
-                catalogSession('other', join(root, 'other'), 'Other', 1_000),
-                {
-                  kind: 'unsupported_legacy_record',
-                  id: 'legacy',
-                  revision: 1,
-                  reason: 'not_wire_representable',
-                },
+                catalogSession('matching', canonicalWorkspace, 'Matching session', 2_000),
+                catalogSession(
+                  'undated',
+                  canonicalWorkspace,
+                  'Out-of-range activity',
+                  Number.MAX_SAFE_INTEGER,
+                ),
               ],
-              nextCursor: 'page-2',
+              nextCursor: null,
             };
-          }
-          return {
-            kind: 'page',
-            revision: SESSION_REVISION,
-            sessions: [
-              catalogSession('matching', canonicalWorkspace, 'Matching session', 2_000),
-              catalogSession(
-                'undated',
-                canonicalWorkspace,
-                'Out-of-range activity',
-                Number.MAX_SAFE_INTEGER,
-              ),
-            ],
-            nextCursor: null,
-          };
-        },
-      }),
+          },
+        }),
     });
 
     const first = await registry.list({ cwd: alias });
@@ -447,17 +592,18 @@ describe('ACP Session registry', () => {
   test('rejects a cursor reused with a different normalized cwd before Host I/O', async () => {
     let requests = 0;
     const registry = new AcpSessionRegistry({
-      connection: fakeConnection({
-        request: async () => {
-          requests += 1;
-          return {
-            kind: 'page',
-            revision: SESSION_REVISION,
-            sessions: [],
-            nextCursor: 'page-2',
-          };
-        },
-      }),
+      connect: async () =>
+        fakeConnection({
+          request: async () => {
+            requests += 1;
+            return {
+              kind: 'page',
+              revision: SESSION_REVISION,
+              sessions: [],
+              nextCursor: 'page-2',
+            };
+          },
+        }),
     });
     const first = await registry.list({ cwd: '/workspace/one/../one' });
 
@@ -473,9 +619,16 @@ describe('ACP Session registry', () => {
   });
 
   test('rejects malformed and oversized ACP cursors as invalid params', async () => {
-    const registry = new AcpSessionRegistry({ connection: fakeConnection() });
+    const registry = new AcpSessionRegistry({
+      connect: async () => fakeConnection(),
+    });
     const invalidRevisionCursor = Buffer.from(
-      JSON.stringify({ v: 1, revision: 'sha256:bad', cursor: 'page-2', cwd: null }),
+      JSON.stringify({
+        v: 1,
+        revision: 'sha256:bad',
+        cursor: 'page-2',
+        cwd: null,
+      }),
       'utf8',
     ).toString('base64url');
     for (const cursor of ['not-a-cursor', 'x'.repeat(8 * 1024 + 1), invalidRevisionCursor]) {
@@ -514,18 +667,19 @@ describe('ACP Session registry', () => {
     ] as const) {
       let first = true;
       const registry = new AcpSessionRegistry({
-        connection: fakeConnection({
-          request: async () => {
-            if (!first) return nextResult;
-            first = false;
-            return {
-              kind: 'page',
-              revision: SESSION_REVISION,
-              sessions: [],
-              nextCursor: 'page-2',
-            };
-          },
-        }),
+        connect: async () =>
+          fakeConnection({
+            request: async () => {
+              if (!first) return nextResult;
+              first = false;
+              return {
+                kind: 'page',
+                revision: SESSION_REVISION,
+                sessions: [],
+                nextCursor: 'page-2',
+              };
+            },
+          }),
       });
       const page = await registry.list({});
       await assert.rejects(registry.list({ cursor: page.nextCursor }), (error: unknown) => {
@@ -540,15 +694,16 @@ describe('ACP Session registry', () => {
 
   test('maps Runtime Host invalid_request from session/list to invalid params', async () => {
     const registry = new AcpSessionRegistry({
-      connection: fakeConnection({
-        request: async () => {
-          throw new RuntimeHostOperationError(
-            'session.catalog.query',
-            'invalid_request',
-            'invalid query',
-          );
-        },
-      }),
+      connect: async () =>
+        fakeConnection({
+          request: async () => {
+            throw new RuntimeHostOperationError(
+              'session.catalog.query',
+              'invalid_request',
+              'invalid query',
+            );
+          },
+        }),
     });
 
     await assert.rejects(registry.list({}), (error: unknown) => {
@@ -632,13 +787,13 @@ function fakeConnection(
     open?: (input: { sessionId: string }) => Promise<TestableSubscription>;
     close?: () => Promise<void>;
   } = {},
-): AcpSessionRegistryOptions['connection'] {
+): AcpSessionRegistryConnection {
   return {
     request: overrides.request ?? (async () => ({})),
     openSessionSubscriptionOnce:
       overrides.open ?? (async ({ sessionId }) => new TestSubscription(sessionId)),
     close: overrides.close ?? (async () => undefined),
-  } as AcpSessionRegistryOptions['connection'];
+  } as AcpSessionRegistryConnection;
 }
 
 function snapshot(sessionId: string, projectionRevision: number): SessionContinuitySnapshot {
@@ -654,7 +809,12 @@ function snapshot(sessionId: string, projectionRevision: number): SessionContinu
     projectionRevision,
     rootTurn: null,
     goal: null,
-    queue: { hostEpoch: 'host-1', queueRevision: 0, steering: [], followup: [] },
+    queue: {
+      hostEpoch: 'host-1',
+      queueRevision: 0,
+      steering: [],
+      followup: [],
+    },
     interactions: { pending: [] },
   };
 }
