@@ -3079,73 +3079,132 @@ describe('runtime policy stores', () => {
     });
   });
 
-  test('proxy policy and credential replacement recover from every persistence cut', {
+  test('proxy replacement never persists its secret outside the credential vault', {
     skip:
       process.platform === 'win32'
         ? 'POSIX file handles are required to inject persistence failures'
         : false,
   }, async () => {
-    for (let failedSync = 1; failedSync <= 7; failedSync += 1) {
-      await withInteractiveOwner(async ({ root, stores }) => {
-        const initial = await stores.runtimePolicy.getSnapshot();
-        const target = {
+    await withInteractiveOwner(async ({ root, stores }) => {
+      const initial = await stores.runtimePolicy.getSnapshot();
+      const secret = 'vault-only-proxy-secret';
+      const probe = await open(root, 'r');
+      const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+        sync: typeof probe.sync;
+      };
+      const originalSync = fileHandlePrototype.sync;
+      await probe.close();
+      let syncCalls = 0;
+      const syncMock = mock.method(
+        fileHandlePrototype,
+        'sync',
+        async function (this: typeof probe) {
+          syncCalls += 1;
+          if (syncCalls === 3) throw new Error('injected proxy policy persistence failure');
+          return originalSync.call(this);
+        },
+      );
+
+      try {
+        await assert.rejects(
+          stores.operations.updateNetworkProxy({
+            expectedPolicyRevision: initial.revision,
+            expectedCredential: null,
+            networkProxy: {
+              ...initial.policy.networkProxy,
+              enabled: true,
+              host: 'vault-only.proxy.internal',
+              port: 7897,
+              authEnabled: true,
+              username: 'vault-only-user',
+            },
+            credential: { kind: 'replace', secret },
+          }),
+          isStoreError('commit_outcome_unknown'),
+        );
+      } finally {
+        syncMock.mock.restore();
+      }
+
+      const filesContainingSecret: string[] = [];
+      for (const entry of await readdir(root)) {
+        if (!entry.endsWith('.json')) continue;
+        if ((await readFile(join(root, entry), 'utf8')).includes(secret)) {
+          filesContainingSecret.push(entry);
+        }
+      }
+      assert.deepEqual(filesContainingSecret, ['credential-vault.json']);
+      assert.equal(existsSync(join(root, 'runtime-policy-network-proxy.json')), false);
+      assert.equal(existsSync(join(root, 'runtime-policy.json')), false);
+    });
+  });
+
+  test('disabling proxy authentication commits policy before deleting its credential', {
+    skip:
+      process.platform === 'win32'
+        ? 'POSIX file handles are required to inject persistence failures'
+        : false,
+  }, async () => {
+    await withInteractiveOwner(async ({ root, stores }) => {
+      const initial = await stores.runtimePolicy.getSnapshot();
+      const secret = 'retained-disabled-proxy-secret';
+      const configured = await stores.operations.updateNetworkProxy({
+        expectedPolicyRevision: initial.revision,
+        expectedCredential: null,
+        networkProxy: {
           ...initial.policy.networkProxy,
           enabled: true,
-          host: 'recoverable.proxy.internal',
+          host: 'disable-order.proxy.internal',
           port: 7897,
           authEnabled: true,
-          username: 'recoverable-user',
-        };
-        const probe = await open(root, 'r');
-        const fileHandlePrototype = Object.getPrototypeOf(probe) as {
-          sync: typeof probe.sync;
-        };
-        const originalSync = fileHandlePrototype.sync;
-        await probe.close();
-        let syncCalls = 0;
-        const syncMock = mock.method(
-          fileHandlePrototype,
-          'sync',
-          async function (this: typeof probe) {
-            syncCalls += 1;
-            if (syncCalls === failedSync) {
-              throw new Error(`injected proxy update persistence cut ${failedSync}`);
-            }
-            return originalSync.call(this);
-          },
-        );
-
-        try {
-          await assert.rejects(
-            stores.operations.updateNetworkProxy({
-              expectedPolicyRevision: initial.revision,
-              expectedCredential: null,
-              networkProxy: target,
-              credential: { kind: 'replace', secret: 'recoverable-secret' },
-            }),
-            isStoreError(failedSync === 1 ? 'io_failed' : 'commit_outcome_unknown'),
-          );
-        } finally {
-          syncMock.mock.restore();
-        }
-        assert.equal(syncCalls, failedSync);
-
-        const policy = await stores.runtimePolicy.getSnapshot();
-        const credential = await getCredentialStatus(stores.credentialVault, proxyCredential());
-        if (failedSync === 1) {
-          assert.deepEqual(policy, initial);
-          assert.equal(credential.configured, false);
-          assert.equal(existsSync(join(root, 'runtime-policy-network-proxy.json')), false);
-          return;
-        }
-
-        assert.deepEqual(policy.policy.networkProxy, target);
-        assert.equal(credential.configured, true);
-        assert.equal(existsSync(join(root, 'runtime-policy-network-proxy.json')), false);
-        const material = await stores.operations.exportCredentialMaterial(proxyCredential());
-        assert.equal(material?.secret, 'recoverable-secret');
+          username: 'disable-order-user',
+        },
+        credential: { kind: 'replace', secret },
       });
-    }
+      assert.equal(configured.kind, 'committed');
+      if (configured.kind !== 'committed') return;
+
+      const probe = await open(root, 'r');
+      const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+        sync: typeof probe.sync;
+      };
+      const originalSync = fileHandlePrototype.sync;
+      await probe.close();
+      let syncCalls = 0;
+      const syncMock = mock.method(
+        fileHandlePrototype,
+        'sync',
+        async function (this: typeof probe) {
+          syncCalls += 1;
+          if (syncCalls === 3) throw new Error('injected proxy credential deletion failure');
+          return originalSync.call(this);
+        },
+      );
+
+      try {
+        await assert.rejects(
+          stores.operations.updateNetworkProxy({
+            expectedPolicyRevision: configured.snapshot.revision,
+            expectedCredential: credentialBasis(configured.credentialStatus),
+            networkProxy: {
+              ...configured.snapshot.policy.networkProxy,
+              authEnabled: false,
+              username: '',
+            },
+            credential: { kind: 'delete' },
+          }),
+          isStoreError('commit_outcome_unknown'),
+        );
+      } finally {
+        syncMock.mock.restore();
+      }
+
+      const persistedPolicy = JSON.parse(
+        await readFile(join(root, 'runtime-policy.json'), 'utf8'),
+      ) as { readonly policy: { readonly networkProxy: RuntimePolicy['networkProxy'] } };
+      assert.equal(persistedPolicy.policy.networkProxy.authEnabled, false);
+      assert.ok((await readFile(join(root, 'credential-vault.json'), 'utf8')).includes(secret));
+    });
   });
 
   test('blocks WebFetch while privacy mode is active', async () => {
