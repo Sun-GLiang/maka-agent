@@ -19,9 +19,14 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { LocaleProvider } from '../locale-context.js';
 import {
   holdJumpDestination,
+  mergePromptAnchorRailTurns,
   observeActivePromptRailVisibility,
+  PromptAnchorRail,
   type PromptRailFrameScheduler,
 } from '../prompt-anchor-rail.js';
 
@@ -261,6 +266,95 @@ test('keeps the active tick visible when the rail viewport resizes', () => {
 
   cleanup();
   assert.equal(disconnected, true);
+});
+
+test('marks complete-index landmarks outside the resident transcript range', () => {
+  const turns = mergePromptAnchorRailTurns(
+    [
+      { turnId: 'turn-1', label: 'Prompt 1', reply: 'Answer 1' },
+      { turnId: 'turn-3', label: 'Prompt 3', reply: 'Answer 3' },
+    ],
+    [
+      { turnId: 'turn-1', sequence: 0, label: 'Prompt 1' },
+      { turnId: 'turn-2', sequence: 2, label: 'Prompt 2' },
+      { turnId: 'turn-3', sequence: 4, label: 'Prompt 3' },
+    ],
+  );
+
+  assert.deepEqual(turns, [
+    {
+      turnId: 'turn-1',
+      label: 'Prompt 1',
+      reply: 'Answer 1',
+      sequence: 0,
+      isResident: true,
+    },
+    {
+      turnId: 'turn-2',
+      label: 'Prompt 2',
+      reply: '',
+      sequence: 2,
+      isResident: false,
+    },
+    {
+      turnId: 'turn-3',
+      label: 'Prompt 3',
+      reply: 'Answer 3',
+      sequence: 4,
+      isResident: true,
+    },
+  ]);
+});
+
+test('treats every projected turn as resident without a durable landmark index', () => {
+  assert.deepEqual(
+    mergePromptAnchorRailTurns([
+      { turnId: 'overlay-turn', label: 'Streaming prompt', reply: '' },
+    ]),
+    [{
+      turnId: 'overlay-turn',
+      label: 'Streaming prompt',
+      reply: '',
+      isResident: true,
+    }],
+  );
+});
+
+test('updates a landmark when its body enters a later resident range', () => {
+  const index = [
+    { turnId: 'turn-1', sequence: 0, label: 'Prompt 1' },
+    { turnId: 'turn-2', sequence: 2, label: 'Prompt 2' },
+  ];
+  const historical = mergePromptAnchorRailTurns(
+    [{ turnId: 'turn-1', label: 'Prompt 1', reply: 'Answer 1' }],
+    index,
+  );
+  const intermediate = mergePromptAnchorRailTurns(
+    [{ turnId: 'turn-2', label: 'Prompt 2', reply: 'Answer 2' }],
+    index,
+  );
+
+  assert.deepEqual(historical.map((turn) => turn.isResident), [true, false]);
+  assert.deepEqual(intermediate.map((turn) => turn.isResident), [false, true]);
+});
+
+test('renders unloaded landmarks as actionable load targets', () => {
+  const markup = renderToStaticMarkup(createElement(LocaleProvider, {
+    locale: 'en',
+    children: createElement(PromptAnchorRail, {
+      turns: [
+        { turnId: 'turn-1', label: 'Prompt 1', sequence: 0, isResident: true },
+        { turnId: 'turn-2', label: 'Prompt 2', sequence: 2, isResident: false },
+        { turnId: 'turn-3', label: 'Prompt 3', sequence: 4, isResident: true },
+      ],
+      scrollRef: { current: null },
+    }),
+  }));
+
+  assert.match(markup, /data-prompt-turn-id="turn-2"/);
+  assert.match(markup, /data-resident="false"/);
+  assert.match(markup, /aria-label="Load and jump to prompt: Prompt 2"/);
+  assert.doesNotMatch(markup, /aria-disabled="true"/);
 });
 
 function box(top: number, bottom: number): DOMRect {

@@ -25,7 +25,11 @@ import {
 } from './icons.js';
 import { DeepResearchEmptyHero, EmptyChatHero } from './chat-empty-hero.js';
 import type { ChatModelChoice } from './chat-model-helpers.js';
-import { PromptAnchorRail, type PromptAnchorRailTurn } from './prompt-anchor-rail.js';
+import {
+  mergePromptAnchorRailTurns,
+  PromptAnchorRail,
+  type PromptAnchorRailTurn,
+} from './prompt-anchor-rail.js';
 import { useMessageSelectionQuote } from './use-message-selection-quote.js';
 import type { DeepResearchClientProgress } from '@maka/core/deep-research-run';
 import type { ProviderType } from '@maka/core/llm-connections';
@@ -57,6 +61,46 @@ import { SessionContextLayer, type SessionContextGoal } from './session-context-
 export interface LiveContentActivationSnapshot {
   turnId: string;
   entries: ReadonlyMap<string, string>;
+}
+
+export interface TranscriptHistoryNoticeProps {
+  title: string;
+  description: string;
+  actionLabel: string;
+  isPending: boolean;
+  onReturnToLatest(): Promise<void> | void;
+}
+
+/** Persistent explanation for a bounded range that omits newer durable messages. */
+export function TranscriptHistoryNotice({
+  title,
+  description,
+  actionLabel,
+  isPending,
+  onReturnToLatest,
+}: TranscriptHistoryNoticeProps) {
+  return (
+    <div
+      className="maka-transcript-history-controls"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <div className="maka-transcript-history-copy">
+        <strong className="maka-transcript-history-title">{title}</strong>
+        <span className="maka-transcript-history-description">{description}</span>
+      </div>
+      <Button
+        label={actionLabel}
+        variant="ghost"
+        size="sm"
+        isDisabled={isPending}
+        onClick={() => {
+          void onReturnToLatest();
+        }}
+      />
+    </div>
+  );
 }
 
 export function ChatView(props: {
@@ -183,6 +227,8 @@ export function ChatView(props: {
   historyLoadPending?: boolean;
   onLoadEarlierHistory?(): Promise<void> | void;
   returnToLatest?: {
+    title: string;
+    description: string;
     label: string;
     isPending: boolean;
     onClick(): Promise<void> | void;
@@ -366,19 +412,10 @@ export function ChatView(props: {
     promptRailTurnsRef.current = next;
     return next;
   }, [turns]);
-  const promptRailTurns = useMemo(() => {
-    const index = props.transcriptTurnIndex;
-    if (!index || index.length === 0) return loadedPromptRailTurns;
-    const loadedByTurnId = new Map(loadedPromptRailTurns.map((turn) => [turn.turnId, turn]));
-    return index.map((turn) => ({
-        ...(loadedByTurnId.get(turn.turnId) ?? {
-          turnId: turn.turnId,
-          label: turn.label,
-          reply: '',
-        }),
-        sequence: turn.sequence,
-      }));
-  }, [loadedPromptRailTurns, props.transcriptTurnIndex]);
+  const promptRailTurns = useMemo(
+    () => mergePromptAnchorRailTurns(loadedPromptRailTurns, props.transcriptTurnIndex),
+    [loadedPromptRailTurns, props.transcriptTurnIndex],
+  );
   // Stable event wrappers (advanced-use-latest): parent handlers are
   // recreated per render upstream; routing through refs keeps the
   // memoized TurnView's function props identity-stable without
@@ -570,19 +607,16 @@ export function ChatView(props: {
       aria-label={copy.conversationAriaLabel(props.activeSession.name)}
     >
       {props.returnToLatest ? (
-        <div className="maka-transcript-history-controls">
-          <Button
-            label={props.returnToLatest.label}
-            variant="ghost"
-            size="sm"
-            isDisabled={props.returnToLatest.isPending}
-            onClick={() => {
-              void Promise.resolve(props.returnToLatest?.onClick()).then(() => {
-                setLatestNavigationNonce((nonce) => nonce + 1);
-              });
-            }}
-          />
-        </div>
+        <TranscriptHistoryNotice
+          title={props.returnToLatest.title}
+          description={props.returnToLatest.description}
+          actionLabel={props.returnToLatest.label}
+          isPending={props.returnToLatest.isPending}
+          onReturnToLatest={() =>
+            Promise.resolve(props.returnToLatest?.onClick()).then(() => {
+              setLatestNavigationNonce((nonce) => nonce + 1);
+            })}
+        />
       ) : null}
       <SessionContextLayer
         sessionName={props.activeSession.name}

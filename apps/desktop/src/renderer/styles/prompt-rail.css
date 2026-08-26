@@ -179,6 +179,20 @@
   transform: scaleX(1);
 }
 
+/* Complete landmark indexes can outlive the bounded transcript bodies they
+   point at. Keep unloaded prompts actionable, but draw them as outlines so the
+   rail cannot imply that every landmark is already present in the DOM. */
+.maka-prompt-rail-tick[data-resident="false"] .maka-prompt-rail-tick-bar {
+  box-sizing: border-box;
+  border: var(--border-width-hairline) solid currentColor;
+  background: transparent;
+}
+
+.maka-prompt-rail-tick[data-resident="false"]:is(:hover, [data-active="true"])
+  .maka-prompt-rail-tick-bar {
+  background: currentColor;
+}
+
 /* HoverCard content. Astryx owns the card itself — surface, radius, shadow,
    padding — so these rules only stack and clamp the two lines and set the two
    text tiers, which stay on the same foreground aliases the transcript uses. */
@@ -207,4 +221,8 @@
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.maka-prompt-rail-preview-residency {
+  color: var(--muted-foreground);
 }

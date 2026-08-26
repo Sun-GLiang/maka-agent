@@ -333,7 +333,32 @@
 }
 .maka-transcript-history-controls {
   display: flex;
-  justify-content: center;
-  gap: 8px;
-  padding: 8px 0;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-2) clamp(var(--space-3), 4vw, var(--space-10));
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width-hairline) solid var(--border-soft);
+  border-radius: var(--radius-element);
+  background: var(--surface-raised);
+}
+
+.maka-transcript-history-copy {
+  display: flex;
+  min-width: min(100%, 28rem);
+  flex: 1 1 28rem;
+  flex-direction: column;
+  gap: var(--space-0-5);
+}
+
+.maka-transcript-history-title {
+  font: var(--maka-text-label);
+  color: var(--foreground);
+}
+
+.maka-transcript-history-description {
+  font: var(--maka-text-supporting);
+  color: var(--muted-foreground);
 }
