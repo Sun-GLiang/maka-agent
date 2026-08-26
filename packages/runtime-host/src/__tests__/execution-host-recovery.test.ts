@@ -257,6 +257,22 @@ test('startup recovery materializes legacy terminal Root sources exactly once', 
   });
 });
 
+test('startup recovery rejects a legacy terminal Root source without its durable receipt', async () => {
+  await withExecutionRoot(async (fixture) => {
+    const legacy = await fixture.seedLegacyTerminalRootWithoutSourceTranscripts();
+    fixture.deleteRootSourceProof(legacy.sources[1].messageId);
+
+    await fixture.expectHostStartupFailure();
+    await fixture.assertOwnerAvailable();
+    assert.deepEqual(
+      (await fixture.readSessionUserMessages()).filter((message) =>
+        legacy.sources.some((source) => source.messageId === message.id),
+      ),
+      [],
+    );
+  });
+});
+
 test('a fresh quoted Turn preserves durable and Runtime handoff content', async () => {
   await withExecutionRoot(async (fixture) => {
     const host = await fixture.startHost();

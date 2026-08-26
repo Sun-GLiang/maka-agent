@@ -34,6 +34,7 @@ import { createServer, type Server } from 'node:http';
 import { connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { TOOL_BOUNDARY_PROTOCOL_V1 } from '@maka/core/runtime-event';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
@@ -66,6 +67,7 @@ import {
   openInteractiveExecutionStoresForRead,
   openInteractiveExecutionStoresForWrite,
 } from '@maka/storage/execution-stores';
+import { OPERATIONAL_STATE_DATABASE_NAME } from '@maka/storage/operational-state-store';
 import { openInteractiveRuntimePolicyStoresForWrite } from '@maka/storage/runtime-policy-stores';
 import {
   resolveRootControlNamespace,
@@ -835,6 +837,20 @@ export class ExecutionFixture {
     } finally {
       await stores?.sessionStore.close?.();
       await owner.close();
+    }
+  }
+
+  deleteRootSourceProof(messageId: string): void {
+    const database = new DatabaseSync(join(this.root, OPERATIONAL_STATE_DATABASE_NAME));
+    try {
+      const result = database
+        .prepare(
+          'DELETE FROM core_root_source_message_proofs WHERE session_id = ? AND message_id = ?',
+        )
+        .run(this.sessionId, messageId);
+      assert.equal(result.changes, 1);
+    } finally {
+      database.close();
     }
   }
 

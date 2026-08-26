@@ -617,18 +617,22 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
         messageId,
       );
       if (
-        proof?.admission.sessionId === input.sessionId &&
-        proof.admission.turnId === input.turnId &&
-        proof.admission.runId === input.runId &&
-        proof.sourceMessage.messageId === messageId
+        !proof ||
+        proof.admission.sessionId !== input.sessionId ||
+        proof.admission.turnId !== input.turnId ||
+        proof.admission.runId !== input.runId ||
+        proof.sourceMessage.messageId !== messageId
       ) {
-        messageIds.add(messageId);
-        provenRootMessages.push({
-          messageId,
-          content: proof.sourceMessage.content,
-          admittedAt: proof.admission.admittedAt,
-        });
+        throw new RuntimeMessageAuthorityInvariantError(
+          `Root admission does not prove Message handoff ${messageId}`,
+        );
       }
+      messageIds.add(messageId);
+      provenRootMessages.push({
+        messageId,
+        content: proof.sourceMessage.content,
+        admittedAt: proof.admission.admittedAt,
+      });
     }
     for (const admission of admissions) {
       if (
@@ -707,7 +711,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
             sessionId,
             turnId: admission.turnId,
             runId: admission.runId,
-            messageIds: [admission.messageId],
+            messageIds: [],
           });
         } else {
           pending.push(admission);

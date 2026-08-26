@@ -29,6 +29,7 @@ import {
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_SESSION_ROLE,
 } from '@maka/core/session';
+import { RuntimeMessageAuthorityInvariantError } from '@maka/runtime/message-authority';
 import type {
   MessageAdmissionStore,
   PendingMessageAdmission,
@@ -1787,49 +1788,14 @@ test('run settlement hands off only steering admissions with immutable proof', a
   fixture.coordinator.completeIdle(batch);
 });
 
-test('run materialization forwards only exact Root source receipt fallbacks', async () => {
+test('run materialization preserves exact Root source receipt fallback order', async () => {
   const fixture = createFixture();
-  const receipt = (
-    messageId: string,
-    admittedAt: number,
-    overrides: Partial<RootTurnSourceMessageReceipt['admission']> = {},
-  ): RootTurnSourceMessageReceipt => {
-    const base = sourceReceipt(
-      messageId,
-      { text: `canonical ${messageId}` },
-      'current_turn',
-      'steering',
-      ROOT.turnId,
-    );
-    return {
-      ...base,
-      admission: {
-        ...base.admission,
-        runId: ROOT.runId,
-        admittedAt,
-        ...overrides,
-      },
-    };
-  };
-  fixture.receipts.set('wrong-session', receipt('wrong-session', 10, { sessionId: 'other' }));
-  fixture.receipts.set('exact-root', receipt('exact-root', 42));
-  fixture.receipts.set('exact-second', receipt('exact-second', 43));
-  fixture.receipts.set('wrong-turn', receipt('wrong-turn', 11, { turnId: 'other' }));
-  fixture.receipts.set('wrong-run', receipt('wrong-run', 12, { runId: 'other' }));
-  fixture.receipts.set('wrong-message', receipt('other-message', 13));
+  fixture.receipts.set('exact-root', matchingSourceReceipt('exact-root', 42));
+  fixture.receipts.set('exact-second', matchingSourceReceipt('exact-second', 43));
 
   await fixture.coordinator.materializeMessageHandoffsForRun({
     ...ROOT,
-    messageIds: [
-      'wrong-session',
-      'exact-root',
-      'wrong-turn',
-      'exact-second',
-      'exact-root',
-      'wrong-run',
-      'wrong-message',
-      'proof-less',
-    ],
+    messageIds: ['exact-root', 'exact-second', 'exact-root'],
   });
 
   assert.deepEqual(fixture.handoffCalls, [
@@ -1851,6 +1817,49 @@ test('run materialization forwards only exact Root source receipt fallbacks', as
       ],
     },
   ]);
+});
+
+test('run materialization rejects the whole requested Root batch when any receipt mismatches', async () => {
+  const mismatches: Array<{
+    messageId: string;
+    receipt?: RootTurnSourceMessageReceipt;
+  }> = [
+    { messageId: 'proof-less' },
+    {
+      messageId: 'wrong-session',
+      receipt: matchingSourceReceipt('wrong-session', 10, { sessionId: 'other' }),
+    },
+    {
+      messageId: 'wrong-turn',
+      receipt: matchingSourceReceipt('wrong-turn', 11, { turnId: 'other' }),
+    },
+    {
+      messageId: 'wrong-run',
+      receipt: matchingSourceReceipt('wrong-run', 12, { runId: 'other' }),
+    },
+    {
+      messageId: 'wrong-message',
+      receipt: matchingSourceReceipt('other-message', 13),
+    },
+  ];
+
+  for (const mismatch of mismatches) {
+    const fixture = createFixture();
+    fixture.receipts.set('exact-root', matchingSourceReceipt('exact-root', 42));
+    if (mismatch.receipt) fixture.receipts.set(mismatch.messageId, mismatch.receipt);
+
+    await assert.rejects(
+      () =>
+        fixture.coordinator.materializeMessageHandoffsForRun({
+          ...ROOT,
+          messageIds: ['exact-root', mismatch.messageId],
+        }),
+      (error: unknown) =>
+        error instanceof RuntimeMessageAuthorityInvariantError &&
+        error.message === `Root admission does not prove Message handoff ${mismatch.messageId}`,
+    );
+    assert.deepEqual(fixture.handoffCalls, []);
+  }
 });
 
 test('a failed terminal root leaves no handed-off payload for restart recovery', async () => {
@@ -2711,6 +2720,29 @@ function sourceReceipt(
       admittedAt: 1,
     },
     sourceMessage,
+  };
+}
+
+function matchingSourceReceipt(
+  messageId: string,
+  admittedAt: number,
+  overrides: Partial<RootTurnSourceMessageReceipt['admission']> = {},
+): RootTurnSourceMessageReceipt {
+  const base = sourceReceipt(
+    messageId,
+    { text: `canonical ${messageId}` },
+    'current_turn',
+    'steering',
+    ROOT.turnId,
+  );
+  return {
+    ...base,
+    admission: {
+      ...base.admission,
+      runId: ROOT.runId,
+      admittedAt,
+      ...overrides,
+    },
   };
 }
 
