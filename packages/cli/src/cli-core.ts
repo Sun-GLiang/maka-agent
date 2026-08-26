@@ -123,7 +123,9 @@ function helpText(cliCommand: string): string {
     `  ${cliCommand} runtime-host service status|start|stop|restart|logs|uninstall [--json]`,
     `  ${cliCommand} runtime-host service retire --expected-service-id <id> --expected-root-path <path> --expected-root-id <id> [--allow-interrupt-active-tasks]`,
     `  ${cliCommand} runtime-host service check-update --target <latest|next|version> [--json]`,
-    `  ${cliCommand} runtime-host service update --expected-service-id <id> --expected-root-path <path> --expected-root-id <id> [--allow-interrupt-active-tasks]`,
+    `  ${cliCommand} runtime-host service update [--target <latest|next|version>] --expected-service-id <id> --expected-root-path <path> --expected-root-id <id> [--allow-interrupt-active-tasks]`,
+    `  ${cliCommand} runtime-host service update-policy [--target <manual|latest|next|version>] [--json]`,
+    `  ${cliCommand} runtime-host service reconcile-update [--json]`,
     `  ${cliCommand} runtime-host access issue --principal <id> --grant <operation>`,
     `  ${cliCommand} runtime-host access issue --principal <id> --preset <desktop-client|terminal-client>`,
     `  ${cliCommand} runtime-host access list`,
@@ -278,10 +280,22 @@ export async function runMakaCli(
       });
     }
     case 'runtime-host-service-update': {
-      const { runManagedRuntimeHostUpdateCli } = await import('./runtime-host-update-command.js');
+      const { runManagedRuntimeHostSelectedUpdateCli, runManagedRuntimeHostUpdateCli } =
+        await import('./runtime-host-update-command.js');
       const serviceDataRoots = command.clientDataRoot
         ? deriveMakaDataRoots(command.clientDataRoot)
         : dataRoots;
+      if (command.selector) {
+        return runManagedRuntimeHostSelectedUpdateCli({
+          json: command.json,
+          framed: command.framed ?? false,
+          clientDataRoot: serviceDataRoots.clientDataRoot,
+          defaultRootPath: serviceDataRoots.workspaceRoot,
+          selector: command.selector,
+          expectedTarget: command.expectedTarget,
+          ...(command.allowInterruptActiveTasks ? { allowInterruptActiveTasks: true } : {}),
+        });
+      }
       return runManagedRuntimeHostUpdateCli({
         json: command.json,
         framed: command.framed ?? false,
@@ -306,6 +320,31 @@ export async function runMakaCli(
         clientDataRoot: serviceDataRoots.clientDataRoot,
         defaultRootPath: serviceDataRoots.workspaceRoot,
         selector: command.selector,
+        ...(command.expectedTarget ? { expectedTarget: command.expectedTarget } : {}),
+      });
+    }
+    case 'runtime-host-service-update-policy':
+    case 'runtime-host-service-reconcile-update': {
+      const { runManagedRuntimeHostUpdatePolicyCli, runManagedRuntimeHostUpdateReconcileCli } =
+        await import('./runtime-host-update-reconciliation.js');
+      const serviceDataRoots = command.clientDataRoot
+        ? deriveMakaDataRoots(command.clientDataRoot)
+        : dataRoots;
+      if (command.kind === 'runtime-host-service-update-policy') {
+        return runManagedRuntimeHostUpdatePolicyCli({
+          json: command.json,
+          framed: command.framed ?? false,
+          clientDataRoot: serviceDataRoots.clientDataRoot,
+          defaultRootPath: serviceDataRoots.workspaceRoot,
+          ...(command.policy ? { policy: command.policy } : {}),
+          ...(command.expectedTarget ? { expectedTarget: command.expectedTarget } : {}),
+        });
+      }
+      return runManagedRuntimeHostUpdateReconcileCli({
+        json: command.json,
+        framed: command.framed ?? false,
+        clientDataRoot: serviceDataRoots.clientDataRoot,
+        defaultRootPath: serviceDataRoots.workspaceRoot,
         ...(command.expectedTarget ? { expectedTarget: command.expectedTarget } : {}),
       });
     }
