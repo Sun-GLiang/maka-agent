@@ -49,6 +49,7 @@ import {
 import type {
   MarkMessagesHandedOffInput,
   PendingMessageAdmission,
+  ProvenRootMessageHandoff,
 } from '../message-admission-store.js';
 import {
   createSqliteRuntimeStore,
@@ -3755,7 +3756,9 @@ function fullHeader(overrides: Partial<SessionHeader> = {}): SessionHeader {
   };
 }
 
-type ProvenRootHandoffInput = MarkMessagesHandedOffInput;
+type ProvenRootHandoffInput = MarkMessagesHandedOffInput & {
+  readonly provenRootMessages: readonly ProvenRootMessageHandoff[];
+};
 
 async function markMessagesHandedOffWithProvenRoots(
   store: ReturnType<typeof createSqliteSessionMetadataStore>,
