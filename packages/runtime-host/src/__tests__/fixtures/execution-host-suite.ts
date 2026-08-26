@@ -39,6 +39,7 @@ import { TOOL_BOUNDARY_PROTOCOL_V1 } from '@maka/core/runtime-event';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import type { AgentRunHeader } from '@maka/core/agent-run';
 import {
+  aggregateMessageContents,
   messageContentDigest,
   normalizeMessageContent,
   type MessageContent,
@@ -730,6 +731,107 @@ export class ExecutionFixture {
         admittedAt,
       });
       assert.equal(result.kind, 'admitted');
+    } finally {
+      await stores?.sessionStore.close?.();
+      await owner.close();
+    }
+  }
+
+  async seedLegacyTerminalRootWithoutSourceTranscripts(): Promise<{
+    turnId: string;
+    runId: string;
+    sources: readonly [
+      { messageId: string; content: MessageContent; admittedAt: number },
+      { messageId: string; content: MessageContent; admittedAt: number },
+    ];
+  }> {
+    const owner = await tryAcquireInteractiveRootOwner(this.capability);
+    assert.ok(owner);
+    if (!owner) throw new Error('Unable to acquire execution root for legacy Root setup');
+    let stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForWrite>> | undefined;
+    try {
+      stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const turnId = randomUUID();
+      const runId = randomUUID();
+      const admittedAt = Date.now();
+      const followup = {
+        messageId: randomUUID(),
+        content: { text: 'legacy follow-up source' },
+        admittedAt,
+      };
+      const steering = {
+        messageId: randomUUID(),
+        content: { text: 'legacy steering source' },
+        admittedAt,
+      };
+      const normalizedInput = aggregateMessageContents([followup.content, steering.content]);
+      const admission = await stores.agentRunStore.admitRootTurn({
+        sessionId: this.sessionId,
+        turnId,
+        proposedRunId: runId,
+        proposedUserMessageId: null,
+        execution: {
+          kind: 'external_message',
+          inputDigest: messageContentDigest(normalizedInput),
+        },
+        previousRootTurnId: null,
+        normalizedInput,
+        sourceMessages: [
+          {
+            messageId: followup.messageId,
+            content: followup.content,
+            submittedContentDigest: messageContentDigest(followup.content),
+            placement: 'next_turn',
+            disposition: 'followup',
+          },
+          {
+            messageId: steering.messageId,
+            content: steering.content,
+            submittedContentDigest: messageContentDigest(steering.content),
+            placement: 'current_turn',
+            disposition: 'steering',
+          },
+        ],
+        admittedAt,
+      });
+      assert.equal(admission.kind, 'admitted');
+      const run: AgentRunHeader = {
+        runId,
+        invocationId: runId,
+        sessionId: this.sessionId,
+        turnId,
+        status: 'created',
+        backendKind: 'fake',
+        llmConnectionSlug: 'fake',
+        modelId: 'fake-model',
+        cwd: this.root,
+        permissionMode: 'ask',
+        createdAt: admittedAt,
+        updatedAt: admittedAt,
+      };
+      await stores.agentRunStore.createRun(run, { durable: true });
+      const terminalAt = admittedAt + 1;
+      const terminal = buildRecoveredTerminalRuntimeEvent({
+        id: randomUUID(),
+        run,
+        status: 'failed',
+        ts: terminalAt,
+        failureClass: 'legacy_terminal',
+        recoveryReason: 'test_legacy_terminal_root',
+      });
+      await commitTerminalRunWithRuntimeFact({
+        runStore: stores.agentRunStore,
+        runtimeEventStore: stores.runtimeEventStore,
+        newId: randomUUID,
+        sessionId: this.sessionId,
+        runId,
+        turnId,
+        status: 'failed',
+        ts: terminalAt,
+        terminalEvent: terminal,
+        failureClass: 'legacy_terminal',
+      });
+      return { turnId, runId, sources: [followup, steering] };
     } finally {
       await stores?.sessionStore.close?.();
       await owner.close();

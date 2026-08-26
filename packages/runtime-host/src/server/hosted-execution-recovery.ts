@@ -106,7 +106,11 @@ export async function prepareHostedExecutionRecovery(
       }
       if (admission.userMessageId === null) {
         if (admission.sourceMessages.length > 0) {
-          verifyQueueSourceMessages(admission, messageIndex);
+          verifyQueueSourceMessages(
+            admission,
+            messageIndex,
+            run !== undefined && isTerminalRun(run.status),
+          );
         }
         if (rootUserMessages.length > 0) {
           throw new Error(`Admitted Turn ${admission.turnId} must not record a UserMessage`);
@@ -319,9 +323,11 @@ function verifyOrRecoverUserMessage(
 function verifyQueueSourceMessages(
   admission: RootTurnAdmission,
   index: RecoveryMessageIndex,
+  allowMissing: boolean,
 ): void {
   for (const source of admission.sourceMessages) {
     const owners = index.messagesById.get(source.messageId) ?? [];
+    if (owners.length === 0 && allowMissing) continue;
     if (
       owners.length !== 1 ||
       owners[0]?.type !== 'user' ||

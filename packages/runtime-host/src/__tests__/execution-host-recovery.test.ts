@@ -217,6 +217,46 @@ test('startup recovery replays an admitted regenerate with its source lineage', 
   });
 });
 
+test('startup recovery materializes legacy terminal Root sources exactly once', async () => {
+  await withExecutionRoot(async (fixture) => {
+    const legacy = await fixture.seedLegacyTerminalRootWithoutSourceTranscripts();
+    assert.deepEqual(
+      (await fixture.readSessionUserMessages()).filter((message) =>
+        legacy.sources.some((source) => source.messageId === message.id),
+      ),
+      [],
+    );
+
+    const firstHost = await fixture.startHost();
+    await fixture.stopHost(firstHost);
+    assert.deepEqual(
+      (await fixture.readSessionUserMessages())
+        .filter((message) => legacy.sources.some((source) => source.messageId === message.id))
+        .map(({ id, turnId, ts, text }) => ({ id, turnId, ts, text })),
+      legacy.sources.map((source) => ({
+        id: source.messageId,
+        turnId: legacy.turnId,
+        ts: source.admittedAt,
+        text: source.content.text,
+      })),
+    );
+
+    const secondHost = await fixture.startHost();
+    await fixture.stopHost(secondHost);
+    assert.deepEqual(
+      (await fixture.readSessionUserMessages())
+        .filter((message) => legacy.sources.some((source) => source.messageId === message.id))
+        .map(({ id, turnId, ts, text }) => ({ id, turnId, ts, text })),
+      legacy.sources.map((source) => ({
+        id: source.messageId,
+        turnId: legacy.turnId,
+        ts: source.admittedAt,
+        text: source.content.text,
+      })),
+    );
+  });
+});
+
 test('a fresh quoted Turn preserves durable and Runtime handoff content', async () => {
   await withExecutionRoot(async (fixture) => {
     const host = await fixture.startHost();

@@ -605,6 +605,11 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     messageIds: readonly string[];
   }): Promise<void> {
     const messageIds = new Set<string>();
+    const provenRootMessages: Array<
+      NonNullable<
+        Parameters<MessageAdmissionStore['markMessagesHandedOff']>[0]['provenRootMessages']
+      >[number]
+    > = [];
     const admissions = await this.#admissions.listMessageAdmissions(input.sessionId);
     for (const messageId of new Set(input.messageIds)) {
       const proof = await this.#durableProof.readRootTurnSourceMessageReceipt(
@@ -612,11 +617,17 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
         messageId,
       );
       if (
-        proof?.admission.turnId === input.turnId &&
+        proof?.admission.sessionId === input.sessionId &&
+        proof.admission.turnId === input.turnId &&
         proof.admission.runId === input.runId &&
         proof.sourceMessage.messageId === messageId
       ) {
         messageIds.add(messageId);
+        provenRootMessages.push({
+          messageId,
+          content: proof.sourceMessage.content,
+          admittedAt: proof.admission.admittedAt,
+        });
       }
     }
     for (const admission of admissions) {
@@ -639,6 +650,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       sessionId: input.sessionId,
       messageIds: [...messageIds],
       turnId: input.turnId,
+      ...(provenRootMessages.length > 0 ? { provenRootMessages } : {}),
     });
   }
 
