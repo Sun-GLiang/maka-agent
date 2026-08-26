@@ -70,46 +70,6 @@ export function proxyTestFailure(result: TestProxyResult): {
   };
 }
 
-export function preserveSensitivePlaceholders(
-  patch: UpdateAppSettingsInput,
-  current: AppSettings,
-): UpdateAppSettingsInput {
-  const botChannels = patch.botChat?.channels
-    ? Object.fromEntries(
-        Object.entries(patch.botChat.channels).map(
-          ([provider, channelPatch]) => {
-            const currentChannel =
-              current.botChat.channels[provider as BotProvider];
-            return [
-              provider,
-              {
-                ...channelPatch,
-                ...(channelPatch?.token === SENSITIVE_PLACEHOLDER
-                  ? { token: currentChannel.token }
-                  : {}),
-                ...(channelPatch?.appSecret === SENSITIVE_PLACEHOLDER
-                  ? { appSecret: currentChannel.appSecret }
-                  : {}),
-              },
-            ];
-          },
-        ),
-      )
-    : undefined;
-
-  return {
-    ...patch,
-    ...(botChannels
-      ? {
-          botChat: {
-            ...patch.botChat,
-            channels: botChannels,
-          },
-        }
-      : {}),
-  };
-}
-
 export function maskAppSettings(
   settings: RuntimeHostAppSettings,
   revealPatch?: UpdateAppSettingsInput,

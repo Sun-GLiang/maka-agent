@@ -44,12 +44,7 @@ async function testCandidate(authEnabled: boolean): Promise<{
   const policy = createDefaultRuntimePolicy();
   let candidate: TestCandidate | undefined;
 
-  registerRuntimeHostSettingsIpc({
-    ipcMain: {
-      handle(channel, listener) {
-        handlers.set(channel, listener as (...args: unknown[]) => unknown);
-      },
-    },
+  const module = createRuntimeHostSettingsModule({
     client: {
       async queryRuntimePolicy() {
         return { revision: 0, policy };
@@ -67,6 +62,14 @@ async function testCandidate(authEnabled: boolean): Promise<{
     } as never,
     settingsStore: {} as never,
     async applyClientSettings() {},
+  });
+  registerRuntimeHostSettingsIpc({
+    ipcMain: {
+      handle(channel, listener) {
+        handlers.set(channel, listener as (...args: unknown[]) => unknown);
+      },
+    },
+    module,
   });
 
   const handler = handlers.get("settings:testNetworkProxy");

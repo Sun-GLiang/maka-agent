@@ -103,12 +103,10 @@ const exclusiveRunners = new WeakMap<
   RuntimeHostSettingsExclusiveRunner
 >();
 
-type RuntimeHostSettingsIpcRegistrationDeps =
-  | RuntimeHostSettingsIpcDeps
-  | {
-      readonly ipcMain: ReconnectableReadIpcMain;
-      readonly module: RuntimeHostSettingsModule;
-    };
+interface RuntimeHostSettingsIpcRegistrationDeps {
+  readonly ipcMain: ReconnectableReadIpcMain;
+  readonly module: RuntimeHostSettingsModule;
+}
 
 export function createRuntimeHostSettingsModule(
   deps: RuntimeHostSettingsModuleDeps,
@@ -160,8 +158,7 @@ export function runRuntimeHostSettingsExclusive<T>(
 export function registerRuntimeHostSettingsIpc(
   deps: RuntimeHostSettingsIpcRegistrationDeps,
 ): void {
-  const module =
-    "module" in deps ? deps.module : createRuntimeHostSettingsModule(deps);
+  const module = deps.module;
   handleReconnectableRead(deps.ipcMain, "settings:get", async () =>
     maskAppSettings(await module.get()),
   );
@@ -187,7 +184,7 @@ function toRuntimeHostProxyPolicy(
 ): RuntimePolicy["networkProxy"] {
   const username = proxy.username?.trim() ?? "";
   const authEnabled =
-    proxy.authEnabled ?? Boolean(username || proxy.password);
+    proxy.authEnabled ?? Boolean(username);
   return {
     enabled: proxy.enabled,
     protocol: proxy.type,
@@ -200,10 +197,6 @@ function toRuntimeHostProxyPolicy(
   };
 }
 
-function credentialOverride(value: string | undefined): string | undefined {
-  return !value || value === SENSITIVE_PLACEHOLDER ? undefined : value;
-}
-
 async function testNetworkProxyWithoutLane(
   client: RuntimeHostSettingsClient,
   input: TestProxyInput,
@@ -212,10 +205,8 @@ async function testNetworkProxyWithoutLane(
   const candidate = input.proxy
     ? toRuntimeHostProxyPolicy(input.proxy, current.autoBypassDomains)
     : undefined;
-  const password = credentialOverride(input.proxy?.password);
   const result = await client.testNetworkProxy({
     ...(candidate ? { networkProxy: candidate } : {}),
-    ...(password ? { password } : {}),
     ...(input.url ? { url: input.url } : {}),
     ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
   });

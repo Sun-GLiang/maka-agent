@@ -77,6 +77,26 @@ test("keyboard focus stays inside through Eye and commits once when Tab leaves t
   assert.equal(harness.exits, 1);
 });
 
+test("window blur does not commit a partially typed password draft", async () => {
+  const harness = await renderPasswordInputs();
+  const input = harness.document.querySelector("input") as HTMLInputElement;
+
+  harness.setDocumentFocused(false);
+  harness.focusExit(input, null);
+
+  assert.equal(harness.exits, 0);
+});
+
+test("focus exit with no destination still commits while the document is focused", async () => {
+  const harness = await renderPasswordInputs();
+  const input = harness.document.querySelector("input") as HTMLInputElement;
+
+  harness.setDocumentFocused(true);
+  harness.focusExit(input, null);
+
+  assert.equal(harness.exits, 1);
+});
+
 test("proxy password can hide Copy while ordinary password inputs keep it by default", async () => {
   const harness = await renderPasswordInputs();
   const copyButtons = harness.document.querySelectorAll(
@@ -118,7 +138,8 @@ async function renderPasswordInputs(): Promise<{
   document: Document;
   readonly exits: number;
   readonly keyEvents: { enters: number; keys: string[] };
-  focusExit(from: Element, to: Element): void;
+  focusExit(from: Element, to: Element | null): void;
+  setDocumentFocused(focused: boolean): void;
 }> {
   const { document, window } = parseHTML(
     '<div id="root"></div><button id="outside">outside</button>',
@@ -137,7 +158,12 @@ async function renderPasswordInputs(): Promise<{
   mountedRoot = root;
   let exits = 0;
   let enters = 0;
+  let documentFocused = true;
   const keys: string[] = [];
+  Object.defineProperty(document, "hasFocus", {
+    configurable: true,
+    value: () => documentFocused,
+  });
   await act(async () => {
     root.render(
       createElement(LocaleProvider, {
@@ -188,9 +214,12 @@ async function renderPasswordInputs(): Promise<{
     focusExit(_from, to) {
       const handler = reactProps(group).onBlurCapture as (event: {
         currentTarget: Element;
-        relatedTarget: Element;
+        relatedTarget: Element | null;
       }) => void;
       handler({ currentTarget: group, relatedTarget: to });
+    },
+    setDocumentFocused(focused) {
+      documentFocused = focused;
     },
   };
 }

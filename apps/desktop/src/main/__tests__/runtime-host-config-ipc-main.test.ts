@@ -113,7 +113,7 @@ test('Runtime Host config export reads selected credentials from Host authority'
   assert.equal(settings.botChat.channels.telegram.token, 'bot-secret');
 });
 
-test('Runtime Host config export includes settings when credentials are selected alone', async () => {
+test('Runtime Host credentials-only export includes only schema-v1 credential fields', async () => {
   const bundle = await gatherRuntimeHostConfig(
     ['credentials'],
     {
@@ -137,10 +137,11 @@ test('Runtime Host config export includes settings when credentials are selected
     } as never,
   );
 
-  const settings = bundle.data.settings as Record<string, any>;
   assert.deepEqual(bundle.includedData, ['settings', 'credentials']);
-  assert.equal(settings.network.proxy.password, 'proxy-host');
-  assert.equal(settings.webSearch.providers.tavily.apiKey, 'tavily-host');
+  assert.deepEqual(bundle.data.settings, {
+    network: { proxy: { password: 'proxy-host' } },
+    webSearch: { providers: { tavily: { apiKey: 'tavily-host' } } },
+  });
 });
 
 test('Runtime Host config export writes an empty v1 proxy password when none is configured', async () => {

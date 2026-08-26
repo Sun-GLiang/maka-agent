@@ -24,7 +24,6 @@ import { SENSITIVE_PLACEHOLDER } from "@maka/core/settings/network-settings";
 import {
   buildSettingsUpdateResult,
   maskAppSettings,
-  preserveSensitivePlaceholders,
   toSettingsTestResult,
 } from "../settings-ipc-helpers.js";
 
@@ -96,32 +95,6 @@ describe("settings IPC helpers", () => {
       SENSITIVE_PLACEHOLDER,
     );
     assert.equal(masked.webSearch.providers.tavily.credentialSource, "saved");
-  });
-
-  test("preserves placeholder values as stored secrets before persisting patches", () => {
-    const current = createDefaultSettings();
-    current.botChat.channels.telegram.token = "stored-bot-token";
-    current.botChat.channels.feishu.appSecret = "stored-feishu-secret";
-
-    const patch = preserveSensitivePlaceholders(
-      {
-        botChat: {
-          channels: {
-            telegram: { token: SENSITIVE_PLACEHOLDER, enabled: true },
-            feishu: { appSecret: SENSITIVE_PLACEHOLDER, appId: "cli_123" },
-          },
-        },
-      },
-      current,
-    );
-
-    assert.equal(patch.botChat?.channels?.telegram?.token, "stored-bot-token");
-    assert.equal(patch.botChat?.channels?.telegram?.enabled, true);
-    assert.equal(
-      patch.botChat?.channels?.feishu?.appSecret,
-      "stored-feishu-secret",
-    );
-    assert.equal(patch.botChat?.channels?.feishu?.appId, "cli_123");
   });
 
   test("maps runtime bot test results as credential checks, not operational readiness", () => {

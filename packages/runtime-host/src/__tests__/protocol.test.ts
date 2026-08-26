@@ -862,6 +862,16 @@ describe('Runtime Host bootstrap protocol', () => {
     );
   });
 
+  test('rejects password overrides on network proxy tests', () => {
+    assert.throws(
+      () =>
+        HOST_OPERATION_SPECS['network-proxy.test'].decodeInput({
+          password: 'must-not-cross-wire',
+        }),
+      isInvalidFrame,
+    );
+  });
+
   test('keeps compound proxy credentials write-only on the protocol', () => {
     const operation = RUNTIME_POLICY_OPERATION_SPECS['runtime.policy.network-proxy.update'];
     const input = {

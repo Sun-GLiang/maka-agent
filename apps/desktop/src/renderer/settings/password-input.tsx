@@ -136,6 +136,9 @@ export function PasswordInput(props: {
       status={props.status}
       onBlurCapture={(event) => {
         const destination = event.relatedTarget;
+        if (!destination && !event.currentTarget.ownerDocument.hasFocus()) {
+          return;
+        }
         if (
           destination &&
           event.currentTarget.contains(destination as Node)

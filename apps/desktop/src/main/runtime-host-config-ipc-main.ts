@@ -192,11 +192,13 @@ export async function gatherRuntimeHostConfig(
   // Schema v1 stores the network-proxy password and Tavily key in the
   // settings payload. Keep a credentials-only request lossless by making the
   // dependency explicit in the generated bundle.
-  if (selected.has('settings') || selected.has('credentials')) {
+  if (selected.has('settings')) {
     const settings = await deps.getSettings();
     data.settings = selected.has('credentials')
       ? restoreHostSettingsSecrets(settings, secrets)
       : stripSettingsSecretsForExport(settings);
+  } else if (selected.has('credentials')) {
+    data.settings = projectHostSettingsSecrets(secrets);
   }
   if (selected.has('credentials') && catalog) {
     data.credentials = connectionCredentials(catalog.connections, secrets);
@@ -404,6 +406,29 @@ function restoreHostSettingsSecrets(
         tavily: {
           ...settings.webSearch.providers.tavily,
           apiKey: webSearch,
+        },
+      },
+    },
+  };
+}
+
+function projectHostSettingsSecrets(
+  secrets: ReadonlyMap<string, string>,
+): Record<string, unknown> {
+  return {
+    network: {
+      proxy: {
+        password:
+          secrets.get(locatorKey({ scope: 'network_proxy', kind: 'password' })) ?? '',
+      },
+    },
+    webSearch: {
+      providers: {
+        tavily: {
+          apiKey:
+            secrets.get(
+              locatorKey({ scope: 'web_search', provider: 'tavily', kind: 'api_key' }),
+            ) ?? '',
         },
       },
     },

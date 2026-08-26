@@ -21,7 +21,6 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type {
   AppSettings,
-  SettingsTestResult,
   UpdateAppSettingsInput,
   UsageRange,
   UsageStats,
@@ -52,7 +51,6 @@ export interface SettingsStore {
     predicate: (current: AppSettings) => boolean,
     patch: ConditionalSettingsPatch,
   ): Promise<{ applied: boolean; settings: AppSettings }>;
-  testNetworkProxy(): Promise<SettingsTestResult>;
   usageStats(range?: UsageRange): Promise<UsageStats>;
   /**
    * PR110b: upsert a single onboarding milestone. Caller passes the
@@ -195,28 +193,6 @@ class FileSettingsStore implements SettingsStore {
     });
     if (!result) throw new Error('Failed to clear onboarding milestone');
     return result;
-  }
-
-  async testNetworkProxy(): Promise<SettingsTestResult> {
-    const started = Date.now();
-    const settings = await this.get();
-    const proxy = settings.network.proxy;
-    if (!proxy.enabled) {
-      return { ok: true, message: '代理未启用，当前会直接连接。', latencyMs: Date.now() - started };
-    }
-    if (!proxy.host.trim()) return { ok: false, message: '代理服务器地址不能为空' };
-    if (!Number.isInteger(proxy.port) || proxy.port <= 0 || proxy.port > 65535) {
-      return { ok: false, message: '代理端口必须在 1-65535 之间' };
-    }
-    if (proxy.authEnabled && !proxy.username.trim()) {
-      return { ok: false, message: '启用代理认证后需要用户名' };
-    }
-    return {
-      ok: true,
-      message: `代理配置有效：${proxy.protocol}://${proxy.host}:${proxy.port}`,
-      latencyMs: Date.now() - started,
-      details: { bypassList: proxy.bypassList, autoBypassDomains: proxy.autoBypassDomains },
-    };
   }
 
   async usageStats(range: UsageRange = '24h'): Promise<UsageStats> {
