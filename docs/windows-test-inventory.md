@@ -16,10 +16,10 @@ Locations intentionally omit line numbers so unrelated edits do not invalidate t
 | Classification | Count |
 |---|---:|
 | windows-backend-gap | 25 |
-| portable-candidate | 12 |
+| portable-candidate | 14 |
 | platform-contract | 35 |
 
-Total Windows-excluded declarations: **72**
+Total Windows-excluded declarations: **74**
 
 ## Inventory
 
@@ -89,7 +89,9 @@ Total Windows-excluded declarations: **72**
 | platform-contract | `packages/storage/src/__tests__/runtime-policy-stores.test.ts` validates proxy policy mutations before clearing and reports failed follow-up commits as unknown | `process.platform === 'win32' ? 'POSIX permissions are required to inject a persistence failure' : false` |
 | platform-contract | `packages/storage/src/__tests__/runtime-policy-stores.test.ts` reports unknown outcome when active proxy password persistence fails after clearing | `process.platform === 'win32' ? 'POSIX permissions are required to inject a persistence failure' : false` |
 | platform-contract | `packages/storage/src/__tests__/runtime-policy-stores.test.ts` preserves unknown commit semantics and consumes the completion ticket | `process.platform === 'win32' ? 'POSIX permissions are required to inject a persistence failure' : false` |
+| portable-candidate | `packages/storage/src/__tests__/runtime-policy-stores.test.ts` proxy replacement failure before vault publication leaves both stores unchanged | `process.platform === 'win32' ? 'POSIX file handles are required to inject persistence failures' : false` |
 | portable-candidate | `packages/storage/src/__tests__/runtime-policy-stores.test.ts` proxy replacement never persists its secret outside the credential vault | `process.platform === 'win32' ? 'POSIX file handles are required to inject persistence failures' : false` |
+| portable-candidate | `packages/storage/src/__tests__/runtime-policy-stores.test.ts` authentication disable failure before policy publication leaves both stores unchanged | `process.platform === 'win32' ? 'POSIX file handles are required to inject persistence failures' : false` |
 | portable-candidate | `packages/storage/src/__tests__/runtime-policy-stores.test.ts` disabling proxy authentication commits policy before deleting its credential | `process.platform === 'win32' ? 'POSIX file handles are required to inject persistence failures' : false` |
 | platform-contract | `packages/storage/src/__tests__/runtime-policy-stores.test.ts` successor recovery removes credentials orphaned by an interrupted connection removal | `process.platform === 'win32' ? 'POSIX permissions are required to inject a persistence failure' : false` |
 | platform-contract | `packages/storage/src/__tests__/runtime-policy-stores.test.ts` fails closed on final symlinks, FIFOs, and oversized documents without changing bytes | `process.platform === 'win32'` |
