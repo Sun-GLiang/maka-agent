@@ -18,7 +18,11 @@
  */
 
 import { isDeepStrictEqual } from 'node:util';
-import { normalizeMessageContent, type MessageContent } from '@maka/core/events';
+import {
+  decodeMessageContent,
+  normalizeMessageContent,
+  type MessageContent,
+} from '@maka/core/events';
 import {
   normalizeSubmittedTurnIntent,
   submittedTurnIntentsEqual,
@@ -49,6 +53,12 @@ export interface PendingMessageAdmission {
   readonly admittedAt: number;
 }
 
+export interface ProvenRootMessageHandoff {
+  readonly messageId: string;
+  readonly content: MessageContent;
+  readonly admittedAt: number;
+}
+
 export interface MessageAdmissionStore {
   commitMessageAdmission(admission: PendingMessageAdmission): Promise<PendingMessageAdmission>;
   readMessageAdmission(
@@ -66,6 +76,7 @@ export interface MessageAdmissionStore {
     sessionId: string;
     messageIds: readonly string[];
     turnId: string;
+    provenRootMessages?: readonly ProvenRootMessageHandoff[];
   }): Promise<void>;
   updateMessageAdmission(admission: PendingMessageAdmission): Promise<void>;
   reorderMessageAdmissions(sessionId: string, messageIds: readonly string[]): Promise<void>;
@@ -106,6 +117,19 @@ export function normalizePendingMessageAdmission(
     throw new Error('Invalid pending Message submitted content digest');
   }
   return normalized;
+}
+
+export function normalizeProvenRootMessageHandoff(
+  handoff: ProvenRootMessageHandoff,
+): ProvenRootMessageHandoff {
+  assertSafeId(handoff.messageId, 'Invalid proven Root Message identity');
+  if (!Number.isSafeInteger(handoff.admittedAt) || handoff.admittedAt < 0) {
+    throw new Error('Invalid proven Root Message timestamp');
+  }
+  return Object.freeze({
+    ...handoff,
+    content: decodeMessageContent(handoff.content),
+  });
 }
 
 export function samePendingMessageAdmission(

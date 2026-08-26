@@ -101,8 +101,10 @@ import {
 import { markPersisted } from '@maka/core/persisted-value';
 import {
   normalizePendingMessageAdmission,
+  normalizeProvenRootMessageHandoff,
   samePendingMessageAdmission,
   type PendingMessageAdmission,
+  type ProvenRootMessageHandoff,
 } from './message-admission-store.js';
 import { normalizeSubmittedTurnIntent } from './submitted-turn-intent.js';
 import {
@@ -1882,12 +1884,27 @@ export class SqliteSessionMetadataStore {
     sessionId: string;
     messageIds: readonly string[];
     turnId: string;
+    provenRootMessages?: readonly ProvenRootMessageHandoff[];
   }): Promise<void> {
     this.assertOpen();
     assertSafeSessionId(input.sessionId);
     assertSafeSessionId(input.turnId);
     const unique = [...new Set(input.messageIds)];
     for (const messageId of unique) assertSafeSessionId(messageId);
+    const requestedMessageIds = new Set(unique);
+    const provenRootMessages = new Map<string, ProvenRootMessageHandoff>();
+    for (const fallback of input.provenRootMessages ?? []) {
+      const normalized = normalizeProvenRootMessageHandoff(fallback);
+      if (!requestedMessageIds.has(normalized.messageId)) {
+        throw new SessionMetadataConflictError(
+          'Proven Root Message identity is not present in messageIds',
+        );
+      }
+      if (provenRootMessages.has(normalized.messageId)) {
+        throw new SessionMetadataConflictError('Proven Root Messages contain duplicate identities');
+      }
+      provenRootMessages.set(normalized.messageId, normalized);
+    }
     this.transaction(() => {
       const lastSequenceRow = this.db
         .prepare(
@@ -1903,6 +1920,7 @@ export class SqliteSessionMetadataStore {
       let nextSequence = lastSequenceRow.last_sequence + 1;
       const materialized: StoredMessage[] = [];
       for (const messageId of unique) {
+        const fallback = provenRootMessages.get(messageId);
         const admissionRow = this.db
           .prepare(
             `
@@ -1917,6 +1935,13 @@ export class SqliteSessionMetadataStore {
         const admission = admissionRow
           ? decodeMessageAdmissionRow(input.sessionId, admissionRow)
           : undefined;
+        if (
+          admission !== undefined &&
+          fallback !== undefined &&
+          !messageContentsEqual(admission.content, fallback.content)
+        ) {
+          throw new SessionMetadataConflictError('Message admission fallback content conflict');
+        }
         if (
           !admission &&
           this.db
@@ -1949,14 +1974,14 @@ export class SqliteSessionMetadataStore {
           );
         }
         if (rows.length === 0) {
-          if (!admission)
-            throw new SessionMetadataConflictError('Message admission does not exist');
+          const source = admission ?? fallback;
+          if (!source) throw new SessionMetadataConflictError('Message admission does not exist');
           const message = decodeCanonicalMessage({
             type: 'user',
             id: messageId,
             turnId: input.turnId,
-            ts: admission.admittedAt,
-            ...admission.content,
+            ts: source.admittedAt,
+            ...source.content,
             steeringEventId: messageId,
           });
           const json = JSON.stringify(message);
@@ -1974,8 +1999,11 @@ export class SqliteSessionMetadataStore {
           if (
             message.type !== 'user' ||
             message.id !== messageId ||
-            (admission !== undefined &&
-              !messageContentsEqual(normalizeMessageContent(message), admission.content))
+            ((admission !== undefined || fallback !== undefined) &&
+              !messageContentsEqual(
+                normalizeMessageContent(message),
+                (admission ?? fallback)!.content,
+              ))
           ) {
             throw new SessionMetadataConflictError(
               'Message admission transcript identity conflict',
