@@ -51,7 +51,10 @@ describe('Maka CLI args', () => {
     assert.match(help.text, /^  maka run /m);
     assert.match(help.text, /^  maka activate /m);
     assert.match(help.text, /^  maka eval /m);
-    assert.match(help.text, /^  maka --acp      Serve ACP v1 over stdio$/m);
+    assert.match(
+      help.text,
+      /^  maka --acp      Serve ACP v1 over stdio \(initialize only; session support in progress\)$/m,
+    );
     assert.match(help.text, /^  maka runtime-host serve /m);
     assert.doesNotMatch(help.text, /cli:dev/);
   });
