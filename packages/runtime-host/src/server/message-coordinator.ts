@@ -574,27 +574,18 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     messageIds: readonly string[];
   }): Promise<void> {
     const handoff: string[] = [];
+    const provenRootMessages: Array<
+      NonNullable<MarkMessagesHandedOffInput['provenRootMessages']>[number]
+    > = [];
     for (const messageId of new Set(input.messageIds)) {
-      const proof = await this.#durableProof.readRootTurnSourceMessageReceipt(
-        input.sessionId,
-        messageId,
-      );
-      if (
-        !proof ||
-        proof.admission.turnId !== input.turnId ||
-        proof.admission.runId !== input.runId ||
-        proof.sourceMessage.messageId !== messageId
-      ) {
-        throw new RuntimeMessageAuthorityInvariantError(
-          `Root admission does not prove Message handoff ${messageId}`,
-        );
-      }
       handoff.push(messageId);
+      provenRootMessages.push(await this.#readProvenRootMessage(input, messageId));
     }
     await this.#admissions.markMessagesHandedOff({
       sessionId: input.sessionId,
       messageIds: handoff,
       turnId: input.turnId,
+      ...(provenRootMessages.length > 0 ? { provenRootMessages } : {}),
     });
   }
 
@@ -611,27 +602,8 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     > = [];
     const admissions = await this.#admissions.listMessageAdmissions(input.sessionId);
     for (const messageId of new Set(input.messageIds)) {
-      const proof = await this.#durableProof.readRootTurnSourceMessageReceipt(
-        input.sessionId,
-        messageId,
-      );
-      if (
-        !proof ||
-        proof.admission.sessionId !== input.sessionId ||
-        proof.admission.turnId !== input.turnId ||
-        proof.admission.runId !== input.runId ||
-        proof.sourceMessage.messageId !== messageId
-      ) {
-        throw new RuntimeMessageAuthorityInvariantError(
-          `Root admission does not prove Message handoff ${messageId}`,
-        );
-      }
       messageIds.add(messageId);
-      provenRootMessages.push({
-        messageId,
-        content: proof.sourceMessage.content,
-        admittedAt: proof.admission.admittedAt,
-      });
+      provenRootMessages.push(await this.#readProvenRootMessage(input, messageId));
     }
     for (const admission of admissions) {
       if (
@@ -655,6 +627,32 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       turnId: input.turnId,
       ...(provenRootMessages.length > 0 ? { provenRootMessages } : {}),
     });
+  }
+
+  async #readProvenRootMessage(
+    input: { readonly sessionId: string; readonly turnId: string; readonly runId: string },
+    messageId: string,
+  ): Promise<NonNullable<MarkMessagesHandedOffInput['provenRootMessages']>[number]> {
+    const proof = await this.#durableProof.readRootTurnSourceMessageReceipt(
+      input.sessionId,
+      messageId,
+    );
+    if (
+      !proof ||
+      proof.admission.sessionId !== input.sessionId ||
+      proof.admission.turnId !== input.turnId ||
+      proof.admission.runId !== input.runId ||
+      proof.sourceMessage.messageId !== messageId
+    ) {
+      throw new RuntimeMessageAuthorityInvariantError(
+        `Root admission does not prove Message handoff ${messageId}`,
+      );
+    }
+    return {
+      messageId,
+      content: proof.sourceMessage.content,
+      admittedAt: proof.admission.admittedAt,
+    };
   }
 
   async cancelMessages(sessionId: string, messageIds: readonly string[]): Promise<void> {

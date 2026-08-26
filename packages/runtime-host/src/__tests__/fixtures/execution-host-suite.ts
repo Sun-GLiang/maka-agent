@@ -739,7 +739,9 @@ export class ExecutionFixture {
     }
   }
 
-  async seedLegacyTerminalRootWithoutSourceTranscripts(): Promise<{
+  async seedLegacyRootWithoutSourceTranscripts(
+    runState: 'missing' | 'created' | 'terminal' = 'terminal',
+  ): Promise<{
     turnId: string;
     runId: string;
     sources: readonly [
@@ -811,28 +813,32 @@ export class ExecutionFixture {
         createdAt: admittedAt,
         updatedAt: admittedAt,
       };
-      await stores.agentRunStore.createRun(run, { durable: true });
-      const terminalAt = admittedAt + 1;
-      const terminal = buildRecoveredTerminalRuntimeEvent({
-        id: randomUUID(),
-        run,
-        status: 'failed',
-        ts: terminalAt,
-        failureClass: 'legacy_terminal',
-        recoveryReason: 'test_legacy_terminal_root',
-      });
-      await commitTerminalRunWithRuntimeFact({
-        runStore: stores.agentRunStore,
-        runtimeEventStore: stores.runtimeEventStore,
-        newId: randomUUID,
-        sessionId: this.sessionId,
-        runId,
-        turnId,
-        status: 'failed',
-        ts: terminalAt,
-        terminalEvent: terminal,
-        failureClass: 'legacy_terminal',
-      });
+      if (runState !== 'missing') {
+        await stores.agentRunStore.createRun(run, { durable: true });
+      }
+      if (runState === 'terminal') {
+        const terminalAt = admittedAt + 1;
+        const terminal = buildRecoveredTerminalRuntimeEvent({
+          id: randomUUID(),
+          run,
+          status: 'failed',
+          ts: terminalAt,
+          failureClass: 'legacy_terminal',
+          recoveryReason: 'test_legacy_terminal_root',
+        });
+        await commitTerminalRunWithRuntimeFact({
+          runStore: stores.agentRunStore,
+          runtimeEventStore: stores.runtimeEventStore,
+          newId: randomUUID,
+          sessionId: this.sessionId,
+          runId,
+          turnId,
+          status: 'failed',
+          ts: terminalAt,
+          terminalEvent: terminal,
+          failureClass: 'legacy_terminal',
+        });
+      }
       return { turnId, runId, sources: [followup, steering] };
     } finally {
       await stores?.sessionStore.close?.();
@@ -1133,6 +1139,20 @@ export class ExecutionFixture {
     try {
       stores = await openInteractiveExecutionStoresForRead(reader.lease);
       return (await stores.interactionStore.listSessionPending(this.sessionId)).length;
+    } finally {
+      await stores?.sessionStore.close?.();
+      await reader.close();
+    }
+  }
+
+  async readTurnRuns(turnId: string) {
+    const reader = await acquireReader(this.capability);
+    let stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForRead>> | undefined;
+    try {
+      stores = await openInteractiveExecutionStoresForRead(reader.lease);
+      return (await stores.agentRunStore.listSessionRuns(this.sessionId)).filter(
+        (candidate) => candidate.turnId === turnId,
+      );
     } finally {
       await stores?.sessionStore.close?.();
       await reader.close();

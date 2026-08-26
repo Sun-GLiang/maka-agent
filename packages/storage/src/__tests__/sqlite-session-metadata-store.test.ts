@@ -473,6 +473,396 @@ describe('SqliteSessionMetadataStore', () => {
     }
   });
 
+  test('inserts proven Root messages before existing output from their Turn', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-legacy-root-order-'));
+    const path = join(root, 'state.sqlite');
+    const store = createSqliteSessionMetadataStore(path);
+    try {
+      await store.create(fullHeader({ id: 'session-legacy-order' }));
+      const legacyOutput = 'existing chunked output '.repeat(4_096);
+      await store.appendMessages(
+        'session-legacy-order',
+        [
+          {
+            type: 'assistant',
+            id: 'message-prior-output',
+            turnId: 'turn-prior',
+            ts: 10,
+            text: 'prior output',
+            modelId: 'fake-model',
+          },
+          {
+            type: 'assistant',
+            id: 'message-legacy-output',
+            turnId: 'turn-legacy-order',
+            ts: 18,
+            text: legacyOutput,
+            modelId: 'fake-model',
+          },
+          {
+            type: 'user',
+            id: 'message-newer-user',
+            turnId: 'turn-newer',
+            ts: 30,
+            text: 'newest preview',
+          },
+        ],
+        { lastMessageAt: 30, lastMessagePreview: 'newest preview' },
+      );
+
+      await markMessagesHandedOffWithProvenRoots(store, {
+        sessionId: 'session-legacy-order',
+        messageIds: ['message-legacy-followup', 'message-legacy-steering'],
+        turnId: 'turn-legacy-order',
+        provenRootMessages: [
+          {
+            messageId: 'message-legacy-followup',
+            content: { text: 'legacy follow-up' },
+            admittedAt: 17,
+          },
+          {
+            messageId: 'message-legacy-steering',
+            content: { text: 'legacy steering' },
+            admittedAt: 17,
+          },
+        ],
+      });
+
+      assert.deepEqual(
+        (await store.readMessages('session-legacy-order')).map((message) => message.id),
+        [
+          'message-prior-output',
+          'message-legacy-followup',
+          'message-legacy-steering',
+          'message-legacy-output',
+          'message-newer-user',
+        ],
+      );
+      assert.equal((await store.read('session-legacy-order')).header.lastMessageAt, 30);
+      const shiftedOutput = (await store.readMessages('session-legacy-order')).find(
+        (message) => message.id === 'message-legacy-output',
+      );
+      assert.equal(shiftedOutput?.type, 'assistant');
+      assert.equal(shiftedOutput?.type === 'assistant' ? shiftedOutput.text : undefined, legacyOutput);
+      assert.equal(
+        (await store.readCatalogRecord('session-legacy-order')).lastMessagePreview,
+        'newest preview',
+      );
+      const audit = new DatabaseSync(path, { readOnly: true });
+      try {
+        assert.deepEqual(audit.prepare('PRAGMA foreign_key_check').all(), []);
+      } finally {
+        audit.close();
+      }
+    } finally {
+      store.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('places a proven Root message before an equally-timed newer transcript row', async () => {
+    const store = createSqliteSessionMetadataStore(':memory:');
+    try {
+      await store.create(fullHeader({ id: 'session-legacy-time-tie' }));
+      await store.appendMessages(
+        'session-legacy-time-tie',
+        [
+          {
+            type: 'user',
+            id: 'message-newer-time-tie',
+            turnId: 'turn-newer-time-tie',
+            ts: 17,
+            text: 'newer same-millisecond preview',
+          },
+        ],
+        { lastMessageAt: 17, lastMessagePreview: 'newer same-millisecond preview' },
+      );
+
+      await markMessagesHandedOffWithProvenRoots(store, {
+        sessionId: 'session-legacy-time-tie',
+        messageIds: ['message-legacy-time-tie'],
+        turnId: 'turn-legacy-time-tie',
+        provenRootMessages: [
+          {
+            messageId: 'message-legacy-time-tie',
+            content: { text: 'legacy same-millisecond source' },
+            admittedAt: 17,
+          },
+        ],
+      });
+
+      assert.deepEqual(
+        (await store.readMessages('session-legacy-time-tie')).map((message) => message.id),
+        ['message-legacy-time-tie', 'message-newer-time-tie'],
+      );
+      assert.equal(
+        (await store.readCatalogRecord('session-legacy-time-tie')).lastMessagePreview,
+        'newer same-millisecond preview',
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  test('keeps ordinary admission-only handoff append semantics', async () => {
+    const store = createSqliteSessionMetadataStore(':memory:');
+    try {
+      await store.create(fullHeader({ id: 'session-ordinary-handoff-order' }));
+      await store.appendMessages(
+        'session-ordinary-handoff-order',
+        [
+          {
+            type: 'assistant',
+            id: 'message-existing-ordinary-output',
+            turnId: 'turn-ordinary-handoff-order',
+            ts: 20,
+            text: 'existing output',
+            modelId: 'fake-model',
+          },
+        ],
+        { lastMessageAt: 20, lastMessagePreview: 'existing output' },
+      );
+      await store.commitMessageAdmission({
+        sessionId: 'session-ordinary-handoff-order',
+        turnId: 'turn-ordinary-handoff-order',
+        runId: 'run-ordinary-handoff-order',
+        messageId: 'message-ordinary-admission',
+        content: { text: 'ordinary admission' },
+        submittedContentDigest: messageContentDigest({ text: 'ordinary admission' }),
+        submittedPlacement: 'current_turn',
+        placement: 'current_turn',
+        disposition: 'steering',
+        admittedAt: 10,
+      });
+
+      await store.markMessagesHandedOff({
+        sessionId: 'session-ordinary-handoff-order',
+        messageIds: ['message-ordinary-admission'],
+        turnId: 'turn-ordinary-handoff-order',
+      });
+
+      assert.deepEqual(
+        (await store.readMessages('session-ordinary-handoff-order')).map(
+          (message) => message.id,
+        ),
+        ['message-existing-ordinary-output', 'message-ordinary-admission'],
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  test('rejects an admission handed off to a different Turn', async () => {
+    const store = createSqliteSessionMetadataStore(':memory:');
+    try {
+      await store.create(fullHeader({ id: 'session-admission-turn-conflict' }));
+      await store.commitMessageAdmission({
+        sessionId: 'session-admission-turn-conflict',
+        turnId: 'turn-admission-authority',
+        runId: 'run-admission-turn-conflict',
+        messageId: 'message-admission-turn-conflict',
+        content: { text: 'turn-owned admission' },
+        submittedContentDigest: messageContentDigest({ text: 'turn-owned admission' }),
+        submittedPlacement: 'current_turn',
+        placement: 'current_turn',
+        disposition: 'steering',
+        admittedAt: 24,
+      });
+
+      await assert.rejects(
+        store.markMessagesHandedOff({
+          sessionId: 'session-admission-turn-conflict',
+          messageIds: ['message-admission-turn-conflict'],
+          turnId: 'turn-different',
+        }),
+        /Turn conflict/,
+      );
+      assert.deepEqual(await store.readMessages('session-admission-turn-conflict'), []);
+      assert.equal((await store.listMessageAdmissions('session-admission-turn-conflict')).length, 1);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('rejects fully materialized proven Root sources in a conflicting order', async () => {
+    const store = createSqliteSessionMetadataStore(':memory:');
+    try {
+      await store.create(fullHeader({ id: 'session-existing-source-order' }));
+      await store.appendMessages(
+        'session-existing-source-order',
+        [
+          {
+            type: 'user',
+            id: 'message-existing-source-b',
+            turnId: 'turn-existing-source-order',
+            ts: 25,
+            text: 'source b',
+          },
+          {
+            type: 'user',
+            id: 'message-existing-source-a',
+            turnId: 'turn-existing-source-order',
+            ts: 25,
+            text: 'source a',
+          },
+        ],
+        { lastMessageAt: 25, lastMessagePreview: 'source a' },
+      );
+
+      await assert.rejects(
+        markMessagesHandedOffWithProvenRoots(store, {
+          sessionId: 'session-existing-source-order',
+          messageIds: ['message-existing-source-a', 'message-existing-source-b'],
+          turnId: 'turn-existing-source-order',
+          provenRootMessages: [
+            {
+              messageId: 'message-existing-source-a',
+              content: { text: 'source a' },
+              admittedAt: 25,
+            },
+            {
+              messageId: 'message-existing-source-b',
+              content: { text: 'source b' },
+              admittedAt: 25,
+            },
+          ],
+        }),
+        /source order conflict/,
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  test('rejects a partial proven Root group that already crosses newer history', async () => {
+    const store = createSqliteSessionMetadataStore(':memory:');
+    try {
+      await store.create(fullHeader({ id: 'session-partial-source-order' }));
+      await store.appendMessages(
+        'session-partial-source-order',
+        [
+          {
+            type: 'user',
+            id: 'message-partial-source-a',
+            turnId: 'turn-partial-source-order',
+            ts: 15,
+            text: 'source a',
+          },
+          {
+            type: 'user',
+            id: 'message-partial-newer-tail',
+            turnId: 'turn-partial-newer',
+            ts: 30,
+            text: 'newer tail',
+          },
+          {
+            type: 'user',
+            id: 'message-partial-source-c',
+            turnId: 'turn-partial-source-order',
+            ts: 15,
+            text: 'source c',
+          },
+        ],
+        { lastMessageAt: 30, lastMessagePreview: 'newer tail' },
+      );
+
+      await assert.rejects(
+        markMessagesHandedOffWithProvenRoots(store, {
+          sessionId: 'session-partial-source-order',
+          messageIds: [
+            'message-partial-source-a',
+            'message-partial-source-b',
+            'message-partial-source-c',
+          ],
+          turnId: 'turn-partial-source-order',
+          provenRootMessages: [
+            {
+              messageId: 'message-partial-source-a',
+              content: { text: 'source a' },
+              admittedAt: 15,
+            },
+            {
+              messageId: 'message-partial-source-b',
+              content: { text: 'source b' },
+              admittedAt: 15,
+            },
+            {
+              messageId: 'message-partial-source-c',
+              content: { text: 'source c' },
+              admittedAt: 15,
+            },
+          ],
+        }),
+        /source order conflict/,
+      );
+      assert.deepEqual(
+        (await store.readMessages('session-partial-source-order')).map(
+          (message) => message.id,
+        ),
+        [
+          'message-partial-source-a',
+          'message-partial-newer-tail',
+          'message-partial-source-c',
+        ],
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  test('rejects an unsafe proven Root tail insertion range', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-legacy-root-overflow-'));
+    const path = join(root, 'state.sqlite');
+    const store = createSqliteSessionMetadataStore(path);
+    try {
+      await store.create(fullHeader({ id: 'session-legacy-overflow' }));
+      await store.appendMessages(
+        'session-legacy-overflow',
+        [
+          {
+            type: 'assistant',
+            id: 'message-overflow-anchor',
+            turnId: 'turn-overflow-anchor',
+            ts: 1,
+            text: 'anchor',
+            modelId: 'fake-model',
+          },
+        ],
+        { lastMessageAt: 1, lastMessagePreview: 'anchor' },
+      );
+      const database = new DatabaseSync(path);
+      try {
+        database
+          .prepare(
+            'UPDATE session_messages SET sequence = ? WHERE session_id = ? AND sequence = 0',
+          )
+          .run(Number.MAX_SAFE_INTEGER - 1, 'session-legacy-overflow');
+      } finally {
+        database.close();
+      }
+
+      await assert.rejects(
+        markMessagesHandedOffWithProvenRoots(store, {
+          sessionId: 'session-legacy-overflow',
+          messageIds: ['message-overflow-a', 'message-overflow-b'],
+          turnId: 'turn-legacy-overflow',
+          provenRootMessages: [
+            { messageId: 'message-overflow-a', content: { text: 'a' }, admittedAt: 2 },
+            { messageId: 'message-overflow-b', content: { text: 'b' }, admittedAt: 2 },
+          ],
+        }),
+        /sequence overflow/,
+      );
+      assert.deepEqual(
+        (await store.readMessages('session-legacy-overflow')).map((message) => message.id),
+        ['message-overflow-anchor'],
+      );
+    } finally {
+      store.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('repeats a proven Root message handoff without duplicating its transcript', async () => {
     const store = createSqliteSessionMetadataStore(':memory:');
     try {
