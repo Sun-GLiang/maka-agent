@@ -6824,6 +6824,99 @@ describe('AiSdkBackend error surfaces', () => {
   });
 });
 
+describe('AiSdkBackend Plan tool boundaries', () => {
+  test('continues to a final response after update_plan completes execution', async () => {
+    const { calls, events } = await runPlanToolBoundary({
+      turnId: 'turn-plan-complete',
+      prompt: 'execute the approved plan',
+      toolName: 'update_plan',
+      toolInput: { steps: [{ id: 'change', status: 'completed' }] },
+      toolResult: {
+        kind: 'plan_execution_completed',
+        execution: planExecution('completed'),
+        storeVersion: 2,
+      },
+      finalText: 'Implementation complete.',
+    });
+
+    assert.equal(calls, 2);
+    assert.equal(
+      events.find((event) => event.type === 'text_complete')?.text,
+      'Implementation complete.',
+    );
+    assert.equal(events.find((event) => event.type === 'complete')?.stopReason, 'end_turn');
+  });
+
+  test('continues to an acknowledgement after cancel_plan cancels execution', async () => {
+    const { calls, events } = await runPlanToolBoundary({
+      turnId: 'turn-plan-cancel',
+      prompt: 'cancel the approved plan',
+      toolName: 'cancel_plan',
+      toolInput: { reason: 'User cancelled the execution.' },
+      toolResult: {
+        kind: 'plan_execution_cancelled',
+        execution: planExecution('cancelled'),
+        storeVersion: 2,
+      },
+      finalText: 'Plan execution cancelled.',
+    });
+
+    assert.equal(calls, 2);
+    assert.equal(
+      events.find((event) => event.type === 'text_complete')?.text,
+      'Plan execution cancelled.',
+    );
+    assert.equal(events.find((event) => event.type === 'complete')?.stopReason, 'end_turn');
+  });
+
+  test('keeps SubmitPlan as a one-step plan handoff', async () => {
+    const { calls, events } = await runPlanToolBoundary({
+      turnId: 'turn-plan-submit',
+      prompt: 'prepare an implementation plan',
+      toolName: 'SubmitPlan',
+      toolInput: {
+        title: 'Implementation plan',
+        steps: [
+          {
+            id: 'change',
+            title: 'Change implementation',
+            description: 'Change code',
+          },
+        ],
+      },
+      toolResult: {
+        kind: 'plan_submitted',
+        proposal: {
+          planId: 'plan-1',
+          proposalId: 'proposal-1',
+          sessionId: 'session-1',
+          turnId: 'turn-plan-submit',
+          revision: 1,
+          title: 'Implementation plan',
+          steps: [
+            {
+              id: 'change',
+              title: 'Change implementation',
+              description: 'Change code',
+            },
+          ],
+          status: 'pending_approval',
+          submittedAt: 2,
+        },
+        storeVersion: 1,
+      },
+    });
+
+    assert.equal(calls, 1);
+    assert.equal(events.filter((event) => event.type === 'plan_submitted').length, 1);
+    assert.equal(
+      events.some((event) => event.type === 'text_complete'),
+      false,
+    );
+    assert.equal(events.find((event) => event.type === 'complete')?.stopReason, 'plan_handoff');
+  });
+});
+
 describe('AiSdkBackend usage telemetry', () => {
   test('records provider-reported usage for a content-filter terminal', async () => {
     const model = new MockLanguageModelV4({
@@ -14096,6 +14189,110 @@ function imageReplayInput(): BackendSendInput {
         },
       }),
     ],
+  };
+}
+
+async function runPlanToolBoundary(input: {
+  turnId: string;
+  prompt: string;
+  toolName: string;
+  toolInput: unknown;
+  toolResult: unknown;
+  finalText?: string;
+}): Promise<{ calls: number; events: SessionEvent[] }> {
+  const durable = durableTurnHarness(input.turnId, input.prompt);
+  let calls = 0;
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      calls += 1;
+      const chunks: LanguageModelV4StreamPart[] =
+        calls === 1
+          ? [
+              { type: 'stream-start', warnings: [] },
+              {
+                type: 'tool-call',
+                toolCallId: `${input.toolName}-call`,
+                toolName: input.toolName,
+                input: JSON.stringify(input.toolInput),
+              },
+              {
+                type: 'finish',
+                finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+                usage: emptyUsage(),
+              },
+            ]
+          : [
+              { type: 'stream-start', warnings: [] },
+              { type: 'text-start', id: 'text-final' },
+              {
+                type: 'text-delta',
+                id: 'text-final',
+                delta: input.finalText ?? 'Unexpected continuation.',
+              },
+              { type: 'text-end', id: 'text-final' },
+              {
+                type: 'finish',
+                finishReason: { unified: 'stop', raw: 'stop' },
+                usage: emptyUsage(),
+              },
+            ];
+      return {
+        stream: simulateReadableStream({
+          chunks,
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+  const backend = createTestAiSdkBackend({
+    sessionId: 'session-1',
+    header: header(),
+    appendMessage: async () => {},
+    connection: connection(),
+    apiKey: 'sk-test',
+    modelId: 'mock-model-id',
+    modelFactory: () => model,
+    tools: [
+      {
+        name: input.toolName,
+        description: `${input.toolName} test tool`,
+        parameters: z.object({}).passthrough(),
+        impl: async () => input.toolResult,
+      },
+    ],
+    loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+    newId: idGenerator(),
+    now: monotonicClock(),
+  });
+  const events = await drainDurably(backend.send(durable.input()), durable);
+  return { calls, events };
+}
+
+function planExecution(status: 'completed' | 'cancelled') {
+  return {
+    executionId: 'execution-1',
+    planId: 'plan-1',
+    proposalId: 'proposal-1',
+    sessionId: 'session-1',
+    status,
+    steps: [
+      {
+        id: 'change',
+        title: 'Change implementation',
+        description: 'Change code',
+        status: status === 'completed' ? ('completed' as const) : ('in_progress' as const),
+        updatedAt: 2,
+      },
+    ],
+    startedAt: 1,
+    updatedAt: 2,
+    ...(status === 'completed'
+      ? { completedAt: 2 }
+      : {
+          cancelledAt: 2,
+          cancelReason: 'User cancelled the execution.',
+        }),
   };
 }
 

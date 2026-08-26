@@ -3265,9 +3265,10 @@ export class AiSdkBackend implements AgentBackend {
       executionId: result.execution.executionId,
       storeVersion: result.storeVersion,
     });
-    if (result.kind === 'plan_execution_completed' || result.kind === 'plan_execution_cancelled') {
-      scope.loopStopRequested = true;
-    }
+    // Completing or cancelling the execution is a tool boundary, not the end of
+    // the conversational Turn. The execution prompt tells the model to persist
+    // final progress before its final response, so let it consume this result
+    // and produce that response on the next provider step.
   }
 
   private handleAgentGraphYieldToolResult(
