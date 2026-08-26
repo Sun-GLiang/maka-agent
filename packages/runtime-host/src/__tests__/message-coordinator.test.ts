@@ -31,6 +31,7 @@ import {
 } from '@maka/core/session';
 import { RuntimeMessageAuthorityInvariantError } from '@maka/runtime/message-authority';
 import type {
+  MarkMessagesHandedOffInput,
   MessageAdmissionStore,
   PendingMessageAdmission,
   RootTurnSourceMessageReceipt,
@@ -2446,7 +2447,7 @@ function createFixture(
       state: 'accepted' | 'handed_off' | 'executed' | 'cancelled';
     }
   >();
-  const handoffCalls: Parameters<MessageAdmissionStore['markMessagesHandedOff']>[0][] = [];
+  const handoffCalls: MarkMessagesHandedOffInput[] = [];
   const admissions =
     admissionsOverride ??
     memoryMessageAdmissionStore(messageAdmissions, (input) => {
@@ -2618,9 +2619,7 @@ function memoryMessageAdmissionStore(
       state: 'accepted' | 'handed_off' | 'executed' | 'cancelled';
     }
   >,
-  onMessagesHandedOff?: (
-    input: Parameters<MessageAdmissionStore['markMessagesHandedOff']>[0],
-  ) => void,
+  onMessagesHandedOff?: (input: MarkMessagesHandedOffInput) => void,
 ): MessageAdmissionStore {
   return {
     commitMessageAdmission: async (admission) => {

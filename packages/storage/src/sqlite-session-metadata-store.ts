@@ -103,6 +103,7 @@ import {
   normalizePendingMessageAdmission,
   normalizeProvenRootMessageHandoff,
   samePendingMessageAdmission,
+  type MarkMessagesHandedOffInput,
   type PendingMessageAdmission,
   type ProvenRootMessageHandoff,
 } from './message-admission-store.js';
@@ -1880,12 +1881,7 @@ export class SqliteSessionMetadataStore {
     });
   }
 
-  async markMessagesHandedOff(input: {
-    sessionId: string;
-    messageIds: readonly string[];
-    turnId: string;
-    provenRootMessages?: readonly ProvenRootMessageHandoff[];
-  }): Promise<void> {
+  async markMessagesHandedOff(input: MarkMessagesHandedOffInput): Promise<void> {
     this.assertOpen();
     assertSafeSessionId(input.sessionId);
     assertSafeSessionId(input.turnId);

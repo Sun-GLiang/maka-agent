@@ -46,7 +46,10 @@ import {
   type SessionConfigurationMetadataUpdate,
   type SqliteSessionMetadataStoreFailpoint,
 } from '../sqlite-session-metadata-store.js';
-import type { PendingMessageAdmission } from '../message-admission-store.js';
+import type {
+  MarkMessagesHandedOffInput,
+  PendingMessageAdmission,
+} from '../message-admission-store.js';
 import {
   createSqliteRuntimeStore,
   SQLITE_RUNTIME_SCHEMA_VERSION,
@@ -3752,16 +3755,7 @@ function fullHeader(overrides: Partial<SessionHeader> = {}): SessionHeader {
   };
 }
 
-type ProvenRootHandoffInput = {
-  readonly sessionId: string;
-  readonly messageIds: readonly string[];
-  readonly turnId: string;
-  readonly provenRootMessages: readonly {
-    readonly messageId: string;
-    readonly content: MessageContent;
-    readonly admittedAt: number;
-  }[];
-};
+type ProvenRootHandoffInput = MarkMessagesHandedOffInput;
 
 async function markMessagesHandedOffWithProvenRoots(
   store: ReturnType<typeof createSqliteSessionMetadataStore>,

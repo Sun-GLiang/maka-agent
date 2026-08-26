@@ -59,6 +59,13 @@ export interface ProvenRootMessageHandoff {
   readonly admittedAt: number;
 }
 
+export interface MarkMessagesHandedOffInput {
+  readonly sessionId: string;
+  readonly messageIds: readonly string[];
+  readonly turnId: string;
+  readonly provenRootMessages?: readonly ProvenRootMessageHandoff[];
+}
+
 export interface MessageAdmissionStore {
   commitMessageAdmission(admission: PendingMessageAdmission): Promise<PendingMessageAdmission>;
   readMessageAdmission(
@@ -72,12 +79,7 @@ export interface MessageAdmissionStore {
    */
   hasCancelledMessageAdmission(sessionId: string, messageId: string): Promise<boolean>;
   listMessageAdmissions(sessionId: string): Promise<readonly PendingMessageAdmission[]>;
-  markMessagesHandedOff(input: {
-    sessionId: string;
-    messageIds: readonly string[];
-    turnId: string;
-    provenRootMessages?: readonly ProvenRootMessageHandoff[];
-  }): Promise<void>;
+  markMessagesHandedOff(input: MarkMessagesHandedOffInput): Promise<void>;
   updateMessageAdmission(admission: PendingMessageAdmission): Promise<void>;
   reorderMessageAdmissions(sessionId: string, messageIds: readonly string[]): Promise<void>;
   cancelMessageAdmissions(sessionId: string, messageIds: readonly string[]): Promise<void>;

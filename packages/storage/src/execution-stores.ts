@@ -111,6 +111,7 @@ export type {
   RuntimeEventScanResult,
 } from './agent-run-store.js';
 export type {
+  MarkMessagesHandedOffInput,
   MessageAdmissionStore,
   PendingMessageAdmission,
 } from './message-admission-store.js';

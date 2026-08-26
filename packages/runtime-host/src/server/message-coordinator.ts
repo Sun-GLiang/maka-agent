@@ -40,6 +40,7 @@ import {
   normalizeRootTurnAdmissionPayload,
   submittedTurnIntentsEqual,
   type ImmutableSteeringMessageProof,
+  type MarkMessagesHandedOffInput,
   type MessageAdmissionStore,
   type PendingMessageAdmission,
   type RootTurnSourceMessage,
@@ -606,9 +607,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
   }): Promise<void> {
     const messageIds = new Set<string>();
     const provenRootMessages: Array<
-      NonNullable<
-        Parameters<MessageAdmissionStore['markMessagesHandedOff']>[0]['provenRootMessages']
-      >[number]
+      NonNullable<MarkMessagesHandedOffInput['provenRootMessages']>[number]
     > = [];
     const admissions = await this.#admissions.listMessageAdmissions(input.sessionId);
     for (const messageId of new Set(input.messageIds)) {
