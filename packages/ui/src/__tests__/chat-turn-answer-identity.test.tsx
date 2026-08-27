@@ -229,9 +229,11 @@ test('uses human conversation context instead of raw ids in action names', async
   );
 });
 
-test('uses Astryx auto formatting for user-message timestamps', async () => {
+test('keeps Astryx auto formatting live for user-message timestamps', async (context) => {
+  const now = Date.UTC(2026, 7, 27, 12);
+  context.mock.timers.enable({ apis: ['Date', 'setInterval'], now });
   const { container, root } = domRoot();
-  const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1_000;
+  const twoHoursAgo = now - 2 * 60 * 60 * 1_000;
   const turn = {
     ...turnWith([{ ...ANSWER, live: false }]),
     user: { id: 'ask', role: 'user' as const, text: 'ask', ts: twoHoursAgo },
@@ -243,6 +245,9 @@ test('uses Astryx auto formatting for user-message timestamps', async () => {
   assert.ok(timestamp, 'Astryx Timestamp renders the semantic time element');
   assert.match(timestamp.textContent ?? '', /2 hours ago/);
   assert.equal(timestamp.getAttribute('tabindex'), '0', 'the absolute-time hover card is keyboard reachable');
+
+  await act(() => context.mock.timers.tick(60 * 60 * 1_000));
+  assert.match(timestamp.textContent ?? '', /3 hours ago/);
 });
 
 /**

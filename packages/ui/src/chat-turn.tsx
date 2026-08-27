@@ -193,7 +193,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
           /* `value` takes ms directly: Timestamp's own parseValue reads
              anything past 1e12 as milliseconds (2001-09-09 onward), and a
              chat message never predates that. */
-          (<Timestamp className="maka-message-time-inline" value={props.ts} format="auto" />)
+          (<Timestamp className="maka-message-time-inline" value={props.ts} format="auto" isLive />)
         ) : undefined
       }
       footer={
