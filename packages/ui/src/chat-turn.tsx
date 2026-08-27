@@ -43,6 +43,7 @@ import {
   IconButton as UiIconButton,
   Spinner,
   Thumbnail,
+  Timestamp,
   Token,
   useLightbox,
 } from '@astryxdesign/core';
@@ -71,7 +72,6 @@ import { useUiLocale } from './locale-context.js';
 import { getConversationCopy } from './conversation-copy.js';
 import { AstryxLocaleProvider } from './astryx-i18n.js';
 import { InlineReferenceText } from './inline-reference.js';
-import { ConversationMessageTimestamp } from './conversation-message-timestamp.js';
 
 export function LocalizedChatMessage({
   accessibleLabel,
@@ -189,9 +189,12 @@ const UserMessageBody = memo(function UserMessageBody(props: {
     <ChatMessageMetadata
       className="maka-message-meta"
       timestamp={
-        props.ts !== undefined
-          ? <ConversationMessageTimestamp value={props.ts} />
-          : undefined
+        props.ts !== undefined ? (
+          /* `value` takes ms directly: Timestamp's own parseValue reads
+             anything past 1e12 as milliseconds (2001-09-09 onward), and a
+             chat message never predates that. */
+          (<Timestamp className="maka-message-time-inline" value={props.ts} format="auto" />)
+        ) : undefined
       }
       footer={
         <>

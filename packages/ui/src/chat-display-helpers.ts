@@ -40,21 +40,29 @@
  * sites.
  */
 
-import {
-  formatConversationMessageAbsoluteTimestamp,
-} from '@maka/core/conversation-message-timestamp';
-import type { UiLocale } from '@maka/core/ui-locale';
+import { uiLocaleToIntlLocale, type UiLocale } from '@maka/core/ui-locale';
 import { getConversationCopy } from './conversation-copy.js';
 
+function createAbsoluteTimeFormat(locale: UiLocale): Intl.DateTimeFormat {
+  if (typeof Intl === 'undefined' || typeof Intl.DateTimeFormat !== 'function') {
+    return { format: (d: Date) => d.toISOString() } as unknown as Intl.DateTimeFormat;
+  }
+  return new Intl.DateTimeFormat(
+    uiLocaleToIntlLocale(locale),
+    { dateStyle: 'medium', timeStyle: 'short' },
+  );
+}
+
 export function formatAbsoluteTimestamp(ts: number, locale: UiLocale): string {
-  return formatConversationMessageAbsoluteTimestamp(ts, locale);
+  return createAbsoluteTimeFormat(locale).format(new Date(ts));
 }
 
 /* `formatClockTime` (a 24-hour `HH:mm` for the user-message time) lived here
    until the meta row moved to Astryx's `Timestamp`. Locking the hour cycle was
-   the app overriding a preference that belongs to the reader's system. Absolute
-   readings now share the conversation timestamp formatter's host-locale policy
-   instead of maintaining a local bag of `Intl` options. */
+   the app overriding a preference that belongs to the reader's system, which is
+   why `Timestamp` formats against the host locale and offers no hour-cycle
+   knob. Absolute readings now come from that component, not from a local bag of
+   `Intl` options. */
 
 /**
  * A turn's duration, counted in whole seconds: `0s`, `25s`, `1m 54s`.

@@ -116,7 +116,6 @@
     "./bot-onboarding": "./dist/bot-onboarding.js",
     "./computer-use": "./dist/computer-use.js",
     "./connection-error-copy": "./dist/connection-error-copy.js",
-    "./conversation-message-timestamp": "./dist/conversation-message-timestamp.js",
     "./git-review": "./dist/git-review.js",
     "./graph-command": "./dist/graph-command.js",
     "./project": "./dist/project.js",
