@@ -2055,10 +2055,7 @@ export class SqliteSessionMetadataStore {
               !historicalMessageIdSet.has(message.id) &&
               (message.turnId === input.turnId || message.ts >= admittedAt),
           );
-          if (
-            sequence <= previousExistingSequence ||
-            blockingRow !== undefined
-          ) {
+          if (sequence <= previousExistingSequence || blockingRow !== undefined) {
             throw new SessionMetadataConflictError(
               'Message admission transcript source order conflict',
             );
@@ -2113,11 +2110,7 @@ export class SqliteSessionMetadataStore {
         }
 
         for (const group of insertionGroups.reverse()) {
-          this.shiftSessionMessageSuffixSync(
-            input.sessionId,
-            group.boundary,
-            group.entries.length,
-          );
+          this.shiftSessionMessageSuffixSync(input.sessionId, group.boundary, group.entries.length);
           this.insertSessionMessagesSync(input.sessionId, group.boundary, group.entries);
           if (group.boundary === lastSequence + 1) {
             tailLatest = group.entries.at(-1)?.message;
@@ -2142,11 +2135,7 @@ export class SqliteSessionMetadataStore {
         ) {
           throw new SessionMetadataConflictError('Invalid Session message sequence');
         }
-        this.insertSessionMessagesSync(
-          input.sessionId,
-          currentLastSequence + 1,
-          ordinaryEntries,
-        );
+        this.insertSessionMessagesSync(input.sessionId, currentLastSequence + 1, ordinaryEntries);
         tailLatest = ordinaryEntries.at(-1)?.message;
       }
       if (tailLatest?.type === 'user') {

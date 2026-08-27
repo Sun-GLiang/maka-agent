@@ -543,7 +543,10 @@ describe('SqliteSessionMetadataStore', () => {
         (message) => message.id === 'message-legacy-output',
       );
       assert.equal(shiftedOutput?.type, 'assistant');
-      assert.equal(shiftedOutput?.type === 'assistant' ? shiftedOutput.text : undefined, legacyOutput);
+      assert.equal(
+        shiftedOutput?.type === 'assistant' ? shiftedOutput.text : undefined,
+        legacyOutput,
+      );
       assert.equal(
         (await store.readCatalogRecord('session-legacy-order')).lastMessagePreview,
         'newest preview',
@@ -642,9 +645,7 @@ describe('SqliteSessionMetadataStore', () => {
       });
 
       assert.deepEqual(
-        (await store.readMessages('session-ordinary-handoff-order')).map(
-          (message) => message.id,
-        ),
+        (await store.readMessages('session-ordinary-handoff-order')).map((message) => message.id),
         ['message-existing-ordinary-output', 'message-ordinary-admission'],
       );
     } finally {
@@ -678,7 +679,10 @@ describe('SqliteSessionMetadataStore', () => {
         /Turn conflict/,
       );
       assert.deepEqual(await store.readMessages('session-admission-turn-conflict'), []);
-      assert.equal((await store.listMessageAdmissions('session-admission-turn-conflict')).length, 1);
+      assert.equal(
+        (await store.listMessageAdmissions('session-admission-turn-conflict')).length,
+        1,
+      );
     } finally {
       store.close();
     }
@@ -796,14 +800,8 @@ describe('SqliteSessionMetadataStore', () => {
         /source order conflict/,
       );
       assert.deepEqual(
-        (await store.readMessages('session-partial-source-order')).map(
-          (message) => message.id,
-        ),
-        [
-          'message-partial-source-a',
-          'message-partial-newer-tail',
-          'message-partial-source-c',
-        ],
+        (await store.readMessages('session-partial-source-order')).map((message) => message.id),
+        ['message-partial-source-a', 'message-partial-newer-tail', 'message-partial-source-c'],
       );
     } finally {
       store.close();
@@ -833,9 +831,7 @@ describe('SqliteSessionMetadataStore', () => {
       const database = new DatabaseSync(path);
       try {
         database
-          .prepare(
-            'UPDATE session_messages SET sequence = ? WHERE session_id = ? AND sequence = 0',
-          )
+          .prepare('UPDATE session_messages SET sequence = ? WHERE session_id = ? AND sequence = 0')
           .run(Number.MAX_SAFE_INTEGER - 1, 'session-legacy-overflow');
       } finally {
         database.close();

@@ -106,11 +106,7 @@ export async function prepareHostedExecutionRecovery(
       }
       if (admission.userMessageId === null) {
         if (admission.sourceMessages.length > 0) {
-          await verifyQueueSourceMessages(
-            admission,
-            messageIndex,
-            input.stores.agentRunStore,
-          );
+          await verifyQueueSourceMessages(admission, messageIndex, input.stores.agentRunStore);
         }
         if (rootUserMessages.length > 0) {
           throw new Error(`Admitted Turn ${admission.turnId} must not record a UserMessage`);
