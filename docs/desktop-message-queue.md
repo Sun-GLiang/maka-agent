@@ -28,7 +28,9 @@ Runtime Host already owns the durable message semantics:
 - `current_turn` queues steering for the next provider boundary.
 - `next_turn` queues a successor turn.
 - queue projections are authoritative.
-- queue projections carry the canonical queued message content; mutation results return only queue state.
+- queue projections carry the canonical queued message content; queue mutation results return only
+  queue state, while `turn.message.submit` also returns the Skill admission outcome for every
+  disposition.
 
 ## Desktop Behavior
 

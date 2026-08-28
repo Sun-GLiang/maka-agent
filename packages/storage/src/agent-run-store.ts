@@ -100,6 +100,8 @@ export interface RootTurnSourceMessage {
   messageId: string;
   content: MessageContent;
   submittedContentDigest?: `sha256:${string}`;
+  /** The admission-time Skill outcome for this exact source Message. */
+  skillInvocation?: SkillInvocationResult;
   /**
    * The exact-Turn intent this Message was submitted with — the Skill ids and
    * the orchestration override. Content and placement do not describe it, so
@@ -1259,6 +1261,16 @@ function normalizeAdmitRootTurnInput(input: AdmitRootTurnInput): RootTurnAdmissi
   return deepFreezeRootTurnAdmission(admission);
 }
 
+/** Whether a proposed admission satisfies the complete durable record contract and size bound. */
+export function rootTurnAdmissionRecordFits(input: AdmitRootTurnInput): boolean {
+  try {
+    normalizeAdmitRootTurnInput(input);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const MUTABLE_AGENT_RUN_HEADER_FIELDS = new Set<keyof AgentRunHeader>([
   'status',
   'updatedAt',
@@ -1667,12 +1679,20 @@ function normalizeRootTurnSourceMessages(value: unknown): readonly RootTurnSourc
         'disposition',
         ...(Object.hasOwn(item, 'submittedContentDigest') ? ['submittedContentDigest'] : []),
         ...(Object.hasOwn(item, 'submittedIntent') ? ['submittedIntent'] : []),
+        ...(Object.hasOwn(item, 'skillInvocation') ? ['skillInvocation'] : []),
       ])
     ) {
       throw new Error(`Invalid root turn source message at index ${index}`);
     }
-    const { messageId, content, submittedContentDigest, submittedIntent, placement, disposition } =
-      item;
+    const {
+      messageId,
+      content,
+      submittedContentDigest,
+      submittedIntent,
+      skillInvocation,
+      placement,
+      disposition,
+    } = item;
     if (
       typeof messageId !== 'string' ||
       !isSafeId(messageId) ||
@@ -1700,6 +1720,9 @@ function normalizeRootTurnSourceMessages(value: unknown): readonly RootTurnSourc
       ...(submittedContentDigest !== undefined ? { submittedContentDigest } : {}),
       ...(submittedIntent !== undefined
         ? { submittedIntent: normalizeSubmittedTurnIntent(submittedIntent) }
+        : {}),
+      ...(skillInvocation !== undefined
+        ? { skillInvocation: decodeSkillInvocationResult(skillInvocation) }
         : {}),
       placement,
       disposition,
@@ -1729,6 +1752,7 @@ function rootTurnAdmissionPayloadsEqual(
         source.disposition === other.disposition &&
         source.submittedContentDigest === other.submittedContentDigest &&
         submittedTurnIntentsEqual(source.submittedIntent, other.submittedIntent) &&
+        isDeepStrictEqual(source.skillInvocation, other.skillInvocation) &&
         messageContentsEqual(source.content, other.content)
       );
     })

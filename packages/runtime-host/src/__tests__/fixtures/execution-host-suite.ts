@@ -701,6 +701,7 @@ export class ExecutionFixture {
         submittedPlacement: 'current_turn',
         placement: 'current_turn',
         disposition: 'steering',
+        skillInvocation: { loaded: [], failed: [], receipts: [] },
         admittedAt,
       });
       const result = await stores.agentRunStore.admitRootTurn({

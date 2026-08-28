@@ -361,7 +361,11 @@ test("sends canonical content and uploads owned Attachment bytes through the Hos
     },
     submitMessage: async (input) => {
       starts.push(input);
-      return { disposition: "turn_started", turnId: "turn-1" };
+      return {
+        disposition: "turn_started",
+        turnId: "turn-1",
+        skillInvocation: { loaded: [], failed: [], receipts: [] },
+      };
     },
   });
   const ipc = ipcHarness();
@@ -466,7 +470,11 @@ test("uploads a selected workspace file as a Host-owned Session Artifact", async
         },
         submitMessage: async (input) => {
           starts.push(input);
-          return { disposition: "turn_started", turnId: "turn-1" };
+          return {
+            disposition: "turn_started",
+            turnId: "turn-1",
+            skillInvocation: { loaded: [], failed: [], receipts: [] },
+          };
         },
       }),
       observer: unusedObserver(),
@@ -566,7 +574,11 @@ test("submits an ordinary composer message once under its stable message identit
         getSession: async () => session(),
         submitMessage: async (input) => {
           submits.push(input);
-          return { disposition: "turn_started", turnId: "host-turn" };
+          return {
+            disposition: "turn_started",
+            turnId: "host-turn",
+            skillInvocation: { loaded: [], failed: [], receipts: [] },
+          };
         },
       }),
       observer: unusedObserver(),
@@ -679,6 +691,11 @@ test('submits a slash Skill message and reports the Host Skill outcome', async (
 test("queues a mid-turn send as steering when the Host reports the session busy", async () => {
   const submits: unknown[] = [];
   const changes: unknown[] = [];
+  const skillInvocation = {
+    loaded: [{ id: 'review', name: 'Review' }],
+    failed: [{ request: 'typo', reason: 'not_found' as const }],
+    receipts: [],
+  };
   const ipc = ipcHarness();
   registerExecutionIpc(
     {
@@ -686,7 +703,7 @@ test("queues a mid-turn send as steering when the Host reports the session busy"
         getSession: async () => session(),
         submitMessage: async (input) => {
           submits.push(input);
-          return { disposition: "steering", queueRevision: 1 };
+          return { disposition: "steering", queueRevision: 1, skillInvocation };
         },
       }),
       observer: unusedObserver(),
@@ -721,7 +738,7 @@ test("queues a mid-turn send as steering when the Host reports the session busy"
     turnId: "turn-1",
     attachments: [],
     inlineReferences: [],
-    skillInvocation: { loaded: [], failed: [], receipts: [] },
+    skillInvocation,
   });
   assert.deepEqual(changes, [
     { reason: "status-change", sessionId: "session-1" },
@@ -805,7 +822,11 @@ test("retries a dispatched send with its original message identity", async () =>
               "connection_lost",
             );
           }
-          return { disposition: "steering", queueRevision: 1 };
+          return {
+            disposition: "steering",
+            queueRevision: 1,
+            skillInvocation: { loaded: [], failed: [], receipts: [] },
+          };
         },
       }),
       newId: () => "id-1",
@@ -884,6 +905,7 @@ test("answers a send with the Turn the Host started for it", async () => {
           return {
             disposition: "turn_started",
             turnId: "turn-9",
+            skillInvocation: { loaded: [], failed: [], receipts: [] },
           };
         },
       }),
@@ -981,7 +1003,11 @@ test("lets the Host queue a textual Skill token as steering", async () => {
         getSession: async () => session(),
         submitMessage: async (input) => {
           submits.push(input);
-          return { disposition: "steering", queueRevision: 1 };
+          return {
+            disposition: "steering",
+            queueRevision: 1,
+            skillInvocation: { loaded: [], failed: [], receipts: [] },
+          };
         },
       }),
       newId: () => "id-1",
@@ -1052,6 +1078,11 @@ test("reports a Host-blocked Skill send as a Skill failure", async () => {
 test("queues explicit Desktop follow-ups", async () => {
   const submits: unknown[] = [];
   let sequence = 0;
+  const skillInvocation = {
+    loaded: [{ id: 'writer', name: 'Writer' }],
+    failed: [{ request: 'missing', reason: 'not_found' as const }],
+    receipts: [],
+  };
   const ipc = ipcHarness();
   registerExecutionIpc(
     {
@@ -1059,7 +1090,7 @@ test("queues explicit Desktop follow-ups", async () => {
         getSession: async () => session(),
         submitMessage: async (input) => {
           submits.push(input);
-          return { disposition: "followup", queueRevision: 4 };
+          return { disposition: "followup", queueRevision: 4, skillInvocation };
         },
       }),
       observer: unusedObserver(),
@@ -1109,7 +1140,7 @@ test("queues explicit Desktop follow-ups", async () => {
         },
       ],
       inlineReferences: [],
-      skillInvocation: { loaded: [], failed: [], receipts: [] },
+      skillInvocation,
     },
   );
   assert.deepEqual(submits, [
@@ -1278,7 +1309,11 @@ test("binds steer and stop to Host-owned queue and active Turn identities", asyn
           'Message disposition cannot be proven in this Host Epoch',
         );
       }
-      return { disposition: "steering", queueRevision: 2 };
+      return {
+        disposition: "steering",
+        queueRevision: 2,
+        skillInvocation: { loaded: [], failed: [], receipts: [] },
+      };
     },
     interruptTurn: async (input) => {
       stopLifecycle.push("interrupt");

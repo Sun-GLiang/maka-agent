@@ -249,6 +249,7 @@ interface MessageAdmissionRow {
   readonly queue_order?: unknown;
   readonly admitted_at?: unknown;
   readonly submitted_intent_json?: unknown;
+  readonly skill_invocation_json?: unknown;
 }
 
 function decodeMessageAdmissionRow(
@@ -260,6 +261,7 @@ function decodeMessageAdmissionRow(
     typeof row.run_id !== 'string' ||
     typeof row.message_id !== 'string' ||
     typeof row.content_json !== 'string' ||
+    typeof row.skill_invocation_json !== 'string' ||
     typeof row.submitted_content_digest !== 'string' ||
     (row.submitted_placement !== 'current_turn' && row.submitted_placement !== 'next_turn') ||
     (row.placement !== 'current_turn' && row.placement !== 'next_turn') ||
@@ -285,6 +287,9 @@ function decodeMessageAdmissionRow(
     ...(typeof row.submitted_intent_json === 'string'
       ? { submittedIntent: normalizeSubmittedTurnIntent(JSON.parse(row.submitted_intent_json)) }
       : {}),
+    skillInvocation: JSON.parse(
+      row.skill_invocation_json,
+    ) as PendingMessageAdmission['skillInvocation'],
     admittedAt: row.admitted_at,
   });
 }
@@ -1580,7 +1585,7 @@ export class SqliteSessionMetadataStore {
           `
           SELECT turn_id, run_id, message_id, content_json, submitted_content_digest,
             submitted_placement, placement, disposition, queue_order, admitted_at,
-            submitted_intent_json
+            submitted_intent_json, skill_invocation_json
           FROM message_admissions
           WHERE session_id = ? AND message_id = ?
         `,
@@ -1619,8 +1624,8 @@ export class SqliteSessionMetadataStore {
           INSERT INTO message_admissions(
             session_id, turn_id, run_id, message_id, content_json, submitted_content_digest,
             submitted_placement, placement, disposition, queue_order, admitted_at,
-            submitted_intent_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            submitted_intent_json, skill_invocation_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         )
         .run(
@@ -1636,6 +1641,7 @@ export class SqliteSessionMetadataStore {
           orderRow.next_order,
           stored.admittedAt,
           stored.submittedIntent ? JSON.stringify(stored.submittedIntent) : null,
+          JSON.stringify(stored.skillInvocation),
         );
 
       return stored;
@@ -1655,7 +1661,7 @@ export class SqliteSessionMetadataStore {
           `
           SELECT turn_id, run_id, message_id, content_json, submitted_content_digest,
             submitted_placement, placement, disposition, queue_order, admitted_at,
-            submitted_intent_json
+            submitted_intent_json, skill_invocation_json
           FROM message_admissions
           WHERE session_id = ? AND message_id = ?
         `,
@@ -1688,7 +1694,7 @@ export class SqliteSessionMetadataStore {
           `
           SELECT turn_id, run_id, message_id, content_json, submitted_content_digest,
             submitted_placement, placement, disposition, queue_order, admitted_at,
-            submitted_intent_json
+            submitted_intent_json, skill_invocation_json
           FROM message_admissions
           WHERE session_id = ?
           ORDER BY queue_order, sequence
@@ -1729,7 +1735,7 @@ export class SqliteSessionMetadataStore {
             `
             SELECT turn_id, run_id, message_id, content_json, submitted_content_digest,
               submitted_placement, placement, disposition, queue_order, admitted_at,
-            submitted_intent_json
+            submitted_intent_json, skill_invocation_json
             FROM message_admissions
             WHERE session_id = ? AND message_id = ?
           `,
@@ -1839,7 +1845,7 @@ export class SqliteSessionMetadataStore {
           `
           SELECT turn_id, run_id, message_id, content_json, submitted_content_digest,
             submitted_placement, placement, disposition, queue_order, admitted_at,
-            submitted_intent_json
+            submitted_intent_json, skill_invocation_json
           FROM message_admissions
           WHERE session_id = ? AND message_id = ?
         `,
@@ -1859,7 +1865,8 @@ export class SqliteSessionMetadataStore {
         .prepare(
           `
           UPDATE message_admissions
-          SET content_json = ?, submitted_content_digest = ?, placement = ?, disposition = ?
+          SET content_json = ?, submitted_content_digest = ?, placement = ?, disposition = ?,
+            skill_invocation_json = ?
           WHERE session_id = ? AND message_id = ?
         `,
         )
@@ -1868,6 +1875,7 @@ export class SqliteSessionMetadataStore {
           stored.submittedContentDigest,
           stored.placement,
           stored.disposition,
+          JSON.stringify(stored.skillInvocation),
           stored.sessionId,
           stored.messageId,
         );

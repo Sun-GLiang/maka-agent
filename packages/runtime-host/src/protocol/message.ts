@@ -99,15 +99,13 @@ export interface TurnMessageSubmitInput {
   readonly turnOrchestration?: TurnOrchestration;
 }
 
-export type TurnMessageSubmitResult =
-  | { readonly disposition: 'steering'; readonly queueRevision: number }
-  | { readonly disposition: 'followup'; readonly queueRevision: number }
-  | {
-      readonly disposition: 'turn_started';
-      readonly turnId: string;
-      readonly skillInvocation?: SkillInvocationResult;
-    }
-  | { readonly disposition: 'blocked'; readonly skillInvocation: SkillInvocationResult };
+export type TurnMessageSubmitResult = {
+  readonly skillInvocation: SkillInvocationResult;
+} & (
+  | { readonly disposition: 'steering' | 'followup'; readonly queueRevision: number }
+  | { readonly disposition: 'turn_started'; readonly turnId: string }
+  | { readonly disposition: 'blocked' }
+);
 
 export interface TurnMessageQueryInput {
   readonly sessionId: string;
@@ -344,18 +342,15 @@ function decodeTurnMessageQueryResult(value: unknown): TurnMessageQueryResult {
 function decodeTurnMessageSubmitResult(value: unknown): TurnMessageSubmitResult {
   const record = requireRecord(value, 'turn.message.submit result');
   if (record.disposition === 'turn_started') {
-    const shaped = requireShapedRecord(
-      record,
-      'turn.message.submit turn_started result',
-      ['disposition', 'turnId'],
-      ['skillInvocation'],
-    );
+    assertExactKeys(record, 'turn.message.submit turn_started result', [
+      'disposition',
+      'turnId',
+      'skillInvocation',
+    ]);
     return {
       disposition: 'turn_started',
-      turnId: requireEntityId(shaped.turnId, 'turnId'),
-      ...(shaped.skillInvocation !== undefined
-        ? { skillInvocation: decodeSubmitSkillInvocation(shaped.skillInvocation) }
-        : {}),
+      turnId: requireEntityId(record.turnId, 'turnId'),
+      skillInvocation: decodeSubmitSkillInvocation(record.skillInvocation),
     };
   }
   if (record.disposition === 'blocked') {
@@ -370,10 +365,15 @@ function decodeTurnMessageSubmitResult(value: unknown): TurnMessageSubmitResult 
     return { disposition: 'blocked', skillInvocation };
   }
   if (record.disposition === 'steering' || record.disposition === 'followup') {
-    assertExactKeys(record, 'turn.message.submit queued result', ['disposition', 'queueRevision']);
+    assertExactKeys(record, 'turn.message.submit queued result', [
+      'disposition',
+      'queueRevision',
+      'skillInvocation',
+    ]);
     return {
       disposition: record.disposition,
       queueRevision: requireCount(record.queueRevision, 'queueRevision'),
+      skillInvocation: decodeSubmitSkillInvocation(record.skillInvocation),
     };
   }
   throw invalidProtocolFrame('Invalid turn.message.submit disposition');

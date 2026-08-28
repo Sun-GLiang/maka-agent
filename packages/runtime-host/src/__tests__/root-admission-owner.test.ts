@@ -182,6 +182,30 @@ test('fails closed when a known durable admission identity drifts', async () => 
           ...first.admission.sourceMessages.slice(1),
         ],
       },
+      {
+        ...first.admission,
+        sourceMessages: [
+          {
+            ...firstSource,
+            submittedIntent: { skillIds: ['writer'] },
+          },
+          ...first.admission.sourceMessages.slice(1),
+        ],
+      },
+      {
+        ...first.admission,
+        sourceMessages: [
+          {
+            ...firstSource,
+            skillInvocation: {
+              loaded: [{ id: 'writer', name: 'Writer' }],
+              failed: [],
+              receipts: [],
+            },
+          },
+          ...first.admission.sourceMessages.slice(1),
+        ],
+      },
     ];
     for (const drifted of sourceDrifts) {
       assert.throws(() => owner.assertKnownAdmission(drifted), /identity changed/);
