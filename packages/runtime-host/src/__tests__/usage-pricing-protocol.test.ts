@@ -50,6 +50,7 @@ import {
   type EffectivePricingEntry,
   type LlmUsageLogProjection,
   type ToolUsageLogProjection,
+  type UsageQueryResult,
 } from '../protocol/index.js';
 import type { ConnectionContext } from '../server/operation-dispatcher.js';
 import { HostUsagePricingCoordinator } from '../server/usage-pricing-coordinator.js';
@@ -168,6 +169,130 @@ describe('Usage/Pricing protocol', () => {
       },
       { kind: 'buckets', query: { range: 'all' }, groupBy: 'week' },
       { kind: 'export', query: { range: 'all' } },
+    ]) {
+      assert.throws(() => usageRequest(input), invalidFrame);
+    }
+    for (const result of [
+      {
+        kind: 'snapshot_started',
+        revision: 'snapshot-revision-1',
+        summary: validSummary(),
+        provenance: validProvenance(),
+        extra: true,
+      },
+      {
+        kind: 'snapshot_logs',
+        revision: 'snapshot-revision-1',
+        source: 'llm',
+        rows: [validLog()],
+        offset: 0,
+        total: 2,
+        nextOffset: 0,
+        truncated: false,
+      },
+      {
+        kind: 'snapshot_logs',
+        revision: 'snapshot-revision-1',
+        source: 'llm',
+        rows: [validLog()],
+        offset: 0,
+        total: 1,
+        nextOffset: null,
+        truncated: 'no',
+      },
+      {
+        kind: 'snapshot_pricing',
+        revision: 'snapshot-revision-1',
+        entries: Array.from({ length: PRICING_PAGE_MAX_ITEMS + 1 }, (_, index) =>
+          customPricingEntry(`provider:model-${index}`),
+        ),
+        offset: 0,
+        total: PRICING_PAGE_MAX_ITEMS + 1,
+        nextOffset: null,
+      },
+      { kind: 'revision_changed', expectedRevision: '' },
+    ]) {
+      assert.throws(() => usageResponse(result), invalidFrame);
+    }
+  });
+
+  test('decodes revision-pinned Usage snapshot start, log, and pricing pages', () => {
+    assert.doesNotThrow(() => usageRequest({ kind: 'snapshot_start', range: { from: 1, to: 2 } }));
+    assert.doesNotThrow(() =>
+      usageRequest({
+        kind: 'snapshot_logs',
+        revision: 'snapshot-revision-1',
+        source: 'llm',
+        offset: 0,
+        limit: 3,
+      }),
+    );
+    assert.doesNotThrow(() =>
+      usageRequest({
+        kind: 'snapshot_pricing',
+        revision: 'snapshot-revision-1',
+        offset: 0,
+        limit: 3,
+      }),
+    );
+
+    assert.doesNotThrow(() =>
+      usageResponse({
+        kind: 'snapshot_started',
+        revision: 'snapshot-revision-1',
+        summary: validSummary(),
+        provenance: validProvenance(),
+      }),
+    );
+    assert.doesNotThrow(() =>
+      usageResponse({
+        kind: 'snapshot_logs',
+        revision: 'snapshot-revision-1',
+        source: 'llm',
+        rows: [validLog()],
+        offset: 0,
+        total: 1,
+        nextOffset: null,
+        truncated: false,
+      }),
+    );
+    assert.doesNotThrow(() =>
+      usageResponse({
+        kind: 'snapshot_pricing',
+        revision: 'snapshot-revision-1',
+        entries: [customPricingEntry('provider:model')],
+        offset: 0,
+        total: 1,
+        nextOffset: null,
+      }),
+    );
+    assert.doesNotThrow(() =>
+      usageResponse({ kind: 'revision_changed', expectedRevision: 'snapshot-revision-1' }),
+    );
+
+    for (const input of [
+      { kind: 'snapshot_start', range: 'all', revision: 'unexpected' },
+      { kind: 'snapshot_logs', revision: '', source: 'llm', offset: 0, limit: 1 },
+      {
+        kind: 'snapshot_logs',
+        revision: 'x'.repeat(129),
+        source: 'llm',
+        offset: 0,
+        limit: 1,
+      },
+      {
+        kind: 'snapshot_logs',
+        revision: 'snapshot-revision-1',
+        source: 'model',
+        offset: 0,
+        limit: 1,
+      },
+      {
+        kind: 'snapshot_pricing',
+        revision: 'snapshot-revision-1',
+        offset: 0,
+        limit: PRICING_PAGE_MAX_ITEMS + 1,
+      },
     ]) {
       assert.throws(() => usageRequest(input), invalidFrame);
     }
@@ -430,6 +555,90 @@ describe('Usage/Pricing protocol', () => {
       assert.equal(outcome.result.provenance.unreadableRecords, 0);
       const global = await stores.modelCalls.catchUpModelCallProjection();
       assert.equal(global.unreadableEvents, 1);
+    } finally {
+      await stores.close().catch(() => undefined);
+      await owner.close();
+      await rm(join(resolveRootControlNamespace(), capability.rootId), {
+        recursive: true,
+        force: true,
+      });
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test('pins every Usage authority behind one expiring LRU snapshot revision', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'maka-usage-snapshot-'));
+    const capability = await resolveStorageRoot({
+      path: join(base, 'interactive-root'),
+      kind: 'interactive',
+    });
+    const owner = await tryAcquireInteractiveRootOwner(capability);
+    assert.ok(owner);
+    const stores = await openInteractiveUsageStoresForWrite(owner.lease);
+    let now = 1_000;
+    let nextRevision = 0;
+    try {
+      await stores.telemetry.recordLlmCall(longUsageRecord('old-llm', 1));
+      await stores.telemetry.recordToolInvocation(longToolRecord('old-tool', 1));
+      await stores.pricing.upsert(0, pricing('snapshot:old'));
+      const coordinator = new HostUsagePricingCoordinator(
+        stores,
+        () => {},
+        new RuntimePolicyActivationGate(),
+        () => {},
+        {
+          now: () => now,
+          createRevision: () => `snapshot-${++nextRevision}`,
+          ttlMs: 100,
+          capacity: 2,
+          activityLimit: 1,
+        },
+      );
+
+      const first = await expectUsageSnapshotStart(coordinator);
+      assert.equal(first.revision, 'snapshot-1');
+      assert.equal(first.summary.totalRequests, 1);
+
+      await stores.telemetry.recordLlmCall(longUsageRecord('new-llm', 2));
+      await stores.telemetry.recordToolInvocation(longToolRecord('new-tool', 2));
+      await stores.pricing.upsert(1, pricing('snapshot:new'));
+
+      const oldLlm = await expectUsageSnapshotLogs(coordinator, first.revision, 'llm');
+      const oldTool = await expectUsageSnapshotLogs(coordinator, first.revision, 'tool');
+      const oldPricing = await expectUsageSnapshotPricing(coordinator, first.revision);
+      assert.deepEqual(
+        oldLlm.rows.map((row) => row.id),
+        ['old-llm'],
+      );
+      assert.deepEqual(
+        oldTool.rows.map((row) => row.id),
+        ['old-tool'],
+      );
+      assert.equal(oldLlm.total, 1);
+      assert.equal(oldLlm.truncated, false);
+      assert.ok(oldPricing.entries.some((entry) => entry.pricing.modelKey === 'snapshot:old'));
+      assert.ok(!oldPricing.entries.some((entry) => entry.pricing.modelKey === 'snapshot:new'));
+
+      const second = await expectUsageSnapshotStart(coordinator);
+      const newLlm = await expectUsageSnapshotLogs(coordinator, second.revision, 'llm');
+      assert.deepEqual(
+        newLlm.rows.map((row) => row.id),
+        ['new-llm'],
+      );
+      assert.equal(newLlm.total, 1, 'total describes retained rows');
+      assert.equal(newLlm.truncated, true, 'truncation describes discarded authority rows');
+
+      await expectUsageSnapshotLogs(coordinator, first.revision, 'llm');
+      await expectUsageSnapshotStart(coordinator);
+      assert.equal(
+        (await queryUsageSnapshotLogs(coordinator, second.revision, 'llm')).kind,
+        'revision_changed',
+        'the least recently used snapshot is evicted',
+      );
+
+      now += 101;
+      const expired = await queryUsageSnapshotLogs(coordinator, first.revision, 'llm');
+      assert.deepEqual(expired, { kind: 'revision_changed', expectedRevision: first.revision });
     } finally {
       await stores.close().catch(() => undefined);
       await owner.close();
@@ -868,6 +1077,78 @@ async function queryUsageBuckets(
     throw new Error('Expected usage buckets');
   }
   return frame.result.buckets;
+}
+
+async function expectUsageSnapshotStart(
+  coordinator: HostUsagePricingCoordinator,
+): Promise<Extract<UsageQueryResult, { kind: 'snapshot_started' }>> {
+  const outcome = await coordinator.handlers['usage.query'](
+    { kind: 'snapshot_start', range: 'all' },
+    CONNECTION_CONTEXT,
+  );
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok || outcome.result.kind !== 'snapshot_started') {
+    throw new Error('Expected a started Usage snapshot');
+  }
+  return outcome.result;
+}
+
+async function queryUsageSnapshotLogs(
+  coordinator: HostUsagePricingCoordinator,
+  revision: string,
+  source: 'llm' | 'tool',
+): Promise<Extract<UsageQueryResult, { kind: 'snapshot_logs' | 'revision_changed' }>> {
+  const outcome = await coordinator.handlers['usage.query'](
+    { kind: 'snapshot_logs', revision, source, offset: 0, limit: USAGE_PAGE_MAX_ITEMS },
+    CONNECTION_CONTEXT,
+  );
+  assert.equal(outcome.ok, true);
+  if (
+    !outcome.ok ||
+    (outcome.result.kind !== 'snapshot_logs' && outcome.result.kind !== 'revision_changed')
+  ) {
+    throw new Error('Expected a Usage snapshot log page');
+  }
+  return outcome.result;
+}
+
+async function expectUsageSnapshotLogs(
+  coordinator: HostUsagePricingCoordinator,
+  revision: string,
+  source: 'llm' | 'tool',
+): Promise<Extract<UsageQueryResult, { kind: 'snapshot_logs' }>> {
+  const result = await queryUsageSnapshotLogs(coordinator, revision, source);
+  if (result.kind !== 'snapshot_logs') throw new Error('Expected a retained Usage snapshot');
+  assert.equal(result.source, source);
+  return result;
+}
+
+async function expectUsageSnapshotPricing(
+  coordinator: HostUsagePricingCoordinator,
+  revision: string,
+): Promise<{ readonly entries: readonly EffectivePricingEntry[] }> {
+  const entries: EffectivePricingEntry[] = [];
+  let offset = 0;
+  let total: number | undefined;
+  do {
+    const outcome = await coordinator.handlers['usage.query'](
+      { kind: 'snapshot_pricing', revision, offset, limit: PRICING_PAGE_MAX_ITEMS },
+      CONNECTION_CONTEXT,
+    );
+    assert.equal(outcome.ok, true);
+    if (!outcome.ok || outcome.result.kind !== 'snapshot_pricing') {
+      throw new Error('Expected a Usage snapshot pricing page');
+    }
+    assert.equal(outcome.result.revision, revision);
+    assert.equal(outcome.result.offset, offset);
+    total ??= outcome.result.total;
+    assert.equal(outcome.result.total, total);
+    entries.push(...outcome.result.entries);
+    if (outcome.result.nextOffset === null) break;
+    offset = outcome.result.nextOffset;
+  } while (true);
+  assert.equal(entries.length, total);
+  return { entries };
 }
 
 function assertDistinctBoundedIdentities(values: readonly (string | undefined)[]): void {

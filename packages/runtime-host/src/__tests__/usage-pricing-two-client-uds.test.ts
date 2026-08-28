@@ -447,6 +447,7 @@ describe('production Usage/Pricing UDS', () => {
       | undefined;
     const clients: RuntimeHostConnection[] = [];
     let endpoint: string | undefined;
+    let firstHostSnapshotRevision: string | undefined;
 
     try {
       firstOwner = await tryAcquireInteractiveRootOwner(capability);
@@ -504,6 +505,15 @@ describe('production Usage/Pricing UDS', () => {
         },
       ]);
 
+      const pinnedUsage = await desktop.request(
+        'usage.query',
+        { kind: 'snapshot_start', range: 'all' },
+        REQUEST_TIMEOUT_MS,
+      );
+      assert.equal(pinnedUsage.kind, 'snapshot_started');
+      if (pinnedUsage.kind !== 'snapshot_started') throw new Error('Usage snapshot did not start');
+      firstHostSnapshotRevision = pinnedUsage.revision;
+
       const initial = await readPricing(desktop);
       assert.equal(initial.revision, 0);
       assert.deepEqual(initial.entries, builtinPricingEntries());
@@ -559,6 +569,27 @@ describe('production Usage/Pricing UDS', () => {
         REQUEST_TIMEOUT_MS,
       );
       assert.deepEqual(retry, { kind: 'committed', revision: 2 });
+
+      const pinnedPricing = await readUsageSnapshotPricing(desktop, pinnedUsage.revision);
+      assert.deepEqual(pinnedPricing, builtinPricingEntries());
+      const pinnedLogs = await desktop.request(
+        'usage.query',
+        {
+          kind: 'snapshot_logs',
+          revision: pinnedUsage.revision,
+          source: 'llm',
+          offset: 0,
+          limit: 100,
+        },
+        REQUEST_TIMEOUT_MS,
+      );
+      assert.equal(pinnedLogs.kind, 'snapshot_logs');
+      if (pinnedLogs.kind === 'snapshot_logs') {
+        assert.deepEqual(
+          pinnedLogs.rows.map((row) => row.id),
+          ['usage-b', 'usage-a'],
+        );
+      }
 
       const [desktopPricing, tuiPricing] = await Promise.all([
         readPricing(desktop),
@@ -662,6 +693,21 @@ describe('production Usage/Pricing UDS', () => {
         connectClient(root),
       ]);
       clients.push(desktopAfterRestart, tuiAfterRestart);
+      assert.ok(firstHostSnapshotRevision);
+      assert.deepEqual(
+        await desktopAfterRestart.request(
+          'usage.query',
+          {
+            kind: 'snapshot_logs',
+            revision: firstHostSnapshotRevision,
+            source: 'llm',
+            offset: 0,
+            limit: 100,
+          },
+          REQUEST_TIMEOUT_MS,
+        ),
+        { kind: 'revision_changed', expectedRevision: firstHostSnapshotRevision },
+      );
       const [usageAfterRestart, pricingAfterRestart, pricingFromSecondClient] = await Promise.all([
         readUsage(desktopAfterRestart),
         readPricing(desktopAfterRestart),
@@ -770,6 +816,31 @@ async function readPricing(client: RuntimeHostConnection): Promise<{
     pageCount += 1;
   }
   return { revision: first.revision, entries, pageCount };
+}
+
+async function readUsageSnapshotPricing(
+  client: RuntimeHostConnection,
+  revision: string,
+): Promise<readonly EffectivePricingEntry[]> {
+  const entries: EffectivePricingEntry[] = [];
+  let offset = 0;
+  while (true) {
+    const result = await client.request(
+      'usage.query',
+      { kind: 'snapshot_pricing', revision, offset, limit: 128 },
+      REQUEST_TIMEOUT_MS,
+    );
+    assert.equal(result.kind, 'snapshot_pricing');
+    if (result.kind !== 'snapshot_pricing') throw new Error('Usage snapshot pricing disappeared');
+    assert.equal(result.revision, revision);
+    assert.equal(result.offset, offset);
+    entries.push(...result.entries);
+    if (result.nextOffset === null) {
+      assert.equal(entries.length, result.total);
+      return entries;
+    }
+    offset = result.nextOffset;
+  }
 }
 
 async function readCoordinatorPricing(

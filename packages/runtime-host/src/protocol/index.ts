@@ -93,7 +93,10 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 59 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 60 as const;
+// 60: `usage.query` adds opaque revision-pinned snapshot start, activity, and
+// pricing pages. Epoch-59 peers reject these exact new input/output variants,
+// so mixed peers must fail the handshake before Settings Usage is requested.
 // 59: Scheduled Turn provider-retry frames may carry an optional host-clock
 // `ts`, letting a mid-wait re-projection recompute the authoritative
 // remaining duration. Older peers decode the frame with an exact key list
