@@ -28,11 +28,49 @@ export type SettingsProjectsCopy = {
     remoteTitle: string;
     remoteDescription: string;
     addComputer: string;
+    useConnectionCode: string;
     configureManually: string;
+    thisComputerRemoteAccess: string;
+    thisComputerRemoteAccessHelp: string;
+    remoteAccessOn: string;
+    remoteAccessOff: string;
+    enableRemoteAccess: string;
+    disableRemoteAccess: string;
+    disableRemoteAccessConfirm: string;
+    disableRemoteAccessDescription: string;
+    revokeSharedAccess: string;
+    revokeSharedAccessConfirm: string;
+    revokeSharedAccessDescription: string;
+    revokeSharedAccessDone: string;
+    uninstallLocalService: string;
+    uninstallLocalServiceConfirm: string;
+    uninstallLocalServiceDescription: string;
+    uninstallLocalServiceDone: string;
+    createConnectionCode: string;
+    connectionCodeTitle: string;
+    connectionCodeDescription: string;
+    importConnectionCodeTitle: string;
+    importConnectionCodeDescription: string;
+    connectionCode: string;
+    copyConnectionCode: string;
+    connectionCodeCopied: string;
+    connectionCodeInvalid: string;
+    connectionCodeUnavailable: string;
+    connectionCodeHostUnreachable: string;
+    connectionCodeHostMismatch: string;
+    connectionCodeUnknownError: string;
+    connectWithCode: string;
+    remoteAccessActiveTasks: string;
+    remoteAccessActiveTasksDescription: string;
+    uninstallActiveTasksDescription: string;
+    interruptAndEnable: string;
+    interruptAndUninstall: string;
+    remoteAccessFailed: string;
     setupTitle: string;
     setupDescription: string;
     setupName: string;
     setupSshPort: string;
+    setupDirectoryRootsDescription: string;
     setupConnect: string;
     setupCancel: string;
     setupRetry: string;
@@ -74,19 +112,48 @@ export type SettingsProjectsCopy = {
     credentialHelp: string;
     saveAndEnable: string;
     defaultBadge: string;
+    experimentalBadge: string;
     defaultDisableHelp: string;
     unavailable: string;
     manage: string;
     managementTitle(name: string): string;
     serviceStatus: string;
     serviceState: Record<import('../../preload/bridge-contract.js').DesktopRuntimeHostManagementResult['service']['state'], string>;
+    directPeer: string;
+    directPeerDescription: string;
+    directPeerState: Record<'unsupported' | 'not_configured' | 'disabled' | 'enabled' | 'unavailable', string>;
+    directPeerUnavailable: string;
+    directPeerUpgradeRequired: string;
+    directPeerClientUnavailable: string;
+    directPeerDisableProfileFirst: string;
+    directPeerId: string;
+    directPeerRoutes: string;
+    directPeerCoordinationRelays: string;
+    directPeerCoordinationRelaysPlaceholder: string;
+    directPeerEnable: string;
+    directPeerDisable: string;
+    directPeerAddProfile: string;
+    directPeerActionFailed: string;
     installedVersion: string;
     operatingSystem: string;
     processId: string;
     lastExitCode: string;
     stateRoot: string;
     directoryRoots: string;
+    directoryRootsDescription: string;
+    directoryRootsUnavailable: string;
+    directoryRootsChanged: string;
+    directoryRootsChangedDescription: string;
+    reloadDirectoryRoots: string;
     noDirectoryRoots: string;
+    directoryRootLabel: string;
+    directoryRootPath: string;
+    addDirectoryRoot: string;
+    removeDirectoryRoot: string;
+    saveDirectoryRoots: string;
+    directoryRootsActiveTasks: string;
+    directoryRootsActiveTasksDescription: string;
+    configureDirectoriesInterrupt: string;
     refresh: string;
     startService: string;
     restartService: string;
@@ -141,6 +208,7 @@ export type SettingsProjectsCopy = {
     uninstallConfirm: string;
     uninstallRetained(path: string): string;
     managementActionFailed: string;
+    managementReconnectFailed: string;
     manageAccess: string;
     accessTitle: string;
     noAccessCredentials: string;
@@ -220,11 +288,49 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
       remoteTitle: '远程 Host',
       remoteDescription: '通过 SSH 自动设置一台电脑，或手动连接已有 Runtime Host。',
       addComputer: '添加电脑',
+      useConnectionCode: '使用连接码',
       configureManually: '手动配置',
+      thisComputerRemoteAccess: '远程访问',
+      thisComputerRemoteAccessHelp: '让其他 Maka Desktop 通过实验性 Direct peer 连接此 Host',
+      remoteAccessOn: '已开启',
+      remoteAccessOff: '未开启',
+      enableRemoteAccess: '开启',
+      disableRemoteAccess: '关闭连接',
+      disableRemoteAccessConfirm: '关闭远程连接？',
+      disableRemoteAccessDescription: '这只会停止 Direct peer 连接；已授予的共享访问仍会保留。',
+      revokeSharedAccess: '撤销共享访问',
+      revokeSharedAccessConfirm: '撤销共享访问？',
+      revokeSharedAccessDescription: '已连接的 Desktop 将断开，尚未使用的连接码也会失效。',
+      revokeSharedAccessDone: '共享访问已撤销',
+      uninstallLocalService: '移除后台服务',
+      uninstallLocalServiceConfirm: '移除 Runtime Host 后台服务？',
+      uninstallLocalServiceDescription: '数据和已授予的共享访问会保留；Local Host 将恢复为仅在 Maka Desktop 运行时启动。',
+      uninstallLocalServiceDone: '后台服务已移除',
+      createConnectionCode: '新建连接码',
+      connectionCodeTitle: '连接这台电脑',
+      connectionCodeDescription: '连接码将在 15 分钟后过期且只能使用一次。对方将获得 Owner 权限；Direct peer 无后备连接。',
+      importConnectionCodeTitle: '使用连接码',
+      importConnectionCodeDescription: '连接后将获得对方 Host 的 Owner 权限。Direct peer 无后备连接。',
+      connectionCode: '连接码',
+      copyConnectionCode: '复制连接码',
+      connectionCodeCopied: '连接码已复制',
+      connectionCodeInvalid: '连接码格式无效。',
+      connectionCodeUnavailable: '连接码已过期或已被使用。请在另一台电脑上新建连接码。',
+      connectionCodeHostUnreachable: '无法建立 Direct peer 连接。请确认两台电脑在线且网络允许 UDP。',
+      connectionCodeHostMismatch: '连接码指向的 Host 与实际连接的 Host 不匹配或版本不兼容。',
+      connectionCodeUnknownError: '连接结果未知。请先检查远程 Host 列表，再决定是否重试。',
+      connectWithCode: '连接',
+      remoteAccessActiveTasks: '这台电脑仍有正在运行的任务',
+      remoteAccessActiveTasksDescription: '开启远程访问需要把 Local Host 交给系统服务。是否中断当前任务并继续？',
+      uninstallActiveTasksDescription: '移除后台服务会停止当前任务。是否中断这些任务并继续？',
+      interruptAndEnable: '中断任务并开启',
+      interruptAndUninstall: '中断任务并移除',
+      remoteAccessFailed: '远程访问操作失败',
       setupTitle: '添加远程电脑',
       setupDescription: '通过 SSH 安装并连接 Runtime Host',
       setupName: '显示名称（可选）',
       setupSshPort: 'SSH 端口（可选）',
+      setupDirectoryRootsDescription: '留空时使用远端 Home。添加目录后，只有这些目录可用于浏览并添加项目。',
       setupConnect: '连接',
       setupCancel: '取消',
       setupRetry: '重试',
@@ -275,6 +381,7 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
       credentialHelp: '在远程机器使用 desktop-client preset 签发',
       saveAndEnable: '保存并启用',
       defaultBadge: '默认',
+      experimentalBadge: '实验性',
       defaultDisableHelp: '先选择另一个默认 Host，才能停用此 Host',
       unavailable: '无法连接',
       manage: '管理',
@@ -287,13 +394,47 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
         running: '运行中',
         failed: '启动失败',
       },
+      directPeer: 'Direct peer（实验性）',
+      directPeerDescription: '创建独立的实验性 Direct profile。受限 NAT 或被阻止的 UDP 可能使其不可达，且不会自动回退；保留 SSH profile 用于手动恢复。',
+      directPeerState: {
+        unsupported: '需要更新',
+        not_configured: '未配置',
+        disabled: '已停用',
+        enabled: '已启用',
+        unavailable: '不可用',
+      },
+      directPeerUnavailable: '无法读取 Direct peer 状态',
+      directPeerUpgradeRequired: '请先更新远程 Runtime Host，再管理 Direct peer。',
+      directPeerClientUnavailable: '当前 Desktop 构建不包含 Direct peer 支持。',
+      directPeerDisableProfileFirst: '请先在 Runtime Host 列表中停用 Direct peer。',
+      directPeerId: 'Peer ID',
+      directPeerRoutes: '可用路径',
+      directPeerCoordinationRelays: '连接协调节点（可选）',
+      directPeerCoordinationRelaysPlaceholder: '多个地址用逗号分隔',
+      directPeerEnable: '启用并添加',
+      directPeerDisable: '停用',
+      directPeerAddProfile: '添加到 Desktop',
+      directPeerActionFailed: 'Direct peer 操作失败',
       installedVersion: '版本',
       operatingSystem: '系统',
       processId: '进程 ID',
       lastExitCode: '上次退出码',
       stateRoot: 'State Root',
-      directoryRoots: '可用目录',
-      noDirectoryRoots: '未配置额外目录',
+      directoryRoots: '可用于添加项目的目录',
+      directoryRootsDescription: '远程 Client 只能从这些目录浏览并添加新项目。移除目录不会删除已经添加的项目。',
+      directoryRootsUnavailable: '更新或修复这个 Host 后，即可在 Desktop 中管理这些目录。',
+      directoryRootsChanged: '这些目录已在其他位置更改',
+      directoryRootsChangedDescription: '你的编辑仍被保留。加载当前配置后再继续编辑。',
+      reloadDirectoryRoots: '加载当前配置',
+      noDirectoryRoots: '目录浏览和项目添加已禁用',
+      directoryRootLabel: '显示名称',
+      directoryRootPath: '远端绝对路径',
+      addDirectoryRoot: '添加目录',
+      removeDirectoryRoot: '移除',
+      saveDirectoryRoots: '应用目录',
+      directoryRootsActiveTasks: '这个 Host 仍有正在运行的任务',
+      directoryRootsActiveTasksDescription: '应用目录需要安全重启远端服务。只有明确确认后才会中断这些任务。',
+      configureDirectoriesInterrupt: '中断任务并应用',
       refresh: '刷新',
       startService: '启动',
       restartService: '重启',
@@ -350,6 +491,7 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
       uninstallConfirm: '卸载服务',
       uninstallRetained: (path: string) => `服务已卸载，数据保留在 ${path}`,
       managementActionFailed: '无法管理 Runtime Host 服务',
+      managementReconnectFailed: '更改已应用，但 Desktop 未能重新连接',
       manageAccess: '管理访问权限',
       accessTitle: '访问权限',
       noAccessCredentials: '没有访问凭据',
@@ -427,11 +569,49 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
       remoteDescription:
         'Set up a computer over SSH, or connect an existing Runtime Host manually.',
       addComputer: 'Add computer',
+      useConnectionCode: 'Use connection code',
       configureManually: 'Configure manually',
+      thisComputerRemoteAccess: 'Remote access',
+      thisComputerRemoteAccessHelp: 'Let another Maka Desktop reach this Host through experimental Direct peer',
+      remoteAccessOn: 'On',
+      remoteAccessOff: 'Off',
+      enableRemoteAccess: 'Enable',
+      disableRemoteAccess: 'Turn off connectivity',
+      disableRemoteAccessConfirm: 'Turn off remote connectivity?',
+      disableRemoteAccessDescription: 'This only stops Direct peer connectivity. Granted shared access is retained.',
+      revokeSharedAccess: 'Revoke shared access',
+      revokeSharedAccessConfirm: 'Revoke shared access?',
+      revokeSharedAccessDescription: 'The connected Desktop will be disconnected, and unused connection codes will stop working.',
+      revokeSharedAccessDone: 'Shared access revoked',
+      uninstallLocalService: 'Remove background service',
+      uninstallLocalServiceConfirm: 'Remove the Runtime Host background service?',
+      uninstallLocalServiceDescription: 'Data and granted shared access are retained. The Local Host will return to running only while Maka Desktop is open.',
+      uninstallLocalServiceDone: 'Background service removed',
+      createConnectionCode: 'New connection code',
+      connectionCodeTitle: 'Connect to this computer',
+      connectionCodeDescription: 'Expires in 15 minutes and can be used once. The other Desktop receives Owner access. Direct peer has no fallback.',
+      importConnectionCodeTitle: 'Use a connection code',
+      importConnectionCodeDescription: 'Connecting grants this Desktop Owner access to the other Host. Direct peer has no fallback.',
+      connectionCode: 'Connection code',
+      copyConnectionCode: 'Copy connection code',
+      connectionCodeCopied: 'Connection code copied',
+      connectionCodeInvalid: 'The connection code is invalid.',
+      connectionCodeUnavailable: 'The connection code expired or was already used. Create a new code on the other computer.',
+      connectionCodeHostUnreachable: 'A Direct peer connection could not be established. Check that both computers are online and UDP is allowed.',
+      connectionCodeHostMismatch: 'The code does not match the connected Host, or the Host version is incompatible.',
+      connectionCodeUnknownError: 'The connection outcome is unknown. Check the remote Host list before retrying.',
+      connectWithCode: 'Connect',
+      remoteAccessActiveTasks: 'This computer still has running tasks',
+      remoteAccessActiveTasksDescription: 'Enabling remote access hands the Local Host to a system service. Interrupt the current tasks and continue?',
+      uninstallActiveTasksDescription: 'Removing the background service stops the current tasks. Interrupt them and continue?',
+      interruptAndEnable: 'Interrupt and enable',
+      interruptAndUninstall: 'Interrupt and remove',
+      remoteAccessFailed: 'Remote access failed',
       setupTitle: 'Add remote computer',
       setupDescription: 'Install and connect Runtime Host over SSH',
       setupName: 'Display name (optional)',
       setupSshPort: 'SSH port (optional)',
+      setupDirectoryRootsDescription: 'Leave empty to use the remote Home directory. When directories are added, only those locations can be browsed to add projects.',
       setupConnect: 'Connect',
       setupCancel: 'Cancel',
       setupRetry: 'Retry',
@@ -482,6 +662,7 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
       credentialHelp: 'Issue it on the remote machine with the desktop-client preset',
       saveAndEnable: 'Save and enable',
       defaultBadge: 'Default',
+      experimentalBadge: 'Experimental',
       defaultDisableHelp: 'Choose another default Host before disabling this Host',
       unavailable: 'Unavailable',
       manage: 'Manage',
@@ -494,13 +675,47 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
         running: 'Running',
         failed: 'Failed',
       },
+      directPeer: 'Direct peer (experimental)',
+      directPeerDescription: 'Create an independent experimental Direct profile. Restrictive NAT or blocked UDP may make it unreachable, and it does not fall back automatically; keep the SSH profile for manual recovery.',
+      directPeerState: {
+        unsupported: 'Update required',
+        not_configured: 'Not configured',
+        disabled: 'Disabled',
+        enabled: 'Enabled',
+        unavailable: 'Unavailable',
+      },
+      directPeerUnavailable: 'Direct peer status is unavailable',
+      directPeerUpgradeRequired: 'Update the remote Runtime Host before managing Direct peer.',
+      directPeerClientUnavailable: 'This Desktop build does not include Direct peer support.',
+      directPeerDisableProfileFirst: 'Disable the Direct peer in the Runtime Host list first.',
+      directPeerId: 'Peer ID',
+      directPeerRoutes: 'Routes',
+      directPeerCoordinationRelays: 'Connection coordination peers (optional)',
+      directPeerCoordinationRelaysPlaceholder: 'Separate multiple addresses with commas',
+      directPeerEnable: 'Enable and add',
+      directPeerDisable: 'Disable',
+      directPeerAddProfile: 'Add to Desktop',
+      directPeerActionFailed: 'Direct peer action failed',
       installedVersion: 'Version',
       operatingSystem: 'System',
       processId: 'Process ID',
       lastExitCode: 'Last exit code',
       stateRoot: 'State Root',
-      directoryRoots: 'Available directories',
-      noDirectoryRoots: 'No additional directories configured',
+      directoryRoots: 'Directories for adding projects',
+      directoryRootsDescription: 'Remote Clients can browse and add new projects only from these directories. Removing one does not delete projects already added.',
+      directoryRootsUnavailable: 'Update or repair this Host to manage these directories in Desktop.',
+      directoryRootsChanged: 'These directories changed elsewhere',
+      directoryRootsChangedDescription: 'Your draft is preserved. Load the current configuration before continuing.',
+      reloadDirectoryRoots: 'Load current configuration',
+      noDirectoryRoots: 'Directory browsing and project registration are disabled',
+      directoryRootLabel: 'Display name',
+      directoryRootPath: 'Absolute path on remote computer',
+      addDirectoryRoot: 'Add directory',
+      removeDirectoryRoot: 'Remove',
+      saveDirectoryRoots: 'Apply directories',
+      directoryRootsActiveTasks: 'This Host still has running tasks',
+      directoryRootsActiveTasksDescription: 'Applying these directories requires a safe remote service restart. Tasks are interrupted only after explicit confirmation.',
+      configureDirectoriesInterrupt: 'Interrupt tasks and apply',
       refresh: 'Refresh',
       startService: 'Start',
       restartService: 'Restart',
@@ -560,6 +775,7 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
       uninstallConfirm: 'Uninstall service',
       uninstallRetained: (path: string) => `Service uninstalled. Data was retained at ${path}`,
       managementActionFailed: 'Unable to manage the Runtime Host service',
+      managementReconnectFailed: 'Change applied, but Desktop could not reconnect',
       manageAccess: 'Manage access',
       accessTitle: 'Access',
       noAccessCredentials: 'No active access credentials',

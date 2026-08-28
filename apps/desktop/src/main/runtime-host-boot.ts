@@ -22,6 +22,7 @@ import {
   clipboard,
   dialog,
   ipcMain,
+  nativeTheme,
   powerSaveBlocker,
   shell,
   type MessageBoxOptions,
@@ -30,7 +31,6 @@ import {
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { type ConnectionEvent } from '@maka/core/connections';
-import type { UsageRange } from '@maka/core/settings';
 import { type SessionChangedEvent, type SessionChangedReason } from '@maka/core/session';
 import { isBotDeliveryProvider } from '@maka/core/bot-chat-settings';
 import { resolveSystemUiLocale } from '@maka/core/ui-locale';
@@ -62,6 +62,7 @@ import { resolveStorageRoot } from "@maka/storage/root-authority";
 import { createMcpOAuthController } from "./mcp-oauth-controller.js";
 import { registerAppClientIpc, registerAppIpc } from "./app-ipc-main.js";
 import { createAppQuitCoordinator } from "./app-quit-coordinator.js";
+import { verifyDownloadedUpdateAttestation } from "./app-update-attestation.js";
 import { createAppUpdateService } from "./app-update-service.js";
 import { createAttachmentApprovalRegistry } from "./attachment-approval.js";
 import { renderAttachmentPreview, resizeImageForAttachment } from "./attachment-resize-native.js";
@@ -168,6 +169,9 @@ import {
   createDesktopRuntimeHostSshTerminal,
 } from "./runtime-host-ssh-terminal.js";
 import { createRuntimeHostSetupPackageResolver } from "./runtime-host-setup-package.js";
+import { configureDesktopRuntimeHostPeerClient } from './runtime-host-peer-client.js';
+import { createDesktopRuntimeHostLocalOperator } from './runtime-host-local-operator.js';
+import { createDesktopLocalRuntimeHostRemoteAccess } from './runtime-host-local-remote-access.js';
 import { createDesktopRuntimeHostOnboarding } from "./runtime-host-onboarding.js";
 import { createDesktopRuntimeHostManagement } from "./runtime-host-management.js";
 import { registerRuntimeHostOAuthIpc } from "./runtime-host-oauth-ipc-main.js";
@@ -200,9 +204,6 @@ import { resolveDesktopStorageRoot } from "./storage-root-startup.js";
 import { startupStep } from "./startup-step.js";
 import { registerWorkspaceSearchIpc } from "./workspace-search-ipc-main.js";
 import {
-  projectDesktopUsageStats,
-} from "../shared/desktop-session-projection.js";
-import {
   parseDesktopSessionResourceKey,
   requireDesktopTargetScope,
   type DesktopTargetScope,
@@ -213,6 +214,12 @@ await resolveShellEnv();
 const MANAGED_UPDATE_RECONNECT_TIMEOUT_MS = 10_000;
 const buildInfo = resolveBuildInfo(app.isPackaged, app.getAppPath());
 const userDataDir = app.getPath("userData");
+const runtimeHostDirectPeerAvailable = await configureDesktopRuntimeHostPeerClient({
+  isPackaged: app.isPackaged,
+  appPath: app.getAppPath(),
+  resourcesPath: process.resourcesPath,
+  clientDataRoot: userDataDir,
+});
 const runtimeHostClientInstanceId = await loadOrCreateRuntimeHostClientInstanceId(
   join(userDataDir, "runtime-host-client.json"),
 );
@@ -300,7 +307,6 @@ if (!startupLocalStorageRoot) {
   await new Promise<never>(() => {});
   throw new Error("Desktop storage root resolution did not complete");
 }
-const localRuntimeHostId = startupLocalStorageRoot.rootId;
 const settingsStore = createSettingsStore(workspaceRoot);
 const desktopLocale = createDesktopLocaleAuthority({
   readSettings: () => settingsStore.get(),
@@ -378,6 +384,17 @@ const runtimeHostSetupPackage = createRuntimeHostSetupPackageResolver({
   appPath: app.getAppPath(),
   environment: process.env,
 });
+const localRuntimeHostOperator = createDesktopRuntimeHostLocalOperator();
+const localRuntimeHostRemoteAccess = createDesktopLocalRuntimeHostRemoteAccess({
+  ipcMain,
+  clientDataRoot: userDataDir,
+  rootPath: startupLocalStorageRoot.canonicalPath,
+  rootId: startupLocalStorageRoot.rootId,
+  directPeerAvailable: runtimeHostDirectPeerAvailable,
+  manager: () => runtimeHostManager,
+  resolveSetupPackage: runtimeHostSetupPackage.resolve,
+  operator: localRuntimeHostOperator,
+});
 const native = assembleDesktopNativeCapabilities({
   isComputerUseRealModelE2e,
   locale: desktopLocale,
@@ -451,6 +468,8 @@ const runtimeHostManagement = createDesktopRuntimeHostManagement({
   ipcMain,
   profiles: runtimeHostProfileService,
   runServiceManagement: runtimeHostSshTerminal.runServiceManagement,
+  runPeerManagement: runtimeHostSshTerminal.runPeerManagement,
+  directPeerClientAvailable: runtimeHostDirectPeerAvailable,
   runUpdate: runtimeHostSshTerminal.runUpdate,
   runUpdatePolicy: runtimeHostSshTerminal.runUpdatePolicy,
   runUpdateReconciliation: runtimeHostSshTerminal.runUpdateReconciliation,
@@ -582,12 +601,23 @@ const clientSettingsEffects = createClientSettingsEffects({
       console.error("[icon] failed to apply the app icon:", error),
     );
   },
+  systemPrefersDark: () => nativeTheme.shouldUseDarkColors,
   observeLocale: (settings) => desktopLocale.observe(settings),
   emitExternalChanged: () => {
     mainWindowController.send("settings:clientChanged");
     sendActiveRuntimeHostEvent("settings:externalChanged", { ts: Date.now() });
   },
 });
+// An OS appearance flip changes no setting, so nothing else would notice it.
+// Only the icon depends on the answer, and `refresh` re-resolves it and
+// no-ops when the resolved tile is the one already applied — which is the
+// case for every user who has not set a separate dark icon.
+nativeTheme.on("updated", () => {
+  void clientSettingsEffects.refresh(false).catch((error) => {
+    console.error("[icon] failed to re-apply the app icon after a theme change:", error);
+  });
+});
+
 const clientSettingsTools = buildClientSettingsTools({
   read: () => settingsStore.get(),
   update: async (patch) => {
@@ -627,14 +657,27 @@ const updateMockState =
   process.env.MAKA_UPDATE_MOCK_STATE === "downloaded"
     ? process.env.MAKA_UPDATE_MOCK_STATE
     : undefined;
+const updateTestFeed = process.env.MAKA_UPDATE_TEST_FEED;
 const updateService = createAppUpdateService({
   currentVersion: app.getVersion(),
   isPackaged: app.isPackaged,
-  testFeedUrl: process.env.MAKA_UPDATE_TEST_FEED,
+  testFeedUrl: updateTestFeed,
   mockLatestVersion: process.env.MAKA_UPDATE_MOCK_VERSION,
   mockState: updateMockState,
   onStatusChange: (status) =>
     mainWindowController.send("app:updateStatusChanged", status),
+  // The loopback-only upgrade harness owns synthetic bytes that cannot carry
+  // a GitHub Actions identity, so it tests updater mechanics rather than
+  // provenance. Ordinary packaged launches have no override and always reach
+  // the Sigstore verifier below.
+  verifyDownloadedUpdate: updateTestFeed
+    ? async () => {}
+    : ({ downloadedFile, version }) =>
+        verifyDownloadedUpdateAttestation({
+          downloadedFile,
+          version,
+          trustRootCacheDirectory: join(userDataDir, "update-trust", "sigstore"),
+        }),
   prepareInstall: async (input) => {
     if (!runtimeHostManager) throw new Error("Runtime Host manager is unavailable");
     const retirement = await runtimeHostManager.retireOwnedLocalHost(
@@ -799,6 +842,7 @@ runtimeHostManager = await startRuntimeHostDesktopManager(
       console.error("[runtime-host] projection refresh failed:", error),
     registerClientIpc: registerHostClientIpc,
     openSshTunnel: runtimeHostSshTerminal.openSshTunnel,
+    activateSshOperator: runtimeHostSshTerminal.activateSshOperator,
   },
   {
     upgradePrompts: createRuntimeHostUpgradePrompts(
@@ -900,6 +944,9 @@ runtimeHostManager = await startRuntimeHostDesktopManager(
 });
 wireLifecycle();
 runtimeHostManager.setDefaultProfile(runtimeHostStartup.preferences.defaultProfileId);
+await localRuntimeHostRemoteAccess.recover().catch((error: unknown) => {
+  console.error('[runtime-host] interrupted Local Host setup could not be recovered:', error);
+});
 void runtimeHostProfileService.startEnabledProfiles();
 const unavailableDefault = runtimeHostStartup.unavailable.get(
   runtimeHostStartup.preferences.defaultProfileId,
@@ -1357,12 +1404,6 @@ function registerPersistentClientIpc(): void {
         }
       : {}),
   });
-  ipcMain.handle("settings:usageStats", async (_event, range?: UsageRange) =>
-    projectDesktopUsageStats(
-      { hostId: localRuntimeHostId },
-      await settingsStore.usageStats(range),
-    ),
-  );
   ipcMain.handle("sessions:unobserve", async (_event, observerId: unknown) => {
     if (typeof observerId !== "string" || observerId.length === 0 || observerId.length > 256) {
       throw new Error("Invalid Session observer identity");
@@ -1581,6 +1622,7 @@ async function closeRuntimeHostDesktop(): Promise<void> {
     Promise.resolve().then(() => runtimeHostManagement.close()),
     runtimeHostManager?.close(),
     runtimeHostOnboarding.close(),
+    localRuntimeHostRemoteAccess.close(),
     runtimeHostSetupPackage.close(),
     Promise.resolve().then(() => workBoardIpc.close()),
     runtimeHostSshTerminal.close(),

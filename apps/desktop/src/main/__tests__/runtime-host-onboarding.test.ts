@@ -23,7 +23,8 @@ import type { DesktopRuntimeHostProfileAddInput } from '../../preload/bridge-con
 import type { DesktopRuntimeHostManagedService } from '../runtime-host-managed-services.js';
 import { createDesktopRuntimeHostOnboarding } from '../runtime-host-onboarding.js';
 
-test('persists a verified SSH profile without projecting its credential', async () => {
+test('persists a verified on-demand SSH profile without endpoint or credential projection', async () => {
+  let setupInput: unknown;
   let saved:
     | (DesktopRuntimeHostProfileAddInput & {
         readonly managedService?: DesktopRuntimeHostManagedService;
@@ -36,7 +37,8 @@ test('persists a verified SSH profile without projecting its credential', async 
         return { profileId: input.profile.id };
       },
     },
-    runSetup: async (_input, onProgress) => {
+    runSetup: async (input, onProgress) => {
+      setupInput = input;
       onProgress({ phase: 'installing_service' });
       return {
         serviceId: 'b'.repeat(64),
@@ -52,6 +54,7 @@ test('persists a verified SSH profile without projecting its credential', async 
   const result = await harness.invoke('runtime-host-onboarding:start', {
     name: 'Lab',
     destination: 'operator@example.com',
+    projectDirectoryRoots: [{ label: 'Work', path: '/srv/work' }],
   });
 
   assert.equal((result as { kind?: string }).kind, 'complete');
@@ -59,15 +62,18 @@ test('persists a verified SSH profile without projecting its credential', async 
   assert.deepEqual(saved?.profile.transport, {
     kind: 'ssh',
     destination: 'operator@example.com',
-    remotePort: 7443,
-    websocketPath: '/runtime-host',
+    activation: {
+      kind: 'ssh_operator',
+      operatorPath: '/home/operator/.local/share/maka/operator',
+    },
   });
-  assert.deepEqual(saved?.managedService, {
-    id: 'b'.repeat(64),
-    rootPath: '/home/operator/.config/Maka/workspaces/default',
-    operatorPath: '/home/operator/.local/share/maka/operator',
-  });
+  assert.equal(saved?.managedService, undefined);
   assert.equal(saved?.credential, 'secret-access-token');
+  assert.deepEqual(
+    (setupInput as { projectDirectoryRoots?: unknown }).projectDirectoryRoots,
+    [{ label: 'Work', path: '/srv/work' }],
+  );
+  assert.equal((setupInput as { lifecycle?: unknown }).lifecycle, 'on_demand');
   assert.doesNotMatch(JSON.stringify(harness.events), /secret-access-token/u);
   await harness.onboarding.close();
   assert.equal(harness.handlers.size, 0);
@@ -88,6 +94,21 @@ test('projects invalid setup input as a recoverable failure', async () => {
   assert.deepEqual(await harness.invoke('runtime-host-onboarding:getSnapshot'), {
     kind: 'idle',
     revision: 2,
+  });
+  await harness.onboarding.close();
+});
+
+test('rejects relative remote Project roots before starting SSH setup', async () => {
+  const harness = createHarness();
+
+  const result = await harness.invoke('runtime-host-onboarding:start', {
+    destination: 'operator@example.com',
+    projectDirectoryRoots: [{ label: 'Work', path: 'srv/work' }],
+  });
+  assert.deepEqual(result, {
+    kind: 'failed',
+    message: 'Runtime Host Project directory is invalid',
+    revision: 1,
   });
   await harness.onboarding.close();
 });

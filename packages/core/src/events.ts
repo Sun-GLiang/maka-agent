@@ -1096,14 +1096,7 @@ export interface MessageAdmissionEvent extends BaseEvent {
   outcome: 'admitted' | 'retracted';
 }
 
-/**
- * Result of enqueuing a steering / followup message. `fallback` means there was
- * no active run to attach to (the turn just ended) and the caller should open a
- * fresh turn with the text instead, so a message is never silently dropped.
- * Queue contents travel on ONE path only: the `queue_update` event.
- */
-export type QueueEnqueueOutcome = { kind: 'queued' } | { kind: 'fallback' };
-
+/** Host-owned placement for a submitted message projected through `queue_update`. */
 export type MessageQueuePlacement = 'current_turn' | 'next_turn';
 export type MessageQueueEntryState = 'queued' | 'in_flight';
 export type FollowUpMode = 'queue' | 'steer';
@@ -1202,10 +1195,22 @@ export type ContextCompactionOutcome =
   | { kind: 'unchanged'; reason: string }
   | { kind: 'failed'; reason: string };
 
-export type ContextBudgetExhaustedDetail =
-  | 'no_safe_completed_span'
-  | 'summarizer_failed'
-  | 'head_anchor_exceeds_capacity';
+export const CONTEXT_BUDGET_EXHAUSTED_DETAILS = [
+  'no_safe_completed_span',
+  'summarizer_failed',
+  'malformed_summary_missing_section',
+  'malformed_summary_truncated',
+  'malformed_summary_too_small_for_fold',
+  'head_anchor_exceeds_capacity',
+] as const;
+
+export type ContextBudgetExhaustedDetail = (typeof CONTEXT_BUDGET_EXHAUSTED_DETAILS)[number];
+
+export function isContextBudgetExhaustedDetail(
+  value: unknown,
+): value is ContextBudgetExhaustedDetail {
+  return CONTEXT_BUDGET_EXHAUSTED_DETAILS.includes(value as ContextBudgetExhaustedDetail);
+}
 
 export type CompleteStopReason = CompleteEvent['stopReason'];
 

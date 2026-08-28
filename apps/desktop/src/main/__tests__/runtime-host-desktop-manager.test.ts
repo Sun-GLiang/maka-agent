@@ -141,6 +141,78 @@ test('quiesces reconnect and waits for the Host process before update install', 
   await owner.close();
 });
 
+test('quiesces Local reconnect while a managed service changes', async () => {
+  const current = candidateHarness({ lifecycleMode: 'service' });
+  const replacement = candidateHarness({
+    lifecycleMode: 'service',
+    hostEpoch: 'service-after',
+  });
+  let starts = 0;
+  let finishChange!: () => void;
+  const change = new Promise<void>((resolve) => {
+    finishChange = resolve;
+  });
+  const owner = await startRuntimeHostDesktopManager(
+    {} as DesktopRuntimeHostCandidateStartInput,
+    {
+      startCandidate: async () => {
+        starts += 1;
+        return ready(starts === 1 ? current.candidate : replacement.candidate);
+      },
+    },
+  );
+
+  const changing = owner.runManagedLocalHostChange(async () => {
+    current.disconnect();
+    await change;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(starts, 1);
+
+  finishChange();
+  await changing;
+  await owner.waitUntilReady('local', 'test-host-epoch');
+  assert.equal(starts, 2);
+  await owner.close();
+});
+
+test('waits through a reconnect gap before quiescing Host retirement', async () => {
+  const first = candidateHarness();
+  const replacement = candidateHarness({ disconnectOnPrepare: true });
+  let starts = 0;
+  let reportReplacementStart!: () => void;
+  let releaseReplacement!: () => void;
+  const replacementStarted = new Promise<void>((resolve) => {
+    reportReplacementStart = resolve;
+  });
+  const replacementReleased = new Promise<void>((resolve) => {
+    releaseReplacement = resolve;
+  });
+  const owner = await startRuntimeHostDesktopManager({} as DesktopRuntimeHostCandidateStartInput, {
+    startCandidate: async () => {
+      starts += 1;
+      if (starts === 1) return ready(first.candidate);
+      reportReplacementStart();
+      await replacementReleased;
+      return ready(replacement.candidate);
+    },
+    waitForHostExit: async () => {},
+  });
+
+  first.disconnect();
+  await replacementStarted;
+  const retirement = owner.retireOwnedLocalHost('interrupt_active_work');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(replacement.prepareRetirementCalls, 0);
+
+  releaseReplacement();
+  assert.equal((await retirement).kind, 'retired');
+  assert.equal(replacement.prepareRetirementCalls, 1);
+  assert.deepEqual(replacement.retirementModes, ['interrupt_active_work']);
+  assert.equal(starts, 2);
+  await owner.close();
+});
+
 test('retires the owned ephemeral Host before Desktop quit', async () => {
   const events: string[] = [];
   const current = candidateHarness({
@@ -491,6 +563,32 @@ test('replays pairing finalization after an unknown commit and reconnect', async
 
   assert.equal(first.finalizeCalls, 1);
   assert.equal(replacement.finalizeCalls, 1);
+  await manager.close();
+});
+
+test('reconnects after a pairing candidate becomes bound to this Client', async () => {
+  const local = candidateHarness({ hostId: 'host-a' });
+  const remoteHostId = 'a'.repeat(64);
+  const candidate = candidateHarness({
+    hostId: remoteHostId,
+    finalizeReconnectRequired: true,
+  });
+  const claimed = candidateHarness({ hostId: remoteHostId });
+  const queue = [local.candidate, candidate.candidate, claimed.candidate];
+  const manager = await startRuntimeHostDesktopManager(
+    {} as DesktopRuntimeHostCandidateStartInput,
+    {
+      startCandidate: async () => ready(queue.shift()!),
+      reconnectBackoff: { minMs: 0, maxMs: 0 },
+    },
+  );
+  await manager.enable(remoteTarget('office'));
+
+  await manager.finalizePairing('office');
+
+  assert.equal(candidate.finalizeCalls, 1);
+  assert.equal(candidate.closeCalls, 1);
+  assert.equal(manager.current('office')?.candidate, claimed.candidate);
   await manager.close();
 });
 
@@ -1065,6 +1163,7 @@ function candidateHarness(
     hostId?: string;
     hostEpoch?: string;
     finalizeFailures?: Error[];
+    finalizeReconnectRequired?: boolean;
     disconnectOnFinalizeFailure?: boolean;
     onPrepare?: (mode: string) => unknown | Promise<unknown>;
   } = {},
@@ -1121,7 +1220,7 @@ function candidateHarness(
           }
           throw failure;
         }
-        return {};
+        return { reconnectRequired: options.finalizeReconnectRequired ?? false };
       },
     },
     botIncoming: {

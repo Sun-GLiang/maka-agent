@@ -57,6 +57,8 @@ import {
   type ProviderRetryEvent,
   type QuoteRef,
 } from '@maka/core/events';
+import type { StoredMessage } from '@maka/core/session';
+import type { TransientUserMessageProjection } from './chat-view.js';
 import {
   finalAssistantReplyText,
   type TurnTimelineItem,
@@ -193,7 +195,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
           /* `value` takes ms directly: Timestamp's own parseValue reads
              anything past 1e12 as milliseconds (2001-09-09 onward), and a
              chat message never predates that. */
-          (<Timestamp className="maka-message-time-inline" value={props.ts} format="time" />)
+          (<Timestamp className="maka-message-time-inline" value={props.ts} format="auto" isLive />)
         ) : undefined
       }
       footer={
@@ -275,6 +277,33 @@ const UserMessageBody = memo(function UserMessageBody(props: {
     </>
   );
 });
+
+export function TransientUserMessage(props: {
+  message: TransientUserMessageProjection;
+  onReadAttachmentBytes?: ReadAttachmentBytes;
+}) {
+  const copy = getConversationCopy(useUiLocale()).messages;
+  const message = props.message;
+  return (
+    <div data-transient-message-id={message.id}>
+      <LocalizedChatMessage
+        accessibleLabel={copy.userAriaLabel}
+        sender="user"
+        className="maka-chat-message maka-user-message"
+      >
+        <UserMessageBody
+          messageId={message.id}
+          text={message.text}
+          ts={message.ts}
+          attachments={message.attachments}
+          quotes={message.quotes}
+          inlineReferences={message.inlineReferences}
+          onReadAttachmentBytes={props.onReadAttachmentBytes}
+        />
+      </LocalizedChatMessage>
+    </div>
+  );
+}
 
 
 function accessibleTextExcerpt(text: string): string {
@@ -1136,6 +1165,9 @@ const AssistantAnswerBubble = memo(function AssistantAnswerBubble(props: Assista
   return (
     <ChatMessageBubble
       variant="ghost"
+      // Astryx's own seam for a bubble that spans the message column: it sets
+      // the width and drops the default max(80%, 280px) cap in one prop.
+      width="100%"
       className={
         props.phase === 'historical'
           ? 'maka-chat-message-bubble maka-chat-message-bubble-assistant'

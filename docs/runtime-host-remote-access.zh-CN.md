@@ -21,7 +21,7 @@
 
 [English](./runtime-host-remote-access.md)
 
-Maka Desktop、TUI 和 CLI 可以通过 TLS、SSH 或明确启用的明文 WebSocket 连接 Runtime Host。
+Maka Desktop、TUI 和 CLI 可以通过 TLS、SSH 或明确启用的明文 WebSocket 连接 Runtime Host。CLI 和 TUI 还支持下文所述的实验性 direct peer transport。
 
 ## 设置 Linux 或 macOS Host
 
@@ -90,6 +90,36 @@ service；未指定 WebSocket port 时会保留现有端口。卸载 npm 包前�
 
 ## 选择连接方式
 
+### 实验性 direct peer
+
+发布版 CLI 与 Desktop 已包含 direct peer native transport，Host 无需安装 Rust 或保留源码。对于通过 SSH
+管理的 Host，可以在 Desktop 的电脑管理界面启用；Desktop 会创建独立的实验性 profile，不删除原 SSH
+profile。同一个 State Root 同时只能启用一个 profile。
+
+等价的 CLI 流程使用 setup 输出的精确 service target：
+
+```sh
+maka runtime-host service peer enable \
+  --expected-service-id '<serviceId>' \
+  --expected-root-path '<rootPath>' \
+  --expected-root-id '<rootId>'
+
+maka runtime-host service peer descriptor \
+  --expected-service-id '<serviceId>' \
+  --expected-root-path '<rootPath>' \
+  --expected-root-id '<rootId>'
+```
+
+Descriptor 只包含 PeerId、Root ID 和候选 route，不包含 access credential。使用这些值执行
+`runtime-host profile set --peer-id ... --peer-route ...`，并通过
+`MAKA_RUNTIME_HOST_ACCESS_CREDENTIAL` 提供 setup 创建的 credential。Disable 后重新 enable 会保留
+PeerId 和 listener 配置；`peer rotate` 会明确更换 PeerId；卸载 service 会删除 peer key，但保留 State
+Root。执行 `peer enable --clear-coordination-relays` 可以删除所有已配置的 coordination relay。
+
+Direct-only 路径仍是实验能力，在受限 NAT 或禁用 UDP 的网络中可能失败。它不会替代已有的 TLS、SSH
+或 overlay network fallback；除非用户在 `peer enable` 时明确传入 `--coordination-relay`，否则不会使用
+公共 relay。
+
 ### Direct TLS
 
 具有稳定网络入口的 Host 使用 TLS：
@@ -139,6 +169,11 @@ Client Profile 还必须单独持久化明文风险确认。Maka 不会把 TLS �
 打开`设置 → 工作区 → Runtime Host`，选择**添加电脑**并填写 OpenSSH 目标。Desktop 会在交互式 SSH 会话中运行已发布的 setup 命令，保存返回的 credential，验证 tunnel，然后打开远程 Project 选择器。
 
 已有 TLS、SSH 或明确允许的明文 endpoint 可通过**手动配置**添加。
+
+如需从另一台 Desktop 访问当前电脑，可在同一设置页开启**远程访问**。Maka 会保留现有
+Local Host 和 State Root，将该 Host 交由操作系统服务管理，并在 Local IPC 之外同时启用 Direct
+peer listener。将一次性 connection code 提供给另一台 Desktop 即可连接。关闭远程访问只会停止
+Direct peer listener；移除后台服务后，Local Host 会重新由 Desktop 管理，所有数据均保留。
 
 Credential 与 Profile 分开存储。Desktop 会让 Local 与每个已启用的 remote Host 独立保持连接，并允许指定一个默认 Host 来创建新 Session；已有 Session 仍使用自己的 Host。Remote connection 失败时仍会显示，但不会中断其他 Host。连接后从该 Host 已注册的 Project 中选择一个；Client 本地目录操作不可用。
 

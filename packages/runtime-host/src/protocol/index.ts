@@ -60,6 +60,7 @@ import {
   type RequestFrame,
   type ResponseFrame,
 } from './operations.js';
+import { isCanonicalRuntimeHostWebSocketPath } from './websocket-path.js';
 
 export * from './access-authority.js';
 export * from './agent-graph.js';
@@ -92,7 +93,22 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 50 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 56 as const;
+// 56: Failed Turn snapshots preserve the structured context-budget exhaustion
+// detail. Epoch-55 peers reject the optional field on the closed snapshot shape.
+// 55: Local owners can atomically revoke every credential for one access
+// principal, closing pairing-finalize races that credential-by-ID revocation cannot.
+// 54: Client-bound pairing candidates restrict pre-claim authority and bind
+// their durable credential to the claiming Client identity; it is also reserved
+// by concurrent protocol changes in #3390 and #3935.
+// 53: Message admission answers `turn.message.submit` with an explicit
+// disposition, and queued Messages can be proven cancelled. Older peers read the
+// answer as a bare acknowledgement and cannot reconcile their own projection.
+// 52: Session subscriptions can forward durable steering-message echoes and
+// preserve their identity across queue and transcript projection.
+// Older peers cannot safely de-duplicate the two authoritative paths.
+// 51: WorkHub exposes bounded coordination candidates and admits only typed
+// actions through the deterministic Runtime Host Action Gate.
 // 50: WorkHub can append durable coordination summaries and admit tool-free
 // answers through its reserved Coordination Session authority.
 // 49: WorkHub resolves one durable Coordination Session per Runtime Host.
@@ -224,6 +240,7 @@ export interface HostRegistration {
   rootId: string;
   hostEpoch: string;
   endpoint: string;
+  websocketEndpoints?: readonly string[];
   protocolMin: number;
   protocolMax: number;
   compatibilityEpoch: number;
@@ -359,6 +376,7 @@ export function decodeHostRegistration(value: unknown): HostRegistration {
   const protocolMax = requireProtocolVersion(registration.protocolMax, 'protocolMax');
   validateProtocolRange({ min: protocolMin, max: protocolMax });
   const rootId = requireHostRootId(registration.rootId);
+  const websocketEndpoints = decodeRegistrationWebSocketEndpoints(registration.websocketEndpoints);
   const pid = requireCount(registration.pid, 'pid');
   if (pid === 0) throw invalidProtocolFrame('Invalid pid');
   return {
@@ -367,6 +385,7 @@ export function decodeHostRegistration(value: unknown): HostRegistration {
     rootId,
     hostEpoch: requireId(registration.hostEpoch, 'hostEpoch'),
     endpoint: requireString(registration.endpoint, 'endpoint', 512),
+    ...(websocketEndpoints === undefined ? {} : { websocketEndpoints }),
     protocolMin,
     protocolMax,
     compatibilityEpoch:
@@ -385,6 +404,39 @@ export function decodeHostRegistration(value: unknown): HostRegistration {
     pid,
     createdAt: requireString(registration.createdAt, 'createdAt', 64),
   };
+}
+
+function decodeRegistrationWebSocketEndpoints(value: unknown): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 4) {
+    throw invalidProtocolFrame('Invalid Runtime Host registration WebSocket endpoints');
+  }
+  const endpoints = value.map((entry) => {
+    const endpoint = requireString(entry, 'Runtime Host WebSocket endpoint', 2_048);
+    let url: URL;
+    try {
+      url = new URL(endpoint);
+    } catch {
+      throw invalidProtocolFrame('Invalid Runtime Host registration WebSocket endpoint');
+    }
+    if (
+      url.protocol !== 'ws:' ||
+      url.hostname !== '127.0.0.1' ||
+      url.username ||
+      url.password ||
+      url.port === '' ||
+      url.search ||
+      url.hash ||
+      !isCanonicalRuntimeHostWebSocketPath(url.pathname)
+    ) {
+      throw invalidProtocolFrame('Invalid Runtime Host registration WebSocket endpoint');
+    }
+    return url.toString();
+  });
+  if (new Set(endpoints).size !== endpoints.length) {
+    throw invalidProtocolFrame('Duplicate Runtime Host registration WebSocket endpoint');
+  }
+  return Object.freeze(endpoints);
 }
 
 function requireHostLifecycleMode(value: unknown): 'ephemeral' | 'service' {

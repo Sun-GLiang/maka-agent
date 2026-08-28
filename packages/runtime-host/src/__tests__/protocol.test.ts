@@ -21,7 +21,7 @@ import { RuntimeHostProtocolError } from '../protocol/errors.js';
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_COUNT } from '@maka/core/attachments';
-import { TOOL_OUTPUT_DELTA_MAX_CHARS } from '@maka/core/events';
+import { CONTEXT_BUDGET_EXHAUSTED_DETAILS, TOOL_OUTPUT_DELTA_MAX_CHARS } from '@maka/core/events';
 import {
   decodeClientCapabilityReplaceInput,
   decodeClientFrame,
@@ -63,6 +63,41 @@ import {
 } from '../protocol/turn.js';
 
 describe('Runtime Host bootstrap protocol', () => {
+  test('accepts only authenticated-listener registration endpoints on IPv4 loopback', () => {
+    const registration = {
+      kind: 'maka-runtime-host',
+      schemaVersion: 1,
+      rootId: 'a'.repeat(64),
+      hostEpoch: 'host-epoch',
+      endpoint: '/tmp/runtime-host.sock',
+      websocketEndpoints: ['ws://127.0.0.1:43210/runtime-host'],
+      protocolMin: RUNTIME_HOST_PROTOCOL_VERSION,
+      protocolMax: RUNTIME_HOST_PROTOCOL_VERSION,
+      compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
+      compositionId: 'maka.interactive',
+      compositionRevision: 'revision',
+      lifecycleMode: 'ephemeral',
+      state: 'ready',
+      pid: 1234,
+      createdAt: new Date(0).toISOString(),
+    } as const;
+    assert.deepEqual(decodeHostRegistration(registration).websocketEndpoints, [
+      'ws://127.0.0.1:43210/runtime-host',
+    ]);
+    assert.throws(() =>
+      decodeHostRegistration({
+        ...registration,
+        websocketEndpoints: ['ws://0.0.0.0:43210/runtime-host'],
+      }),
+    );
+    assert.throws(() =>
+      decodeHostRegistration({
+        ...registration,
+        websocketEndpoints: ['ws://127.0.0.1:43210/runtime-host?credential=secret'],
+      }),
+    );
+  });
+
   test('decodes a Client hello without a surface identity', () => {
     const hello = {
       kind: 'hello',
@@ -189,6 +224,13 @@ describe('Runtime Host bootstrap protocol', () => {
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 47);
   });
 
+  test('publishes a new compatibility epoch for context-budget failure detail', () => {
+    // Epoch 50 is already used by WorkHub coordination summaries on main.
+    // The context-budget detail therefore needs its own strictly newer
+    // handshake boundary so peers cannot accept the wrong closed shape.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 50);
+  });
+
   test('adds credential rotation without changing existing credential inputs', () => {
     const issueInput = {
       principalKind: 'remote_owner',
@@ -200,6 +242,19 @@ describe('Runtime Host bootstrap protocol', () => {
     assert.deepEqual(
       HOST_OPERATION_SPECS['access.credential.prepare'].decodeInput(issueInput),
       issueInput,
+    );
+    assert.deepEqual(
+      HOST_OPERATION_SPECS['access.credential.prepare'].decodeInput({
+        ...issueInput,
+        bindClientInstance: true,
+      }),
+      { ...issueInput, bindClientInstance: true },
+    );
+    assert.deepEqual(
+      HOST_OPERATION_SPECS['access.credential.finalize'].decodeOutput({
+        reconnectRequired: true,
+      }),
+      { reconnectRequired: true },
     );
     assert.throws(() =>
       HOST_OPERATION_SPECS['access.credential.prepare'].decodeInput({
@@ -230,6 +285,28 @@ describe('Runtime Host bootstrap protocol', () => {
     );
   });
 
+  test('decodes atomic principal revocation and publishes its compatibility boundary', () => {
+    assert.deepEqual(
+      HOST_OPERATION_SPECS['access.principal.revoke'].decodeInput({
+        principalKind: 'remote_owner',
+        principalId: 'desktop-owner:local-sharing',
+      }),
+      {
+        principalKind: 'remote_owner',
+        principalId: 'desktop-owner:local-sharing',
+      },
+    );
+    assert.deepEqual(
+      HOST_OPERATION_SPECS['access.principal.revoke'].decodeOutput({ revoked: true }),
+      { revoked: true },
+    );
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 54);
+  });
+
+  test('publishes a new compatibility epoch for Client-bound pairing claims', () => {
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 53);
+  });
+
   test('publishes a new compatibility epoch for provider capacity retry progress', () => {
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 41);
   });
@@ -242,6 +319,10 @@ describe('Runtime Host bootstrap protocol', () => {
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 43);
   });
 
+  test('publishes a new compatibility epoch for durable Message lifecycle queries', () => {
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 50);
+  });
+
   test('selects the highest mutually supported protocol and rejects a gap', () => {
     assert.equal(negotiateProtocol({ min: 0, max: 0 }, { min: 0, max: 0 }), 0);
     assert.equal(negotiateProtocol({ min: 1, max: 3 }, { min: 2, max: 4 }), 3);
@@ -250,7 +331,7 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('keeps the subscription queue Epoch correlated', () => {
-    assert.equal(SESSION_CONTINUITY_SCHEMA_VERSION, 4);
+    assert.equal(SESSION_CONTINUITY_SCHEMA_VERSION, 5);
     const opened = {
       requestId: 'open-1',
       operation: 'subscription.open',
@@ -467,6 +548,37 @@ describe('Runtime Host bootstrap protocol', () => {
     ]) {
       assert.throws(() => decodeHostFrame({ ...envelope, event }), isInvalidFrame);
     }
+
+    // The durable steering echo shares the session-event frame without a
+    // toolUseId; unknown keys stay rejected.
+    const steering = {
+      type: 'steering_message' as const,
+      id: 'steering-event-1',
+      turnId: 'turn-1',
+      ts: 7,
+      messageId: 'steering-message-1',
+      content: { text: 'steer the turn' },
+    };
+    const decodedSteering = decodeHostFrame({ ...envelope, event: steering });
+    assert.ok('kind' in decodedSteering);
+    if ('kind' in decodedSteering) {
+      assert.equal(decodedSteering.kind, 'subscription.session_event');
+      if (decodedSteering.kind === 'subscription.session_event') {
+        assert.deepEqual(decodedSteering.event, steering);
+      }
+    }
+    assert.throws(
+      () => decodeHostFrame({ ...envelope, event: { ...steering, toolUseId: 'tool-1' } }),
+      isInvalidFrame,
+    );
+    assert.throws(
+      () =>
+        decodeHostFrame({
+          ...envelope,
+          event: { ...steering, content: { text: 'x'.repeat(49 * 1024) } },
+        }),
+      isInvalidFrame,
+    );
     assert.throws(
       () =>
         decodeHostFrame({
@@ -969,6 +1081,14 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('requires stable Message command identities, origin Host Epoch, and exact inputs', () => {
+    const query = {
+      requestId: 'query-request-1',
+      operation: 'turn.message.query' as const,
+      input: {
+        sessionId: 'session-1',
+        messageIds: ['message-1', 'message-2'],
+      },
+    };
     const submit = {
       requestId: 'submit-request-1',
       operation: 'turn.message.submit' as const,
@@ -996,6 +1116,7 @@ describe('Runtime Host bootstrap protocol', () => {
         runId: 'run-1',
       },
     };
+    assert.deepEqual(decodeClientFrame(query), query);
     assert.deepEqual(decodeClientFrame(submit), submit);
     assert.deepEqual(decodeClientFrame(retract), retract);
     assert.deepEqual(decodeClientFrame(interrupt), interrupt);
@@ -1607,6 +1728,28 @@ describe('Runtime Host bootstrap protocol', () => {
     };
 
     assert.deepEqual(decodeHostFrame(response), response);
+    for (const contextBudgetExhaustedDetail of CONTEXT_BUDGET_EXHAUSTED_DETAILS) {
+      const withContextDetail = {
+        ...response,
+        result: {
+          ...response.result,
+          failureClass: 'context_budget_exhausted',
+          contextBudgetExhaustedDetail,
+        },
+      };
+      assert.deepEqual(decodeHostFrame(withContextDetail), withContextDetail);
+    }
+    assert.throws(
+      () =>
+        decodeHostFrame({
+          ...response,
+          result: {
+            ...response.result,
+            contextBudgetExhaustedDetail: 'unknown_detail',
+          },
+        }),
+      isInvalidFrame,
+    );
     assert.throws(
       () =>
         decodeHostFrame({

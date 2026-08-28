@@ -32,6 +32,7 @@ import type {
   DesktopRuntimeHostSetupPackage,
   DesktopRuntimeHostSshSetupInput,
 } from './runtime-host-ssh-terminal.js';
+import { requireProjectDirectoryRoots } from '../shared/runtime-host-project-directory-policy.js';
 
 type OnboardingState = DesktopRuntimeHostOnboardingSnapshot extends infer Snapshot
   ? Snapshot extends DesktopRuntimeHostOnboardingSnapshot
@@ -105,6 +106,7 @@ export function createDesktopRuntimeHostOnboarding(input: {
   ): Promise<DesktopRuntimeHostOnboardingSnapshot> => {
     try {
       const setupPackage = await input.resolveSetupPackage(signal);
+      const lifecycle = setupPackage.kind === 'npm' ? 'on_demand' : 'supervised';
       signal.throwIfAborted();
       publish({ kind: 'running', phase: 'connecting_ssh' });
       let commitStarted = false;
@@ -122,7 +124,11 @@ export function createDesktopRuntimeHostOnboarding(input: {
           destination: request.destination,
           ...(request.sshPort === undefined ? {} : { sshPort: request.sshPort }),
           setupPackage,
+          lifecycle,
           principalId: `desktop:${input.clientInstanceId}`,
+          ...(request.projectDirectoryRoots
+            ? { projectDirectoryRoots: request.projectDirectoryRoots }
+            : {}),
           signal,
         },
         (progress) => {
@@ -149,16 +155,29 @@ export function createDesktopRuntimeHostOnboarding(input: {
             kind: 'ssh',
             destination: request.destination,
             ...(request.sshPort === undefined ? {} : { sshPort: request.sshPort }),
-            remotePort: endpoint.port,
-            websocketPath: endpoint.websocketPath,
+            ...(lifecycle === 'on_demand'
+              ? {
+                  activation: {
+                    kind: 'ssh_operator' as const,
+                    operatorPath: complete.operatorPath,
+                  },
+                }
+              : {
+                  remotePort: endpoint.port,
+                  websocketPath: endpoint.websocketPath,
+                }),
           },
         },
         credential: complete.credential,
-        managedService: {
-          id: complete.serviceId,
-          rootPath: complete.rootPath,
-          operatorPath: complete.operatorPath,
-        },
+        ...(lifecycle === 'supervised'
+          ? {
+              managedService: {
+                id: complete.serviceId,
+                rootPath: complete.rootPath,
+                operatorPath: complete.operatorPath,
+              },
+            }
+          : {}),
       });
       return publish({
         kind: 'complete',
@@ -227,5 +246,8 @@ function requireOnboardingInput(value: unknown): DesktopRuntimeHostOnboardingInp
     destination: input.destination,
     ...(input.name?.trim() ? { name: input.name.trim() } : {}),
     ...(input.sshPort === undefined ? {} : { sshPort: input.sshPort }),
+    ...(input.projectDirectoryRoots === undefined
+      ? {}
+      : { projectDirectoryRoots: requireProjectDirectoryRoots(input.projectDirectoryRoots) }),
   };
 }

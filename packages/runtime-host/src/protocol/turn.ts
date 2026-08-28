@@ -20,7 +20,9 @@
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_COUNT } from '@maka/core/attachments';
 import {
   decodeMessageContent as decodeCanonicalMessageContent,
+  isContextBudgetExhaustedDetail,
   isCanonicalAttachmentRef,
+  type ContextBudgetExhaustedDetail,
   type ContextCompactionOutcome,
   type MessageContent,
   type ProviderRetryReason,
@@ -193,6 +195,7 @@ export type TurnSnapshot =
       terminalEventId: string;
       failureClass: string;
       failureMessage?: string;
+      contextBudgetExhaustedDetail?: ContextBudgetExhaustedDetail;
     })
   | (TurnSnapshotBase & {
       status: 'cancelled';
@@ -361,7 +364,7 @@ function requirePositiveSafeInteger(value: unknown, label: string): number {
   return decoded;
 }
 
-function decodeSkillIds(value: unknown): string[] {
+export function decodeSkillIds(value: unknown): string[] {
   if (value === undefined) return [];
   if (
     !Array.isArray(value) ||
@@ -379,7 +382,7 @@ function decodeSkillIds(value: unknown): string[] {
   return [...value];
 }
 
-function decodeTurnOrchestration(value: unknown): TurnOrchestration {
+export function decodeTurnOrchestration(value: unknown): TurnOrchestration {
   const record = requireExactRecord(value, 'Turn orchestration', ['mode', 'source']);
   if (!isOrchestrationMode(record.mode) || !isTurnOrchestrationSource(record.source)) {
     throw invalidProtocolFrame('Invalid Turn orchestration');
@@ -660,7 +663,7 @@ export function decodeTurnSnapshot(value: unknown): TurnSnapshot {
       record,
       'failed Turn snapshot',
       ['sessionId', 'turnId', 'runId', 'status', 'terminalEventId', 'failureClass'],
-      ['failureMessage'],
+      ['failureMessage', 'contextBudgetExhaustedDetail'],
     );
     return {
       ...base,
@@ -674,6 +677,13 @@ export function decodeTurnSnapshot(value: unknown): TurnSnapshot {
               'failureMessage',
               TURN_FAILURE_MESSAGE_MAX_BYTES,
               false,
+            ),
+          }
+        : {}),
+      ...(record.contextBudgetExhaustedDetail !== undefined
+        ? {
+            contextBudgetExhaustedDetail: requireContextBudgetExhaustedDetail(
+              record.contextBudgetExhaustedDetail,
             ),
           }
         : {}),
@@ -708,6 +718,11 @@ export function decodeTurnSnapshot(value: unknown): TurnSnapshot {
       ? { providerRetry: decodeTurnProviderRetry(record.providerRetry) }
       : {}),
   };
+}
+
+function requireContextBudgetExhaustedDetail(value: unknown): ContextBudgetExhaustedDetail {
+  if (isContextBudgetExhaustedDetail(value)) return value;
+  throw invalidProtocolFrame('Invalid context budget exhausted detail');
 }
 
 export function decodeContextCompactionOutcome(value: unknown): ContextCompactionOutcome {

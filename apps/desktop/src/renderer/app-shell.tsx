@@ -60,12 +60,10 @@ import {
   type NavSelection,
   TitlebarSessionIdentity,
   type TurnFooterActionMeta,
-  type WorkspacePickerModel,
   useToast,
   activeInteractionFor,
   deriveTitlebarProjectName,
   enqueueInteraction,
-  getConversationCopy,
   reconcileInteractions,
 } from '@maka/ui';
 import type { ConnectionEvent } from '@maka/core/connections';
@@ -96,7 +94,11 @@ import {
   SessionNavigationHost,
   useSessionNavigationController,
 } from './features/session-navigation';
-import { UNRESOLVED_NEW_TASK_DRAFT_KEY } from './new-task-reload-intent';
+import {
+  TaskEntryHost,
+  useTaskEntryController,
+  type TaskEntryError,
+} from './features/task-entry';
 import { useNewTaskChoice } from './use-new-task-choice';
 import { NEW_TASK_PENDING_KEY } from './pending-items';
 import { parseDesktopSlashCommand } from './desktop-slash-command';
@@ -172,10 +174,6 @@ import {
   createAppShellChatActions,
   type WorkspaceFileReferencePosition,
 } from './app-shell-chat-actions';
-import {
-  retainedAttachmentRefs,
-  toComposerIngestItems,
-} from './composer-attachments';
 import { createAppShellTurnActions } from './app-shell-turn-actions';
 import {
   abandonTurnRevisionCopyAttempt,
@@ -211,7 +209,6 @@ import { useComposerMentions } from './use-composer-mentions';
 import { useAppShellSessionWorkspace } from './use-app-shell-session-workspace';
 import { useShellMemoryPill } from './use-shell-memory-pill';
 import { useShellConnections } from './use-shell-connections';
-import { useNewTaskTarget } from './use-new-task-target';
 import { useShellChatModel } from './use-shell-chat-model';
 import { useShellLiveTurn } from './use-shell-live-turn';
 import { useShellResume } from './use-shell-resume';
@@ -233,7 +230,6 @@ function rebaseWorkspaceFileReferences(
 }
 
 import { useSettingsModal } from './use-settings-modal';
-import { RemoteProjectDirectoryDialog } from './remote-project-directory-dialog';
 import { useSystemUiLocale } from './use-system-ui-locale';
 import {
   isSessionWorkspaceUnavailableError,
@@ -247,21 +243,18 @@ type ComposerImportOwner = {
   newTaskDraftKey?: string;
 };
 
-function newTaskDraftKey(target: {
-  profileId: string;
-  hostId: string;
-  projectId: string | null;
-} | undefined): string {
-  return target
-    ? JSON.stringify(['new-task', target.profileId, target.hostId, target.projectId])
-    : UNRESOLVED_NEW_TASK_DRAFT_KEY;
-}
-
 /**
  * Grace period before the committed-history fallback force-settles an
  * assistant stream slot when the primary post-commit signal is missed.
  */
 const SETTLE_FALLBACK_GRACE_MS = 1000;
+const FIRST_SEND_OBSERVATION_TIMEOUT_MS = 30_000;
+type FirstSendObservationWaiter = {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeoutId: ReturnType<typeof globalThis.setTimeout>;
+};
 /**
  * Module surfaces that own their whole column and render no workspace toolbar.
  * This used to be a `display: none` rule keyed on the detail panel's
@@ -351,7 +344,13 @@ function AppShellContent({
     startNewSession,
     clearOwnedSessionState,
     messages,
+    transientMessages,
     setMessages,
+    addTransientMessage,
+    updateTransientMessage,
+    projectQueuedTransientMessages,
+    retireCancelledTransientMessages,
+    removeTransientMessage,
     transcriptRangeRef,
     messageLoadPending,
     setMessageLoadPending,
@@ -379,8 +378,16 @@ function AppShellContent({
   }, []);
 
   const onboarding = useOnboardingSnapshot(initialOnboardingSnapshot);
-  const newTask = useNewTaskTarget({ toastApi, uiLocale });
-  const currentNewTaskDraftKey = newTaskDraftKey(newTask.target);
+  const reportTaskEntryError = useCallback(
+    ({ title, description, profileId }: TaskEntryError) => {
+      toastApi.error(title, description, undefined, { profileId });
+    },
+    [toastApi],
+  );
+  const taskEntry = useTaskEntryController({
+    reportError: reportTaskEntryError,
+  });
+  const currentNewTaskDraftKey = taskEntry.selectors.draftKey;
   // Staged files and quotes do NOT take the target-scoped key: they belong to
   // the composer the user is looking at, and an in-flight send needs an owner
   // that cannot move under it. See NEW_TASK_PENDING_KEY.
@@ -518,8 +525,11 @@ function AppShellContent({
     uiLocale,
     sessionId: activeId,
   });
-  const newTaskHost = newTask.selectedHost
-    ? { profileId: newTask.selectedHost.profile.id, hostId: newTask.selectedHost.hostId }
+  const newTaskHost = taskEntry.selectors.selectedHost
+    ? {
+        profileId: taskEntry.selectors.selectedHost.profileId,
+        hostId: taskEntry.selectors.selectedHost.hostId,
+      }
     : undefined;
   const newTaskConnections = useShellConnections({
     toastApi,
@@ -538,9 +548,7 @@ function AppShellContent({
   });
   const startupConnectionSnapshot =
     initialOnboardingSnapshot ?? onboarding.mountedSnapshotHandoff;
-  const newTaskUsesDefaultHost =
-    newTask.catalog.hosts.length === 0 ||
-    newTask.selectedProfileId === newTask.catalog.defaultProfileId;
+  const newTaskUsesDefaultHost = taskEntry.selectors.usesDefaultHost;
   let newTaskConnectionSnapshot = newTaskConnections.snapshot;
   if (!newTaskConnections.hasSnapshot && newTaskUsesDefaultHost) {
     newTaskConnectionSnapshot = defaultHostConnections.hasSnapshot
@@ -617,7 +625,6 @@ function AppShellContent({
   const shellCopy = getShellCopy(uiLocale).app;
   const previousInterruptionCopy =
     getShellRemainingCopy(uiLocale).previousMainProcessInterruption;
-  const projectActionsCopy = getShellCopy(uiLocale).projectActions;
   const desktopConversationCopy = getDesktopConversationCopy(uiLocale);
   /**
    * What this draft would start in: the user's choice for it if they made one,
@@ -628,7 +635,9 @@ function AppShellContent({
    * never written back to `chatDefaults` — the Settings surface owns that.
    */
   const newTaskPermissionMode =
-    newTaskPermissionChoice ?? newTask.selectedHost?.chatDefaults.permissionMode ?? 'ask';
+    newTaskPermissionChoice ??
+    taskEntry.selectors.selectedHost?.chatDefaults.permissionMode ??
+    'ask';
   const setNewTaskPermissionMode = setNewTaskPermissionChoice;
   useEffect(() => {
     if (!appearanceHydrated) return;
@@ -801,6 +810,7 @@ function AppShellContent({
   const activeQuestion = activeInteraction?.type === 'user_question_request' ? activeInteraction : undefined;
   const activeSession = sessions.find((session) => session.id === activeId);
   const activeMessageQueue = activeId ? messageQueueBySession[activeId] : undefined;
+  const activeMessageSubmitting = transientMessages.length > 0;
   const activeDesktopSession = activeSession;
   // The shell's reading of the active live turn: streaming/settled flags, the
   // in-flight tool signal, and the #646 turn-wait cues, all derived from the
@@ -838,13 +848,13 @@ function AppShellContent({
     : undefined;
   const composerProfileId = activeId
     ? activeDesktopSession?.profileId
-    : newTask.selectedProfileId;
+    : taskEntry.selectors.selectedProfileId;
   const composerProfileName = activeId
     ? activeDesktopSession?.profileName
-    : newTask.selectedHost?.profile.name;
+    : taskEntry.selectors.selectedHost?.name;
   const modelSettingsOwnsComposerHost =
     composerProfileId !== undefined &&
-    composerProfileId === newTask.catalog.defaultProfileId;
+    composerProfileId === taskEntry.selectors.defaultProfileId;
   const {
     chatModelChoices,
     activeConnection,
@@ -874,7 +884,7 @@ function AppShellContent({
     activeSession,
     persistedComposerDefaults,
     usePersistedComposerDefaults: modelSettingsOwnsComposerHost,
-    defaultThinkingLevel: newTask.selectedHost?.chatDefaults.thinkingLevel,
+    defaultThinkingLevel: taskEntry.selectors.selectedHost?.chatDefaults.thinkingLevel,
     openSettingsSection,
   });
   const newChatProviderType = newChatModel
@@ -1487,6 +1497,10 @@ function AppShellContent({
           window.maka.workHub.answer(workHubCoordinationSessionId!, input),
         record: (input) =>
           window.maka.workHub.record(workHubCoordinationSessionId!, input),
+        candidates: () =>
+          window.maka.workHub.candidates(workHubCoordinationSessionId!),
+        act: (input) =>
+          window.maka.workHub.act(workHubCoordinationSessionId!, input),
       }),
       sessions: createDesktopWorkHubSessionPort({
         sessions: scopeWorkHubSessionsToCoordinationHost(
@@ -1511,72 +1525,8 @@ function AppShellContent({
   // Where a NEW chat starts. Built unconditionally and handed to the composer,
   // which renders it only while no session owns it — the project is fixed once
   // the first message creates one, so there is nothing to pick after that.
-  const selectedNewTaskHost = newTask.catalog.hosts.find(
-    (host) => host.profile.id === newTask.selectedProfileId,
-  );
-  const selectedNewTaskProject = newTask.currentProject?.name ??
-    (newTask.selectedProjectId === null && newTask.selectedHost?.capabilities.selectNoProject
-      ? getConversationCopy(uiLocale).workspace.noProject
-      : undefined);
-  const selectedNewTaskBranch =
-    newTask.selectedHost &&
-      newTask.selectedProjectId === newTask.selectedHost.selectedProjectId
-      ? newTask.selectedHost.branch
-      : undefined;
-  const newTaskCatalogNeedsRetry = Boolean(newTask.error) || newTask.catalog.hosts.some(
-    (host) => host.readiness === 'ready' && host.state === 'error',
-  );
-  const workspacePicker: WorkspacePickerModel = {
-    label: selectedNewTaskProject ?? selectedNewTaskHost?.profile.name ??
-      (newTask.error ? getShellCopy(uiLocale).projectActions.catalogUnavailable : undefined),
-    ...(selectedNewTaskHost?.profile.kind === 'remote'
-      ? { hostBadge: selectedNewTaskHost.profile.name }
-      : {}),
-    branch: newTask.selectedProjectId === null ? null : selectedNewTaskBranch,
-    pending: newTask.pending || (newTask.refreshing && newTask.catalog.hosts.length === 0),
-    selectedGroupId: newTask.selectedProfileId,
-    groups: newTask.catalog.hosts.map((host) => {
-      if (host.readiness !== 'ready' || host.state !== 'available') {
-        return {
-          id: host.profile.id,
-          label: host.profile.name,
-          status: host.readiness === 'ready'
-            ? host.message
-            : getShellCopy(uiLocale).projectActions.runtimeHostReadiness[host.readiness],
-          disabled: true,
-          projects: [],
-        };
-      }
-      const selectedProjectId = host.profile.id === newTask.selectedProfileId
-        ? newTask.selectedProjectId
-        : host.selectedProjectId;
-      return {
-        id: host.profile.id,
-        label: host.profile.name,
-        projects: host.projects.filter((project) => project.archivedAt === undefined),
-        selectedProjectId,
-        onSelectProject: (projectId: string) => newTask.selectProject(host, projectId),
-        ...(host.capabilities.chooseClientDirectory || host.capabilities.chooseHostDirectory
-          ? { onAdd: () => void newTask.addProject(host) }
-          : {}),
-        ...(host.capabilities.chooseClientDirectory
-          ? { onRelink: (projectId: string) => void newTask.relinkProject(host, projectId) }
-          : {}),
-        ...(host.capabilities.selectNoProject
-          ? { onSelectNoProject: () => newTask.selectNoProject(host) }
-          : {}),
-      };
-    }),
-    ...(newTaskCatalogNeedsRetry
-      ? {
-          retry: {
-            label: getShellCopy(uiLocale).projectActions.retryCatalog,
-            onClick: () => void newTask.refresh().catch(() => undefined),
-          },
-        }
-      : {}),
-  };
-  const taskReadinessWorkspace = activeSession?.cwd ?? newTask.projectPath;
+  const workspacePicker = taskEntry.selectors.workspacePicker;
+  const taskReadinessWorkspace = activeSession?.cwd ?? taskEntry.selectors.projectPath;
   const taskReadinessRequest = {
     ...resolveTaskReadinessModelTarget(activeSession, activeSessionSendOutcome, newChatModel),
     ...(taskReadinessWorkspace ? { cwd: taskReadinessWorkspace } : {}),
@@ -1585,13 +1535,13 @@ function AppShellContent({
     taskReadinessRequest,
     onboarding.snapshot,
     activeId,
-    activeId ? undefined : newTask.target,
+    activeId ? undefined : taskEntry.selectors.target,
   );
   const taskReadinessNotice = deriveTaskReadinessNotice(taskReadiness.snapshot, uiLocale);
   const ignoreTaskReadinessModelTarget =
     activeSession !== undefined && activeSessionSendOutcome?.kind !== 'blocked';
   const taskSubmissionHardBlocked =
-    (!activeId && !newTask.target) ||
+    (!activeId && !taskEntry.selectors.target) ||
     isTaskSubmissionHardBlocked(taskReadiness.snapshot, {
       ignoreModelTarget: ignoreTaskReadinessModelTarget,
     });
@@ -1609,7 +1559,7 @@ function AppShellContent({
     composerRef,
     isShellSurfaceOwnerActive,
     openSessionInChat,
-    newTaskTarget: newTask.target,
+    newTaskTarget: taskEntry.selectors.target,
     sessionStartPendingRef,
     refreshOnboarding: onboarding.refresh,
     refreshSessions,
@@ -1640,8 +1590,8 @@ function AppShellContent({
   const { mentionSkills, mentionSkillsUnavailable, mentionSkillsLoading, searchMentionFiles } = useComposerMentions({
     skillCatalogRevision: moduleHub.selectors.skillCatalogRevision,
     sessionId: activeId,
-    projectPath: activeId ? projectInfo?.projectPath : newTask.projectPath,
-    newTaskTarget: activeId ? undefined : newTask.target,
+    projectPath: activeId ? projectInfo?.projectPath : taskEntry.selectors.projectPath,
+    newTaskTarget: activeId ? undefined : taskEntry.selectors.target,
     newSessionModel: newChatModel,
     newSessionCollaborationMode: newChatPlanModeActive ? 'plan' : 'agent',
     // Refresh only; Desktop Main re-reads the authoritative default before
@@ -1737,6 +1687,48 @@ function AppShellContent({
     [sessions, localProjects, sessionNavigation.commands],
   );
 
+  const firstSendObservationWaitersRef = useRef(
+    new Map<string, FirstSendObservationWaiter>(),
+  );
+  const activateSessionForFirstSend = useCallback((sessionId: string): Promise<void> => {
+    let waiter = firstSendObservationWaitersRef.current.get(sessionId);
+    if (!waiter) {
+      let resolve!: () => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+      });
+      let created!: FirstSendObservationWaiter;
+      const timeoutId = globalThis.setTimeout(() => {
+        if (firstSendObservationWaitersRef.current.get(sessionId) !== created) return;
+        firstSendObservationWaitersRef.current.delete(sessionId);
+        created.reject(new Error('Timed out while preparing the new Session event stream'));
+      }, FIRST_SEND_OBSERVATION_TIMEOUT_MS);
+      created = { promise, resolve, reject, timeoutId };
+      waiter = created;
+      firstSendObservationWaitersRef.current.set(sessionId, waiter);
+    }
+    setNavSelection({ section: 'sessions' });
+    setActiveId(sessionId);
+    return waiter.promise;
+  }, [setActiveId, setNavSelection]);
+  useEffect(() => {
+    for (const [sessionId, waiter] of firstSendObservationWaitersRef.current) {
+      if (sessionId === activeId) continue;
+      firstSendObservationWaitersRef.current.delete(sessionId);
+      globalThis.clearTimeout(waiter.timeoutId);
+      waiter.reject(new Error('The new Session was left before its event stream became ready'));
+    }
+  }, [activeId]);
+  useEffect(() => () => {
+    for (const [sessionId, waiter] of firstSendObservationWaitersRef.current) {
+      firstSendObservationWaitersRef.current.delete(sessionId);
+      globalThis.clearTimeout(waiter.timeoutId);
+      waiter.reject(new Error('The app closed before the new Session event stream became ready'));
+    }
+  }, []);
+
   const { applyE2eFixture } = useStableActions(createAppShellE2eFixtureActions, {
     openSettingsSection,
     refreshSessions,
@@ -1755,6 +1747,7 @@ function AppShellContent({
 
   const {
     send,
+    enqueueMessage,
     respondToSandboxBoundary,
     respondToUserQuestion,
     refreshMessages,
@@ -1770,12 +1763,15 @@ function AppShellContent({
     isShellSurfaceOwnerActive,
     messageRetryPendingRef,
     refreshSessions,
+    activateSessionForFirstSend,
     setActiveId,
     setMessageLoadErrorBySession,
     setMessageRetryPendingBySession,
     setMessages,
+    addTransientMessage,
+    updateTransientMessage,
+    removeTransientMessage,
     transcriptRangeRef,
-    setNavSelection,
     setLiveTurnBySession,
     setInteractionBySession,
     onInteractionChanged: markInteractionChanged,
@@ -1788,7 +1784,7 @@ function AppShellContent({
     clearNewChatPermissionChoice: clearNewTaskPermissionChoice,
     newChatCollaborationMode: newChatPlanModeActive ? 'plan' : 'agent',
     newChatOrchestrationMode: newChatOrchestrationMode,
-    newTaskTarget: newTask.target,
+    newTaskTarget: taskEntry.selectors.target,
   });
 
   const { handleTurnFooterAction } = useStableActions(createAppShellTurnActions, {
@@ -1868,28 +1864,24 @@ function AppShellContent({
   ): Promise<boolean> {
     const pending = pendingAttachments.length > 0 ? pendingAttachments : undefined;
     const quotes = pendingQuotes.length > 0 ? pendingQuotes : undefined;
-    const attachmentItems = pending ? toComposerIngestItems(pending) : [];
-    const retainedAttachments = pending ? retainedAttachmentRefs(pending) : [];
     try {
-      const result = await window.maka.sessions.enqueue(
+      const sent = await enqueueMessage(
         sessionId,
+        text,
         mode === 'steer' ? 'current_turn' : 'next_turn',
+        pending,
         {
-          text,
-          ...(attachmentItems.length > 0 ? { attachmentItems } : {}),
-          ...(retainedAttachments.length > 0 ? { retainedAttachments } : {}),
           ...(quotes ? { quotes: [...quotes] } : {}),
           ...(metadata?.workspaceFileReferences?.length
             ? { workspaceFileReferences: [...metadata.workspaceFileReferences] }
             : {}),
         },
       );
+      // Refused: the composer keeps the draft, the attachments and the quotes,
+      // because the user has to change something and send it again.
+      if (!sent) return false;
       if (pending) clearSubmittedAttachments(pending);
       if (quotes) clearQuotes();
-      if (result.kind === 'started') {
-        await refreshMessages(sessionId);
-        await refreshSessions();
-      }
       return true;
     } catch (error) {
       if (activeIdRef.current === sessionId) {
@@ -2140,18 +2132,23 @@ function AppShellContent({
   }
 
   async function deleteQueuedEntry(entryId: string): Promise<void> {
-    await runQueueEntryAction((sessionId) =>
+    const messageId = activeMessageQueue?.entries.find((entry) => entry.entryId === entryId)?.messageId;
+    const sessionId = await runQueueEntryAction((sessionId) =>
       window.maka.sessions.retractQueueEntry(sessionId, entryId).then(() => undefined)
     );
+    if (sessionId && messageId) removeTransientMessage(sessionId, messageId);
   }
 
   // Surfaces the failure, then rethrows so the pending plate can settle its
   // in-flight action state without guessing with a timer.
-  async function runQueueEntryAction(action: (sessionId: string) => Promise<void>): Promise<void> {
+  async function runQueueEntryAction(
+    action: (sessionId: string) => Promise<void>,
+  ): Promise<string | undefined> {
     const sessionId = activeIdRef.current;
     if (!sessionId) return;
     try {
       await action(sessionId);
+      return sessionId;
     } catch (error) {
       if (activeIdRef.current === sessionId) {
         const copy = getDesktopConversationCopy(uiLocale).actions;
@@ -2184,6 +2181,7 @@ function AppShellContent({
     clearPendingSessionAction,
     setStopPendingBySession,
     stopPendingRef,
+    removeTransientMessage,
     toastApi,
   });
 
@@ -2204,6 +2202,8 @@ function AppShellContent({
     setLiveTurnBySession,
     setInteractionBySession,
     setMessageQueueBySession,
+    projectQueuedTransientMessages,
+    removeTransientMessage,
     displayBatch: sessionDisplayBatch,
     onInteractionChanged: markInteractionChanged,
     onExecutionBoundaryChanged: reloadActiveExecutionBoundary,
@@ -2297,6 +2297,13 @@ function AppShellContent({
     const next = completeLiveContentSeed(current, sessionId, expected);
     activeEventSeedRef.current = next;
     setActiveEventSeed(next);
+    const firstSendWaiter = firstSendObservationWaitersRef.current.get(sessionId);
+    if (firstSendWaiter) {
+      firstSendObservationWaitersRef.current.delete(sessionId);
+      globalThis.clearTimeout(firstSendWaiter.timeoutId);
+      firstSendWaiter.resolve();
+    }
+    void retireCancelledTransientMessages(sessionId);
   };
   useActiveSessionEvents({
     uiLocale,
@@ -2455,8 +2462,7 @@ function AppShellContent({
   }
 
   async function createSessionInProject(projectId: string) {
-    if (!newTask.localHost) return;
-    newTask.selectProject(newTask.localHost, projectId);
+    if (!taskEntry.commands.selectLocalProject(projectId)) return;
     openNewTaskSurface();
   }
 
@@ -2549,7 +2555,8 @@ function AppShellContent({
     toastApi.error(title, description, undefined, { sessionId });
   }
 
-  const canStageComposerContext = activeId !== undefined || newTask.target !== undefined;
+  const canStageComposerContext =
+    activeId !== undefined || taskEntry.selectors.target !== undefined;
 
   const activeMessageLoadError = activeId ? messageLoadErrorBySession[activeId] : undefined;
   let activeTranscriptRange;
@@ -2608,7 +2615,7 @@ function AppShellContent({
     connections: defaultHostConnections.snapshot.connections,
     defaultConnection: defaultHostConnections.snapshot.defaultConnection,
     messages,
-    newTaskProfileId: newTask.selectedProfileId,
+    newTaskProfileId: taskEntry.selectors.selectedProfileId,
     settingsOpen,
     settingsProfileId: settingsDiagnosticProfileId,
     sessions,
@@ -2876,7 +2883,7 @@ function AppShellContent({
                   // #646: in the first-token wait (Stop up, nothing streams yet) the
                   // hint reads "Maka 正在处理…"; in a mid-turn lull it reads the calm
                   // "Maka 继续中…". Both are mutually exclusive with activeStreamingLive.
-                  processing={showProcessingIndicator && !activeStreamingLive}
+                  processing={(showProcessingIndicator || activeMessageSubmitting) && !activeStreamingLive}
                   continuing={showContinuingIndicator && !activeStreamingLive}
                   onSend={sendOwningItsTarget}
                   onStop={stop}
@@ -3018,6 +3025,7 @@ function AppShellContent({
                 onReturnToLatestHistory={() => loadTranscriptHistory('latest')}
                 liveContentSeedRevision={liveContentSeedRevision(activeEventSeed, activeId)}
                 messages={messages}
+                transientMessages={transientMessages}
                 messageLoading={activeMessageLoading}
                 runningStatus={showRunningStatus}
                     onStreamingSettled={
@@ -3105,12 +3113,8 @@ function AppShellContent({
                   taskReadinessNotice?.action === 'workspace_picker'
                     ? activeSession
                       ? openNewTaskSurface
-                      : newTask.selectedHost &&
-                          (newTask.selectedHost.capabilities.chooseClientDirectory ||
-                            newTask.selectedHost.capabilities.chooseHostDirectory)
-                        ? () => {
-                            if (newTask.selectedHost) void newTask.addProject(newTask.selectedHost);
-                          }
+                      : taskEntry.selectors.canAddProject
+                        ? taskEntry.commands.addProject
                         : undefined
                     : taskReadiness.refresh
                 }
@@ -3166,31 +3170,8 @@ function AppShellContent({
         />
       )}
       <GoalHost model={goals.host} />
+      <TaskEntryHost model={taskEntry.host} />
       <RuntimeHostSshTerminalDialog />
-
-      <RemoteProjectDirectoryDialog
-        host={newTask.directoryHost ? {
-          profileId: newTask.directoryHost.profile.id,
-          hostId: newTask.directoryHost.hostId,
-          name: newTask.directoryHost.profile.name,
-        } : undefined}
-        returnFocusTo={newTask.directoryOpener}
-        onClose={newTask.closeDirectoryPicker}
-        onRegistered={(project, host) => {
-          void newTask.acceptRegisteredProject(project, host).catch((error) => {
-            toastApi.error(
-              projectActionsCopy.projectUpdateFailedTitle,
-              localizedShellErrorMessage(
-                error,
-                projectActionsCopy.projectUpdateFailedFallback,
-                uiLocale,
-              ),
-              undefined,
-              { profileId: host.profileId },
-            );
-          });
-        }}
-      />
 
       <AppShellOverlays
         settingsOpen={settingsOpen}
@@ -3203,7 +3184,7 @@ function AppShellContent({
         uiLocaleUpdateGate={uiLocaleUpdateGate}
         setUserLabel={setUserLabel}
         refreshChatDefaults={() => {
-          void newTask.refresh();
+          void taskEntry.commands.refresh().catch(() => undefined);
         }}
         settingsRequestedSection={settingsRequestedSection}
         settingsProviderCatalogOpen={settingsProviderCatalogOpen}
@@ -3235,7 +3216,7 @@ function AppShellContent({
         onRemoteHostAdded={(profileId) => {
           closeSettings();
           openNewTaskSurface();
-          void newTask.chooseProjectForProfile(profileId).catch(() => undefined);
+          void taskEntry.commands.chooseProjectForProfile(profileId).catch(() => undefined);
         }}
         onSelectedRuntimeHostProfileIdChange={setSettingsDiagnosticProfileId}
       />

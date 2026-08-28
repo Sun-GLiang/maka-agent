@@ -38,6 +38,7 @@ const MAX_PENDING_AUTHENTICATIONS = 16;
 export interface StartRuntimeHostPeerListenerOptions {
   readonly nativePath: string;
   readonly keyPath: string;
+  readonly expectedPeerId?: string;
   readonly listenAddresses?: readonly string[];
   readonly coordinationRelays?: readonly string[];
   readonly accessAuthority: RuntimeHostAccessAuthority;
@@ -159,13 +160,18 @@ class RuntimeHostPeerListener implements RuntimeHostPeerListenerContract {
         stream.abort();
         return;
       }
+      const admittedAuthority = this.#accessAuthority.authenticate(authenticated.credential);
+      if (!admittedAuthority) {
+        stream.abort();
+        return;
+      }
       const transport = new FramedByteStreamTransport(
         new RuntimeHostPeerByteStream(stream, authenticated.remainder),
       );
       this.#transports.add(transport);
       void transport.closed.then(() => this.#transports.delete(transport));
       try {
-        this.#accept({ transport, authority });
+        this.#accept({ transport, authority: admittedAuthority });
       } catch (error) {
         transport.abort(asError(error));
       }

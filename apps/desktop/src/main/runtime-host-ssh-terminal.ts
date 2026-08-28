@@ -26,25 +26,37 @@ import type { IPty } from 'node-pty';
 import { spawn as spawnPty } from 'node-pty';
 import { terminateProcessTree } from '@maka/runtime/process-tree-terminator';
 import {
+  activateRuntimeHostSshOperator,
   normalizeRuntimeHostSshDestination,
   openRuntimeHostSshTunnel,
+  type RuntimeHostSshOperatorActivationInput,
   type RuntimeHostSshProcess,
   type RuntimeHostSshProcessFactory,
   type RuntimeHostSshTunnel,
   type RuntimeHostSshTunnelInput,
 } from '@maka/runtime-host/client';
 import {
+  decodeRuntimeHostActivationFrame,
   decodeRuntimeHostAccessManagementFrame,
+  decodeRuntimeHostPeerManagementFrame,
   decodeRuntimeHostServiceManagementFrame,
   decodeRuntimeHostSetupFrame,
+  RUNTIME_HOST_ACTIVATION_FRAME_MAX_BYTES,
+  RUNTIME_HOST_ACTIVATION_FRAME_PREFIX,
   RUNTIME_HOST_ACCESS_MANAGEMENT_FRAME_PREFIX,
   RUNTIME_HOST_OPERATOR_ACCESS_MANAGEMENT_CAPABILITY,
   RUNTIME_HOST_OPERATOR_CAPABILITY_REQUEST_ENV,
+  RUNTIME_HOST_OPERATOR_PROJECT_DIRECTORY_CONFIGURATION_REQUEST_ENV,
   RUNTIME_HOST_OPERATOR_UPDATE_SCHEDULER_CAPABILITY,
+  RUNTIME_HOST_PEER_MANAGEMENT_FRAME_PREFIX,
   RUNTIME_HOST_SERVICE_MANAGEMENT_FRAME_PREFIX,
   RUNTIME_HOST_SETUP_FRAME_PREFIX,
   type RuntimeHostAccessManagementFrame,
+  type RuntimeHostActivationResult,
   type RuntimeHostManagedUpdatePolicy,
+  type RuntimeHostPeerManagementAction,
+  type RuntimeHostPeerManagementFrame,
+  type RuntimeHostOperatorCapability,
   type RuntimeHostServiceManagementAction,
   type RuntimeHostServiceManagementFrame,
   type RuntimeHostServiceUpdatePhase,
@@ -54,6 +66,7 @@ import type {
   DesktopRuntimeHostSshTerminalEvent,
   DesktopRuntimeHostSshTerminalSnapshot,
 } from '../preload/bridge-contract.js';
+import { createRuntimeHostFramedOutputFilter } from './runtime-host-framed-output.js';
 
 interface ActiveTerminal {
   readonly sessionId: string;
@@ -77,6 +90,7 @@ const TERMINAL_OUTPUT_MAX = 64 * 1024;
 const SETUP_FRAME_PENDING_MAX = 20 * 1024;
 const MANAGEMENT_FRAME_PENDING_MAX = 128 * 1024;
 const ACCESS_MANAGEMENT_FRAME_PENDING_MAX = 768 * 1024;
+const PEER_MANAGEMENT_FRAME_PENDING_MAX = 128 * 1024;
 const SETUP_TIMEOUT_MS = 10 * 60_000;
 const MANAGEMENT_TIMEOUT_MS = 2 * 60_000;
 const PROCESS_STOP_GRACE_MS = 2_000;
@@ -86,6 +100,8 @@ export interface DesktopRuntimeHostSshSetupInput {
   readonly sshPort?: number;
   readonly setupPackage: DesktopRuntimeHostSetupPackage;
   readonly principalId: string;
+  readonly lifecycle?: 'supervised' | 'on_demand';
+  readonly projectDirectoryRoots?: readonly { readonly label: string; readonly path: string }[];
   readonly signal?: AbortSignal;
 }
 
@@ -105,7 +121,11 @@ export interface DesktopRuntimeHostSshManagementInput {
   readonly rootPath?: string;
   readonly websocketPort?: number;
   readonly websocketPath?: string;
+  readonly projectDirectoryRoots?: readonly { readonly label: string; readonly path: string }[];
+  readonly expectedConfigFingerprint?: string;
+  readonly allowInterruptActiveTasks?: boolean;
   readonly retainManagedDeployment?: boolean;
+  readonly capabilityRequest?: RuntimeHostOperatorCapability;
   readonly signal?: AbortSignal;
 }
 
@@ -131,6 +151,16 @@ export interface DesktopRuntimeHostSshUpdateReconciliationInput {
   readonly destination: string;
   readonly sshPort?: number;
   readonly operatorPath: string;
+  readonly expectedTarget: DesktopRuntimeHostSshManagementInput['expectedTarget'];
+  readonly signal?: AbortSignal;
+}
+
+export interface DesktopRuntimeHostSshPeerManagementInput {
+  readonly destination: string;
+  readonly sshPort?: number;
+  readonly operatorPath: string;
+  readonly action: Extract<RuntimeHostPeerManagementAction, 'enable' | 'disable' | 'status'>;
+  readonly coordinationRelays?: readonly string[];
   readonly expectedTarget: DesktopRuntimeHostSshManagementInput['expectedTarget'];
   readonly signal?: AbortSignal;
 }
@@ -194,11 +224,15 @@ export function createDesktopRuntimeHostSshTerminal(input: {
   readonly send: (channel: string, event: DesktopRuntimeHostSshTerminalEvent) => void;
   readonly spawnPty?: typeof spawnPty;
   readonly openSshTunnel?: typeof openRuntimeHostSshTunnel;
+  readonly activateSshOperator?: typeof activateRuntimeHostSshOperator;
   readonly revealDelayMs?: number;
   readonly managementTimeoutMs?: number;
   readonly processStopGraceMs?: number;
   readonly terminateProcessTree?: typeof terminateProcessTree;
 }): {
+  activateSshOperator(
+    input: RuntimeHostSshOperatorActivationInput,
+  ): Promise<RuntimeHostActivationResult>;
   openSshTunnel(input: RuntimeHostSshTunnelInput): Promise<RuntimeHostSshTunnel>;
   runSetup(
     input: DesktopRuntimeHostSshSetupInput,
@@ -222,6 +256,9 @@ export function createDesktopRuntimeHostSshTerminal(input: {
   runAccessManagement(
     input: DesktopRuntimeHostSshAccessInput,
   ): Promise<RuntimeHostAccessManagementFrame>;
+  runPeerManagement(
+    input: DesktopRuntimeHostSshPeerManagementInput,
+  ): Promise<RuntimeHostPeerManagementFrame>;
   cleanupManagedDeployment(input: DesktopRuntimeHostSshCleanupInput): Promise<void>;
   close(): Promise<void>;
 } {
@@ -472,7 +509,7 @@ export function createDesktopRuntimeHostSshTerminal(input: {
     let failure: Error | undefined;
     let activeTerminal: ActiveTerminal | undefined;
     let receivedProgress = false;
-    const filter = createFramedOutputFilter({
+    const filter = createRuntimeHostFramedOutputFilter({
       prefix: options.prefix,
       pendingMaxBytes: options.pendingMaxBytes,
       decode: options.decode,
@@ -531,6 +568,27 @@ export function createDesktopRuntimeHostSshTerminal(input: {
   };
 
   return {
+    activateSshOperator: async (activationInput) => {
+      if (activationInput.interaction !== 'terminal') {
+        return (input.activateSshOperator ?? activateRuntimeHostSshOperator)(activationInput);
+      }
+      const frame = await runFramedManagement({
+        ...activationInput,
+        remoteCommand: runtimeHostActivationRemoteCommand(activationInput),
+        prefix: RUNTIME_HOST_ACTIVATION_FRAME_PREFIX,
+        pendingMaxBytes: RUNTIME_HOST_ACTIVATION_FRAME_MAX_BYTES,
+        decode: decodeRuntimeHostActivationFrame,
+        action: 'activate',
+        frameAction: () => 'activate',
+        label: 'Remote Runtime Host activation',
+        timeoutMs: activationInput.timeoutMs,
+      });
+      if (frame.kind === 'error') throw new Error(frame.error.message);
+      if (frame.rootId !== activationInput.rootId) {
+        throw new Error('Remote Runtime Host activation returned an inconsistent root');
+      }
+      return frame;
+    },
     openSshTunnel: async (tunnelInput) => {
       if (closed) throw new Error('Runtime Host SSH terminal is closed');
       const openSshTunnel = input.openSshTunnel ?? openRuntimeHostSshTunnel;
@@ -567,7 +625,7 @@ export function createDesktopRuntimeHostSshTerminal(input: {
         let complete: RuntimeHostSetupCompleteFrame | undefined;
         let setupFailure: Error | undefined;
         let setupTerminal: ActiveTerminal | undefined;
-        const filter = createFramedOutputFilter({
+        const filter = createRuntimeHostFramedOutputFilter({
           prefix: RUNTIME_HOST_SETUP_FRAME_PREFIX,
           pendingMaxBytes: SETUP_FRAME_PENDING_MAX,
           decode: decodeRuntimeHostSetupFrame,
@@ -720,6 +778,17 @@ export function createDesktopRuntimeHostSshTerminal(input: {
         frameAction: (frame) => frame.action,
         label: 'Remote Runtime Host access management',
       }),
+    runPeerManagement: (peerInput) =>
+      runFramedManagement({
+        ...peerInput,
+        remoteCommand: runtimeHostPeerManagementRemoteCommand(peerInput),
+        prefix: RUNTIME_HOST_PEER_MANAGEMENT_FRAME_PREFIX,
+        pendingMaxBytes: PEER_MANAGEMENT_FRAME_PENDING_MAX,
+        decode: decodeRuntimeHostPeerManagementFrame,
+        action: peerInput.action,
+        frameAction: (frame) => frame.action,
+        label: 'Remote Runtime Host direct-peer management',
+      }),
     cleanupManagedDeployment: async (cleanupInput) => {
       if (closed) throw new Error('Runtime Host SSH terminal is closed');
       cleanupInput.signal?.throwIfAborted();
@@ -794,83 +863,6 @@ function cancellableUntilComplete(signal: AbortSignal | undefined): {
     },
     close,
   };
-}
-
-function createFramedOutputFilter<Frame>(input: {
-  readonly prefix: string;
-  readonly pendingMaxBytes: number;
-  readonly decode: (line: string) => Frame | undefined;
-  readonly label: string;
-  readonly onFrame: (frame: Frame) => void;
-  readonly onError: (error: Error) => void;
-}): { push(data: string): string; finish(): string } {
-  let pending = '';
-  let discardReservedLine = false;
-  const drain = (finished: boolean): string => {
-    let visible = '';
-    while (pending) {
-      if (discardReservedLine) {
-        const newline = pending.indexOf('\n');
-        if (newline < 0) {
-          pending = '';
-          break;
-        }
-        pending = pending.slice(newline + 1);
-        discardReservedLine = false;
-        continue;
-      }
-      const marker = pending.indexOf(input.prefix);
-      if (marker >= 0) {
-        visible += pending.slice(0, marker);
-        pending = pending.slice(marker);
-        const newline = pending.indexOf('\n');
-        if (newline < 0) {
-          if (finished) {
-            input.onError(new Error(`${input.label} returned an incomplete result`));
-            pending = '';
-          } else if (pending.length > input.pendingMaxBytes) {
-            input.onError(new Error(`${input.label} returned an oversized result`));
-            pending = '';
-            discardReservedLine = true;
-          }
-          break;
-        }
-        const line = pending.slice(0, newline + 1);
-        pending = pending.slice(newline + 1);
-        const frame = input.decode(line);
-        if (frame) input.onFrame(frame);
-        else input.onError(new Error(`${input.label} returned an invalid result`));
-        continue;
-      }
-      if (finished) {
-        visible += pending;
-        pending = '';
-        break;
-      }
-      const retained = markerSuffixLength(pending, input.prefix);
-      visible += pending.slice(0, pending.length - retained);
-      pending = pending.slice(pending.length - retained);
-      break;
-    }
-    return visible;
-  };
-  return {
-    push(data) {
-      pending += data;
-      return drain(false);
-    },
-    finish() {
-      return drain(true);
-    },
-  };
-}
-
-function markerSuffixLength(value: string, prefix: string): number {
-  const limit = Math.min(value.length, prefix.length - 1);
-  for (let length = limit; length > 0; length -= 1) {
-    if (prefix.startsWith(value.slice(-length))) return length;
-  }
-  return 0;
 }
 
 interface PreparedSetupPackage {
@@ -1037,7 +1029,10 @@ async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Prom
 
 function runtimeHostSetupRemoteCommand(
   setupPackage: PreparedSetupPackage,
-  input: Pick<DesktopRuntimeHostSshSetupInput, 'principalId'>,
+  input: Pick<
+    DesktopRuntimeHostSshSetupInput,
+    'principalId' | 'projectDirectoryRoots' | 'lifecycle'
+  >,
 ): string {
   if (!/^[A-Za-z0-9_.:-]{1,128}$/u.test(input.principalId)) {
     throw new Error('Runtime Host setup principal is invalid');
@@ -1049,9 +1044,34 @@ function runtimeHostSetupRemoteCommand(
     input.principalId,
     '--preset',
     'desktop-client',
+    '--lifecycle',
+    input.lifecycle === 'on_demand' ? 'on-demand' : 'supervised',
     '--defer-pairing-commit',
+    ...(input.projectDirectoryRoots === undefined
+      ? []
+      : input.projectDirectoryRoots.length === 0
+        ? ['--no-project-roots']
+        : input.projectDirectoryRoots.flatMap(({ label, path }) => [
+            '--project-root-json',
+            JSON.stringify({ label, path }),
+          ])),
     '--json',
   ]);
+}
+
+function runtimeHostActivationRemoteCommand(
+  input: RuntimeHostSshOperatorActivationInput,
+): string {
+  if (!pathPosix.isAbsolute(input.operatorPath)) {
+    throw new Error('Runtime Host operator path must be absolute');
+  }
+  return [
+    input.operatorPath,
+    'activate',
+    '--framed',
+    '--root-id',
+    input.rootId,
+  ].map(quotePosix).join(' ');
 }
 
 function runtimeHostServiceManagementRemoteCommand(
@@ -1066,12 +1086,25 @@ function runtimeHostServiceManagementRemoteCommand(
       ? []
       : ['--websocket-port', String(input.websocketPort)]),
     ...(input.websocketPath ? ['--websocket-path', input.websocketPath] : []),
+    ...(input.projectDirectoryRoots === undefined
+      ? []
+      : input.projectDirectoryRoots.length === 0
+        ? ['--no-project-roots']
+        : input.projectDirectoryRoots.flatMap(({ label, path }) => [
+            '--project-root-json',
+            JSON.stringify({ label, path }),
+          ])),
+    ...(input.expectedConfigFingerprint
+      ? ['--expected-config-fingerprint', input.expectedConfigFingerprint]
+      : []),
+    ...(input.allowInterruptActiveTasks ? ['--allow-interrupt-active-tasks'] : []),
     ...(input.retainManagedDeployment ? ['--retain-managed-deployment'] : []),
     ...managedServiceTargetArgs(input.expectedTarget),
   ].map(quotePosix).join(' ');
   const invocation =
+    `${RUNTIME_HOST_OPERATOR_PROJECT_DIRECTORY_CONFIGURATION_REQUEST_ENV}=1 ` +
     `${RUNTIME_HOST_OPERATOR_CAPABILITY_REQUEST_ENV}=` +
-    `${quotePosix(RUNTIME_HOST_OPERATOR_ACCESS_MANAGEMENT_CAPABILITY)} exec ${command}`;
+    `${quotePosix(input.capabilityRequest ?? RUNTIME_HOST_OPERATOR_ACCESS_MANAGEMENT_CAPABILITY)} exec ${command}`;
   return `exec "\${SHELL:-/bin/sh}" -lic ${quotePosix(invocation)}`;
 }
 
@@ -1092,6 +1125,7 @@ function runtimeHostUpdateRemoteCommand(
     {
       [RUNTIME_HOST_OPERATOR_CAPABILITY_REQUEST_ENV]:
         RUNTIME_HOST_OPERATOR_ACCESS_MANAGEMENT_CAPABILITY,
+      [RUNTIME_HOST_OPERATOR_PROJECT_DIRECTORY_CONFIGURATION_REQUEST_ENV]: '1',
     },
   );
 }
@@ -1128,6 +1162,7 @@ function runtimeHostUpdateReconciliationRemoteCommand(
     .map(quotePosix)
     .join(' ');
   const invocation =
+    `${RUNTIME_HOST_OPERATOR_PROJECT_DIRECTORY_CONFIGURATION_REQUEST_ENV}=1 ` +
     `${RUNTIME_HOST_OPERATOR_CAPABILITY_REQUEST_ENV}=` +
     `${quotePosix(RUNTIME_HOST_OPERATOR_UPDATE_SCHEDULER_CAPABILITY)} exec ${command}`;
   return `exec "\${SHELL:-/bin/sh}" -lic ${quotePosix(invocation)}`;
@@ -1154,6 +1189,24 @@ function runtimeHostAccessManagementRemoteCommand(
     '--expected-root',
     input.expectedRootId,
     ...actionArgs,
+  ].map(quotePosix).join(' ');
+  return `exec "\${SHELL:-/bin/sh}" -lic ${quotePosix(`exec ${command}`)}`;
+}
+
+function runtimeHostPeerManagementRemoteCommand(
+  input: DesktopRuntimeHostSshPeerManagementInput,
+): string {
+  const command = [
+    input.operatorPath,
+    'peer',
+    input.action,
+    '--framed',
+    ...(input.action === 'enable' && input.coordinationRelays
+      ? input.coordinationRelays.length === 0
+        ? ['--clear-coordination-relays']
+        : input.coordinationRelays.flatMap((relay) => ['--coordination-relay', relay])
+      : []),
+    ...managedServiceTargetArgs(input.expectedTarget),
   ].map(quotePosix).join(' ');
   return `exec "\${SHELL:-/bin/sh}" -lic ${quotePosix(`exec ${command}`)}`;
 }
