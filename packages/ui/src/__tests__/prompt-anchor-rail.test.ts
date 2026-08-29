@@ -268,7 +268,7 @@ test('keeps the active tick visible when the rail viewport resizes', () => {
   assert.equal(disconnected, true);
 });
 
-test('marks complete-index landmarks outside the resident transcript range', () => {
+test('merges complete-index landmarks with the resident transcript range', () => {
   const turns = mergePromptAnchorRailTurns(
     [
       { turnId: 'turn-1', label: 'Prompt 1', reply: 'Answer 1' },
@@ -287,26 +287,23 @@ test('marks complete-index landmarks outside the resident transcript range', () 
       label: 'Prompt 1',
       reply: 'Answer 1',
       sequence: 0,
-      isResident: true,
     },
     {
       turnId: 'turn-2',
       label: 'Prompt 2',
       reply: '',
       sequence: 2,
-      isResident: false,
     },
     {
       turnId: 'turn-3',
       label: 'Prompt 3',
       reply: 'Answer 3',
       sequence: 4,
-      isResident: true,
     },
   ]);
 });
 
-test('treats every projected turn as resident without a durable landmark index', () => {
+test('preserves every projected turn without a durable landmark index', () => {
   assert.deepEqual(
     mergePromptAnchorRailTurns([
       { turnId: 'overlay-turn', label: 'Streaming prompt', reply: '' },
@@ -315,12 +312,11 @@ test('treats every projected turn as resident without a durable landmark index',
       turnId: 'overlay-turn',
       label: 'Streaming prompt',
       reply: '',
-      isResident: true,
     }],
   );
 });
 
-test('updates a landmark when its body enters a later resident range', () => {
+test('updates landmark content when its body enters a later resident range', () => {
   const index = [
     { turnId: 'turn-1', sequence: 0, label: 'Prompt 1' },
     { turnId: 'turn-2', sequence: 2, label: 'Prompt 2' },
@@ -334,26 +330,27 @@ test('updates a landmark when its body enters a later resident range', () => {
     index,
   );
 
-  assert.deepEqual(historical.map((turn) => turn.isResident), [true, false]);
-  assert.deepEqual(intermediate.map((turn) => turn.isResident), [false, true]);
+  assert.deepEqual(historical.map((turn) => turn.reply), ['Answer 1', '']);
+  assert.deepEqual(intermediate.map((turn) => turn.reply), ['', 'Answer 2']);
 });
 
-test('renders unloaded landmarks as actionable load targets', () => {
+test('keeps unloaded landmarks visually uniform and actionable', () => {
   const markup = renderToStaticMarkup(createElement(LocaleProvider, {
     locale: 'en',
     children: createElement(PromptAnchorRail, {
       turns: [
-        { turnId: 'turn-1', label: 'Prompt 1', sequence: 0, isResident: true },
-        { turnId: 'turn-2', label: 'Prompt 2', sequence: 2, isResident: false },
-        { turnId: 'turn-3', label: 'Prompt 3', sequence: 4, isResident: true },
+        { turnId: 'turn-1', label: 'Prompt 1', sequence: 0 },
+        { turnId: 'turn-2', label: 'Prompt 2', sequence: 2 },
+        { turnId: 'turn-3', label: 'Prompt 3', sequence: 4 },
       ],
       scrollRef: { current: null },
     }),
   }));
 
   assert.match(markup, /data-prompt-turn-id="turn-2"/);
-  assert.match(markup, /data-resident="false"/);
-  assert.match(markup, /aria-label="Load and jump to prompt: Prompt 2"/);
+  assert.doesNotMatch(markup, /data-resident/);
+  assert.match(markup, /aria-label="Jump to prompt: Prompt 2"/);
+  assert.doesNotMatch(markup, /Not currently loaded/);
   assert.doesNotMatch(markup, /aria-disabled="true"/);
 });
 

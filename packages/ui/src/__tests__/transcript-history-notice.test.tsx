@@ -25,8 +25,7 @@ import { TranscriptHistoryNotice } from '../chat-view.js';
 function renderNotice(isPending: boolean): string {
   return renderToStaticMarkup(
     <TranscriptHistoryNotice
-      title="Viewing an earlier part of this conversation"
-      description="Newer messages are still saved, but are not currently loaded."
+      title="Viewing earlier messages"
       actionLabel="Return to latest"
       isPending={isPending}
       onReturnToLatest={() => undefined}
@@ -34,22 +33,23 @@ function renderNotice(isPending: boolean): string {
   );
 }
 
-test('explains a partial historical range as persistent accessible status', () => {
+test('presents historical position as quiet persistent status', () => {
   const markup = renderNotice(false);
 
   assert.match(markup, /role="status"/);
   assert.match(markup, /aria-live="polite"/);
   assert.match(markup, /aria-atomic="true"/);
-  assert.match(markup, /Viewing an earlier part of this conversation/);
-  assert.match(markup, /Newer messages are still saved, but are not currently loaded\./);
+  assert.match(markup, /Viewing earlier messages/);
   assert.match(markup, /Return to latest/);
+  assert.doesNotMatch(markup, /saved|loaded/);
+  assert.doesNotMatch(markup, /<strong/);
   assert.doesNotMatch(markup, /disabled/);
 });
 
-test('keeps the explanation visible while return-to-latest is pending', () => {
+test('keeps the position status visible while return-to-latest is pending', () => {
   const markup = renderNotice(true);
 
-  assert.match(markup, /Viewing an earlier part of this conversation/);
-  assert.match(markup, /Newer messages are still saved, but are not currently loaded\./);
+  assert.match(markup, /Viewing earlier messages/);
+  assert.doesNotMatch(markup, /saved|loaded/);
   assert.match(markup, /disabled/);
 });

@@ -41,7 +41,7 @@ import type {
   ShellRunUpdate,
 } from '@maka/core/events';
 import { isDeepResearchSession } from '@maka/core/explore-agent';
-import { Button, ButtonGroup, ChatMessageList, EmptyState, Spinner } from '@astryxdesign/core';
+import { Button, ButtonGroup, ChatMessageList, EmptyState, HStack, Spinner, Text } from '@astryxdesign/core';
 import { useChatLayoutContext } from '@astryxdesign/core/Chat';
 import { useLayer } from '@astryxdesign/core/Layer';
 import { materializeChat } from './materialize.js';
@@ -71,31 +71,30 @@ export interface LiveContentActivationSnapshot {
 
 export interface TranscriptHistoryNoticeProps {
   title: string;
-  description: string;
   actionLabel: string;
   isPending: boolean;
   onReturnToLatest(): Promise<void> | void;
 }
 
-/** Persistent explanation for a bounded range that omits newer durable messages. */
+/** Persistent navigation position with a direct path back to the transcript tail. */
 export function TranscriptHistoryNotice({
   title,
-  description,
   actionLabel,
   isPending,
   onReturnToLatest,
 }: TranscriptHistoryNoticeProps) {
   return (
-    <div
+    <HStack
       className="maka-transcript-history-controls"
+      gap={2}
+      hAlign="center"
+      vAlign="center"
+      wrap="wrap"
       role="status"
       aria-live="polite"
       aria-atomic="true"
     >
-      <div className="maka-transcript-history-copy">
-        <strong className="maka-transcript-history-title">{title}</strong>
-        <span className="maka-transcript-history-description">{description}</span>
-      </div>
+      <Text type="supporting" color="secondary">{title}</Text>
       <Button
         label={actionLabel}
         variant="ghost"
@@ -105,7 +104,7 @@ export function TranscriptHistoryNotice({
           void onReturnToLatest();
         }}
       />
-    </div>
+    </HStack>
   );
 }
 
@@ -265,7 +264,6 @@ export function ChatView(props: {
   onLoadEarlierHistory?(): Promise<void> | void;
   returnToLatest?: {
     title: string;
-    description: string;
     label: string;
     isPending: boolean;
     onClick(): Promise<void> | void;
@@ -670,7 +668,6 @@ export function ChatView(props: {
       {props.returnToLatest ? (
         <TranscriptHistoryNotice
           title={props.returnToLatest.title}
-          description={props.returnToLatest.description}
           actionLabel={props.returnToLatest.label}
           isPending={props.returnToLatest.isPending}
           onReturnToLatest={() =>

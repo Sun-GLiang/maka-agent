@@ -214,7 +214,6 @@ export interface PromptAnchorRailTurn {
   label: string;
   reply?: string;
   sequence?: number;
-  isResident: boolean;
 }
 
 export function mergePromptAnchorRailTurns(
@@ -222,7 +221,7 @@ export function mergePromptAnchorRailTurns(
   index?: ReadonlyArray<{ turnId: string; sequence: number; label: string }>,
 ): PromptAnchorRailTurn[] {
   if (!index || index.length === 0) {
-    return loadedTurns.map((turn) => ({ ...turn, isResident: true }));
+    return loadedTurns.map((turn) => ({ ...turn }));
   }
   const loadedByTurnId = new Map(loadedTurns.map((turn) => [turn.turnId, turn]));
   return index.map((landmark) => {
@@ -234,7 +233,6 @@ export function mergePromptAnchorRailTurns(
         reply: '',
       }),
       sequence: landmark.sequence,
-      isResident: loaded !== undefined,
     };
   });
 }
@@ -539,9 +537,6 @@ export const PromptAnchorRail = memo(function PromptAnchorRail({ turns, scrollRe
           const isActive = turn.turnId === activeTurnIdRef.current;
           const preview = turn.label.trim() || copy.emptyPrompt;
           const replyPreview = (turn.reply ?? '').replace(/\s+/g, ' ').trim().slice(0, 140);
-          const actionLabel = turn.isResident
-            ? copy.jumpToPrompt(preview)
-            : copy.loadPrompt(preview);
           const proximity =
             hoveredIndex === null
               ? HOVER_FALLOFF_TICKS
@@ -555,9 +550,7 @@ export const PromptAnchorRail = memo(function PromptAnchorRail({ turns, scrollRe
               content={
                 <span className="maka-prompt-rail-preview">
                   <span className="maka-prompt-rail-preview-prompt">{preview}</span>
-                  {!turn.isResident ? (
-                    <span className="maka-prompt-rail-preview-residency">{copy.unloadedPrompt}</span>
-                  ) : replyPreview ? (
+                  {replyPreview ? (
                     <span className="maka-prompt-rail-preview-reply">{replyPreview}</span>
                   ) : null}
                 </span>
@@ -567,10 +560,9 @@ export const PromptAnchorRail = memo(function PromptAnchorRail({ turns, scrollRe
                 type="button"
                 variant="ghost"
                 size="sm"
-                label={actionLabel}
+                label={copy.jumpToPrompt(preview)}
                 className="maka-prompt-rail-tick"
                 data-prompt-turn-id={turn.turnId}
-                data-resident={turn.isResident ? 'true' : 'false'}
                 data-active={isActive ? 'true' : undefined}
                 aria-current={isActive ? 'true' : undefined}
                 onClick={() => jumpTo(turn)}
