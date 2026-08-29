@@ -711,6 +711,17 @@ test('sends a Mesh invitation only after the authenticated remote operator reque
       result: {
         localPeerId: 'peer-b',
         available: true,
+        transit: {
+          meshId: null,
+          allowedMemberCount: 0,
+          activeReservationCount: 0,
+          activeCircuitCount: 0,
+          maxReservationCount: 32,
+          maxCircuitCount: 8,
+          maxCircuitsPerPeer: 2,
+          maxCircuitDurationSeconds: 7_200,
+          maxCircuitBytes: 256 * 1024 * 1024,
+        },
         meshes: [
           {
             meshId: 'mesh-id',

@@ -172,13 +172,22 @@ export type RuntimeHostCliCommand =
     }
   | {
       kind: 'runtime-host-service-peer-mesh';
-      action: 'status' | 'create' | 'invite' | 'join' | 'remove' | 'leave' | 'close' | 'reconcile';
+      action:
+        | 'status'
+        | 'create'
+        | 'invite'
+        | 'join'
+        | 'remove'
+        | 'leave'
+        | 'close'
+        | 'reconcile'
+        | 'transit';
       json: boolean;
       framed?: true;
       managedRootId: string;
       operatorDeploymentId: string;
       expectedTarget: RuntimeHostManagedServiceTarget;
-      meshId?: string;
+      meshId?: string | null;
       peerId?: string;
     }
   | {
@@ -731,7 +740,7 @@ function parseServiceManagementCommand(argv: string[]): RuntimeHostCliCommand {
             allowInterruptActiveTasks = true;
           },
         }
-      : action === 'retire' || action === 'update' || action === 'configure'
+      : action === 'restart' || action === 'retire' || action === 'update' || action === 'configure'
         ? {
             '--allow-interrupt-active-tasks': () => {
               if (allowInterruptActiveTasks) {
@@ -1010,15 +1019,16 @@ function parseServicePeerMeshCommand(argv: string[]): RuntimeHostCliCommand {
     action !== 'remove' &&
     action !== 'leave' &&
     action !== 'close' &&
-    action !== 'reconcile'
+    action !== 'reconcile' &&
+    action !== 'transit'
   ) {
     return error(
       action
         ? `Unexpected runtime-host service mesh command: ${action}`
-        : 'runtime-host service mesh requires status, create, invite, join, remove, leave, close, or reconcile',
+        : 'runtime-host service mesh requires status, create, invite, join, remove, leave, close, reconcile, or transit',
     );
   }
-  let meshId: string | undefined;
+  let meshId: string | null | undefined;
   let peerId: string | undefined;
   const options = parseManagedServiceOptions(argv.slice(1), {
     allowConfiguration: false,
@@ -1035,6 +1045,12 @@ function parseServicePeerMeshCommand(argv: string[]): RuntimeHostCliCommand {
         peerId = value;
       },
     },
+    flagOptions: {
+      '--off': () => {
+        if (meshId !== undefined) return error('mesh transit accepts either --mesh or --off');
+        meshId = null;
+      },
+    },
   });
   if ('kind' in options) return options;
   if (!options.managedRootId || !options.operatorDeploymentId || !options.expectedTarget) {
@@ -1044,12 +1060,11 @@ function parseServicePeerMeshCommand(argv: string[]): RuntimeHostCliCommand {
   }
   const needsMesh =
     action === 'invite' || action === 'remove' || action === 'leave' || action === 'close';
-  if (needsMesh !== (meshId !== undefined)) {
-    return error(
-      needsMesh
-        ? `runtime-host service mesh ${action} requires --mesh`
-        : '--mesh is only valid with mesh invite, remove, leave, or close',
-    );
+  if (needsMesh && typeof meshId !== 'string') {
+    return error(`runtime-host service mesh ${action} requires --mesh`);
+  }
+  if (!needsMesh && action !== 'transit' && typeof meshId === 'string') {
+    return error('--mesh is only valid with mesh invite, remove, leave, close, or transit');
   }
   if ((action === 'remove') !== (peerId !== undefined)) {
     return error(
@@ -1057,6 +1072,12 @@ function parseServicePeerMeshCommand(argv: string[]): RuntimeHostCliCommand {
         ? 'runtime-host service mesh remove requires --peer'
         : '--peer is only valid with mesh remove',
     );
+  }
+  if (meshId === null && action !== 'transit') {
+    return error('--off is only valid with mesh transit');
+  }
+  if (action === 'transit' && meshId === undefined) {
+    return error('runtime-host service mesh transit requires --mesh or --off');
   }
   return {
     kind: 'runtime-host-service-peer-mesh',
@@ -1066,7 +1087,7 @@ function parseServicePeerMeshCommand(argv: string[]): RuntimeHostCliCommand {
     managedRootId: options.managedRootId,
     operatorDeploymentId: options.operatorDeploymentId,
     expectedTarget: options.expectedTarget,
-    ...(meshId ? { meshId } : {}),
+    ...(meshId !== undefined ? { meshId } : {}),
     ...(peerId ? { peerId } : {}),
   };
 }

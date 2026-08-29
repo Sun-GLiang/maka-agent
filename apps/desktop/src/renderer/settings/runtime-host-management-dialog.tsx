@@ -37,7 +37,6 @@ import {
 } from '@maka/ui';
 import { HelpCircle, ICON_SIZE } from '@maka/ui/icons';
 import { uiLocaleToIntlLocale, type UiLocale } from '@maka/core/ui-locale';
-import type { RemoteRuntimeHostProfile } from '@maka/runtime-host/client';
 import type {
   DesktopRuntimeHostManagementAction,
   DesktopRuntimeHostDirectPeerSnapshot,
@@ -61,7 +60,8 @@ import {
 } from './runtime-host-project-directory-editor.js';
 
 type RuntimeHostManagementConfirmation =
-  | { readonly kind: 'uninstall' }
+  | { readonly kind: 'uninstall'; readonly allowInterruptActiveTasks: boolean }
+  | { readonly kind: 'restart' }
   | { readonly kind: 'update' }
   | { readonly kind: 'configureDirectories' }
   | { readonly kind: 'rotate' }
@@ -80,8 +80,15 @@ type DirectoryPolicyEdit = {
   readonly draft: readonly ProjectDirectoryRootDraft[];
   readonly conflict?: DirectoryPolicySnapshot;
 };
+export interface RuntimeHostManagementTarget {
+  readonly id: string;
+  readonly name: string;
+  readonly subtitle?: string;
+  readonly directPeerManagement: boolean;
+}
+
 export function RuntimeHostManagementDialog(props: {
-  readonly profile: RemoteRuntimeHostProfile | undefined;
+  readonly target: RuntimeHostManagementTarget | undefined;
   readonly onClose: () => void;
 }) {
   const locale = useUiLocale();
@@ -109,9 +116,9 @@ export function RuntimeHostManagementDialog(props: {
   const nextDirectoryRootId = useRef(1);
   const logsRef = useRef<HTMLPreElement>(null);
 
-  const profile = props.profile;
+  const target = props.target;
   useEffect(() => {
-    if (!profile) return;
+    if (!target) return;
     let disposed = false;
     setResult(undefined);
     setError(undefined);
@@ -133,7 +140,7 @@ export function RuntimeHostManagementDialog(props: {
     void (async () => {
       let shouldLoadUpdatePolicy = false;
       try {
-        const response = await window.maka.runtimeHostManagement.run(profile.id, 'status');
+        const response = await window.maka.runtimeHostManagement.run(target.id, 'status');
         if (disposed) return;
         if (response.kind === 'result') {
           setResult(response);
@@ -147,7 +154,7 @@ export function RuntimeHostManagementDialog(props: {
       }
       if (shouldLoadUpdatePolicy) {
         try {
-          const policy = await window.maka.runtimeHostManagement.getUpdatePolicy(profile.id);
+          const policy = await window.maka.runtimeHostManagement.getUpdatePolicy(target.id);
           if (!disposed) applyUpdatePolicy(policy);
         } catch (failure) {
           if (!disposed) {
@@ -156,9 +163,9 @@ export function RuntimeHostManagementDialog(props: {
           }
         }
       }
-      if (shouldLoadUpdatePolicy) {
+      if (shouldLoadUpdatePolicy && target.directPeerManagement) {
         try {
-          const peer = await window.maka.runtimeHostManagement.getDirectPeer(profile.id);
+          const peer = await window.maka.runtimeHostManagement.getDirectPeer(target.id);
           if (!disposed) applyDirectPeer(peer);
         } catch (failure) {
           if (!disposed) setDirectPeerError(settingsActionErrorMessage(failure, locale));
@@ -169,11 +176,11 @@ export function RuntimeHostManagementDialog(props: {
     return () => {
       disposed = true;
     };
-  }, [locale, profile]);
+  }, [locale, target]);
 
   useEffect(() => window.maka.runtimeHostManagement.subscribeProgress((progress) => {
-    if (progress.profileId === profile?.id) setUpdatePhase(progress.phase);
-  }), [profile?.id]);
+    if (progress.profileId === target?.id) setUpdatePhase(progress.phase);
+  }), [target?.id]);
 
   useLayoutEffect(() => {
     if (result?.action !== 'logs') return;
@@ -181,15 +188,32 @@ export function RuntimeHostManagementDialog(props: {
     if (logs) logs.scrollTop = logs.scrollHeight;
   }, [result]);
 
-  async function run(action: DesktopRuntimeHostManagementAction): Promise<void> {
-    if (!profile) return;
+  async function run(
+    action: DesktopRuntimeHostManagementAction,
+    allowInterruptActiveTasks = false,
+  ): Promise<void> {
+    if (!target) return;
     setLoading(true);
     setError(undefined);
     setReconnectWarning(undefined);
     setLastUpdateOutcome(undefined);
     try {
-      const response = await window.maka.runtimeHostManagement.run(profile.id, action);
+      const response = await window.maka.runtimeHostManagement.run(
+        target.id,
+        action,
+        allowInterruptActiveTasks,
+      );
       if (response.kind === 'error') {
+        if (action === 'uninstall' && response.error.code === 'active_tasks') {
+          setError(undefined);
+          setConfirmation({ kind: 'uninstall', allowInterruptActiveTasks: true });
+          return;
+        }
+        if (action === 'restart' && response.error.code === 'active_tasks') {
+          setError(undefined);
+          setConfirmation({ kind: 'restart' });
+          return;
+        }
         setUpdatePolicy(undefined);
         setError(response.error.message);
         toast.error(copy.managementActionFailed, response.error.message);
@@ -199,12 +223,14 @@ export function RuntimeHostManagementDialog(props: {
         setResult(undefined);
         setUpdatePolicy(undefined);
         setUninstalledRoot(response.retainedStateRoot);
+        setConfirmation(undefined);
         return;
       }
+      setConfirmation(undefined);
       setResult(response);
       reconcileDirectoryPolicy(response.service);
       if (response.service.state === 'not_installed') setUpdatePolicy(undefined);
-      else if (action !== 'logs') await reloadUpdatePolicy(profile.id);
+      else if (action !== 'logs') await reloadUpdatePolicy(target.id);
     } catch (failure) {
       const message = settingsActionErrorMessage(failure, locale);
       setUpdatePolicy(undefined);
@@ -223,11 +249,11 @@ export function RuntimeHostManagementDialog(props: {
   }
 
   async function reloadDirectPeer(): Promise<void> {
-    if (!profile) return;
+    if (!target) return;
     setLoading(true);
     setDirectPeerError(undefined);
     try {
-      applyDirectPeer(await window.maka.runtimeHostManagement.getDirectPeer(profile.id));
+      applyDirectPeer(await window.maka.runtimeHostManagement.getDirectPeer(target.id));
     } catch (failure) {
       setDirectPeerError(settingsActionErrorMessage(failure, locale));
     } finally {
@@ -236,7 +262,7 @@ export function RuntimeHostManagementDialog(props: {
   }
 
   async function configureDirectPeer(enabled: boolean): Promise<void> {
-    if (!profile) return;
+    if (!target) return;
     setLoading(true);
     setDirectPeerError(undefined);
     try {
@@ -246,7 +272,7 @@ export function RuntimeHostManagementDialog(props: {
         .filter(Boolean);
       applyDirectPeer(
         await window.maka.runtimeHostManagement.configureDirectPeer(
-          profile.id,
+          target.id,
           enabled,
           relays,
           automaticRelayDiscovery,
@@ -255,7 +281,7 @@ export function RuntimeHostManagementDialog(props: {
     } catch (failure) {
       const message = settingsActionErrorMessage(failure, locale);
       try {
-        applyDirectPeer(await window.maka.runtimeHostManagement.getDirectPeer(profile.id));
+        applyDirectPeer(await window.maka.runtimeHostManagement.getDirectPeer(target.id));
       } catch {
         // Preserve the last authoritative snapshot when recovery cannot be read.
       }
@@ -267,11 +293,11 @@ export function RuntimeHostManagementDialog(props: {
   }
 
   async function loadAccess(): Promise<void> {
-    if (!profile) return;
+    if (!target) return;
     setLoading(true);
     setError(undefined);
     try {
-      setAccess(await window.maka.runtimeHostManagement.listCredentials(profile.id));
+      setAccess(await window.maka.runtimeHostManagement.listCredentials(target.id));
     } catch (failure) {
       const message = settingsActionErrorMessage(failure, locale);
       setError(message);
@@ -282,7 +308,7 @@ export function RuntimeHostManagementDialog(props: {
   }
 
   async function update(allowInterruptActiveTasks: boolean): Promise<void> {
-    if (!profile) return;
+    if (!target) return;
     setLoading(true);
     setError(undefined);
     setReconnectWarning(undefined);
@@ -290,7 +316,7 @@ export function RuntimeHostManagementDialog(props: {
     setLastUpdateOutcome(undefined);
     try {
       const response = await window.maka.runtimeHostManagement.update(
-        profile.id,
+        target.id,
         allowInterruptActiveTasks,
       );
       if (response.kind === 'error') {
@@ -312,7 +338,7 @@ export function RuntimeHostManagementDialog(props: {
           : undefined,
       );
       if (response.action === 'update' && response.update.kind !== 'active_tasks') {
-        await reloadUpdatePolicy(profile.id);
+        await reloadUpdatePolicy(target.id);
       }
     } catch (failure) {
       const message = settingsActionErrorMessage(failure, locale);
@@ -369,13 +395,13 @@ export function RuntimeHostManagementDialog(props: {
   }
 
   async function configureDirectories(allowInterruptActiveTasks: boolean): Promise<void> {
-    if (!profile || !directoryPolicyEdit || directoryPolicyEdit.conflict) return;
+    if (!target || !directoryPolicyEdit || directoryPolicyEdit.conflict) return;
     setLoading(true);
     setError(undefined);
     setReconnectWarning(undefined);
     try {
       const response = await window.maka.runtimeHostManagement.configureProjectDirectories(
-        profile.id,
+        target.id,
         canonicalProjectDirectoryRoots(directoryPolicyEdit.draft),
         directoryPolicyEdit.baseline.configurationFingerprint,
         allowInterruptActiveTasks,
@@ -429,7 +455,7 @@ export function RuntimeHostManagementDialog(props: {
   }
 
   async function saveUpdatePolicy(): Promise<void> {
-    if (!profile) return;
+    if (!target) return;
     setLoading(true);
     setError(undefined);
     setUpdatePolicyError(undefined);
@@ -441,7 +467,7 @@ export function RuntimeHostManagementDialog(props: {
           ? { kind: 'fixed' as const, version: fixedVersion.trim() }
           : { kind: 'channel' as const, channel: updatePolicyChoice };
       applyUpdatePolicy(
-        await window.maka.runtimeHostManagement.setUpdatePolicy(profile.id, policy),
+        await window.maka.runtimeHostManagement.setUpdatePolicy(target.id, policy),
       );
     } catch (failure) {
       const message = settingsActionErrorMessage(failure, locale);
@@ -454,7 +480,7 @@ export function RuntimeHostManagementDialog(props: {
   }
 
   async function reconcileUpdate(): Promise<void> {
-    if (!profile) return;
+    if (!target) return;
     setLoading(true);
     setError(undefined);
     setReconnectWarning(undefined);
@@ -462,7 +488,7 @@ export function RuntimeHostManagementDialog(props: {
     setUpdatePhase('checking');
     setLastUpdateOutcome(undefined);
     try {
-      const response = await window.maka.runtimeHostManagement.reconcileUpdate(profile.id);
+      const response = await window.maka.runtimeHostManagement.reconcileUpdate(target.id);
       if (response.kind === 'error') {
         setUpdatePolicy(undefined);
         setUpdatePolicyError(response.error.message);
@@ -489,11 +515,11 @@ export function RuntimeHostManagementDialog(props: {
   }
 
   async function rotateCredential(): Promise<void> {
-    if (!profile) return;
+    if (!target) return;
     setLoading(true);
     setError(undefined);
     try {
-      setAccess(await window.maka.runtimeHostManagement.rotateCredential(profile.id));
+      setAccess(await window.maka.runtimeHostManagement.rotateCredential(target.id));
     } catch (failure) {
       const message = settingsActionErrorMessage(failure, locale);
       setError(message);
@@ -516,13 +542,13 @@ export function RuntimeHostManagementDialog(props: {
     const revokeTarget = confirmation?.kind === 'revoke'
       ? confirmation.credential
       : undefined;
-    if (!profile || !revokeTarget) return;
+    if (!target || !revokeTarget) return;
     setLoading(true);
     setError(undefined);
     try {
       setAccess(
         await window.maka.runtimeHostManagement.revokeCredential(
-          profile.id,
+          target.id,
           revokeTarget.credentialId,
         ),
       );
@@ -557,7 +583,7 @@ export function RuntimeHostManagementDialog(props: {
   const updateOutcome = lastUpdateOutcome;
   return (
     <Dialog
-      isOpen={profile !== undefined}
+      isOpen={target !== undefined}
       onOpenChange={(open) => {
         if (!open && !loading) props.onClose();
       }}
@@ -568,8 +594,8 @@ export function RuntimeHostManagementDialog(props: {
       <Layout
         header={(
           <DialogHeader
-            title={profile ? copy.managementTitle(profile.name) : copy.title}
-            subtitle={profile?.transport.kind === 'ssh' ? profile.transport.destination : undefined}
+            title={target ? copy.managementTitle(target.name) : copy.title}
+            subtitle={target?.subtitle}
             onOpenChange={(open) => {
               if (!open && !loading) props.onClose();
             }}
@@ -603,7 +629,9 @@ export function RuntimeHostManagementDialog(props: {
                 <Banner
                   status="warning"
                   title={copy.uninstallConfirmTitle}
-                  description={copy.uninstallConfirmBody}
+                  description={confirmation.allowInterruptActiveTasks
+                    ? copy.uninstallActiveTasksDescription
+                    : copy.uninstallConfirmBody}
                 />
               ) : null}
               {confirmation?.kind === 'update' ? (
@@ -611,6 +639,13 @@ export function RuntimeHostManagementDialog(props: {
                   status="warning"
                   title={copy.updateBlockedTitle}
                   description={copy.updateBlockedBody}
+                />
+              ) : null}
+              {confirmation?.kind === 'restart' ? (
+                <Banner
+                  status="warning"
+                  title={copy.directoryRootsActiveTasks}
+                  description={copy.restartActiveTasksDescription}
                 />
               ) : null}
               {confirmation?.kind === 'rotate' ? (
@@ -679,7 +714,7 @@ export function RuntimeHostManagementDialog(props: {
                       <Fact label={copy.stateRoot} value={service.stateRoot} wide />
                     ) : null}
                   </dl>
-                  {serviceInstalled ? (
+                  {serviceInstalled && target?.directPeerManagement ? (
                     <section className="settingsRuntimeHostDirectPeer">
                       <div className="settingsRuntimeHostUpdatePolicyHeading">
                         <div>
@@ -1116,6 +1151,21 @@ export function RuntimeHostManagementDialog(props: {
                     onClick={() => void update(true)}
                   />
                 </>
+              ) : confirmation?.kind === 'restart' ? (
+                <>
+                  <Button
+                    variant="secondary"
+                    label={copy.cancel}
+                    isDisabled={loading}
+                    onClick={() => setConfirmation(undefined)}
+                  />
+                  <Button
+                    variant="destructive"
+                    label={copy.restartInterrupt}
+                    isDisabled={loading}
+                    onClick={() => void run('restart', true)}
+                  />
+                </>
               ) : confirmation?.kind === 'configureDirectories' ? (
                 <>
                   <Button
@@ -1141,9 +1191,14 @@ export function RuntimeHostManagementDialog(props: {
                   />
                   <Button
                     variant="destructive"
-                    label={copy.uninstallConfirm}
+                    label={confirmation.allowInterruptActiveTasks
+                      ? copy.interruptAndUninstall
+                      : copy.uninstallConfirm}
                     isDisabled={loading}
-                    onClick={() => void run('uninstall').then(() => setConfirmation(undefined))}
+                    onClick={() => void run(
+                      'uninstall',
+                      confirmation.allowInterruptActiveTasks,
+                    )}
                   />
                 </>
               ) : confirmation?.kind === 'rotate' ? (
@@ -1188,9 +1243,9 @@ export function RuntimeHostManagementDialog(props: {
                     isDisabled={loading}
                     onClick={props.onClose}
                   />
-                  {profile && !uninstalled ? (
+                  {target && !uninstalled ? (
                     <MoreMenu
-                      label={copy.moreActions(profile.name)}
+                      label={copy.moreActions(target.name)}
                       size="sm"
                       isDisabled={loading}
                       items={[
@@ -1205,12 +1260,15 @@ export function RuntimeHostManagementDialog(props: {
                           : []),
                         {
                           label: copy.uninstallService,
-                          onClick: () => setConfirmation({ kind: 'uninstall' }),
+                          onClick: () => setConfirmation({
+                            kind: 'uninstall',
+                            allowInterruptActiveTasks: false,
+                          }),
                         },
                       ]}
                     />
                   ) : null}
-                  {result && profile && !uninstalled ? (
+                  {result && target && !uninstalled ? (
                     <>
                       <Button
                         variant="secondary"
