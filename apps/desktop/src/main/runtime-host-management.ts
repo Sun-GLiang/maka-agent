@@ -20,7 +20,7 @@
 import type { IpcMain } from 'electron';
 import {
   RUNTIME_HOST_OPERATOR_ACCESS_MANAGEMENT_CAPABILITY,
-  RUNTIME_HOST_OPERATOR_PEER_MANAGEMENT_CAPABILITY,
+  RUNTIME_HOST_OPERATOR_PEER_RELAY_DISCOVERY_CAPABILITY,
   isProductReleaseVersion,
   runtimeHostAccessCredentialFingerprint,
   type RuntimeHostManagedUpdatePolicy,
@@ -49,11 +49,14 @@ import type {
   DesktopRuntimeHostSshUpdateInput,
   DesktopRuntimeHostSshUpdatePolicyInput,
   DesktopRuntimeHostSshUpdateReconciliationInput,
-  DesktopRuntimeHostSetupPackage,
   RuntimeHostServiceUpdatePolicyTerminalFrame,
   RuntimeHostServiceUpdateReconciliationTerminalFrame,
   RuntimeHostServiceUpdateTerminalFrame,
 } from './runtime-host-ssh-terminal.js';
+import type {
+  DesktopRuntimeHostDevelopmentPeerTarget,
+  DesktopRuntimeHostSetupPackage,
+} from './runtime-host-setup-package.js';
 
 const MANAGEMENT_ACTIONS = new Set<DesktopRuntimeHostManagementAction>([
   'status',
@@ -104,7 +107,15 @@ export function createDesktopRuntimeHostManagement(input: {
     input: DesktopRuntimeHostSshUpdateReconciliationInput,
     onProgress: (phase: DesktopRuntimeHostManagementProgress['phase']) => void,
   ) => Promise<RuntimeHostServiceUpdateReconciliationTerminalFrame>;
-  readonly resolveUpdatePackage: () =>
+  readonly setupPackageMode: 'published' | 'development';
+  readonly resolveSshDevelopmentPeerTarget: (input: {
+    readonly destination: string;
+    readonly sshPort?: number;
+    readonly signal?: AbortSignal;
+  }) => Promise<Exclude<DesktopRuntimeHostDevelopmentPeerTarget, 'none'>>;
+  readonly resolveUpdatePackage: (
+    peerTarget: DesktopRuntimeHostDevelopmentPeerTarget,
+  ) =>
     | DesktopRuntimeHostSetupPackage
     | Promise<DesktopRuntimeHostSetupPackage>;
   readonly currentHostEpoch: (profileId: string) => string | undefined;
@@ -308,6 +319,7 @@ export function createDesktopRuntimeHostManagement(input: {
       ...(status.peerId ? { peerId: status.peerId } : {}),
       routeHints: status.routeHints,
       coordinationRelays: status.coordinationRelays,
+      automaticRelayDiscovery: status.automaticRelayDiscovery ?? false,
       profilePresent: profile.exists,
       profileEnabled: profile.enabled,
       clientAvailable: input.directPeerClientAvailable,
@@ -325,7 +337,7 @@ export function createDesktopRuntimeHostManagement(input: {
       operatorPath: target.managed.control.operatorPath,
       action: 'status',
       expectedTarget: target.expectedTarget,
-      capabilityRequest: RUNTIME_HOST_OPERATOR_PEER_MANAGEMENT_CAPABILITY,
+      capabilityRequest: RUNTIME_HOST_OPERATOR_PEER_RELAY_DISCOVERY_CAPABILITY,
     });
     if (capability.kind === 'error') throw new Error(capability.error.message);
     if (capability.action !== 'status') {
@@ -334,7 +346,7 @@ export function createDesktopRuntimeHostManagement(input: {
     return {
       ...target,
       available: capability.operatorCapabilities?.includes(
-        RUNTIME_HOST_OPERATOR_PEER_MANAGEMENT_CAPABILITY,
+        RUNTIME_HOST_OPERATOR_PEER_RELAY_DISCOVERY_CAPABILITY,
       ) === true,
     };
   };
@@ -347,6 +359,7 @@ export function createDesktopRuntimeHostManagement(input: {
       state: 'unsupported',
       routeHints: [],
       coordinationRelays: [],
+      automaticRelayDiscovery: false,
       profilePresent: profile.exists,
       profileEnabled: profile.enabled,
       clientAvailable: input.directPeerClientAvailable,
@@ -381,11 +394,15 @@ export function createDesktopRuntimeHostManagement(input: {
     profileIdValue: unknown,
     enabledValue: unknown,
     coordinationRelaysValue: unknown,
+    automaticRelayDiscoveryValue: unknown,
   ): Promise<DesktopRuntimeHostDirectPeerSnapshot> => {
     if (typeof enabledValue !== 'boolean') {
       throw new Error('Runtime Host direct-peer state is invalid');
     }
     const coordinationRelays = requireCoordinationRelays(coordinationRelaysValue);
+    if (typeof automaticRelayDiscoveryValue !== 'boolean') {
+      throw new Error('Runtime Host relay discovery state is invalid');
+    }
     const { profileId, managed, transport, expectedTarget, available } =
       await peerManagementTarget(profileIdValue);
     if (!available) {
@@ -401,6 +418,7 @@ export function createDesktopRuntimeHostManagement(input: {
       operatorPath: managed.control.operatorPath,
       action: enabledValue ? 'enable' : 'disable',
       ...(enabledValue ? { coordinationRelays } : {}),
+      ...(enabledValue ? { automaticRelayDiscovery: automaticRelayDiscoveryValue } : {}),
       expectedTarget,
     });
     if (response.kind !== 'result') {
@@ -466,7 +484,13 @@ export function createDesktopRuntimeHostManagement(input: {
       await managedMutationTarget(profileIdValue);
     const previousHostEpoch = input.currentHostEpoch(profileId);
     input.sendProgress({ profileId, phase: 'preparing_cli' });
-    const setupPackage = await input.resolveUpdatePackage();
+    const peerTarget = input.setupPackageMode === 'development'
+      ? await input.resolveSshDevelopmentPeerTarget({
+          destination: transport.destination,
+          ...(transport.sshPort === undefined ? {} : { sshPort: transport.sshPort }),
+        })
+      : 'none';
+    const setupPackage = await input.resolveUpdatePackage(peerTarget);
     const response = await input.runUpdate(
       {
         destination: transport.destination,
@@ -814,8 +838,18 @@ export function createDesktopRuntimeHostManagement(input: {
     getDirectPeer(profileId));
   input.ipcMain.handle(
     channels.configureDirectPeer,
-    (_event, profileId: unknown, enabled: unknown, coordinationRelays: unknown) =>
-      configureDirectPeer(profileId, enabled, coordinationRelays),
+    (
+      _event,
+      profileId: unknown,
+      enabled: unknown,
+      coordinationRelays: unknown,
+      automaticRelayDiscovery: unknown,
+    ) => configureDirectPeer(
+      profileId,
+      enabled,
+      coordinationRelays,
+      automaticRelayDiscovery,
+    ),
   );
 
   return {

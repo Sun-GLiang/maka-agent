@@ -54,9 +54,15 @@ export interface RuntimeHostPeerNativeStream {
   abort(): void;
 }
 
+export interface RuntimeHostPeerIdentityProof {
+  readonly publicKey: Buffer;
+  readonly signature: Buffer;
+}
+
 export interface RuntimeHostPeerNativeEndpoint {
   readonly peerId: string;
   readonly listenAddresses: readonly string[];
+  readonly activeCoordinationRelays: readonly string[];
   connect(options: {
     readonly requestId: number;
     readonly peerId: string;
@@ -79,12 +85,70 @@ export interface RuntimeHostPeerNativeEndpoint {
 
 interface RuntimeHostPeerNativeModule {
   ensurePeerIdentity(keyPath: string): Promise<string>;
+  signPeerIdentity(
+    keyPath: string,
+    expectedPeerId: string,
+    payload: Buffer,
+  ): Promise<RuntimeHostPeerIdentityProof>;
+  verifyPeerIdentity(
+    peerId: string,
+    publicKey: Buffer,
+    payload: Buffer,
+    signature: Buffer,
+  ): boolean;
   startPeerEndpoint(options: {
     readonly keyPath: string;
     readonly expectedPeerId?: string;
     readonly listenAddresses?: readonly string[];
     readonly coordinationRelays?: readonly string[];
+    readonly automaticRelayDiscovery?: boolean;
   }): unknown;
+}
+
+export async function signRuntimeHostPeerIdentity(input: {
+  readonly nativePath: string;
+  readonly keyPath: string;
+  readonly expectedPeerId: string;
+  readonly payload: Buffer;
+}): Promise<RuntimeHostPeerIdentityProof> {
+  try {
+    const proof = await loadNativeModule(input.nativePath).signPeerIdentity(
+      input.keyPath,
+      input.expectedPeerId,
+      input.payload,
+    );
+    if (!isPeerIdentityProof(proof)) {
+      throw new RuntimeHostPeerError(
+        'peer_native_failed',
+        'Native peer identity signature is invalid',
+      );
+    }
+    return Object.freeze({
+      publicKey: Buffer.from(proof.publicKey),
+      signature: Buffer.from(proof.signature),
+    });
+  } catch (error) {
+    throw normalizePeerError(error);
+  }
+}
+
+export function verifyRuntimeHostPeerIdentity(input: {
+  readonly nativePath: string;
+  readonly peerId: string;
+  readonly publicKey: Buffer;
+  readonly payload: Buffer;
+  readonly signature: Buffer;
+}): boolean {
+  try {
+    return loadNativeModule(input.nativePath).verifyPeerIdentity(
+      input.peerId,
+      input.publicKey,
+      input.payload,
+      input.signature,
+    );
+  } catch (error) {
+    throw normalizePeerError(error);
+  }
 }
 
 export async function ensureRuntimeHostPeerIdentity(input: {
@@ -108,6 +172,7 @@ export function startRuntimeHostPeerEndpoint(input: {
   readonly expectedPeerId?: string;
   readonly listenAddresses?: readonly string[];
   readonly coordinationRelays?: readonly string[];
+  readonly automaticRelayDiscovery?: boolean;
 }): RuntimeHostPeerNativeEndpoint {
   try {
     const endpoint = loadNativeModule(input.nativePath).startPeerEndpoint({
@@ -115,6 +180,9 @@ export function startRuntimeHostPeerEndpoint(input: {
       ...(input.expectedPeerId ? { expectedPeerId: input.expectedPeerId } : {}),
       ...(input.listenAddresses ? { listenAddresses: input.listenAddresses } : {}),
       ...(input.coordinationRelays ? { coordinationRelays: input.coordinationRelays } : {}),
+      ...(input.automaticRelayDiscovery === undefined
+        ? {}
+        : { automaticRelayDiscovery: input.automaticRelayDiscovery }),
     });
     if (!isPeerNativeEndpoint(endpoint)) {
       throw new RuntimeHostPeerError(
@@ -347,8 +415,27 @@ function isPeerNativeModule(value: unknown): value is RuntimeHostPeerNativeModul
     value !== null &&
     'ensurePeerIdentity' in value &&
     typeof value.ensurePeerIdentity === 'function' &&
+    'signPeerIdentity' in value &&
+    typeof value.signPeerIdentity === 'function' &&
+    'verifyPeerIdentity' in value &&
+    typeof value.verifyPeerIdentity === 'function' &&
     'startPeerEndpoint' in value &&
     typeof value.startPeerEndpoint === 'function'
+  );
+}
+
+function isPeerIdentityProof(value: unknown): value is RuntimeHostPeerIdentityProof {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'publicKey' in value &&
+    Buffer.isBuffer(value.publicKey) &&
+    value.publicKey.byteLength > 0 &&
+    value.publicKey.byteLength <= 256 &&
+    'signature' in value &&
+    Buffer.isBuffer(value.signature) &&
+    value.signature.byteLength > 0 &&
+    value.signature.byteLength <= 256
   );
 }
 
@@ -361,6 +448,9 @@ function isPeerNativeEndpoint(value: unknown): value is RuntimeHostPeerNativeEnd
     'listenAddresses' in value &&
     Array.isArray(value.listenAddresses) &&
     value.listenAddresses.every((address) => typeof address === 'string') &&
+    'activeCoordinationRelays' in value &&
+    Array.isArray(value.activeCoordinationRelays) &&
+    value.activeCoordinationRelays.every((address) => typeof address === 'string') &&
     'connect' in value &&
     typeof value.connect === 'function' &&
     'connectMeshControl' in value &&

@@ -18,15 +18,19 @@
  */
 
 export {
-  decodePeerMeshInvitation,
   type PeerMeshAuthorityTarget,
-  type PeerMeshInvitationV1,
   type PeerMeshRosterV1,
   type SignedPeerMeshRosterV1,
 } from './model.js';
+export { decodePeerMeshInvitation, type PeerMeshInvitationV1 } from '../protocol/peer-mesh.js';
 export {
   openPeerMeshNode,
   type PeerMeshNode,
   type PeerMeshStatus,
   type PeerMeshTransport,
 } from './node.js';
+export {
+  openRuntimeHostPeerMeshOwner,
+  type RuntimeHostPeerMeshOwner,
+} from './owner.js';
+export { hasActivePeerMeshMembership } from './store.js';

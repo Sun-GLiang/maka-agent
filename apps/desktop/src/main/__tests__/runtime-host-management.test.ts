@@ -20,7 +20,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  RUNTIME_HOST_OPERATOR_PEER_MANAGEMENT_CAPABILITY,
+  RUNTIME_HOST_OPERATOR_PEER_RELAY_DISCOVERY_CAPABILITY,
   runtimeHostAccessCredentialFingerprint,
   type RuntimeHostServiceManagementFrame,
 } from '@maka/runtime-host/operator';
@@ -425,6 +425,9 @@ test('publishes update progress and waits for the managed profile to reconnect',
     runUpdatePolicy: async () => assert.fail('update policy is not expected'),
     runUpdateReconciliation: async () =>
       assert.fail('update reconciliation is not expected'),
+    setupPackageMode: 'published',
+    resolveSshDevelopmentPeerTarget: async () =>
+      assert.fail('published update must not inspect the development target'),
     resolveUpdatePackage: () => ({ kind: 'npm', specifier: 'maka-agent@1.3.0' }),
     currentHostEpoch: () => 'host-before-update',
     awaitUpdatedConnection: async (...args) => {
@@ -934,11 +937,11 @@ test('keeps the SSH profile while adding and removing its managed Direct peer', 
       assert.equal(input.action, 'status');
       assert.equal(
         input.capabilityRequest,
-        RUNTIME_HOST_OPERATOR_PEER_MANAGEMENT_CAPABILITY,
+        RUNTIME_HOST_OPERATOR_PEER_RELAY_DISCOVERY_CAPABILITY,
       );
       return {
         ...serviceResult('status'),
-        operatorCapabilities: [RUNTIME_HOST_OPERATOR_PEER_MANAGEMENT_CAPABILITY],
+        operatorCapabilities: [RUNTIME_HOST_OPERATOR_PEER_RELAY_DISCOVERY_CAPABILITY],
       };
     },
     runAccessManagement: async () => assert.fail('access management is not expected'),
@@ -968,9 +971,9 @@ test('keeps the SSH profile while adding and removing its managed Direct peer', 
 
   const configure = handlers.get('runtime-host-management:configure-direct-peer');
   assert.ok(configure);
-  const enabled = await configure({}, profile.id, true, []);
+  const enabled = await configure({}, profile.id, true, [], true);
   assert.equal((enabled as { profilePresent: boolean }).profilePresent, true);
-  const disabled = await configure({}, profile.id, false, []);
+  const disabled = await configure({}, profile.id, false, [], true);
   assert.equal((disabled as { profilePresent: boolean }).profilePresent, false);
   assert.deepEqual(actions, ['enable', 'disable']);
 });
@@ -1002,7 +1005,7 @@ test('disables a newly enabled listener when its Desktop profile cannot be commi
       directPeerClientAvailable: true,
       runServiceManagement: async () => ({
         ...serviceResult('status'),
-        operatorCapabilities: [RUNTIME_HOST_OPERATOR_PEER_MANAGEMENT_CAPABILITY],
+        operatorCapabilities: [RUNTIME_HOST_OPERATOR_PEER_RELAY_DISCOVERY_CAPABILITY],
       }),
       runAccessManagement: async () => assert.fail('access management is not expected'),
       runPeerManagement: async (input) => {
@@ -1034,7 +1037,7 @@ test('disables a newly enabled listener when its Desktop profile cannot be commi
     const configure = handlers.get('runtime-host-management:configure-direct-peer');
     assert.ok(configure);
     await assert.rejects(
-      configure({}, 'office', true, []) as Promise<unknown>,
+      configure({}, 'office', true, [], true) as Promise<unknown>,
       failure === 'descriptor' ? /usable direct-peer descriptor/u : /profile store failed/u,
     );
     assert.deepEqual(actions, ['enable', 'disable']);
@@ -1074,13 +1077,14 @@ test('does not invoke peer management when the remote operator lacks its capabil
     state: 'unsupported',
     routeHints: [],
     coordinationRelays: [],
+    automaticRelayDiscovery: false,
     profilePresent: false,
     profileEnabled: false,
     clientAvailable: true,
     managementAvailable: false,
   });
   await assert.rejects(
-    configure({}, 'office', true, []) as Promise<unknown>,
+    configure({}, 'office', true, [], true) as Promise<unknown>,
     /Update this Runtime Host/u,
   );
 });
@@ -1175,6 +1179,9 @@ function unusedUpdateDependencies() {
     runPeerManagement: async (): Promise<never> =>
       assert.fail('direct peer management is not expected'),
     directPeerClientAvailable: false,
+    setupPackageMode: 'published' as const,
+    resolveSshDevelopmentPeerTarget: async (): Promise<never> =>
+      assert.fail('published update must not inspect the development target'),
     resolveUpdatePackage: () => ({ kind: 'npm', specifier: 'maka-agent@1.2.3' } as const),
     currentHostEpoch: () => undefined,
     awaitUpdatedConnection: async () => undefined,

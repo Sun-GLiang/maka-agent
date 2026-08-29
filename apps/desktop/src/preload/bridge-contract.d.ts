@@ -51,6 +51,7 @@ import type {
   ShellRunUpdate,
 } from '@maka/core/events';
 import type { UserQuestionResponse } from '@maka/core/user-question';
+import type { RuntimeHostProfileKind } from '@maka/runtime-host/profile-kind';
 import type { PermissionMode } from '@maka/core/permission';
 import type { CollaborationMode } from '@maka/core/collaboration';
 import type { OrchestrationMode } from '@maka/core/orchestration';
@@ -105,6 +106,7 @@ import type { WorkBoardItem, WorkBoardListQuery, WorkBoardPage } from '@maka/cor
 import type { WorkBoardMutationOptions } from '@maka/storage/work-board-store';
 import type {
   OperationInput,
+  OperationOutcome,
   OperationOutput,
 } from '@maka/runtime-host/protocol';
 import type { AgentGraphEpochDirectory } from '@maka/runtime-host/client';
@@ -186,14 +188,14 @@ import type { BundledSkillCatalogEntry, ManagedSkillSourceEntry, ManagedSkillUpd
 import type { ConfigCategory } from '@maka/storage/config-transfer';
 import type { OnboardingMilestone, OnboardingMilestoneId, OnboardingState } from '@maka/core/onboarding';
 import type {
-  RemoteRuntimeHostProfile,
+  PersistedRuntimeHostProfile,
   RuntimeHostProfile,
 } from '@maka/runtime-host/client';
 export interface OnboardingSnapshot {
   state: OnboardingState;
   milestones: OnboardingMilestone[];
   sessions: DesktopSessionSummary[];
-  connections: import('@maka/core/llm-connections').LlmConnection[];
+  connections: import('@maka/core/llm-connections').IdentifiedLlmConnection[];
   defaultSlug: string | null;
   chatModelChoices: import('@maka/core/chat-model-choice').ChatModelChoice[];
   sessionSendOutcomes: Record<string, import('@maka/core/session-send-projection').SessionSendProjection>;
@@ -356,7 +358,7 @@ export interface DesktopNewTaskCatalog {
 }
 
 export interface DesktopRuntimeHostProfileAddInput {
-  readonly profile: RemoteRuntimeHostProfile;
+  readonly profile: PersistedRuntimeHostProfile;
   readonly credential?: string;
 }
 
@@ -375,7 +377,7 @@ export interface DesktopRuntimeHostProfileChangedEvent {
   readonly epoch: string;
   readonly profileId: string;
   readonly profileName: string;
-  readonly profileKind: 'local' | 'remote';
+  readonly profileKind: RuntimeHostProfileKind;
   readonly readiness: 'connecting' | 'ready' | 'reconnecting' | 'unavailable';
   readonly hostId?: string;
   readonly isDefault: boolean;
@@ -433,16 +435,25 @@ export type DesktopRuntimeHostSshTerminalSnapshot =
       readonly signal: string | null;
     };
 
-export interface DesktopRuntimeHostOnboardingInput {
-  readonly name?: string;
-  readonly destination: string;
-  readonly sshPort?: number;
-  readonly projectDirectoryRoots?: readonly { readonly label: string; readonly path: string }[];
-}
+export type DesktopRuntimeHostOnboardingInput =
+  | {
+      readonly kind: 'ssh';
+      readonly name?: string;
+      readonly destination: string;
+      readonly sshPort?: number;
+      readonly projectDirectoryRoots?: readonly { readonly label: string; readonly path: string }[];
+    }
+  | {
+      readonly kind: 'wsl';
+      readonly name?: string;
+      readonly distribution: string;
+      readonly projectDirectoryRoots?: readonly { readonly label: string; readonly path: string }[];
+    };
 
 export type DesktopRuntimeHostOnboardingPhase =
   | 'preparing_cli'
   | 'connecting_ssh'
+  | 'connecting_wsl'
   | RuntimeHostSetupPhase
   | 'connecting_host';
 
@@ -503,11 +514,23 @@ export interface DesktopRuntimeHostDirectPeerSnapshot {
   readonly peerId?: string;
   readonly routeHints: readonly string[];
   readonly coordinationRelays: readonly string[];
+  readonly automaticRelayDiscovery: boolean;
   readonly profilePresent: boolean;
   readonly profileEnabled: boolean;
   readonly clientAvailable: boolean;
   readonly managementAvailable: boolean;
 }
+
+export type DesktopRuntimeHostPeerMeshTarget =
+  | { readonly kind: 'desktop' }
+  | { readonly kind: 'managed_host'; readonly profileId: string };
+
+export type DesktopRuntimeHostPeerMeshAction =
+  import('@maka/runtime-host/operator').RuntimeHostPeerMeshManagementAction;
+
+export type DesktopRuntimeHostPeerMeshResult =
+  | import('@maka/runtime-host/protocol').PeerMeshQueryResult
+  | import('@maka/runtime-host/protocol').PeerMeshInvitationResult;
 
 type RuntimeHostUpdatePolicyResult = Extract<
   RuntimeHostServiceManagementFrame,
@@ -672,6 +695,7 @@ export interface MakaBridge {
   };
 
   runtimeHostOnboarding: {
+    listWslDistributions(): Promise<readonly string[]>;
     getSnapshot(): Promise<DesktopRuntimeHostOnboardingSnapshot>;
     start(input: DesktopRuntimeHostOnboardingInput): Promise<DesktopRuntimeHostOnboardingSnapshot>;
     cancel(): Promise<boolean>;
@@ -708,6 +732,7 @@ export interface MakaBridge {
       profileId: string,
       enabled: boolean,
       coordinationRelays: readonly string[],
+      automaticRelayDiscovery: boolean,
     ): Promise<DesktopRuntimeHostDirectPeerSnapshot>;
     listCredentials(profileId: string): Promise<DesktopRuntimeHostAccessSnapshot>;
     rotateCredential(profileId: string): Promise<DesktopRuntimeHostAccessSnapshot>;
@@ -715,6 +740,14 @@ export interface MakaBridge {
       profileId: string,
       credentialId: string,
     ): Promise<DesktopRuntimeHostAccessSnapshot>;
+  };
+
+  runtimeHostPeerMesh: {
+    execute(
+      target: DesktopRuntimeHostPeerMeshTarget,
+      action: DesktopRuntimeHostPeerMeshAction,
+      input?: { readonly meshId?: string; readonly peerId?: string; readonly invitation?: string },
+    ): Promise<DesktopRuntimeHostPeerMeshResult>;
   };
 
   newTasks: {
@@ -858,7 +891,7 @@ export interface MakaBridge {
     act(
       coordinationSessionId: string,
       input: Omit<OperationInput<'workhub.coordination.act'>, 'create'>,
-    ): Promise<OperationOutput<'workhub.coordination.act'>>;
+    ): Promise<OperationOutcome<'workhub.coordination.act'>>;
     /** Create an ordinary Session on the exact Host owning the resolved conversation. */
     createSession(
       coordinationSessionId: string,
@@ -1062,7 +1095,7 @@ export interface MakaBridge {
       executionId: string;
     }>;
     abandonPlanExecution(sessionId: string, executionId: string): Promise<PlanSessionState>;
-    setModel(sessionId: string, input: { llmConnectionSlug: string; model: string }): Promise<DesktopSessionSummary>;
+    setModel(sessionId: string, input: { llmConnectionId: string; llmConnectionSlug: string; model: string }): Promise<DesktopSessionSummary>;
     setThinkingLevel(sessionId: string, level: ThinkingLevel | undefined | null): Promise<DesktopSessionSummary>;
     /**
      * `requireArchived` holds the caller's premise through the deletion: a task
@@ -1311,10 +1344,7 @@ export interface MakaBridge {
       | { ok: true; base64: string; mimeType: string }
       | { ok: false; reason: string }
     >;
-    readBytes(sessionId: string, relativePath: string): Promise<
-      | { ok: true; base64: string; mimeType: string }
-      | { ok: false; reason: string }
-    >;
+    readBytes(sessionId: string, artifactId: string): Promise<ArtifactBinaryReadResult>;
   };
   search: {
     thread(

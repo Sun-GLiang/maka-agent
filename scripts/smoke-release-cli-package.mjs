@@ -37,6 +37,7 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { validateCliReleaseArtifactMetrics } from './release-cli-artifact-policy.mjs';
+import { findReleaseTarball } from './release-cli-eval-support.mjs';
 import {
   collectRuntimeHostFailureDiagnostic,
   renderRuntimeHostFailureDiagnostic,
@@ -56,11 +57,8 @@ const INSTALLED_ROOT_ENV = 'MAKA_CLI_RELEASE_INSTALLED_ROOT';
 const require = createRequire(import.meta.url);
 
 const repoRoot = resolve(import.meta.dirname, '..');
-const cliVersion = JSON.parse(
-  readFileSync(join(repoRoot, 'packages/cli/package.json'), 'utf8'),
-).version;
 const tarballPath = resolve(
-  process.argv[2] ?? join(repoRoot, `packages/cli/release/maka-agent-${cliVersion}.tgz`),
+  process.argv[2] ?? findReleaseTarball(join(repoRoot, 'packages/cli/release')),
 );
 
 const installedRoot = process.env[INSTALLED_ROOT_ENV];
@@ -227,12 +225,8 @@ async function smokeRuntimeHostPeerProtocol({ packageRoot, cliEntrypoint, root }
   const previousKeyPath = process.env.MAKA_RUNTIME_HOST_PEER_KEY_PATH;
   let host;
   let connection;
-  let peerClient;
-  let meshAuthority;
-  let meshMember;
-  let meshAuthorityPeer;
-  let meshMemberPeer;
-  let meshServing;
+  let meshAuthorityOwner;
+  let meshMemberOwner;
   try {
     delete process.env.MAKA_RUNTIME_HOST_PEER_NATIVE_PATH;
     delete process.env.MAKA_RUNTIME_HOST_PEER_KEY_PATH;
@@ -253,14 +247,16 @@ async function smokeRuntimeHostPeerProtocol({ packageRoot, cliEntrypoint, root }
     } catch (error) {
       if (!String(error).includes('peer_identity_mismatch')) throw error;
     }
+    meshAuthorityOwner = await mesh.openRuntimeHostPeerMeshOwner({
+      nativePath,
+      keyPath: hostKeyPath,
+      expectedPeerId: peerId,
+      dataRoot: join(root, 'mesh-authority'),
+      listenAddresses: ['/ip4/127.0.0.1/udp/0/quic-v1'],
+    });
     host = await server.startExecutionRuntimeHostService({
       rootPath: hostRoot,
-      peer: {
-        nativePath,
-        keyPath: hostKeyPath,
-        expectedPeerId: peerId,
-        listenAddresses: ['/ip4/127.0.0.1/udp/0/quic-v1'],
-      },
+      peer: { client: meshAuthorityOwner.client },
     });
     const listener = host.peerListeners[0];
     if (!listener || listener.peerId !== peerId || listener.listenAddresses.length === 0) {
@@ -276,7 +272,21 @@ async function smokeRuntimeHostPeerProtocol({ packageRoot, cliEntrypoint, root }
       canUseHostPaths: false,
       preset: 'terminal-client',
     });
-    peerClient = client.createRuntimeHostPeerClientFromEnvironment(process.env);
+    const meshMemberKeyPath = join(root, 'mesh-member.key');
+    const meshMemberDataRoot = join(root, 'mesh-member');
+    meshMemberOwner = await mesh.openRuntimeHostPeerMeshOwner({
+      nativePath,
+      keyPath: meshMemberKeyPath,
+      dataRoot: meshMemberDataRoot,
+      listenAddresses: ['/ip4/127.0.0.1/udp/0/quic-v1'],
+    });
+    const meshAuthority = meshAuthorityOwner.mesh;
+    let meshMember = meshMemberOwner.mesh;
+    const created = await meshAuthority.create();
+    const joined = await meshMember.join(await meshAuthority.invite(created.roster.roster.meshId));
+    if (joined.roster.roster.members.length !== 2) {
+      throw new Error('Installed Runtime Host peer Mesh did not admit the invited peer');
+    }
     connection = await client.connectRemoteRuntimeHostProfile({
       profile: {
         id: 'release-smoke-peer',
@@ -286,13 +296,13 @@ async function smokeRuntimeHostPeerProtocol({ packageRoot, cliEntrypoint, root }
         transport: {
           kind: 'libp2p-direct',
           peerId,
-          routeHints: listener.listenAddresses,
+          routeHints: ['/ip4/127.0.0.1/udp/1/quic-v1'],
           coordinationRelays: [],
         },
       },
       credential: issued.credential,
       clientInstanceId: 'release-smoke-peer-client',
-      peerClient,
+      peerClient: meshMemberOwner.client,
       connectTimeoutMs: 10_000,
       handshakeTimeoutMs: 10_000,
       readyTimeoutMs: 10_000,
@@ -301,51 +311,21 @@ async function smokeRuntimeHostPeerProtocol({ packageRoot, cliEntrypoint, root }
     if (status.state !== 'ready') {
       throw new Error(`Installed Runtime Host direct-peer status is ${status.state}`);
     }
-
-    const meshMemberKeyPath = join(root, 'mesh-member.key');
-    const meshMemberDataRoot = join(root, 'mesh-member');
-    meshAuthorityPeer = client.createRuntimeHostPeerClient({
-      nativePath,
-      keyPath: join(root, 'mesh-authority.key'),
-      listenAddresses: ['/ip4/127.0.0.1/udp/0/quic-v1'],
-    });
-    meshMemberPeer = client.createRuntimeHostPeerClient({
-      nativePath,
-      keyPath: meshMemberKeyPath,
-      listenAddresses: ['/ip4/127.0.0.1/udp/0/quic-v1'],
-    });
-    meshAuthority = await mesh.openPeerMeshNode({
-      dataRoot: join(root, 'mesh-authority'),
-      peer: meshAuthorityPeer,
-    });
-    meshMember = await mesh.openPeerMeshNode({
-      dataRoot: meshMemberDataRoot,
-      peer: meshMemberPeer,
-    });
-    meshServing = meshAuthority.serve();
-    const created = await meshAuthority.create();
-    const joined = await meshMember.join(await meshAuthority.invite(created.roster.roster.meshId));
-    if (joined.roster.roster.members.length !== 2) {
-      throw new Error('Installed Runtime Host peer Mesh did not admit the invited peer');
-    }
     const removed = await meshAuthority.remove(
       created.roster.roster.meshId,
-      meshMemberPeer.identity().peerId,
+      meshMemberOwner.client.identity().peerId,
     );
     if (removed.roster.roster.members.length !== 1) {
       throw new Error('Installed Runtime Host peer Mesh did not remove the invited peer');
     }
-    await meshMember.close();
-    await meshMemberPeer.close();
-    meshMemberPeer = client.createRuntimeHostPeerClient({
+    await meshMemberOwner.close();
+    meshMemberOwner = await mesh.openRuntimeHostPeerMeshOwner({
       nativePath,
       keyPath: meshMemberKeyPath,
+      dataRoot: meshMemberDataRoot,
       listenAddresses: ['/ip4/127.0.0.1/udp/0/quic-v1'],
     });
-    meshMember = await mesh.openPeerMeshNode({
-      dataRoot: meshMemberDataRoot,
-      peer: meshMemberPeer,
-    });
+    meshMember = meshMemberOwner.mesh;
     const stale = meshMember.status()[0];
     if (stale?.roster.roster.revision !== joined.roster.roster.revision) {
       throw new Error('Installed Runtime Host peer Mesh did not recover the last-known roster');
@@ -359,15 +339,19 @@ async function smokeRuntimeHostPeerProtocol({ packageRoot, cliEntrypoint, root }
     ) {
       throw new Error('Installed Runtime Host peer Mesh did not re-admit the removed peer');
     }
+    await meshAuthority.remove(
+      created.roster.roster.meshId,
+      meshMemberOwner.client.identity().peerId,
+    );
+    await meshMember.reconcile();
+    if (meshMember.status().length !== 0) {
+      throw new Error('Installed Runtime Host peer Mesh did not propagate member removal');
+    }
   } finally {
-    await meshAuthority?.close().catch(() => undefined);
-    await meshMember?.close().catch(() => undefined);
-    await meshServing?.catch(() => undefined);
-    await meshAuthorityPeer?.close().catch(() => undefined);
-    await meshMemberPeer?.close().catch(() => undefined);
     await connection?.close().catch(() => undefined);
-    await peerClient?.close().catch(() => undefined);
     await host?.close().catch(() => undefined);
+    await meshMemberOwner?.close().catch(() => undefined);
+    await meshAuthorityOwner?.close().catch(() => undefined);
     restoreEnvironment('MAKA_RUNTIME_HOST_PEER_NATIVE_PATH', previousNativePath);
     restoreEnvironment('MAKA_RUNTIME_HOST_PEER_KEY_PATH', previousKeyPath);
   }

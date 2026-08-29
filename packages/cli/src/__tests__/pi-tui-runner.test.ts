@@ -77,6 +77,7 @@ import {
 import { AUTO_RECAP_IDLE_MS } from '../session-recap.js';
 import { BUSY_SPINNER_FRAMES } from '../tui-attention.js';
 import { EXPANSION_COLLAPSE_CONFIRM_WINDOW_MS } from '../pi-transcript.js';
+import type { TuiMcpAction, TuiMcpManagement } from '../tui-mcp-control.js';
 import {
   autocompleteSuggestionLines,
   assertBottomPickerPlacement,
@@ -2219,11 +2220,14 @@ describe('Maka Pi TUI runner', () => {
       mcp: {
         snapshot: () => ({
           initialization: 'ready',
+          configuration: 'ready',
           publication: 'published',
           toolCount: 1,
           servers: [
             {
               serverId: 'filesystem',
+              configured: true,
+              synchronized: true,
               state: 'connected',
               transport: 'stdio',
               negotiatedProtocol: { era: 'modern', revision: '2026-07-28' },
@@ -2232,6 +2236,10 @@ describe('Maka Pi TUI runner', () => {
           ],
         }),
         subscribe: () => () => undefined,
+        configForEdit: () => undefined,
+        previewImport: () => ({ status: 'invalid', reason: 'invalid-config' }),
+        discardImportPreview: () => undefined,
+        execute: async () => ({ status: 'failed', reason: 'manager-failed' }),
       },
     });
 
@@ -2241,6 +2249,185 @@ describe('Maka Pi TUI runner', () => {
     assert.match(plainTerminalOutput(terminal.screenOutput()), /filesystem/u);
     terminal.input('q');
     await waitFor(() => !plainTerminalOutput(terminal.screenOutput()).includes('MCP SERVERS'));
+    exitMaka(terminal);
+    await run;
+  });
+
+  test('/mcp previews pasted JSON and completes guided setup in-frame', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new SlashCommandDriver();
+    const actions: TuiMcpAction[] = [];
+    const discardedPreviews: string[] = [];
+    let previewSource = '';
+    const mcp: TuiMcpManagement = {
+      snapshot: () => ({
+        initialization: 'ready',
+        configuration: 'ready',
+        publication: 'not_published',
+        toolCount: 0,
+        servers: [],
+      }),
+      subscribe: () => () => undefined,
+      configForEdit: () => undefined,
+      previewImport: (source) => {
+        previewSource = source;
+        return {
+          status: 'ready',
+          preview: {
+            previewId: 'preview-1',
+            entries: [
+              {
+                serverId: 'docs',
+                change: 'add',
+                transport: 'remote',
+                protocol: 'auto',
+              },
+            ],
+          },
+        };
+      },
+      discardImportPreview: (previewId) => discardedPreviews.push(previewId),
+      execute: async (action) => {
+        actions.push(action);
+        return { status: 'applied', effect: 'published' };
+      },
+    };
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'deepseek-v4-flash',
+      connectionSlug: 'deepseek',
+      permissionMode: 'ask',
+      terminal,
+      mcp,
+    });
+
+    terminal.input('/mcp');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('MCP SERVERS'));
+    terminal.input('a');
+    terminal.input('j');
+    terminal.input('secret-draft');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('secret-draft'));
+    terminal.input('\x1b');
+    await waitFor(() => !plainTerminalOutput(terminal.screenOutput()).includes('secret-draft'));
+    terminal.input('a');
+    terminal.input('j');
+    terminal.input('\x1f');
+    await delay(0);
+    assert.doesNotMatch(plainTerminalOutput(terminal.screenOutput()), /secret-draft/u);
+    terminal.input('{"docs":{"url":"https://docs.example/mcp","protocol":"auto"}}');
+    terminal.input('\r');
+    await waitFor(() =>
+      plainTerminalOutput(terminal.screenOutput()).includes('Import MCP servers?'),
+    );
+    assert.equal(actions.length, 0);
+    assert.equal(previewSource.includes('docs.example'), true);
+    terminal.input('\x1b');
+    assert.deepEqual(discardedPreviews, ['preview-1']);
+    terminal.input('a');
+    terminal.input('j');
+    terminal.input('{"docs":{"url":"https://docs.example/mcp","protocol":"auto"}}');
+    terminal.input('\r');
+    await waitFor(() =>
+      plainTerminalOutput(terminal.screenOutput()).includes('Import MCP servers?'),
+    );
+    terminal.input('y');
+    await waitFor(() => actions.length === 1);
+    assert.deepEqual(actions[0], { kind: 'commit_import', previewId: 'preview-1' });
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('tools refreshed'));
+
+    terminal.input('a');
+    terminal.input('g');
+    terminal.input('local');
+    terminal.input('\r');
+    terminal.input('1');
+    terminal.input('mcp-server');
+    terminal.input('\r');
+    terminal.input('[]');
+    terminal.input('\r');
+    terminal.input('3');
+    terminal.input('\r');
+    terminal.input('{}');
+    terminal.input('\r');
+    await waitFor(() =>
+      plainTerminalOutput(terminal.screenOutput()).includes('Add this MCP server?'),
+    );
+    terminal.input('y');
+    await waitFor(() => actions.length === 2);
+    assert.deepEqual(actions[1], {
+      kind: 'add',
+      serverId: 'local',
+      config: {
+        enabled: true,
+        command: 'mcp-server',
+        args: [],
+        env: {},
+        protocol: '2026-07-28',
+      },
+    });
+    terminal.input('q');
+    exitMaka(terminal);
+    await run;
+  });
+
+  test('/mcp ignores a late action result after the user cancels its busy view', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new SlashCommandDriver();
+    const result = deferred<Awaited<ReturnType<TuiMcpManagement['execute']>>>();
+    const actions: TuiMcpAction[] = [];
+    const mcp: TuiMcpManagement = {
+      snapshot: () => ({
+        initialization: 'ready',
+        configuration: 'ready',
+        publication: 'not_published',
+        toolCount: 0,
+        servers: [
+          {
+            serverId: 'docs',
+            configured: true,
+            synchronized: true,
+            enabled: false,
+            configuredTransport: 'remote',
+            configuredProtocol: 'auto',
+            state: 'disabled',
+            toolCount: 0,
+          },
+        ],
+      }),
+      subscribe: () => () => undefined,
+      configForEdit: () => undefined,
+      previewImport: () => ({ status: 'invalid', reason: 'invalid-config' }),
+      discardImportPreview: () => undefined,
+      execute: async (action) => {
+        actions.push(action);
+        return result.promise;
+      },
+    };
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'deepseek-v4-flash',
+      connectionSlug: 'deepseek',
+      permissionMode: 'ask',
+      terminal,
+      mcp,
+    });
+
+    terminal.input('/mcp');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('docs'));
+    terminal.input(' ');
+    await waitFor(() => actions.length === 1);
+    assert.deepEqual(actions[0], { kind: 'set_enabled', serverId: 'docs', enabled: true });
+    terminal.input('\x1b');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('docs'));
+    result.resolve({ status: 'failed', reason: 'manager-failed' });
+    await delay(0);
+    assert.doesNotMatch(plainTerminalOutput(terminal.screenOutput()), /connection action failed/u);
+    terminal.input('q');
     exitMaka(terminal);
     await run;
   });
@@ -3259,10 +3446,12 @@ describe('Maka Pi TUI runner', () => {
       driver,
       cwd: '/repo',
       model: 'gpt-5.5',
+      connectionId: 'connection-openai',
       connectionSlug: 'openai',
       providerType: 'openai',
       modelChoices: [
         {
+          connectionId: 'connection-openai',
           connectionSlug: 'openai',
           connectionName: 'OpenAI',
           providerType: 'openai',
@@ -3271,6 +3460,7 @@ describe('Maka Pi TUI runner', () => {
           isDefaultConnection: true,
         },
         {
+          connectionId: 'connection-zai',
           connectionSlug: 'zai',
           connectionName: 'Z.ai',
           providerType: 'openai',
@@ -3427,10 +3617,12 @@ describe('Maka Pi TUI runner', () => {
       driver,
       cwd: '/repo',
       model: 'gpt-5.5',
+      connectionId: 'connection-openai',
       connectionSlug: 'openai',
       providerType: 'openai',
       modelChoices: [
         {
+          connectionId: 'connection-openai',
           connectionSlug: 'openai',
           connectionName: 'OpenAI',
           providerType: 'openai',
@@ -3438,6 +3630,7 @@ describe('Maka Pi TUI runner', () => {
           isDefaultConnection: true,
         },
         {
+          connectionId: 'connection-openai',
           connectionSlug: 'openai',
           connectionName: 'OpenAI',
           providerType: 'openai',
@@ -3482,10 +3675,12 @@ describe('Maka Pi TUI runner', () => {
       driver,
       cwd: '/repo',
       model: 'shared-model',
+      connectionId: 'connection-primary',
       connectionSlug: 'primary',
       providerType: 'openai',
       modelChoices: [
         {
+          connectionId: 'connection-primary',
           connectionSlug: 'primary',
           connectionName: 'Primary',
           providerType: 'openai',
@@ -3493,6 +3688,7 @@ describe('Maka Pi TUI runner', () => {
           isDefaultConnection: true,
         },
         {
+          connectionId: 'connection-relay',
           connectionSlug: 'relay',
           connectionName: 'Relay',
           providerType: 'openai',
@@ -7042,6 +7238,104 @@ describe('Maka Pi TUI runner', () => {
     await run;
   });
 
+  test('tells a legacy Session exactly how to choose an account', async () => {
+    const terminal = new FakeTerminal(160, 24);
+    const { llmConnectionId: _legacyConnectionId, ...legacy } = fakeSessionSummary('session-2');
+    const driver = new SlashCommandDriver([legacy]);
+    const run = runMakaPiTui({
+      title: 'Maka',
+      locale: 'en',
+      driver,
+      cwd: '/repo',
+      model: legacy.model,
+      connectionSlug: legacy.llmConnectionSlug,
+      connectionIdentities: [
+        { connectionId: 'connection-openrouter', connectionSlug: 'openrouter', enabled: true },
+      ],
+      modelChoices: [
+        {
+          connectionId: 'connection-openrouter',
+          connectionSlug: 'openrouter',
+          connectionName: 'OpenRouter',
+          providerType: 'openrouter',
+          model: legacy.model,
+          isDefaultConnection: true,
+        },
+      ],
+      permissionMode: 'ask',
+      terminal,
+      resumeSessionId: legacy.id,
+    });
+
+    await waitFor(() => driver.sessionIds.length === 1);
+    await waitForTuiPaint(terminal);
+    await waitFor(() =>
+      plainTerminalOutput(terminal.screenOutput()).includes('one-time account confirmation'),
+    );
+    const output = plainTerminalOutput(terminal.screenOutput());
+    assert.match(output, /one-time account confirmation/);
+    assert.match(output, /Run \/model/);
+    assert.match(output, /run \/setup for API-key connections/);
+
+    exitMaka(terminal);
+    await run;
+  });
+
+  test('reports a deleted original account and recovers only through an exact model pick', async () => {
+    const terminal = new FakeTerminal();
+    const deleted = {
+      ...fakeSessionSummary('session-2'),
+      llmConnectionId: 'connection-a',
+      llmConnectionSlug: 'shared',
+      model: 'shared-model',
+    };
+    const driver = new SlashCommandDriver([deleted]);
+    const run = runMakaPiTui({
+      title: 'Maka',
+      locale: 'en',
+      driver,
+      cwd: '/repo',
+      model: deleted.model,
+      connectionId: deleted.llmConnectionId,
+      connectionSlug: deleted.llmConnectionSlug,
+      connectionIdentities: [
+        { connectionId: 'connection-b', connectionSlug: 'shared', enabled: true },
+      ],
+      modelChoices: [
+        {
+          connectionId: 'connection-b',
+          connectionSlug: 'shared',
+          connectionName: 'Replacement',
+          providerType: 'openai',
+          model: 'shared-model',
+          isDefaultConnection: true,
+        },
+      ],
+      permissionMode: 'ask',
+      terminal,
+      resumeSessionId: deleted.id,
+    });
+
+    await waitFor(() => driver.sessionIds.length === 1);
+    await waitForTuiPaint(terminal);
+    await waitFor(() =>
+      plainTerminalOutput(terminal.screenOutput()).includes('The original account was deleted'),
+    );
+    const recoveryNotice = plainTerminalOutput(terminal.screenOutput());
+    assert.match(recoveryNotice, /Run \/model/);
+    assert.match(recoveryNotice, /run \/setup for API-key connections/);
+    terminal.input('/model');
+    terminal.input('\r');
+    await waitFor(() => terminal.output().includes('Replacement'));
+    assert.doesNotMatch(plainTerminalOutput(terminal.screenOutput()), /Replacement · current/);
+    terminal.input('\r');
+    await waitFor(() => driver.modelConnectionIds.length === 1);
+    assert.deepEqual(driver.modelConnectionIds, ['connection-b']);
+
+    exitMaka(terminal);
+    await run;
+  });
+
   test('resumes an active Host turn from its atomic transcript and continues live output', async () => {
     const terminal = new FakeTerminal();
     const driver = new ActiveResumeDriver();
@@ -7242,7 +7536,7 @@ abstract class FakeSessionDriver implements MakaSessionDriver {
   async stop(): Promise<void> {}
   async respondToSandboxBoundary(_response: SandboxBoundaryResponse): Promise<void> {}
   async renameSession(_name: string): Promise<string | void> {}
-  async setModel(_model: string, _connectionSlug?: string): Promise<void> {}
+  async setModel(_model: string, _connectionSlug?: string, _connectionId?: string): Promise<void> {}
   async setPermissionMode(_mode: PermissionMode): Promise<void> {}
   async setThinkingLevel(_level: ThinkingLevel | undefined): Promise<void> {}
 
@@ -7950,6 +8244,7 @@ class SlashCommandDriver extends FakeSessionDriver {
   readonly displayPrompts: string[] = [];
   readonly models: string[] = [];
   readonly modelConnections: Array<string | undefined> = [];
+  readonly modelConnectionIds: Array<string | undefined> = [];
   readonly permissionModes: PermissionMode[] = [];
   readonly thinkingLevelUpdates: Array<ThinkingLevel | undefined> = [];
   readonly orchestrationModes: OrchestrationMode[] = [];
@@ -8106,9 +8401,10 @@ class SlashCommandDriver extends FakeSessionDriver {
     };
   }
 
-  async setModel(model: string, connectionSlug?: string): Promise<void> {
+  async setModel(model: string, connectionSlug?: string, connectionId?: string): Promise<void> {
     this.models.push(model);
     this.modelConnections.push(connectionSlug);
+    this.modelConnectionIds.push(connectionId);
   }
   async renameSession(name: string): Promise<string> {
     this.renames.push(name);

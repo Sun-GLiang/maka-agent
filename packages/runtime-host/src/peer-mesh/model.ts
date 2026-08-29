@@ -27,12 +27,24 @@ import {
   timingSafeEqual,
   verify,
 } from 'node:crypto';
+import {
+  decodePeerMeshInvitation as decodePeerMeshInvitationWire,
+  type PeerMeshInvitationV1,
+} from '../protocol/peer-mesh.js';
+import {
+  PEER_MESH_MAX_MEMBERS,
+  PEER_MESH_MAX_ROUTE_HINTS,
+  PEER_MESH_ROUTE_RECORD_MAX_BYTES,
+} from './limits.js';
 
-export const PEER_MESH_MAX_MEMBERS = 64;
-export const PEER_MESH_MAX_MESHES = 16;
-export const PEER_MESH_MAX_PENDING_INVITATIONS = 32;
-export const PEER_MESH_MAX_INVITATION_RECORDS = PEER_MESH_MAX_PENDING_INVITATIONS * 3;
-export const PEER_MESH_MAX_ROUTE_HINTS = 16;
+export {
+  PEER_MESH_MAX_INVITATION_RECORDS,
+  PEER_MESH_MAX_MEMBERS,
+  PEER_MESH_MAX_MESHES,
+  PEER_MESH_MAX_PENDING_INVITATIONS,
+  PEER_MESH_MAX_ROUTE_HINTS,
+  PEER_MESH_ROUTE_RECORD_MAX_BYTES,
+} from './limits.js';
 
 export interface PeerMeshRosterV1 {
   readonly version: 1;
@@ -54,16 +66,21 @@ export interface PeerMeshAuthorityTarget {
   readonly coordinationRelays: readonly string[];
 }
 
-export interface PeerMeshInvitationV1 extends PeerMeshAuthorityTarget {
-  readonly version: 1;
-  readonly meshId: string;
-  readonly authorityPublicKey: string;
-  readonly secret: string;
-}
-
 export interface PeerMeshAuthorityKeyPair {
   readonly publicKey: string;
   readonly privateKey: string;
+}
+
+export interface PeerMeshRouteRecordV1 extends PeerMeshAuthorityTarget {
+  readonly version: 1;
+  readonly sequence: number;
+  readonly expiresAt: number;
+}
+
+export interface SignedPeerMeshRouteRecordV1 {
+  readonly route: PeerMeshRouteRecordV1;
+  readonly publicKey: string;
+  readonly signature: string;
 }
 
 export function generatePeerMeshAuthorityKeyPair(): PeerMeshAuthorityKeyPair {
@@ -160,32 +177,16 @@ export function matchesPeerMeshInvitationSecret(secret: string, expectedDigest: 
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-export function decodePeerMeshInvitation(value: unknown): PeerMeshInvitationV1 {
-  const record = exactObject(value, 'Peer Mesh invitation', [
-    'version',
-    'meshId',
-    'authorityPublicKey',
-    'secret',
-    'peerId',
-    'routeHints',
-    'coordinationRelays',
-  ]);
-  if (record.version !== 1) throw new Error('Unsupported Peer Mesh invitation version');
-  const authorityPublicKey = string(record.authorityPublicKey, 'authorityPublicKey', 256);
-  const meshId = string(record.meshId, 'meshId', 128);
+export function validatePeerMeshInvitation(value: unknown): PeerMeshInvitationV1 {
+  const invitation = decodePeerMeshInvitationWire(value);
+  const authorityPublicKey = invitation.authorityPublicKey;
+  const meshId = invitation.meshId;
   if (meshId !== peerMeshId(authorityPublicKey)) {
     throw new Error('Peer Mesh invitation has the wrong authority');
   }
   return Object.freeze({
-    version: 1,
-    meshId,
-    authorityPublicKey,
-    secret: validateSecret(record.secret),
-    ...decodeAuthorityTarget({
-      peerId: record.peerId,
-      routeHints: record.routeHints,
-      coordinationRelays: record.coordinationRelays,
-    }),
+    ...invitation,
+    secret: validateSecret(invitation.secret),
   });
 }
 
@@ -227,6 +228,60 @@ export function decodeAuthorityTarget(value: unknown): PeerMeshAuthorityTarget {
       addressArray(record.coordinationRelays, 'coordinationRelays'),
     ),
   });
+}
+
+export function canonicalPeerMeshRouteRecord(value: unknown): PeerMeshRouteRecordV1 {
+  const record = exactObject(value, 'Peer Mesh route record', [
+    'version',
+    'peerId',
+    'sequence',
+    'expiresAt',
+    'routeHints',
+    'coordinationRelays',
+  ]);
+  if (record.version !== 1) throw new Error('Unsupported Peer Mesh route record version');
+  const route = Object.freeze({
+    version: 1 as const,
+    peerId: token(record.peerId, 'peerId', 256),
+    sequence: integer(record.sequence, 'route sequence', 1),
+    expiresAt: integer(record.expiresAt, 'route expiry', 1),
+    routeHints: Object.freeze(addressArray(record.routeHints, 'routeHints')),
+    coordinationRelays: Object.freeze(
+      addressArray(record.coordinationRelays, 'coordinationRelays'),
+    ),
+  });
+  if (peerMeshRouteRecordSigningBytes(route).byteLength > PEER_MESH_ROUTE_RECORD_MAX_BYTES) {
+    throw new Error('Peer Mesh route record is too large');
+  }
+  return route;
+}
+
+export function decodeSignedPeerMeshRouteRecord(value: unknown): SignedPeerMeshRouteRecordV1 {
+  const record = exactObject(value, 'signed Peer Mesh route record', [
+    'route',
+    'publicKey',
+    'signature',
+  ]);
+  const publicKey = canonicalProof(record.publicKey, 'route public key', 256);
+  const signature = canonicalProof(record.signature, 'route signature', 256);
+  return Object.freeze({
+    route: canonicalPeerMeshRouteRecord(record.route),
+    publicKey,
+    signature,
+  });
+}
+
+export function peerMeshRouteRecordSigningBytes(route: PeerMeshRouteRecordV1): Buffer {
+  return Buffer.from(
+    `maka.peer-mesh.route.v1\n${JSON.stringify({
+      coordinationRelays: route.coordinationRelays,
+      expiresAt: route.expiresAt,
+      peerId: route.peerId,
+      routeHints: route.routeHints,
+      sequence: route.sequence,
+      version: route.version,
+    })}`,
+  );
 }
 
 function encodeRoster(roster: PeerMeshRosterV1): Buffer {
@@ -277,6 +332,15 @@ function decodeCanonicalBase64Url(value: string, label: string): Buffer {
     throw new Error(`Invalid Peer Mesh ${label}`);
   }
   return bytes;
+}
+
+function canonicalProof(value: unknown, label: string, maxBytes: number): string {
+  const encoded = string(value, label, Math.ceil((maxBytes * 4) / 3));
+  const bytes = decodeCanonicalBase64Url(encoded, label);
+  if (bytes.length === 0 || bytes.length > maxBytes) {
+    throw new Error(`Invalid Peer Mesh ${label}`);
+  }
+  return encoded;
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {

@@ -26,12 +26,15 @@ import {
 import {
   decodeAuthorityTarget,
   decodeSignedPeerMeshRoster,
+  decodeSignedPeerMeshRouteRecord,
   PEER_MESH_MAX_INVITATION_RECORDS,
+  PEER_MESH_MAX_MEMBERS,
   PEER_MESH_MAX_MESHES,
   PEER_MESH_MAX_PENDING_INVITATIONS,
   type PeerMeshAuthorityKeyPair,
   type PeerMeshAuthorityTarget,
   type SignedPeerMeshRosterV1,
+  type SignedPeerMeshRouteRecordV1,
   validatePeerMeshAuthorityKeyPair,
 } from './model.js';
 
@@ -70,11 +73,17 @@ export interface PeerMeshReplicaStateV1 extends PeerMeshStateBase {
 
 export type PeerMeshStateV1 = PeerMeshAuthorityStateV1 | PeerMeshReplicaStateV1;
 
+export interface PeerMeshStoredStateV1 {
+  readonly meshes: readonly PeerMeshStateV1[];
+  readonly routes: readonly SignedPeerMeshRouteRecordV1[];
+}
+
 export interface PeerMeshStateStore {
-  read(): readonly PeerMeshStateV1[];
+  readonly terminalFailure: Promise<never>;
+  read(): PeerMeshStoredStateV1;
   mutate<T>(
-    operation: (state: readonly PeerMeshStateV1[]) => {
-      readonly state: readonly PeerMeshStateV1[];
+    operation: (state: PeerMeshStoredStateV1) => {
+      readonly state: PeerMeshStoredStateV1;
       readonly result: T;
     },
   ): Promise<T>;
@@ -97,9 +106,43 @@ export async function openPeerMeshStateStore(
   }
 }
 
+export async function hasActivePeerMeshMembership(
+  dataRoot: string,
+  localPeerId: string,
+): Promise<boolean> {
+  const state = await readState(join(dataRoot, STATE_FILE), localPeerId);
+  return state.meshes.some((mesh) => !isRetired(mesh, localPeerId));
+}
+
+export async function migrateLegacyPeerMeshState(
+  dataRoot: string,
+  localPeerId: string,
+): Promise<void> {
+  const legacyPath = join(dataRoot, STATE_FILE);
+  const targetRoot = join(dataRoot, localPeerId);
+  const targetPath = join(targetRoot, STATE_FILE);
+  if (await pathExists(targetPath)) {
+    if (await pathExists(legacyPath)) {
+      await unlink(legacyPath);
+      await syncDirectory(dataRoot);
+    }
+    return;
+  }
+  if (!(await pathExists(legacyPath))) return;
+
+  const state = await readState(legacyPath, localPeerId);
+  await mkdir(targetRoot, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') await chmod(targetRoot, 0o700);
+  await writeState(targetPath, localPeerId, state);
+  await unlink(legacyPath);
+  await syncDirectory(dataRoot);
+}
+
 class PeerMeshStateStoreImpl implements PeerMeshStateStore {
   readonly #path: string;
-  #state: readonly PeerMeshStateV1[];
+  readonly terminalFailure: Promise<never>;
+  readonly #rejectTerminalFailure: (error: unknown) => void;
+  #state: PeerMeshStoredStateV1;
   #tail = Promise.resolve();
   #failure: Error | undefined;
   #closeTask: Promise<void> | undefined;
@@ -109,20 +152,26 @@ class PeerMeshStateStoreImpl implements PeerMeshStateStore {
     dataRoot: string,
     private readonly localPeerId: string,
     private readonly owner: FileLifetimeOwner,
-    state: readonly PeerMeshStateV1[],
+    state: PeerMeshStoredStateV1,
   ) {
     this.#path = join(dataRoot, STATE_FILE);
     this.#state = state;
+    let rejectTerminalFailure!: (error: unknown) => void;
+    this.terminalFailure = new Promise<never>((_resolve, reject) => {
+      rejectTerminalFailure = reject;
+    });
+    this.#rejectTerminalFailure = rejectTerminalFailure;
+    void this.terminalFailure.catch(() => undefined);
   }
 
-  read(): readonly PeerMeshStateV1[] {
+  read(): PeerMeshStoredStateV1 {
     this.#assertOpen();
     return this.#state;
   }
 
   mutate<T>(
-    operation: (state: readonly PeerMeshStateV1[]) => {
-      readonly state: readonly PeerMeshStateV1[];
+    operation: (state: PeerMeshStoredStateV1) => {
+      readonly state: PeerMeshStoredStateV1;
       readonly result: T;
     },
   ): Promise<T> {
@@ -131,8 +180,9 @@ class PeerMeshStateStoreImpl implements PeerMeshStateStore {
       if (this.#failure) throw this.#failure;
       const updated = operation(this.#state);
       if (updated.state === this.#state) return updated.result;
-      const canonical = decodePeerMeshStates(updated.state, this.localPeerId);
-      assertStateAdvance(this.#state, canonical, this.localPeerId);
+      const candidate = pruneUnreferencedRoutes(updated.state);
+      const canonical = decodePeerMeshStoredState(candidate, this.localPeerId);
+      assertStateAdvance(this.#state.meshes, canonical.meshes, this.localPeerId);
       try {
         await writeState(this.#path, this.localPeerId, canonical);
         this.#state = canonical;
@@ -140,8 +190,10 @@ class PeerMeshStateStoreImpl implements PeerMeshStateStore {
         if (error instanceof PeerMeshPostCommitError) {
           this.#state = canonical;
           this.#failure = error;
+          this.#rejectTerminalFailure(error);
+          throw error;
         }
-        throw error;
+        throw new PeerMeshPersistenceError(error);
       }
       return updated.result;
     });
@@ -278,7 +330,7 @@ export function authorityKeys(state: PeerMeshStateV1): PeerMeshAuthorityKeyPair 
 async function readState(
   path: string,
   expectedLocalPeerId: string,
-): Promise<readonly PeerMeshStateV1[]> {
+): Promise<PeerMeshStoredStateV1> {
   try {
     const info = await lstat(path);
     if (!info.isFile() || info.size > MAX_STATE_BYTES)
@@ -288,20 +340,44 @@ async function readState(
       throw new Error('Invalid Peer Mesh state document');
     }
     const record = document as Record<string, unknown>;
-    if (
-      record.version !== 1 ||
-      Object.keys(record).length !== 3 ||
-      !Object.hasOwn(record, 'localPeerId') ||
-      !Object.hasOwn(record, 'meshes')
-    ) {
+    const versionOne =
+      record.version === 1 &&
+      Object.keys(record).length === 3 &&
+      Object.hasOwn(record, 'localPeerId') &&
+      Object.hasOwn(record, 'meshes');
+    const versionTwo =
+      record.version === 2 &&
+      Object.keys(record).length === 4 &&
+      Object.hasOwn(record, 'localPeerId') &&
+      Object.hasOwn(record, 'meshes') &&
+      Object.hasOwn(record, 'routes');
+    if (!versionOne && !versionTwo) {
       throw new Error('Unsupported Peer Mesh state document');
     }
     if (boundedString(record.localPeerId, 'localPeerId', 256) !== expectedLocalPeerId) {
       throw new Error('Peer Mesh state belongs to a different peer identity');
     }
-    return decodePeerMeshStates(record.meshes, expectedLocalPeerId);
+    return decodePeerMeshStoredState(
+      { meshes: record.meshes, routes: versionOne ? [] : record.routes },
+      expectedLocalPeerId,
+    );
   } catch (error) {
-    if (isNodeError(error, 'ENOENT')) return Object.freeze([]);
+    if (isNodeError(error, 'ENOENT')) {
+      return Object.freeze({
+        meshes: Object.freeze([]),
+        routes: Object.freeze([]),
+      });
+    }
+    throw error;
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return false;
     throw error;
   }
 }
@@ -309,9 +385,9 @@ async function readState(
 async function writeState(
   path: string,
   localPeerId: string,
-  state: readonly PeerMeshStateV1[],
+  state: PeerMeshStoredStateV1,
 ): Promise<void> {
-  const document = `${JSON.stringify({ version: 1, localPeerId, meshes: state }, null, 2)}\n`;
+  const document = `${JSON.stringify({ version: 2, localPeerId, ...state }, null, 2)}\n`;
   if (Buffer.byteLength(document) > MAX_STATE_BYTES)
     throw new Error('Peer Mesh state is too large');
   const temporary = `${path}.tmp`;
@@ -340,7 +416,13 @@ async function writeState(
   }
 }
 
-class PeerMeshPostCommitError extends Error {
+export class PeerMeshPersistenceError extends Error {
+  constructor(cause: unknown) {
+    super('Peer Mesh state could not be persisted', { cause });
+  }
+}
+
+export class PeerMeshPostCommitError extends Error {
   constructor(cause: unknown) {
     super('Peer Mesh state was replaced but its durability could not be confirmed; reopen it', {
       cause,
@@ -367,7 +449,11 @@ function decodeInvitations(value: unknown): PeerMeshInvitationRecord[] {
       if (!Number.isSafeInteger(expiresAt) || (expiresAt as number) < 1) {
         throw new Error('Invalid Peer Mesh invitation expiry');
       }
-      return Object.freeze({ status: 'pending' as const, ...base, expiresAt: expiresAt as number });
+      return Object.freeze({
+        status: 'pending' as const,
+        ...base,
+        expiresAt: expiresAt as number,
+      });
     }
     if (
       record.status === 'redeemed' &&
@@ -392,6 +478,55 @@ function decodeInvitations(value: unknown): PeerMeshInvitationRecord[] {
     throw new Error('Too many pending Peer Mesh invitations');
   }
   return invitations;
+}
+
+function decodeRoutes(
+  value: unknown,
+  meshes: readonly PeerMeshStateV1[],
+): readonly SignedPeerMeshRouteRecordV1[] {
+  if (!Array.isArray(value) || value.length > PEER_MESH_MAX_MESHES * PEER_MESH_MAX_MEMBERS) {
+    throw new Error('Invalid Peer Mesh routes');
+  }
+  const routes = value.map(decodeSignedPeerMeshRouteRecord);
+  const peerIds = routes.map(({ route }) => route.peerId);
+  const knownPeers = new Set(
+    meshes
+      .filter(({ roster }) => !roster.roster.closed)
+      .flatMap(({ roster }) => roster.roster.members),
+  );
+  if (
+    new Set(peerIds).size !== peerIds.length ||
+    peerIds.some((peerId) => !knownPeers.has(peerId))
+  ) {
+    throw new Error('Invalid Peer Mesh routes');
+  }
+  return Object.freeze(routes);
+}
+
+function decodePeerMeshStoredState(value: unknown, localPeerId: string): PeerMeshStoredStateV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid Peer Mesh state document');
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).length !== 2 ||
+    !Object.hasOwn(record, 'meshes') ||
+    !Object.hasOwn(record, 'routes')
+  ) {
+    throw new Error('Invalid Peer Mesh state document');
+  }
+  const meshes = decodePeerMeshStates(record.meshes, localPeerId);
+  return Object.freeze({ meshes, routes: decodeRoutes(record.routes, meshes) });
+}
+
+function pruneUnreferencedRoutes(state: PeerMeshStoredStateV1): PeerMeshStoredStateV1 {
+  const knownPeers = new Set(
+    state.meshes
+      .filter(({ roster }) => !roster.roster.closed)
+      .flatMap(({ roster }) => roster.roster.members),
+  );
+  const routes = state.routes.filter(({ route }) => knownPeers.has(route.peerId));
+  return routes.length === state.routes.length ? state : { ...state, routes };
 }
 
 function boundedString(value: unknown, label: string, max: number): string {

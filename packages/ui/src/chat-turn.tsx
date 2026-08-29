@@ -17,16 +17,13 @@
  * under the License.
  */
 
-import { memo, useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react';
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react';
 import { useMountedRef } from './use-mounted-ref.js';
-import { ICON_SIZE, AlertOctagon, Ban, Check, Copy, GitBranch, Info, Pencil, RefreshCcw, Timer } from './icons.js';
+import { ICON_SIZE, Ban, Check, Copy, GitBranch, Info, Pencil, RefreshCcw, Timer } from './icons.js';
 import { type ClipboardCopyPhase, useClipboardCopyFeedback } from './clipboard-feedback.js';
 import { Markdown } from './markdown.js';
-import {
-  formatAbsoluteTimestamp,
-  formatTurnDuration,
-  turnAbortMarkerLabel,
-} from './chat-display-helpers.js';
+import { formatTurnDuration, turnAbortStatusLabel } from './chat-display-helpers.js';
+import { formatAbsoluteTimestamp } from '@maka/core/relative-time';
 import { isTimeDrivenMotionEnabled } from './streaming-presentation.js';
 import { computerRunningLabel } from './tool-activity/computer-action-label.js';
 import {
@@ -74,6 +71,8 @@ import { getConversationCopy } from './conversation-copy.js';
 import { AstryxLocaleProvider } from './astryx-i18n.js';
 import { InlineReferenceText } from './inline-reference.js';
 import { redactSecrets } from './redact.js';
+import { useAttachmentImageSource } from './attachment-image.js';
+import { resolvePreviewKind } from './artifact-preview-registry.js';
 
 export function LocalizedChatMessage({
   accessibleLabel,
@@ -92,19 +91,6 @@ export function LocalizedChatMessage({
   );
 }
 
-/**
- * Injected host capability that reads a session attachment's bytes. @maka/ui is
- * host-agnostic: it never reaches into the desktop preload or any other host
- * global. The desktop renderer threads its attachment reader through this prop;
- * non-desktop hosts (Storybook, tests, a future web shell) can omit it or supply
- * their own reader,
- * in which case an image attachment stays in its pending skeleton.
- */
-export type ReadAttachmentBytes = (
-  sessionId: string,
-  relativePath: string,
-) => Promise<{ ok: true; base64: string; mimeType: string } | { ok: false }>;
-
 function legacySentSkillTokens(text: string) {
   const values = new Set(
     [...text.matchAll(new RegExp(SKILL_INVOCATION_TOKEN_SOURCE, 'g'))].map((match) => match[0]),
@@ -112,32 +98,27 @@ function legacySentSkillTokens(text: string) {
   return [...values].map((value) => ({ value, label: value, variant: 'neutral' as const }));
 }
 
-function AttachmentImage(props: { attachment: AttachmentRef; onReadAttachmentBytes?: ReadAttachmentBytes }) {
-  const [src, setSrc] = useState<string | undefined>(undefined);
-  const { onReadAttachmentBytes } = props;
-  useEffect(() => {
-    if (props.attachment.ref.kind !== 'session_file') return;
-    // No host reader (non-desktop host, or the capability wasn't wired): leave the
-    // thumbnail in its pending skeleton rather than reaching into a host global.
-    if (!onReadAttachmentBytes) return;
-    let cancelled = false;
-    onReadAttachmentBytes(props.attachment.ref.sessionId, props.attachment.ref.relativePath)
-      .then((result) => {
-        if (cancelled || !result.ok) return;
-        setSrc(`data:${result.mimeType};base64,${result.base64}`);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [props.attachment, onReadAttachmentBytes]);
+function AttachmentImage(props: { attachment: AttachmentRef }) {
+  const preview = resolvePreviewKind({
+    name: props.attachment.name,
+    kind: 'image',
+    mimeType: props.attachment.mimeType,
+    sizeBytes: props.attachment.bytes,
+  });
+  const ref = preview.kind === 'image' && props.attachment.ref.kind === 'session_file'
+    ? {
+        sessionId: props.attachment.ref.sessionId,
+        artifactId: props.attachment.ref.relativePath,
+      }
+    : undefined;
+  const src = useAttachmentImageSource(ref);
   if (!src) {
     return (
       <Thumbnail
         className="maka-user-attachment-thumbnail"
         alt={props.attachment.name}
         label={props.attachment.name}
-        isLoading
+        isLoading={preview.kind === 'image'}
       />
     );
   }
@@ -174,7 +155,6 @@ const UserMessageBody = memo(function UserMessageBody(props: {
   attachments?: readonly AttachmentRef[];
   quotes?: readonly QuoteRef[];
   inlineReferences?: readonly InlineReference[];
-  onReadAttachmentBytes?: ReadAttachmentBytes;
   /** When set on a user message, show an edit affordance that starts a revision draft. */
   onEditUserMessage?: () => void;
   editDisabled?: boolean;
@@ -257,7 +237,6 @@ const UserMessageBody = memo(function UserMessageBody(props: {
             <AttachmentImage
               key={`${attachment.name}-${index}`}
               attachment={attachment}
-              onReadAttachmentBytes={props.onReadAttachmentBytes}
             />
           ))}
         </HStack>
@@ -280,7 +259,6 @@ const UserMessageBody = memo(function UserMessageBody(props: {
 
 export function TransientUserMessage(props: {
   message: TransientUserMessageProjection;
-  onReadAttachmentBytes?: ReadAttachmentBytes;
 }) {
   const copy = getConversationCopy(useUiLocale()).messages;
   const message = props.message;
@@ -298,7 +276,6 @@ export function TransientUserMessage(props: {
           attachments={message.attachments}
           quotes={message.quotes}
           inlineReferences={message.inlineReferences}
-          onReadAttachmentBytes={props.onReadAttachmentBytes}
         />
       </LocalizedChatMessage>
     </div>
@@ -397,12 +374,18 @@ export const TurnView = memo(function TurnView(props: {
    */
   failedReasonLabel?: string;
   /**
-   * PR-PawWork-run-incident-lite: pre-derived recovery guidance for a failed
-   * turn. Caller computes this from error class, retained partial output, and
-   * tool activity so the banner can distinguish "retry" from "inspect tool
-   * output first".
+   * How loud the failed-turn banner should be. Caller computes it from the
+   * error class; `warning` marks the outcomes the session can simply continue
+   * past. Defaults to `error` when a caller doesn't derive it.
    */
-  failedRecoveryLabel?: string;
+  failedSeverity?: 'error' | 'warning';
+  /**
+   * What the turn already did before it failed, when that changes the cost of
+   * sending the next message (a tool that ran may have had side effects). This
+   * accompanies `failedReasonLabel` rather than competing with it: the reason
+   * is the outcome, this is the execution state, and both can be true.
+   */
+  failedExecutionStateLabel?: string;
   safeResumeAction?: {
     pending: boolean;
     detail?: string;
@@ -452,13 +435,6 @@ export const TurnView = memo(function TurnView(props: {
     providerRetry?: LiveProviderRetry;
     initialLiveContent?: ReadonlyMap<string, string>;
   };
-  /**
-   * Injected host reader for image attachment bytes. Threaded down to the user
-   * message's `AttachmentImage` thumbnails; absent on non-desktop hosts, where
-   * image thumbnails stay in their pending skeleton. Keeps @maka/ui from
-   * reaching into the desktop preload directly.
-   */
-  onReadAttachmentBytes?: ReadAttachmentBytes;
   /**
    * Open a linked subagent child session in the main chat column. Threaded into
    * linked subagent tool rows; omitted when the host has no navigation.
@@ -577,7 +553,6 @@ export const TurnView = memo(function TurnView(props: {
             attachments={turn.user.attachments}
             quotes={turn.user.quotes}
             inlineReferences={turn.user.inlineReferences}
-            onReadAttachmentBytes={props.onReadAttachmentBytes}
             onEditUserMessage={
               props.onEditUserMessage && !turn.user.hostOrigin
                 ? () => props.onEditUserMessage?.(turn.turnId)
@@ -633,58 +608,26 @@ export const TurnView = memo(function TurnView(props: {
                 attachments={message.attachments}
                 quotes={message.quotes}
                 inlineReferences={message.inlineReferences}
-                onReadAttachmentBytes={props.onReadAttachmentBytes}
               />
             </LocalizedChatMessage>
           );
         }
         const ownsTurnChrome = segmentIndex === conversationSegments.length - 1;
+        // Disjoint namespaces: a steering id is any string, so a bare
+        // sentinel could collide with a real one.
+        const assistantKey =
+          segment.repliesTo === undefined
+            ? 'assistant-opening'
+            : `assistant-after-${segment.repliesTo}`;
         return (
-          <LocalizedChatMessage
-            // Disjoint namespaces: a steering id is any string, so a bare
-            // sentinel could collide with a real one.
-            key={
-              segment.repliesTo === undefined
-                ? 'assistant-opening'
-                : `assistant-after-${segment.repliesTo}`
-            }
-            accessibleLabel={copy.assistantAriaLabel}
-            sender="assistant"
-            data-turn-status={turn.status}
-            className="maka-chat-message maka-assistant-answer"
-          >
+          <Fragment key={assistantKey}>
+            <LocalizedChatMessage
+              accessibleLabel={copy.assistantAriaLabel}
+              sender="assistant"
+              data-turn-status={turn.status}
+              className="maka-chat-message maka-assistant-answer"
+            >
             <div className="maka-assistant-answer-content">
-              {ownsTurnChrome && turn.status === 'aborted' && (
-                <Marker variant="aborted" role="status">
-                  <Ban size={ICON_SIZE.meta} aria-hidden="true" />
-                  <em>{turnAbortMarkerLabel(turn.abortSource, locale)}</em>
-                </Marker>
-              )}
-              {ownsTurnChrome && turn.status === 'failed' && props.failedReasonLabel && (
-                <Marker variant="failed-banner" role="alert">
-                  <Marker as="span" variant="failed-icon" aria-hidden="true">
-                    <AlertOctagon size={ICON_SIZE.control} />
-                  </Marker>
-                  <span>{props.failedReasonLabel}</span>
-                  {(props.safeResumeAction?.detail ?? props.failedRecoveryLabel) && (
-                    <Marker as="span" variant="failed-recovery">
-                      {props.safeResumeAction?.detail ?? props.failedRecoveryLabel}
-                    </Marker>
-                  )}
-                  {props.safeResumeAction && (
-                    <UiButton
-                      variant="ghost"
-                      size="sm"
-                      className="maka-turn-failed-resume"
-                      isDisabled={props.safeResumeAction.pending}
-                      onClick={props.safeResumeAction.onResume}
-                      label={
-                        props.safeResumeAction.pending ? copy.safeResumePending : copy.safeResume
-                      }
-                    />
-                  )}
-                </Marker>
-              )}
               {/* The turn timeline is the rendering source of truth
                 (materialize.ts): each step's 深度思考 disclosure, answer bubble,
                 and Astryx tool group in the order the model produced them.
@@ -717,6 +660,42 @@ export const TurnView = memo(function TurnView(props: {
                     initialLiveContent={props.liveStreaming?.initialLiveContent}
                   />
                 ),
+              )}
+              {/* A failed turn's banner states the OUTCOME of the turn, so it
+                  belongs after the work it is the outcome of. `description`
+                  carries the parked-resume diagnostic when there
+                  is one — it explains why the button did nothing, which
+                  outranks execution state on the one turn that can have both. */}
+              {ownsTurnChrome && turn.status === 'failed' && props.failedReasonLabel && (
+                <Banner
+                  status={props.failedSeverity ?? 'error'}
+                  container="section"
+                  className="maka-turn-failed-banner"
+                  title={props.failedReasonLabel}
+                  {...(props.safeResumeAction?.detail ?? props.failedExecutionStateLabel
+                    ? {
+                        description:
+                          props.safeResumeAction?.detail ?? props.failedExecutionStateLabel,
+                      }
+                    : {})}
+                  {...(props.safeResumeAction
+                    ? {
+                        endContent: (
+                          <UiButton
+                            variant="ghost"
+                            size="sm"
+                            isDisabled={props.safeResumeAction.pending}
+                            onClick={props.safeResumeAction.onResume}
+                            label={
+                              props.safeResumeAction.pending
+                                ? copy.safeResumePending
+                                : copy.safeResume
+                            }
+                          />
+                        ),
+                      }
+                    : {})}
+                />
               )}
               {ownsTurnChrome && props.liveStreaming && (
                 <>
@@ -779,7 +758,16 @@ export const TurnView = memo(function TurnView(props: {
                   />
                 )
               ))}
-          </LocalizedChatMessage>
+            </LocalizedChatMessage>
+            {/* An abort is a short, settled status change rather than sender
+                content or a recovery error. Keep Astryx's system notice as a
+                sibling of the assistant message, after the work it closes. */}
+            {ownsTurnChrome && turn.status === 'aborted' && (
+              <ChatSystemMessage icon={<Ban size={ICON_SIZE.meta} aria-hidden="true" />}>
+                {turnAbortStatusLabel(turn.abortSource, locale)}
+              </ChatSystemMessage>
+            )}
+          </Fragment>
         );
       })}
     </section>
@@ -868,7 +856,8 @@ export interface TurnLineageBadge {
 export interface TurnPresentation {
   footerActionsByTurn: Record<string, ReadonlyArray<TurnFooterActionMeta>>;
   failedReasonLabels: Record<string, string>;
-  failedRecoveryLabels: Record<string, string>;
+  failedSeverities: Record<string, 'error' | 'warning'>;
+  failedExecutionStateLabels: Record<string, string>;
   lineageBadgesByTurn: Record<string, TurnLineageBadge[]>;
   /** The turn a safe resume would restart, when the shell offers one. */
   resumeCandidateTurnId?: string;

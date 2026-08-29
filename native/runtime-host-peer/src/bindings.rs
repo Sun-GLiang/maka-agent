@@ -19,7 +19,7 @@
 
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
@@ -31,6 +31,7 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 use crate::engine::{self, EngineCommand, PeerError, StreamCommand};
 
 type IncomingStreamReceiver = mpsc::Receiver<std::result::Result<Vec<u8>, PeerError>>;
+const IDENTITY_PAYLOAD_MAX_BYTES: usize = 8 * 1024;
 
 #[napi(object)]
 pub struct StartPeerEndpointOptions {
@@ -38,6 +39,7 @@ pub struct StartPeerEndpointOptions {
     pub expected_peer_id: Option<String>,
     pub listen_addresses: Option<Vec<String>>,
     pub coordination_relays: Option<Vec<String>>,
+    pub automatic_relay_discovery: Option<bool>,
 }
 
 #[napi(object)]
@@ -49,10 +51,17 @@ pub struct ConnectPeerOptions {
     pub direct_deadline_ms: u32,
 }
 
+#[napi(object)]
+pub struct PeerIdentitySignature {
+    pub public_key: Buffer,
+    pub signature: Buffer,
+}
+
 #[napi]
 pub struct PeerEndpoint {
     peer_id: String,
     listen_addresses: Vec<String>,
+    active_coordination_relays: Arc<RwLock<Vec<Multiaddr>>>,
     commands: mpsc::Sender<EngineCommand>,
     incoming: Arc<AsyncMutex<mpsc::Receiver<engine::PeerStream>>>,
     mesh_incoming: Arc<AsyncMutex<mpsc::Receiver<engine::PeerStream>>>,
@@ -70,6 +79,14 @@ impl PeerEndpoint {
     #[napi(getter)]
     pub fn listen_addresses(&self) -> Vec<String> {
         self.listen_addresses.clone()
+    }
+
+    #[napi(getter)]
+    pub fn active_coordination_relays(&self) -> Vec<String> {
+        self.active_coordination_relays
+            .read()
+            .map(|addresses| addresses.iter().map(ToString::to_string).collect())
+            .unwrap_or_default()
     }
 
     #[napi]
@@ -276,6 +293,7 @@ pub fn start_peer_endpoint(options: StartPeerEndpointOptions) -> Result<PeerEndp
             options.coordination_relays.unwrap_or_default(),
             "coordination relay",
         )?,
+        automatic_relay_discovery: options.automatic_relay_discovery.unwrap_or(false),
     })
     .map_err(peer_error)?;
     Ok(PeerEndpoint {
@@ -285,6 +303,7 @@ pub fn start_peer_endpoint(options: StartPeerEndpointOptions) -> Result<PeerEndp
             .into_iter()
             .map(|address| address.to_string())
             .collect(),
+        active_coordination_relays: started.active_coordination_relays,
         commands: started.commands,
         incoming: Arc::new(AsyncMutex::new(started.incoming)),
         mesh_incoming: Arc::new(AsyncMutex::new(started.mesh_incoming)),
@@ -298,6 +317,38 @@ pub async fn ensure_peer_identity(key_path: String) -> Result<String> {
     engine::ensure_identity(PathBuf::from(key_path))
         .await
         .map(|peer_id| peer_id.to_string())
+        .map_err(peer_error)
+}
+
+#[napi]
+pub async fn sign_peer_identity(
+    key_path: String,
+    expected_peer_id: String,
+    payload: Buffer,
+) -> Result<PeerIdentitySignature> {
+    validate_identity_payload(&payload)?;
+    let signed = engine::sign_identity(
+        PathBuf::from(key_path),
+        parse_peer_id(&expected_peer_id)?,
+        &payload,
+    )
+    .await
+    .map_err(peer_error)?;
+    Ok(PeerIdentitySignature {
+        public_key: signed.public_key.into(),
+        signature: signed.signature.into(),
+    })
+}
+
+#[napi]
+pub fn verify_peer_identity(
+    peer_id: String,
+    public_key: Buffer,
+    payload: Buffer,
+    signature: Buffer,
+) -> Result<bool> {
+    validate_identity_payload(&payload)?;
+    engine::verify_identity(parse_peer_id(&peer_id)?, &public_key, &payload, &signature)
         .map_err(peer_error)
 }
 
@@ -325,6 +376,16 @@ fn parse_addresses(values: Vec<String>, label: &str) -> Result<Vec<Multiaddr>> {
             })
         })
         .collect()
+}
+
+fn validate_identity_payload(payload: &[u8]) -> Result<()> {
+    if payload.is_empty() || payload.len() > IDENTITY_PAYLOAD_MAX_BYTES {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "identity payload must be between 1 and 8192 bytes",
+        ));
+    }
+    Ok(())
 }
 
 fn peer_error(error: PeerError) -> Error {
