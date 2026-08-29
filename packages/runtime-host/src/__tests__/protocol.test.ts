@@ -22,6 +22,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_COUNT } from '@maka/core/attachments';
 import { CONTEXT_BUDGET_EXHAUSTED_DETAILS, TOOL_OUTPUT_DELTA_MAX_CHARS } from '@maka/core/events';
+import { CONNECTION_CATALOG_MAX_ENABLED_MODEL_IDS } from '@maka/core/runtime-policy';
 import {
   decodeClientCapabilityReplaceInput,
   decodeClientFrame,
@@ -233,6 +234,15 @@ describe('Runtime Host bootstrap protocol', () => {
     // The context-budget detail therefore needs its own strictly newer
     // handshake boundary so peers cannot accept the wrong closed shape.
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 50);
+  });
+
+  test('publishes a new compatibility epoch for the removed execution.inspect.resolve operation', () => {
+    // Epoch 63 peers still know execution.inspect.resolve and would send it
+    // only to fail mid-connection now that it is gone, so its removal must
+    // fail the handshake instead.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 63);
+    assert.equal(Object.hasOwn(HOST_OPERATION_SPECS, 'execution.inspect.resolve'), false);
+    assert.equal(Object.hasOwn(HOST_OPERATION_SPECS, 'execution.inspect.query'), true);
   });
 
   test('adds credential rotation without changing existing credential inputs', () => {
@@ -495,6 +505,13 @@ describe('Runtime Host bootstrap protocol', () => {
       },
       {
         ...identity,
+        type: 'tool_start',
+        toolName: 'Bash',
+        intent: '只读探索:定位渲染入口',
+        argsPreview: { command: 'git status --porcelain' },
+      },
+      {
+        ...identity,
         type: 'tool_output_delta',
         seq: 0,
         stream: 'stdout',
@@ -532,6 +549,18 @@ describe('Runtime Host bootstrap protocol', () => {
         type: 'tool_start',
         toolName: 'read',
         args: { path: '/private' },
+      },
+      {
+        ...identity,
+        type: 'tool_start',
+        toolName: 'read',
+        argsPreview: { command: 'x'.repeat(9 * 1024) },
+      },
+      {
+        ...identity,
+        type: 'tool_start',
+        toolName: 'read',
+        intent: 42,
       },
       {
         ...identity,
@@ -803,6 +832,35 @@ describe('Runtime Host bootstrap protocol', () => {
       () =>
         exportCredentials.decodeOutput({
           credential: { locator: apiKeyLocator, secretBase64 },
+        }),
+      isInvalidFrame,
+    );
+  });
+
+  test('keeps the connection update model limit aligned with the catalog', () => {
+    const updateConnection = RUNTIME_POLICY_OPERATION_SPECS['connection.catalog.update'];
+    const enabledModelIds = Array.from(
+      { length: CONNECTION_CATALOG_MAX_ENABLED_MODEL_IDS },
+      (_, index) => `model-${index}`,
+    );
+    const input = {
+      expected: { connectionId: '00000000-0000-4000-8000-000000000001', revision: 1 },
+      changes: {
+        name: 'OpenRouter',
+        enabled: true,
+        enabledModelIds,
+      },
+    };
+
+    assert.doesNotThrow(() => updateConnection.decodeInput(input));
+    assert.throws(
+      () =>
+        updateConnection.decodeInput({
+          ...input,
+          changes: {
+            ...input.changes,
+            enabledModelIds: [...enabledModelIds, 'model-too-many'],
+          },
         }),
       isInvalidFrame,
     );

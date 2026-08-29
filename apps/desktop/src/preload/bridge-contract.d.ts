@@ -514,11 +514,23 @@ export interface DesktopRuntimeHostDirectPeerSnapshot {
   readonly peerId?: string;
   readonly routeHints: readonly string[];
   readonly coordinationRelays: readonly string[];
+  readonly automaticRelayDiscovery: boolean;
   readonly profilePresent: boolean;
   readonly profileEnabled: boolean;
   readonly clientAvailable: boolean;
   readonly managementAvailable: boolean;
 }
+
+export type DesktopRuntimeHostPeerMeshTarget =
+  | { readonly kind: 'desktop' }
+  | { readonly kind: 'managed_host'; readonly profileId: string };
+
+export type DesktopRuntimeHostPeerMeshAction =
+  import('@maka/runtime-host/operator').RuntimeHostPeerMeshManagementAction;
+
+export type DesktopRuntimeHostPeerMeshResult =
+  | import('@maka/runtime-host/protocol').PeerMeshQueryResult
+  | import('@maka/runtime-host/protocol').PeerMeshInvitationResult;
 
 type RuntimeHostUpdatePolicyResult = Extract<
   RuntimeHostServiceManagementFrame,
@@ -720,6 +732,7 @@ export interface MakaBridge {
       profileId: string,
       enabled: boolean,
       coordinationRelays: readonly string[],
+      automaticRelayDiscovery: boolean,
     ): Promise<DesktopRuntimeHostDirectPeerSnapshot>;
     listCredentials(profileId: string): Promise<DesktopRuntimeHostAccessSnapshot>;
     rotateCredential(profileId: string): Promise<DesktopRuntimeHostAccessSnapshot>;
@@ -727,6 +740,14 @@ export interface MakaBridge {
       profileId: string,
       credentialId: string,
     ): Promise<DesktopRuntimeHostAccessSnapshot>;
+  };
+
+  runtimeHostPeerMesh: {
+    execute(
+      target: DesktopRuntimeHostPeerMeshTarget,
+      action: DesktopRuntimeHostPeerMeshAction,
+      input?: { readonly meshId?: string; readonly peerId?: string; readonly invitation?: string },
+    ): Promise<DesktopRuntimeHostPeerMeshResult>;
   };
 
   newTasks: {
@@ -1323,10 +1344,7 @@ export interface MakaBridge {
       | { ok: true; base64: string; mimeType: string }
       | { ok: false; reason: string }
     >;
-    readBytes(sessionId: string, relativePath: string): Promise<
-      | { ok: true; base64: string; mimeType: string }
-      | { ok: false; reason: string }
-    >;
+    readBytes(sessionId: string, artifactId: string): Promise<ArtifactBinaryReadResult>;
   };
   search: {
     thread(

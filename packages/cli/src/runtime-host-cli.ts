@@ -165,8 +165,21 @@ export type RuntimeHostCliCommand =
       operatorDeploymentId: string;
       listenAddresses: string[];
       coordinationRelays?: string[];
+      automaticRelayDiscovery?: boolean;
+      relayDiscoveryStatus?: true;
       expectedTarget?: RuntimeHostManagedServiceTarget;
       allowInterruptActiveTasks?: true;
+    }
+  | {
+      kind: 'runtime-host-service-peer-mesh';
+      action: 'status' | 'create' | 'invite' | 'join' | 'remove' | 'leave' | 'close' | 'reconcile';
+      json: boolean;
+      framed?: true;
+      managedRootId: string;
+      operatorDeploymentId: string;
+      expectedTarget: RuntimeHostManagedServiceTarget;
+      meshId?: string;
+      peerId?: string;
     }
   | {
       kind: 'runtime-host-service-check-update';
@@ -640,6 +653,7 @@ function parseSetupCommand(argv: string[]): RuntimeHostCliCommand {
 function parseServiceManagementCommand(argv: string[]): RuntimeHostCliCommand {
   const action = argv[0];
   if (action === 'peer') return parseServicePeerCommand(argv.slice(1));
+  if (action === 'mesh') return parseServicePeerMeshCommand(argv.slice(1));
   if (action === 'cleanup-deployment') {
     let clientDataRoot: string | undefined;
     let finalize = false;
@@ -694,7 +708,7 @@ function parseServiceManagementCommand(argv: string[]): RuntimeHostCliCommand {
     return error(
       action
         ? `Unexpected runtime-host service command: ${action}`
-        : 'runtime-host service requires install, configure, status, start, stop, restart, retire, check-update, update, update-policy, reconcile-update, logs, or uninstall',
+        : 'runtime-host service requires install, configure, status, start, stop, restart, retire, peer, mesh, check-update, update, update-policy, reconcile-update, logs, or uninstall',
     );
   }
 
@@ -880,6 +894,8 @@ function parseServicePeerCommand(argv: string[]): RuntimeHostCliCommand {
   const listenAddresses: string[] = [];
   const coordinationRelays: string[] = [];
   let clearCoordinationRelays = false;
+  let automaticRelayDiscovery: boolean | undefined;
+  let relayDiscoveryStatus = false;
   let allowInterruptActiveTasks = false;
   const options = parseManagedServiceOptions(argv.slice(1), {
     allowConfiguration: false,
@@ -892,6 +908,22 @@ function parseServicePeerCommand(argv: string[]): RuntimeHostCliCommand {
       '--allow-interrupt-active-tasks': () => {
         if (allowInterruptActiveTasks) return error('Duplicate --allow-interrupt-active-tasks');
         allowInterruptActiveTasks = true;
+      },
+      '--automatic-relay-discovery': () => {
+        if (automaticRelayDiscovery !== undefined) {
+          return error('Relay discovery mode was specified more than once');
+        }
+        automaticRelayDiscovery = true;
+      },
+      '--no-automatic-relay-discovery': () => {
+        if (automaticRelayDiscovery !== undefined) {
+          return error('Relay discovery mode was specified more than once');
+        }
+        automaticRelayDiscovery = false;
+      },
+      '--relay-discovery-status': () => {
+        if (relayDiscoveryStatus) return error('Duplicate --relay-discovery-status');
+        relayDiscoveryStatus = true;
       },
     },
     valueOptions: {
@@ -912,6 +944,9 @@ function parseServicePeerCommand(argv: string[]): RuntimeHostCliCommand {
   if (options.framed && (action === 'rotate' || action === 'descriptor')) {
     return error(`runtime-host service peer ${action} does not support --framed`);
   }
+  if (relayDiscoveryStatus && !options.framed) {
+    return error('--relay-discovery-status requires --framed');
+  }
   if (listenAddresses.some(hasEphemeralRuntimeHostPeerPort)) {
     return error('--listen requires a stable non-zero transport port');
   }
@@ -920,11 +955,12 @@ function parseServicePeerCommand(argv: string[]): RuntimeHostCliCommand {
   }
   if (
     action !== 'enable' &&
-    (listenAddresses.length > 0 || coordinationRelays.length > 0 || clearCoordinationRelays)
+    (listenAddresses.length > 0 ||
+      coordinationRelays.length > 0 ||
+      clearCoordinationRelays ||
+      automaticRelayDiscovery !== undefined)
   ) {
-    return error(
-      '--listen, --coordination-relay, and --clear-coordination-relays are only valid with peer enable',
-    );
+    return error('Peer listener options are only valid with peer enable');
   }
   if (allowInterruptActiveTasks && action !== 'enable' && action !== 'disable') {
     return error('--allow-interrupt-active-tasks is only valid with peer enable or peer disable');
@@ -957,8 +993,81 @@ function parseServicePeerCommand(argv: string[]): RuntimeHostCliCommand {
       : coordinationRelays.length > 0
         ? { coordinationRelays }
         : {}),
+    ...(automaticRelayDiscovery === undefined ? {} : { automaticRelayDiscovery }),
+    ...(relayDiscoveryStatus ? { relayDiscoveryStatus: true as const } : {}),
     ...(options.expectedTarget ? { expectedTarget: options.expectedTarget } : {}),
     ...(allowInterruptActiveTasks ? { allowInterruptActiveTasks: true } : {}),
+  };
+}
+
+function parseServicePeerMeshCommand(argv: string[]): RuntimeHostCliCommand {
+  const action = argv[0];
+  if (
+    action !== 'status' &&
+    action !== 'create' &&
+    action !== 'invite' &&
+    action !== 'join' &&
+    action !== 'remove' &&
+    action !== 'leave' &&
+    action !== 'close' &&
+    action !== 'reconcile'
+  ) {
+    return error(
+      action
+        ? `Unexpected runtime-host service mesh command: ${action}`
+        : 'runtime-host service mesh requires status, create, invite, join, remove, leave, close, or reconcile',
+    );
+  }
+  let meshId: string | undefined;
+  let peerId: string | undefined;
+  const options = parseManagedServiceOptions(argv.slice(1), {
+    allowConfiguration: false,
+    allowFramed: true,
+    valueOptions: {
+      '--mesh': (value) => {
+        if (meshId !== undefined) return error('Duplicate --mesh');
+        if (!value || value.length > 128) return error('--mesh requires a valid Mesh ID');
+        meshId = value;
+      },
+      '--peer': (value) => {
+        if (peerId !== undefined) return error('Duplicate --peer');
+        if (!value || value.length > 256) return error('--peer requires a valid Peer ID');
+        peerId = value;
+      },
+    },
+  });
+  if ('kind' in options) return options;
+  if (!options.managedRootId || !options.operatorDeploymentId || !options.expectedTarget) {
+    return error(
+      'runtime-host service mesh requires --managed-root-id, --operator-deployment-id, and an expected target',
+    );
+  }
+  const needsMesh =
+    action === 'invite' || action === 'remove' || action === 'leave' || action === 'close';
+  if (needsMesh !== (meshId !== undefined)) {
+    return error(
+      needsMesh
+        ? `runtime-host service mesh ${action} requires --mesh`
+        : '--mesh is only valid with mesh invite, remove, leave, or close',
+    );
+  }
+  if ((action === 'remove') !== (peerId !== undefined)) {
+    return error(
+      action === 'remove'
+        ? 'runtime-host service mesh remove requires --peer'
+        : '--peer is only valid with mesh remove',
+    );
+  }
+  return {
+    kind: 'runtime-host-service-peer-mesh',
+    action,
+    json: options.json,
+    ...(options.framed ? { framed: true as const } : {}),
+    managedRootId: options.managedRootId,
+    operatorDeploymentId: options.operatorDeploymentId,
+    expectedTarget: options.expectedTarget,
+    ...(meshId ? { meshId } : {}),
+    ...(peerId ? { peerId } : {}),
   };
 }
 
