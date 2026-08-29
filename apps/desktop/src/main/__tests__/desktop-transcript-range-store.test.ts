@@ -25,7 +25,10 @@ import {
   encodeDesktopTranscriptChange,
   encodeDesktopTranscriptSnapshot,
 } from '../desktop-transcript-ipc.js';
-import { DESKTOP_TRANSCRIPT_FRAGMENT_MAX_BYTES } from '../../preload/transcript-contract.js';
+import {
+  DESKTOP_TRANSCRIPT_FRAGMENT_MAX_BYTES,
+  DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES,
+} from '../../preload/transcript-contract.js';
 import {
   createDesktopTranscriptRangeController,
   DesktopTranscriptRangeStore,
@@ -596,6 +599,100 @@ test('loads a history target with newer messages available below it', async () =
   assert.equal(replica.snapshot().hasNewer, true);
 });
 
+test('keeps an oversized transcript sparse while moving between indexed prompts', async () => {
+  const messages = syntheticLargeTranscript();
+  const totalBytes = messages.reduce(
+    (total, entry) => total + Buffer.byteLength(JSON.stringify(entry.message), 'utf8'),
+    0,
+  );
+  assert.ok(totalBytes > DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES * 2);
+
+  const bootstrapPage = transcriptPage('older', 'older', 15);
+  const historicalPage = transcriptPage('newer', 'newer', 15);
+  const intermediatePage = transcriptPage('newer', 'newer', 15);
+  const latestPage = transcriptPage('older', 'older', 15);
+  const requests: Array<{
+    direction: 'older' | 'newer';
+    anchorSequence: number | null;
+    maxBytes: number;
+  }> = [];
+  const rendererStore = transcriptStore();
+  const generation = 'oversized-range';
+  const handle = runtimeHostSessionFixture({
+    snapshot: continuitySnapshot(),
+    transcript: Promise.resolve([]),
+    events: { async *[Symbol.asyncIterator]() {} },
+    transcriptBootstrap: {
+      throughSequence: 15,
+      overlayMessageCount: 0,
+      durable: bootstrapPage,
+      overlay: { ...transcriptPage('older', null, 15), source: 'overlay' },
+    },
+    loadTranscriptOverlay: async () => [],
+    decodeTranscriptPage: async (page) => page === bootstrapPage || page === latestPage
+      ? { messages: messages.slice(12, 16), nextCursor: 'older' }
+      : page === historicalPage
+        ? { messages: messages.slice(0, 5), nextCursor: 'newer' }
+        : { messages: messages.slice(6, 11), nextCursor: 'newer' },
+    loadTranscriptPage: async (input) => {
+      requests.push({
+        direction: input.direction,
+        anchorSequence: input.anchorSequence,
+        maxBytes: input.maxBytes,
+      });
+      if (input.direction === 'older') return latestPage;
+      return input.anchorSequence === null ? historicalPage : intermediatePage;
+    },
+    async close() {},
+  });
+  const replica = await DesktopTranscriptReplica.prepare(handle, {
+    generation,
+    onChange: (_current, change) => {
+      for (const batch of encodeDesktopTranscriptChange({
+        sessionId: 'session-1',
+        generation,
+        hostEpoch: 'host-1',
+      }, change)) rendererStore.accept(batch);
+    },
+  });
+  for (const batch of encodeDesktopTranscriptSnapshot(replica.snapshot())) {
+    rendererStore.accept(batch);
+  }
+
+  assert.deepEqual(replica.snapshot().durable.map(({ sequence }) => sequence), [12, 13, 14, 15]);
+  assert.deepEqual(renderedUserPrompts(rendererStore), ['Prompt 7', 'Prompt 8']);
+  assert.equal(rendererStore.range().hasNewer, false);
+  assertRangeFitsBudget(rendererStore);
+
+  await replica.loadAround(0, DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES);
+  assert.deepEqual(replica.snapshot().durable.map(({ sequence }) => sequence), [0, 1, 2, 3, 4]);
+  assert.deepEqual(renderedUserPrompts(rendererStore), ['Prompt 1', 'Prompt 2', 'Prompt 3']);
+  assert.equal(rendererStore.range().hasOlder, false);
+  assert.equal(rendererStore.range().hasNewer, true);
+  assertRangeFitsBudget(rendererStore);
+
+  await replica.loadAround(6, DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES);
+  assert.deepEqual(replica.snapshot().durable.map(({ sequence }) => sequence), [6, 7, 8, 9, 10]);
+  assert.deepEqual(renderedUserPrompts(rendererStore), ['Prompt 4', 'Prompt 5', 'Prompt 6']);
+  assert.equal(rendererStore.range().hasOlder, true);
+  assert.equal(rendererStore.range().hasNewer, true);
+  assertRangeFitsBudget(rendererStore);
+
+  await replica.loadAround(15, DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES);
+  assert.deepEqual(replica.snapshot().durable.map(({ sequence }) => sequence), [12, 13, 14, 15]);
+  assert.deepEqual(renderedUserPrompts(rendererStore), ['Prompt 7', 'Prompt 8']);
+  assert.equal(rendererStore.range().hasOlder, true);
+  assert.equal(rendererStore.range().hasNewer, false);
+  assertRangeFitsBudget(rendererStore);
+
+  assert.deepEqual(requests, [
+    { direction: 'newer', anchorSequence: null, maxBytes: DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES },
+    { direction: 'newer', anchorSequence: 5, maxBytes: DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES },
+    { direction: 'older', anchorSequence: 16, maxBytes: DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES },
+  ]);
+  replica.close();
+});
+
 test('rejects an overlay that exceeds its cache budget', async () => {
   const messages = [
     assistantMessage('x'.repeat(700), 'overlay-1'),
@@ -859,6 +956,43 @@ function transcriptPage(
     fragments: [],
     nextCursor,
   };
+}
+
+function syntheticLargeTranscript(): Array<{ identity: number; message: StoredMessage }> {
+  return Array.from({ length: 8 }, (_, index) => {
+    const number = index + 1;
+    const turnId = `turn-${number}`;
+    return [
+      {
+        identity: index * 2,
+        message: {
+          ...userMessage(`Prompt ${number}`, `user-${number}`),
+          turnId,
+        },
+      },
+      {
+        identity: index * 2 + 1,
+        message: {
+          ...assistantMessage('x'.repeat(180 * 1024), `assistant-${number}`),
+          turnId,
+        },
+      },
+    ];
+  }).flat();
+}
+
+function renderedUserPrompts(store: DesktopTranscriptRangeStore): string[] {
+  return store.snapshot().messages.flatMap((message) =>
+    message.type === 'user' ? [message.text] : [],
+  );
+}
+
+function assertRangeFitsBudget(store: DesktopTranscriptRangeStore): void {
+  const bytes = store.snapshot().messages.reduce(
+    (total, message) => total + Buffer.byteLength(JSON.stringify(message), 'utf8'),
+    0,
+  );
+  assert.ok(bytes <= DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES);
 }
 
 function continuitySnapshot() {

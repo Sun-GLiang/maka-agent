@@ -1350,12 +1350,14 @@ const makaBridge = {
       profileId: string,
       enabled: boolean,
       coordinationRelays: readonly string[],
+      automaticRelayDiscovery: boolean,
     ) {
       return ipcRenderer.invoke(
         'runtime-host-management:configure-direct-peer',
         profileId,
         enabled,
         coordinationRelays,
+        automaticRelayDiscovery,
       );
     },
     listCredentials(profileId: string): Promise<DesktopRuntimeHostAccessSnapshot> {
@@ -1372,6 +1374,22 @@ const makaBridge = {
         'runtime-host-management:revoke-credential',
         profileId,
         credentialId,
+      );
+    },
+  },
+  runtimeHostPeerMesh: {
+    execute(
+      target: import('./bridge-contract.js').DesktopRuntimeHostPeerMeshTarget,
+      action: import('./bridge-contract.js').DesktopRuntimeHostPeerMeshAction,
+      input: { readonly meshId?: string; readonly peerId?: string; readonly invitation?: string } = {},
+    ) {
+      return ipcRenderer.invoke(
+        'runtime-host-peer-mesh:execute',
+        target,
+        action,
+        input.meshId,
+        input.peerId,
+        input.invitation,
       );
     },
   },
@@ -2576,11 +2594,8 @@ const makaBridge = {
     > {
       return ipcRenderer.invoke('attachments:previewApproval', approvalId);
     },
-    readBytes(sessionId: string, relativePath: string): Promise<
-      | { ok: true; base64: string; mimeType: string }
-      | { ok: false; reason: string }
-    > {
-      return invokeSessionRuntimeHost('attachments:readBytes', sessionId, relativePath);
+    readBytes(sessionId: string, artifactId: string): Promise<ArtifactBinaryReadResult> {
+      return invokeSessionRuntimeHost('attachments:readBytes', sessionId, artifactId);
     },
   },
   search: {

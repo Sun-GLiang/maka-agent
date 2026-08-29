@@ -21,6 +21,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -56,7 +57,12 @@ import {
 import { useUiLocale } from './locale-context.js';
 import { getConversationCopy } from './conversation-copy.js';
 import { type ChatModelChoice, exactModelChoiceValue } from './chat-model-helpers.js';
-import { appendPromptContextDraft, isReferenceSizedPaste } from './composer-helpers.js';
+import {
+  appendPromptContextDraft,
+  deriveComposerModelSwitchAvailability,
+  isReferenceSizedPaste,
+  type ComposerModelSwitchAvailability,
+} from './composer-helpers.js';
 import { stripQuoteHeadingMarkers } from './quote-ref-chip.js';
 import { WorkspacePicker, type WorkspacePickerModel } from './workspace-picker.js';
 import { useComposerDraft, type ComposerDraftPersistence } from './use-composer-draft.js';
@@ -208,6 +214,8 @@ export interface ComposerHandle {
   appendDraft?(draftKey: string, text: string): void;
   /** Move focus to the input without changing its content. */
   focus(): void;
+  /** Open the active Session's existing account-and-model picker. */
+  openModelPicker(): void;
 }
 
 export interface ComposerSendMetadata {
@@ -310,10 +318,13 @@ export const Composer = forwardRef<
     modelChoices?: ChatModelChoice[];
     /** Whether this Session already has conversation history whose provider prompt cache may be rebuilt by a switch. */
     modelSwitchHasHistory?: boolean;
+    /** Identity recovery must not present the stale target as a checked, selectable row. */
+    hideUnavailableCurrentModel?: boolean;
     /** Renders the provider brand mark beside each model option;
      *  injected by the desktop app to keep the provider SVG library out of @maka/ui. */
     renderProviderMark?(type: ProviderType): ReactNode;
-    modelChangePending?: boolean;
+    /** Host-projected availability when another recovery surface opens this picker. */
+    modelSwitchAvailability?: ComposerModelSwitchAvailability;
     onModelChange?(input: {
       llmConnectionId: string;
       llmConnectionSlug: string;
@@ -482,6 +493,16 @@ export const Composer = forwardRef<
   }
   const [dragActive, setDragActive] = useState(false);
   const [sendPending, setSendPending] = useState(false);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const modelSwitchAvailability =
+    props.modelSwitchAvailability ??
+    deriveComposerModelSwitchAvailability({
+      streaming: props.streaming,
+      sessionStatus: props.activeSession?.status,
+    });
+  const modelSwitchAvailabilityRef = useRef(modelSwitchAvailability);
+  modelSwitchAvailabilityRef.current = modelSwitchAvailability;
+  useLayoutEffect(() => setModelPickerOpen(false), [props.activeSession?.id]);
   const [pendingImportAction, setPendingImportAction] = useState<ComposerImportActionId | null>(null);
   const composerMountedRef = useMountedRef();
   const sendPendingRef = useRef(false);
@@ -1136,6 +1157,10 @@ export const Composer = forwardRef<
       focus() {
         focusInput();
       },
+      openModelPicker() {
+        if (!modelSwitchAvailabilityRef.current.available) return;
+        setModelPickerOpen(true);
+      },
     }),
     [],
   );
@@ -1349,13 +1374,9 @@ export const Composer = forwardRef<
   // Mid-turn the model and thinking menus stay mounted but locked, each
   // carrying the reason in its own words (model vs thinking level) — the
   // lock is one state with two wordings, not two locks.
-  const switchLock = props.streaming
-    ? 'streaming'
-    : props.activeSession?.status === 'running'
-      ? 'running'
-      : props.activeSession?.status === 'waiting_for_user'
-        ? 'permission'
-        : undefined;
+  const switchLock = modelSwitchAvailability.available
+    ? undefined
+    : modelSwitchAvailability.reason;
   const modelSwitcherDisabledReason =
     switchLock === 'streaming' ? copy.switchDisabledStreaming
     : switchLock === 'running' ? copy.switchDisabledRunning
@@ -1964,8 +1985,11 @@ export const Composer = forwardRef<
                     currentProviderType={props.activeProviderType}
                     choices={props.modelChoices ?? []}
                     hasConversationHistory={props.modelSwitchHasHistory}
-                    pending={props.modelChangePending}
+                    availability={modelSwitchAvailability}
                     disabledReason={modelSwitcherDisabledReason}
+                    isMenuOpen={modelPickerOpen}
+                    onMenuOpenChange={setModelPickerOpen}
+                    hideUnavailableCurrentOption={props.hideUnavailableCurrentModel}
                     renderProviderMark={props.renderProviderMark}
                     onChange={props.onModelChange}
                   />
@@ -1998,9 +2022,9 @@ export const Composer = forwardRef<
                     levels={props.activeThinkingLevels ?? []}
                     current={props.activeThinkingLevel}
                     onChange={props.onThinkingLevelChange}
-                    disabled={Boolean(modelSwitcherDisabledReason) || props.modelChangePending}
+                    disabled={!modelSwitchAvailability.available}
                     disabledReason={thinkingSwitcherDisabledReason}
-                    loading={props.modelChangePending}
+                    loading={modelSwitchAvailability.pending}
                   />
                 ) : (
                   <ThinkingLevelSelector

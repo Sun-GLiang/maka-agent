@@ -79,6 +79,7 @@ export interface PeerMeshStoredStateV1 {
 }
 
 export interface PeerMeshStateStore {
+  readonly terminalFailure: Promise<never>;
   read(): PeerMeshStoredStateV1;
   mutate<T>(
     operation: (state: PeerMeshStoredStateV1) => {
@@ -105,8 +106,42 @@ export async function openPeerMeshStateStore(
   }
 }
 
+export async function hasActivePeerMeshMembership(
+  dataRoot: string,
+  localPeerId: string,
+): Promise<boolean> {
+  const state = await readState(join(dataRoot, STATE_FILE), localPeerId);
+  return state.meshes.some((mesh) => !isRetired(mesh, localPeerId));
+}
+
+export async function migrateLegacyPeerMeshState(
+  dataRoot: string,
+  localPeerId: string,
+): Promise<void> {
+  const legacyPath = join(dataRoot, STATE_FILE);
+  const targetRoot = join(dataRoot, localPeerId);
+  const targetPath = join(targetRoot, STATE_FILE);
+  if (await pathExists(targetPath)) {
+    if (await pathExists(legacyPath)) {
+      await unlink(legacyPath);
+      await syncDirectory(dataRoot);
+    }
+    return;
+  }
+  if (!(await pathExists(legacyPath))) return;
+
+  const state = await readState(legacyPath, localPeerId);
+  await mkdir(targetRoot, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') await chmod(targetRoot, 0o700);
+  await writeState(targetPath, localPeerId, state);
+  await unlink(legacyPath);
+  await syncDirectory(dataRoot);
+}
+
 class PeerMeshStateStoreImpl implements PeerMeshStateStore {
   readonly #path: string;
+  readonly terminalFailure: Promise<never>;
+  readonly #rejectTerminalFailure: (error: unknown) => void;
   #state: PeerMeshStoredStateV1;
   #tail = Promise.resolve();
   #failure: Error | undefined;
@@ -121,6 +156,12 @@ class PeerMeshStateStoreImpl implements PeerMeshStateStore {
   ) {
     this.#path = join(dataRoot, STATE_FILE);
     this.#state = state;
+    let rejectTerminalFailure!: (error: unknown) => void;
+    this.terminalFailure = new Promise<never>((_resolve, reject) => {
+      rejectTerminalFailure = reject;
+    });
+    this.#rejectTerminalFailure = rejectTerminalFailure;
+    void this.terminalFailure.catch(() => undefined);
   }
 
   read(): PeerMeshStoredStateV1 {
@@ -149,8 +190,10 @@ class PeerMeshStateStoreImpl implements PeerMeshStateStore {
         if (error instanceof PeerMeshPostCommitError) {
           this.#state = canonical;
           this.#failure = error;
+          this.#rejectTerminalFailure(error);
+          throw error;
         }
-        throw error;
+        throw new PeerMeshPersistenceError(error);
       }
       return updated.result;
     });
@@ -320,8 +363,21 @@ async function readState(
     );
   } catch (error) {
     if (isNodeError(error, 'ENOENT')) {
-      return Object.freeze({ meshes: Object.freeze([]), routes: Object.freeze([]) });
+      return Object.freeze({
+        meshes: Object.freeze([]),
+        routes: Object.freeze([]),
+      });
     }
+    throw error;
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return false;
     throw error;
   }
 }
@@ -360,7 +416,13 @@ async function writeState(
   }
 }
 
-class PeerMeshPostCommitError extends Error {
+export class PeerMeshPersistenceError extends Error {
+  constructor(cause: unknown) {
+    super('Peer Mesh state could not be persisted', { cause });
+  }
+}
+
+export class PeerMeshPostCommitError extends Error {
   constructor(cause: unknown) {
     super('Peer Mesh state was replaced but its durability could not be confirmed; reopen it', {
       cause,
@@ -387,7 +449,11 @@ function decodeInvitations(value: unknown): PeerMeshInvitationRecord[] {
       if (!Number.isSafeInteger(expiresAt) || (expiresAt as number) < 1) {
         throw new Error('Invalid Peer Mesh invitation expiry');
       }
-      return Object.freeze({ status: 'pending' as const, ...base, expiresAt: expiresAt as number });
+      return Object.freeze({
+        status: 'pending' as const,
+        ...base,
+        expiresAt: expiresAt as number,
+      });
     }
     if (
       record.status === 'redeemed' &&

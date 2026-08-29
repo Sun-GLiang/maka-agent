@@ -19,16 +19,10 @@
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type {
-  AppSettings,
-  UpdateAppSettingsInput,
-  UsageRange,
-  UsageStats,
-} from '@maka/core/settings';
+import type { AppSettings, UpdateAppSettingsInput } from '@maka/core/settings';
 import type { OnboardingMilestone, OnboardingMilestoneId } from '@maka/core/onboarding';
 import { createDefaultSettings, mergeSettings, normalizeSettings } from '@maka/core/settings';
 import { sanitizeOnboardingMilestones } from '@maka/core/onboarding';
-import { readUsageStats } from './usage-stats-store.js';
 
 /**
  * A conditional write's patch, either fixed or derived from the state the
@@ -51,7 +45,6 @@ export interface SettingsStore {
     predicate: (current: AppSettings) => boolean,
     patch: ConditionalSettingsPatch,
   ): Promise<{ applied: boolean; settings: AppSettings }>;
-  usageStats(range?: UsageRange): Promise<UsageStats>;
   /**
    * PR110b: upsert a single onboarding milestone. Caller passes the
    * desired terminal status; the store stamps `Date.now()` so the
@@ -82,7 +75,7 @@ class FileSettingsStore implements SettingsStore {
   private readonly settingsPath: string;
   private queue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly workspaceRoot: string) {
+  constructor(workspaceRoot: string) {
     this.settingsPath = join(workspaceRoot, 'settings.json');
   }
 
@@ -193,10 +186,6 @@ class FileSettingsStore implements SettingsStore {
     });
     if (!result) throw new Error('Failed to clear onboarding milestone');
     return result;
-  }
-
-  async usageStats(range: UsageRange = '24h'): Promise<UsageStats> {
-    return readUsageStats(this.workspaceRoot, range);
   }
 
   private async write(settings: AppSettings): Promise<void> {
