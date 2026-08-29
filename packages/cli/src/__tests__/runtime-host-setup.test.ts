@@ -24,6 +24,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   symlink,
@@ -73,7 +74,7 @@ const execFile = promisify(execFileCallback);
 const PACKAGE_INTEGRITY = `sha512-${Buffer.alloc(64, 7).toString('base64')}`;
 
 test('on-demand setup installs one exact deployment without a service backend', async (t) => {
-  const base = await mkdtemp(join(tmpdir(), 'maka-runtime-host-on-demand-setup-'));
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-runtime-host-on-demand-setup-')));
   const stateRoot = join(base, 'state');
   const clientDataRoot = join(base, 'client');
   const canonicalDataHome = join(base, 'canonical-data-home');
@@ -362,7 +363,7 @@ test('lifecycle discovery records environment scope and persisted providers are 
 });
 
 test('registry package identity avoids local content and recovers an interrupted removal', async (t) => {
-  const base = await mkdtemp(join(tmpdir(), 'maka-runtime-host-registry-package-'));
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-runtime-host-registry-package-')));
   t.after(() => rm(base, { recursive: true, force: true }));
   const version = '0.2.0';
   const localPackage = await createReleasePackage(join(base, 'local'), version);
