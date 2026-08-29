@@ -109,9 +109,10 @@ export interface ScannedSkill extends RuntimeSkillDefinition {
   contentSha256: string;
   /**
    * The containment root this skill was discovered under (e.g. workspace root,
-   * home dir). Used to compute `relativePath` in `loadSkillInstructions` so
-   * legacy callers see `skills/<id>/SKILL.md` while multi-path callers see
-   * the actual subpath.
+   * home dir). Remains the authority for later contained reads even when
+   * `path` is a mutable symlink, and is used to compute `relativePath` in
+   * `loadSkillInstructions` so legacy callers see `skills/<id>/SKILL.md`
+   * while multi-path callers see the actual subpath.
    */
   discoveryRoot: string;
 }
