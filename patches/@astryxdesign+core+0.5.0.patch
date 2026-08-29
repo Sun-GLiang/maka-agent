@@ -934,31 +934,69 @@ index 55b441e..7aa4174 100644
 +  );
  }
 diff --git a/node_modules/@astryxdesign/core/dist/Chat/useTriggerMenu.js b/node_modules/@astryxdesign/core/dist/Chat/useTriggerMenu.js
-index e1d2ebd6c..f2f4f3f86 100644
+index e1d2ebd6c..d4bb8cb03 100644
 --- a/node_modules/@astryxdesign/core/dist/Chat/useTriggerMenu.js
 +++ b/node_modules/@astryxdesign/core/dist/Chat/useTriggerMenu.js
-@@ -64 +64,9 @@ function getTextBeforeCursor(editable) {
+@@ -49,0 +50,39 @@ const styles = {
++const blockDisplays = new Set(['block', 'flex', 'flow-root', 'grid', 'list-item', 'table']);
++function createsLineBoundary(node) {
++  return node instanceof HTMLBRElement || node instanceof HTMLElement && blockDisplays.has(window.getComputedStyle(node).display);
++}
++function getTrailingContextCharacter(node) {
++  if (node.nodeType === Node.TEXT_NODE) {
++    return (node.textContent ?? '').slice(-1);
++  }
++  if (createsLineBoundary(node)) {
++    return '\n';
++  }
++  for (let child = node.lastChild; child; child = child.previousSibling) {
++    const character = getTrailingContextCharacter(child);
++    if (character) {
++      return character;
++    }
++  }
++  return '';
++}
++function getCharacterBeforeNode(editable, node) {
++  let current = node;
++  while (current && current !== editable) {
++    for (let sibling = current.previousSibling; sibling; sibling = sibling.previousSibling) {
++      const character = getTrailingContextCharacter(sibling);
++      if (character) {
++        return character;
++      }
++    }
++    const parent = current.parentNode;
++    if (!parent || parent === editable) {
++      return '';
++    }
++    if (createsLineBoundary(parent)) {
++      return '\n';
++    }
++    current = parent;
++  }
++  return '';
++}
+@@ -64 +103,6 @@ function getTextBeforeCursor(editable) {
 -    return (node.textContent ?? '').slice(0, range.startOffset);
 +    const nodeText = (node.textContent ?? '').slice(0, range.startOffset);
-+    const beforeNode = range.cloneRange();
-+    beforeNode.selectNodeContents(editable);
-+    beforeNode.setEnd(node, 0);
-+    const prefix = beforeNode.toString().slice(-1);
++    const prefix = getCharacterBeforeNode(editable, node);
 +    return {
 +      text: prefix + nodeText,
 +      nodeStart: prefix.length
 +    };
-@@ -309,2 +317,2 @@ export function useTriggerMenu(options) {
+@@ -309,2 +353,2 @@ export function useTriggerMenu(options) {
 -    const textBefore = getTextBeforeCursor(editable);
 -    if (textBefore === null) {
 +    const cursorContext = getTextBeforeCursor(editable);
 +    if (cursorContext === null) {
-@@ -316,2 +324,2 @@ export function useTriggerMenu(options) {
+@@ -316,2 +360,2 @@ export function useTriggerMenu(options) {
 -    const found = findActiveTrigger(textBefore, triggers);
 -    if (!found) {
 +    const found = findActiveTrigger(cursorContext.text, triggers);
 +    if (!found || found.triggerStart < cursorContext.nodeStart) {
-@@ -324,5 +332,5 @@ export function useTriggerMenu(options) {
+@@ -322,9 +366,9 @@ export function useTriggerMenu(options) {
+     }
      const {
        trigger,
 -      query,
@@ -966,34 +1004,81 @@ index e1d2ebd6c..f2f4f3f86 100644
 +      query
      } = found;
 +    const triggerStart = found.triggerStart - cursorContext.nodeStart;
+     if (!state.isActive || state.activeTrigger !== trigger) {
+       triggerStartRef.current = triggerStart;
+       setState(prev => ({
 diff --git a/node_modules/@astryxdesign/core/src/Chat/useTriggerMenu.tsx b/node_modules/@astryxdesign/core/src/Chat/useTriggerMenu.tsx
-index 6eefd4a59..8bec39086 100644
+index 6eefd4a59..17071f1b2 100644
 --- a/node_modules/@astryxdesign/core/src/Chat/useTriggerMenu.tsx
 +++ b/node_modules/@astryxdesign/core/src/Chat/useTriggerMenu.tsx
-@@ -170 +170,3 @@ const styles = stylex.create({
+@@ -170 +170,50 @@ const styles = stylex.create({
 -function getTextBeforeCursor(editable: HTMLDivElement): string | null {
++const blockDisplays = new Set(['block', 'flex', 'flow-root', 'grid', 'list-item', 'table']);
++
++function createsLineBoundary(node: Node): boolean {
++  return (
++    node instanceof HTMLBRElement ||
++    (node instanceof HTMLElement && blockDisplays.has(window.getComputedStyle(node).display))
++  );
++}
++
++function getTrailingContextCharacter(node: Node): string {
++  if (node.nodeType === Node.TEXT_NODE) {
++    return (node.textContent ?? '').slice(-1);
++  }
++  if (createsLineBoundary(node)) {
++    return '\n';
++  }
++  for (let child = node.lastChild; child; child = child.previousSibling) {
++    const character = getTrailingContextCharacter(child);
++    if (character) {
++      return character;
++    }
++  }
++  return '';
++}
++
++function getCharacterBeforeNode(editable: HTMLDivElement, node: Node): string {
++  let current: Node | null = node;
++  while (current && current !== editable) {
++    for (let sibling = current.previousSibling; sibling; sibling = sibling.previousSibling) {
++      const character = getTrailingContextCharacter(sibling);
++      if (character) {
++        return character;
++      }
++    }
++
++    const parent = current.parentNode;
++    if (!parent || parent === editable) {
++      return '';
++    }
++    if (createsLineBoundary(parent)) {
++      return '\n';
++    }
++    current = parent;
++  }
++  return '';
++}
++
 +function getTextBeforeCursor(
 +  editable: HTMLDivElement,
 +): {text: string; nodeStart: number} | null {
-@@ -186 +188,6 @@ function getTextBeforeCursor(editable: HTMLDivElement): string | null {
+@@ -186 +235,3 @@ function getTextBeforeCursor(editable: HTMLDivElement): string | null {
 -    return (node.textContent ?? '').slice(0, range.startOffset);
 +    const nodeText = (node.textContent ?? '').slice(0, range.startOffset);
-+    const beforeNode = range.cloneRange();
-+    beforeNode.selectNodeContents(editable);
-+    beforeNode.setEnd(node, 0);
-+    const prefix = beforeNode.toString().slice(-1);
++    const prefix = getCharacterBeforeNode(editable, node);
 +    return {text: prefix + nodeText, nodeStart: prefix.length};
-@@ -489,2 +496,2 @@ export function useTriggerMenu(
+@@ -489,2 +540,2 @@ export function useTriggerMenu(
 -    const textBefore = getTextBeforeCursor(editable);
 -    if (textBefore === null) {
 +    const cursorContext = getTextBeforeCursor(editable);
 +    if (cursorContext === null) {
-@@ -497,2 +504,2 @@ export function useTriggerMenu(
+@@ -497,2 +548,2 @@ export function useTriggerMenu(
 -    const found = findActiveTrigger(textBefore, triggers);
 -    if (!found) {
 +    const found = findActiveTrigger(cursorContext.text, triggers);
 +    if (!found || found.triggerStart < cursorContext.nodeStart) {
-@@ -505 +512,2 @@ export function useTriggerMenu(
+@@ -505 +556,2 @@ export function useTriggerMenu(
 -    const {trigger, query, triggerStart} = found;
 +    const {trigger, query} = found;
 +    const triggerStart = found.triggerStart - cursorContext.nodeStart;
