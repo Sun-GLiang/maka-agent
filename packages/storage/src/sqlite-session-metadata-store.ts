@@ -1923,6 +1923,7 @@ export class SqliteSessionMetadataStore {
         string,
         { readonly message: StoredMessage; readonly json: string }
       >();
+      const historicalMessageIdSet = new Set<string>();
       const existingSequences = new Map<string, number>();
       for (const messageId of unique) {
         const fallback = provenRootMessages.get(messageId);
@@ -1953,6 +1954,9 @@ export class SqliteSessionMetadataStore {
           !messageContentsEqual(admission.content, fallback.content)
         ) {
           throw new SessionMetadataConflictError('Message admission fallback content conflict');
+        }
+        if (admission === undefined && fallback !== undefined) {
+          historicalMessageIdSet.add(messageId);
         }
         if (
           !admission &&
@@ -1997,10 +2001,10 @@ export class SqliteSessionMetadataStore {
             steeringEventId: messageId,
           });
           const json = JSON.stringify(message);
-          (fallback ? historicalMissingMessages : ordinaryMissingMessages).set(messageId, {
-            message,
-            json,
-          });
+          (historicalMessageIdSet.has(messageId)
+            ? historicalMissingMessages
+            : ordinaryMissingMessages
+          ).set(messageId, { message, json });
         } else {
           const sequence = rows[0]?.sequence;
           if (typeof sequence !== 'number' || !Number.isSafeInteger(sequence)) {
@@ -2037,13 +2041,12 @@ export class SqliteSessionMetadataStore {
         }
       }
       let tailLatest: StoredMessage | undefined;
-      if (provenRootMessages.size > 0) {
+      if (historicalMessageIdSet.size > 0) {
         const transcript = this.readSessionMessageOrderingSync(input.sessionId);
         let previousExistingSequence = -1;
         const historicalMessageIds = unique.filter((messageId) =>
-          provenRootMessages.has(messageId),
+          historicalMessageIdSet.has(messageId),
         );
-        const historicalMessageIdSet = new Set(historicalMessageIds);
         for (const messageId of historicalMessageIds) {
           const sequence = existingSequences.get(messageId);
           if (sequence === undefined) continue;

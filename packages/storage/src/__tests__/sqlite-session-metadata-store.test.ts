@@ -607,7 +607,7 @@ describe('SqliteSessionMetadataStore', () => {
     }
   });
 
-  test('keeps ordinary admission-only handoff append semantics', async () => {
+  test('keeps ordinary admission handoff append semantics when Root proof is also supplied', async () => {
     const store = createSqliteSessionMetadataStore(':memory:');
     try {
       await store.create(fullHeader({ id: 'session-ordinary-handoff-order' }));
@@ -638,10 +638,17 @@ describe('SqliteSessionMetadataStore', () => {
         admittedAt: 10,
       });
 
-      await store.markMessagesHandedOff({
+      await markMessagesHandedOffWithProvenRoots(store, {
         sessionId: 'session-ordinary-handoff-order',
         messageIds: ['message-ordinary-admission'],
         turnId: 'turn-ordinary-handoff-order',
+        provenRootMessages: [
+          {
+            messageId: 'message-ordinary-admission',
+            content: { text: 'ordinary admission' },
+            admittedAt: 10,
+          },
+        ],
       });
 
       assert.deepEqual(
