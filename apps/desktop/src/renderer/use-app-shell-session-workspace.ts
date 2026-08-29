@@ -21,6 +21,11 @@ import { useRef, useState } from 'react';
 import type { StoredMessage } from '@maka/core/session';
 import type { TransientUserMessageProjection } from '@maka/ui';
 import { useAppShellSessionUiState } from './app-shell-session-ui-state.js';
+import {
+  selectActiveSessionId,
+  useSessionCatalogController,
+} from './session-catalog-state.js';
+import { useExternalStoreSelector } from './use-external-store-selector.js';
 import { useAppShellSessionList } from './use-app-shell-session-list.js';
 import { createBootstrapSelectionLease } from './bootstrap-selection-lease.js';
 import { hasNewTaskReloadIntent } from './new-task-reload-intent.js';
@@ -37,10 +42,15 @@ type ToastApi = {
 type TransientUserMessage = TransientUserMessageProjection;
 
 export function useAppShellSessionWorkspace(toastApi: ToastApi) {
-  const [activeId, setActiveIdState] = useState<string | undefined>();
+  // The catalog and the selection are one authority, and it is a store: the
+  // Session rail subscribes to it directly instead of receiving it from the
+  // shell's render (#4109).
+  const catalog = useSessionCatalogController();
+  const activeId = useExternalStoreSelector(catalog, selectActiveSessionId);
   const activeIdRef = useRef<string | undefined>(undefined);
   const sessionUiController = useAppShellSessionUiState();
   const sessionList = useAppShellSessionList(toastApi, {
+    catalog,
     activeIdRef,
     liveTurnBySessionRef: sessionUiController.liveTurnBySessionRef,
     clearTurnTransientStateIfCurrent: sessionUiController.clearTurnTransientStateIfCurrent,
@@ -67,7 +77,11 @@ export function useAppShellSessionWorkspace(toastApi: ToastApi) {
     transientMessagesBySessionRef,
     transcriptRangeRef,
     selectionRevisionRef,
-    setActiveIdState,
+    // The store is the authority for the selection, so the factory's single
+    // write point goes to it rather than to a `useState` beside it. The
+    // controller is created once per renderer, so this identity is fixed and
+    // the once-created factory may capture it.
+    setActiveIdState: catalog.setActiveSessionId,
     setMessagesState: setMessages,
     setTransientMessagesState: setTransientMessages,
     setMessageLoadPending,
@@ -86,6 +100,7 @@ export function useAppShellSessionWorkspace(toastApi: ToastApi) {
 
   return {
     ...sessionList,
+    sessionCatalogController: catalog,
     activeId,
     activeIdRef,
     bootstrapSelectionLease: bootstrapSelectionLeaseRef.current,
