@@ -48,10 +48,13 @@ import {
   createClientRuntimeHostCredentialStore,
   createClientRuntimeHostProfileCatalog,
   createRuntimeHostCandidateLaunchBarrier,
+  createRuntimeHostPeerClientFromEnvironment,
   LOCAL_RUNTIME_HOST_PROFILE,
   loadOrCreateRuntimeHostClientInstanceId,
+  listRuntimeHostWslDistributions,
 } from "@maka/runtime-host/client";
 import type { WorkspaceTarget } from "@maka/runtime-host/protocol";
+import { runtimeHostProfileUsesHostWorkspace } from "@maka/runtime-host/profile-kind";
 import { createCredentialMcpOAuthStorage, McpClientManager } from "@maka/mcp";
 import { createWorkBoardStore } from "@maka/storage/work-board-store";
 import { createFileCredentialStore } from "@maka/storage/credential-store";
@@ -168,7 +171,11 @@ import {
 import {
   createDesktopRuntimeHostSshTerminal,
 } from "./runtime-host-ssh-terminal.js";
-import { createRuntimeHostSetupPackageResolver } from "./runtime-host-setup-package.js";
+import { runDesktopRuntimeHostWslSetup } from './runtime-host-wsl-controller.js';
+import {
+  createRuntimeHostSetupPackageResolver,
+  desktopRuntimeHostDevelopmentPeerTarget,
+} from "./runtime-host-setup-package.js";
 import { configureDesktopRuntimeHostPeerClient } from './runtime-host-peer-client.js';
 import { createDesktopRuntimeHostLocalOperator } from './runtime-host-local-operator.js';
 import { createDesktopLocalRuntimeHostRemoteAccess } from './runtime-host-local-remote-access.js';
@@ -220,6 +227,9 @@ const runtimeHostDirectPeerAvailable = await configureDesktopRuntimeHostPeerClie
   resourcesPath: process.resourcesPath,
   clientDataRoot: userDataDir,
 });
+const runtimeHostPeerClient = runtimeHostDirectPeerAvailable
+  ? createRuntimeHostPeerClientFromEnvironment()
+  : undefined;
 const runtimeHostClientInstanceId = await loadOrCreateRuntimeHostClientInstanceId(
   join(userDataDir, "runtime-host-client.json"),
 );
@@ -392,7 +402,10 @@ const localRuntimeHostRemoteAccess = createDesktopLocalRuntimeHostRemoteAccess({
   rootId: startupLocalStorageRoot.rootId,
   directPeerAvailable: runtimeHostDirectPeerAvailable,
   manager: () => runtimeHostManager,
-  resolveSetupPackage: runtimeHostSetupPackage.resolve,
+  resolveSetupPackage: (signal) => runtimeHostSetupPackage.resolve(
+    desktopRuntimeHostDevelopmentPeerTarget(),
+    signal,
+  ),
   operator: localRuntimeHostOperator,
 });
 const native = assembleDesktopNativeCapabilities({
@@ -432,14 +445,19 @@ const runtimeHostProfileService = createDesktopRuntimeHostProfileService({
   credentialStore: runtimeHostCredentialStore,
   states: () => runtimeHostManager?.entries() ?? [],
   enable: async (target, sshInteraction) => {
-    if (target.profile.kind !== "remote" || !target.credential) {
-      throw new Error("A resolved remote Runtime Host profile is required");
+    if (target.profile.kind === 'local') {
+      throw new Error('A resolved non-local Runtime Host profile is required');
+    }
+    if (target.profile.kind === 'remote' && !target.credential) {
+      throw new Error('A remote Runtime Host profile requires an access credential');
     }
     if (!runtimeHostManager) throw new Error("Runtime Host manager is unavailable");
     await runtimeHostManager.enable({
       profile: target.profile,
-      credential: target.credential,
-      ...(target.profile.transport.kind === "ssh" ? { sshInteraction } : {}),
+      ...(target.credential ? { credential: target.credential } : {}),
+      ...(target.profile.kind === 'remote' && target.profile.transport.kind === "ssh"
+        ? { sshInteraction }
+        : {}),
     });
   },
   disable: async (profileId) => {
@@ -460,6 +478,10 @@ const runtimeHostOnboarding = createDesktopRuntimeHostOnboarding({
   clientInstanceId: runtimeHostClientInstanceId,
   profiles: runtimeHostProfileService,
   runSetup: runtimeHostSshTerminal.runSetup,
+  runWslSetup: runDesktopRuntimeHostWslSetup,
+  listWslDistributions: listRuntimeHostWslDistributions,
+  setupPackageMode: runtimeHostSetupPackage.mode,
+  resolveSshDevelopmentPeerTarget: runtimeHostSshTerminal.resolveDevelopmentPeerTarget,
   resolveSetupPackage: runtimeHostSetupPackage.resolve,
   send: (snapshot) =>
     mainWindowController.send("runtime-host-onboarding:changed", snapshot),
@@ -473,6 +495,8 @@ const runtimeHostManagement = createDesktopRuntimeHostManagement({
   runUpdate: runtimeHostSshTerminal.runUpdate,
   runUpdatePolicy: runtimeHostSshTerminal.runUpdatePolicy,
   runUpdateReconciliation: runtimeHostSshTerminal.runUpdateReconciliation,
+  setupPackageMode: runtimeHostSetupPackage.mode,
+  resolveSshDevelopmentPeerTarget: runtimeHostSshTerminal.resolveDevelopmentPeerTarget,
   resolveUpdatePackage: runtimeHostSetupPackage.resolve,
   currentHostEpoch: (profileId) =>
     runtimeHostManager?.current(profileId)?.candidate?.client.hostEpoch,
@@ -562,7 +586,7 @@ const selectedDesktopWorkspaceTarget = async (
   if (typeof current.projectId === "string") {
     return { kind: "project", projectId: current.projectId };
   }
-  if (target.kind === "remote") return undefined;
+  if (runtimeHostProfileUsesHostWorkspace(target.kind)) return undefined;
   return { kind: "host_path", path: current.path };
 };
 const currentDesktopWorkspaceTarget = async (
@@ -570,7 +594,7 @@ const currentDesktopWorkspaceTarget = async (
 ): Promise<WorkspaceTarget> => {
   const workspace = await selectedDesktopWorkspaceTarget(target);
   if (!workspace) {
-    throw new Error("Select a project from the remote Runtime Host first");
+    throw new Error("Select a project from the Runtime Host first");
   }
   return workspace;
 };
@@ -724,6 +748,7 @@ runtimeHostManager = await startRuntimeHostDesktopManager(
     clientInstanceId: runtimeHostClientInstanceId,
     generation: runtimeHostGeneration,
     candidateLaunchBarrier: runtimeHostCandidateLaunchBarrier,
+    ...(runtimeHostPeerClient ? { peerClient: runtimeHostPeerClient } : {}),
     // The Desktop E2E composition lives behind its own entry module, which
     // release packaging drops: picking it here is what keeps FakeBackend and
     // the E2E bootstrap out of the shipped Runtime Host.
@@ -817,7 +842,7 @@ runtimeHostManager = await startRuntimeHostDesktopManager(
         input,
         {
           ...currentTarget.projectManagement,
-          ...(target.kind === "local"
+          ...(!runtimeHostProfileUsesHostWorkspace(target.kind)
             ? {
                 defaultProjectId: async () =>
                   (await settingsStore.get()).projects.defaultProjectId,
@@ -825,7 +850,7 @@ runtimeHostManager = await startRuntimeHostDesktopManager(
             : {}),
         },
         currentTarget.projectCatalog,
-        { allowHostPath: target.kind === "local" },
+        { allowHostPath: !runtimeHostProfileUsesHostWorkspace(target.kind) },
       );
     },
     emitSessionsChanged,
@@ -1022,6 +1047,7 @@ function registerHostClientIpc(
   scope: DesktopTargetScope,
   isTargetActive: () => boolean,
 ): () => Promise<void> {
+  const usesHostWorkspace = runtimeHostProfileUsesHostWorkspace(target.kind);
   const sendToRenderer = (channel: string, ...args: unknown[]): void => {
     if (isTargetActive()) mainWindowController.send(channel, scope, ...args);
   };
@@ -1042,7 +1068,7 @@ function registerHostClientIpc(
   });
   const targetProjectCatalog = createRuntimeHostProjectCatalog(() => ({
     client,
-    includeHostPaths: target.kind === "local",
+    includeHostPaths: !usesHostWorkspace,
   }));
   const targetProjectManagement = createProjectManagementService({
     catalog: targetProjectCatalog,
@@ -1055,7 +1081,7 @@ function registerHostClientIpc(
       return result.canceled ? undefined : result.filePaths[0];
     },
     selection: targetProjectRoot,
-    capabilities: target.kind === "local"
+    capabilities: !usesHostWorkspace
       ? {
           chooseClientDirectory: true,
           chooseHostDirectory: false,
@@ -1159,7 +1185,7 @@ function registerHostClientIpc(
     client,
     workspaceRoot,
     openPath: (path) => shell.openPath(path),
-    allowLocalPaths: target.kind === "local",
+    allowLocalPaths: !usesHostWorkspace,
   });
   const settingsIpcDeps = {
     ipcMain: scopedIpc,
@@ -1213,7 +1239,7 @@ function registerHostClientIpc(
         return { kind: "project", projectId };
       }
       if (projectId === null) {
-        if (target.kind === "remote") return undefined;
+        if (usesHostWorkspace) return undefined;
         return {
           kind: "host_path",
           path: (await requireRuntimePolicyTarget(target).projectManagement.current()).path,
@@ -1224,7 +1250,7 @@ function registerHostClientIpc(
     getDefaultPermissionMode: () =>
       resolveDefaultPermissionMode(() => loadRuntimeHostSettings(settingsIpcDeps)),
     openPath: (path) => shell.openPath(path),
-    allowLocalPaths: target.kind === "local",
+    allowLocalPaths: !usesHostWorkspace,
   });
   registerRuntimeHostSearchIpc({ ipcMain: scopedIpc, client });
   registerRuntimeHostUsageIpc({
@@ -1235,7 +1261,7 @@ function registerHostClientIpc(
   registerRuntimeHostWorkspaceIpc({
     ipcMain: scopedIpc,
     client,
-    allowLocalWorkspace: target.kind === "local",
+    allowLocalWorkspace: !usesHostWorkspace,
   });
   const resolveProjectRootForContext = (sessionId: unknown): Promise<string> =>
     resolveProjectContextRoot(sessionId, {
@@ -1256,7 +1282,7 @@ function registerHostClientIpc(
       buildInfo,
       e2eFixture,
       projectManagement: targetProjectManagement,
-      allowLocalProjectPaths: target.kind === "local",
+      allowLocalProjectPaths: !usesHostWorkspace,
     },
     scopedIpc,
   );
@@ -1270,7 +1296,7 @@ function registerHostClientIpc(
       if (!path) throw new Error(`Project is unavailable: ${projectId}`);
       return path;
     },
-    allowLocalWorkspace: target.kind === "local",
+    allowLocalWorkspace: !usesHostWorkspace,
   });
   const onboardingService = createOnboardingService({
     listConnections: async () =>
@@ -1310,7 +1336,7 @@ function registerHostClientIpc(
   const taskSubmissionReadinessService = createDesktopTaskSubmissionReadinessService({
     workspaceRoot,
     runtimeState: () => ({ state: client.lifecycleState, checkedAt: Date.now() }),
-    ...(target.kind === "remote"
+    ...(usesHostWorkspace
       ? { inspectWorkspace: async () => "ready" as const }
       : {}),
     resolveModelTarget: (requestedSlug) =>

@@ -447,15 +447,15 @@ describe('SqliteSessionMetadataStore', () => {
     }
   });
 
-  test('migrates v33 message admissions with an empty Skill invocation outcome', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'maka-message-admission-v33-'));
+  test('migrates v34 message admissions with an empty Skill invocation outcome', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-message-admission-v34-'));
     const path = join(root, 'state.sqlite');
     try {
       const setup = createSqliteSessionMetadataStore(path);
       try {
-        await setup.create(fullHeader({ id: 'session-v33-admission' }));
+        await setup.create(fullHeader({ id: 'session-v34-admission' }));
         await setup.commitMessageAdmission({
-          sessionId: 'session-v33-admission',
+          sessionId: 'session-v34-admission',
           turnId: 'turn-1',
           runId: 'run-1',
           messageId: 'message-1',
@@ -475,7 +475,7 @@ describe('SqliteSessionMetadataStore', () => {
       try {
         legacy.exec(`
           ALTER TABLE message_admissions DROP COLUMN skill_invocation_json;
-          UPDATE session_metadata_schema SET version = 33 WHERE scope = 'session_metadata';
+          UPDATE session_metadata_schema SET version = 34 WHERE scope = 'session_metadata';
         `);
       } finally {
         legacy.close();
@@ -485,7 +485,7 @@ describe('SqliteSessionMetadataStore', () => {
       try {
         assert.equal(migrated.schemaVersion(), SQLITE_SESSION_METADATA_SCHEMA_VERSION);
         assert.deepEqual(
-          (await migrated.readMessageAdmission('session-v33-admission', 'message-1'))
+          (await migrated.readMessageAdmission('session-v34-admission', 'message-1'))
             ?.skillInvocation,
           { loaded: [], failed: [], receipts: [] },
         );
@@ -2668,6 +2668,7 @@ describe('SqliteSessionMetadataStore', () => {
       expectedVersion: 1,
       configuration: {
         backend: 'ai-sdk' as const,
+        llmConnectionId: '11111111-1111-4111-8111-111111111111',
         llmConnectionSlug: 'openrouter',
         connectionLocked: true,
         model: 'openrouter/free',
@@ -2705,6 +2706,7 @@ describe('SqliteSessionMetadataStore', () => {
 
       const updated = await store.updateSessionConfiguration('configured-session', configuration);
       assert.equal(updated.metadataVersion, 2);
+      assert.equal(updated.header.llmConnectionId, '11111111-1111-4111-8111-111111111111');
       assert.equal(updated.header.model, 'openrouter/free');
       assert.equal(updated.header.collaborationMode, 'plan');
       assert.equal(updated.header.orchestrationMode, 'graph');
@@ -2750,6 +2752,7 @@ describe('SqliteSessionMetadataStore', () => {
         expectedVersion: 1,
         configuration: {
           backend: 'ai-sdk',
+          llmConnectionId: '11111111-1111-4111-8111-111111111111',
           llmConnectionSlug: 'openrouter',
           connectionLocked: true,
           model: 'openrouter/free',

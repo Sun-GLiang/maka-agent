@@ -121,7 +121,9 @@ export const TURN_RESUME_PARK_REASONS = [
   'continuation_already_exists',
   'continuation_repair_required',
   'continuation_started_indeterminate',
-  'continuation_unavailable',
+  'resume_feature_disabled',
+  'continuation_authority_unavailable',
+  'safety_observation_unavailable',
   'session_busy',
 ] as const;
 
@@ -169,6 +171,12 @@ export type TurnProviderRetry =
       attempt: number;
       maxAttempts: number;
       delayMs: number;
+      /**
+       * Host-clock time the wait was scheduled at, kept so a re-projection
+       * mid-wait can recompute the authoritative remaining duration. Absent
+       * from snapshots written by older runtimes.
+       */
+      ts?: number;
       reason: ProviderRetryReason;
     }
   | {
@@ -747,18 +755,18 @@ export function decodeTurnProviderRetry(value: unknown): TurnProviderRetry {
   if (attempt > maxAttempts) throw invalidProtocolFrame('Invalid Turn provider retry');
   const reason = requireProviderRetryReason(record.reason);
   if (phase === 'scheduled') {
-    assertExactKeys(record, 'scheduled Turn provider retry', [
-      'phase',
-      'attempt',
-      'maxAttempts',
-      'delayMs',
-      'reason',
-    ]);
+    const requiredKeys = ['phase', 'attempt', 'maxAttempts', 'delayMs', 'reason'] as const;
+    assertExactKeys(
+      record,
+      'scheduled Turn provider retry',
+      record.ts === undefined ? requiredKeys : [...requiredKeys, 'ts'],
+    );
     return {
       phase,
       attempt,
       maxAttempts,
       delayMs: requireCount(record.delayMs, 'delayMs'),
+      ...(record.ts !== undefined ? { ts: requireCount(record.ts, 'ts') } : {}),
       reason,
     };
   }

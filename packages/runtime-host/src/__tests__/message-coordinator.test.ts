@@ -18,15 +18,24 @@
  */
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { messageContentDigest, type MessageContent } from '@maka/core/events';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { SkillInvocationResult } from '@maka/core/skill-invocation';
+import {
+  WORKHUB_COORDINATION_SESSION_ID,
+  WORKHUB_COORDINATION_SESSION_ROLE,
+} from '@maka/core/session';
 import type {
   MessageAdmissionStore,
   PendingMessageAdmission,
   RootTurnSourceMessageReceipt,
 } from '@maka/storage/execution-stores';
+import { createSessionStore } from '@maka/storage/session-store';
 import {
   MESSAGE_OPERATION_RESULT_MAX_BYTES,
   MESSAGE_QUEUE_MAX_ENTRIES,
@@ -46,6 +55,84 @@ import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 
 const ROOT = { sessionId: 'session-1', turnId: 'turn-1', runId: 'run-1' } as const;
 const EMPTY_SKILL_INVOCATION = { loaded: [], failed: [], receipts: [] } as const;
+
+test('consumes an atomically committed active-target admission exactly once', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-workhub-active-consume-'));
+  const store = createSessionStore(root);
+  t.after(async () => {
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  });
+  await store.createStableSession({
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+    requestFingerprint: `sha256:${'a'.repeat(64)}`,
+    input: {
+      cwd: root,
+      name: 'WorkHub',
+      role: WORKHUB_COORDINATION_SESSION_ROLE,
+      llmConnectionSlug: 'test',
+      model: 'test',
+      permissionMode: 'explore',
+      toolProfile: 'workhub-coordination-v1',
+    },
+  });
+  await store.createStableSession({
+    sessionId: ROOT.sessionId,
+    requestFingerprint: `sha256:${'b'.repeat(64)}`,
+    input: {
+      cwd: root,
+      name: 'Payments',
+      llmConnectionSlug: 'test',
+      model: 'test',
+      permissionMode: 'ask',
+    },
+  });
+  const fixture = createFixture(undefined, () => true, store);
+  fixture.coordinator.reserveRootTurn(ROOT);
+  fixture.coordinator.bindRun(ROOT);
+  const content = { text: 'atomic WorkHub assignment' };
+  const actionId = 'action-active-target';
+  const suffix = createHash('sha256').update(actionId, 'utf8').digest('hex').slice(0, 48);
+  const messageId = `whm_${suffix}`;
+  await store.assignWorkHubMessage({
+    assignment: {
+      type: 'workhub_coordination',
+      id: `wha_${suffix}`,
+      turnId: actionId,
+      ts: 10,
+      schemaVersion: 1,
+      kind: 'delegation_assigned',
+      actionId,
+      actionFingerprint: `sha256:${'c'.repeat(64)}`,
+      coordinationTurnId: actionId,
+      targetSessionId: ROOT.sessionId,
+      targetSessionName: 'Payments',
+      targetTurnId: ROOT.turnId,
+      targetMessageId: messageId,
+      delegationId: `whd_${suffix}`,
+      disposition: 'delegate_existing',
+      userText: content.text,
+      steered: true,
+    },
+    admission: {
+      ...ROOT,
+      messageId,
+      content,
+      submittedContentDigest: messageContentDigest(content),
+      submittedPlacement: 'current_turn',
+      placement: 'current_turn',
+      disposition: 'steering',
+      skillInvocation: EMPTY_SKILL_INVOCATION,
+      admittedAt: 10,
+    },
+  });
+
+  await fixture.coordinator.consumePendingAdmissions([ROOT.sessionId]);
+  await fixture.coordinator.consumePendingAdmissions([ROOT.sessionId]);
+
+  assert.equal(fixture.coordinator.projection(ROOT.sessionId).steering.length, 1);
+  assert.equal(fixture.drainRequests(), 0);
+});
 
 test('idle submit starts exactly one root Turn and retry identity is connection-independent', async () => {
   const fixture = createFixture();
@@ -2577,6 +2664,7 @@ test('canonical retry omits redundant display text and empty ordered refs', asyn
 function createFixture(
   onProjectionChanged?: (sessionId: string) => void,
   preflightSessionSnapshot: HostMessageCoordinatorOptions['preflightSessionSnapshot'] = () => true,
+  admissionsOverride?: MessageAdmissionStore,
 ) {
   let nextId = 1;
   let liveResidencies = 0;
@@ -2605,7 +2693,8 @@ function createFixture(
       state: 'accepted' | 'handed_off' | 'executed' | 'cancelled';
     }
   >();
-  const admissions = memoryMessageAdmissionStore(messageAdmissions);
+  const admissions = admissionsOverride ?? memoryMessageAdmissionStore(messageAdmissions);
+  const sessionAdmission = new SessionAdmissionGate();
   const stopClaimed = deferred<void>();
   const terminal = deferred<TurnSnapshot>();
   let coordinator: HostMessageCoordinator;
@@ -2724,7 +2813,7 @@ function createFixture(
       },
     },
     admissions,
-    sessionAdmission: new SessionAdmissionGate(),
+    sessionAdmission,
     acquireResidency: () => {
       liveResidencies += 1;
       let released = false;
@@ -2747,6 +2836,7 @@ function createFixture(
   return {
     coordinator,
     admissions,
+    sessionAdmission,
     setRootState: (state: HostMessageRootState) => {
       rootState = state;
     },

@@ -133,7 +133,7 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('publishes a new compatibility epoch for mandatory submit Skill outcomes', () => {
-    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 56);
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 61);
   });
 
   test('rejects the legacy connection update result in the current compatibility epoch', () => {
@@ -327,6 +327,10 @@ describe('Runtime Host bootstrap protocol', () => {
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 50);
   });
 
+  test('publishes a new compatibility epoch for exact Session Connection identity', () => {
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 56);
+  });
+
   test('selects the highest mutually supported protocol and rejects a gap', () => {
     assert.equal(negotiateProtocol({ min: 0, max: 0 }, { min: 0, max: 0 }), 0);
     assert.equal(negotiateProtocol({ min: 1, max: 3 }, { min: 2, max: 4 }), 3);
@@ -402,6 +406,24 @@ describe('Runtime Host bootstrap protocol', () => {
       },
     };
     assert.deepEqual(decodeSessionContinuitySnapshot(retrying), retrying);
+    // Snapshots written after #3393 carry the host-clock schedule time so a
+    // re-projection can recompute the remaining wait; the field is optional
+    // for older snapshots.
+    const retryingWithTs = {
+      ...continuitySnapshot('epoch-1'),
+      rootTurn: {
+        ...continuitySnapshot('epoch-1').rootTurn,
+        providerRetry: {
+          phase: 'scheduled' as const,
+          attempt: 8,
+          maxAttempts: 10,
+          delayMs: 40_000,
+          ts: 1_700_000_000_000,
+          reason: 'rate_limit' as const,
+        },
+      },
+    };
+    assert.deepEqual(decodeSessionContinuitySnapshot(retryingWithTs), retryingWithTs);
     assert.throws(
       () =>
         decodeSessionContinuitySnapshot({
@@ -1039,6 +1061,25 @@ describe('Runtime Host bootstrap protocol', () => {
       },
     };
     assert.deepEqual(decodeHostFrame(parked), parked);
+    for (const reason of [
+      'resume_feature_disabled',
+      'continuation_authority_unavailable',
+      'safety_observation_unavailable',
+    ] as const) {
+      const unavailable = {
+        ...parked,
+        result: { ...parked.result, reason },
+      };
+      assert.deepEqual(decodeHostFrame(unavailable), unavailable);
+    }
+    assert.throws(
+      () =>
+        decodeHostFrame({
+          ...parked,
+          result: { ...parked.result, reason: 'continuation_unavailable' },
+        }),
+      isInvalidFrame,
+    );
     assert.throws(
       () =>
         decodeHostFrame({

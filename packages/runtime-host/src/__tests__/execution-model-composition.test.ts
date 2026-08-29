@@ -144,6 +144,27 @@ const TEST_SANDBOX_DIAGNOSTICS = createSandboxDiagnosticsProvider({
   canonicalizePath: async (path) => path,
 });
 
+test('backend creation resolves a bound Session by immutable Connection identity', async () => {
+  let observedRef: unknown;
+  await createHostAiSdkBackend(
+    backendCreationFixture({
+      abortSignal: new AbortController().signal,
+      connectionId: '11111111-1111-4111-8111-111111111111',
+      resolveExecutionConnection: async (ref) => {
+        observedRef = ref;
+        return readyExecutionConnection();
+      },
+      readPricing: async () => ({ revision: 0, overrides: [] }),
+    }),
+  );
+
+  assert.deepEqual(observedRef, {
+    kind: 'bound',
+    connectionId: '11111111-1111-4111-8111-111111111111',
+    connectionSlug: 'backend-creation-connection',
+  });
+});
+
 test('backend creation aborts a stalled canonical connection read', async () => {
   const abort = new AbortController();
   const creating = createHostAiSdkBackend(
@@ -300,6 +321,7 @@ test('production Host executes current-boundary Bash and refreshes live sandbox 
     const execution = await openInteractiveExecutionStoresForWrite(owner.lease);
     const session = await execution.sessionStore.create({
       cwd: project,
+      llmConnectionId: connection.connectionId,
       llmConnectionSlug: 'hosted-managed-bash-provider',
       model: MODEL_ID,
       permissionMode: 'ask',
@@ -753,9 +775,13 @@ test('backend abort cannot cancel the authority-owned OAuth refresh used by its 
     const firstCreation = createHostAiSdkBackend(
       backendCreationFixture({
         abortSignal: firstAbort.signal,
+        connectionId: connection.connectionId,
         modelId: subscriptionModelId,
         resolveExecutionConnection: () =>
-          policy.operations.resolveExecutionConnection('backend-creation-connection'),
+          policy.operations.resolveExecutionConnection({
+            kind: 'catalog_slug',
+            connectionSlug: 'backend-creation-connection',
+          }),
         runtimePolicy: policy,
         oauthCredentials: authority,
         readPricing: async () => ({ revision: 0, overrides: [] }),
@@ -777,9 +803,13 @@ test('backend abort cannot cancel the authority-owned OAuth refresh used by its 
     secondBackend = await createHostAiSdkBackend(
       backendCreationFixture({
         abortSignal: new AbortController().signal,
+        connectionId: connection.connectionId,
         modelId: subscriptionModelId,
         resolveExecutionConnection: () =>
-          policy.operations.resolveExecutionConnection('backend-creation-connection'),
+          policy.operations.resolveExecutionConnection({
+            kind: 'catalog_slug',
+            connectionSlug: 'backend-creation-connection',
+          }),
         runtimePolicy: policy,
         oauthCredentials: authority,
         readPricing: async () => ({ revision: 0, overrides: [] }),
@@ -788,9 +818,10 @@ test('backend abort cannot cancel the authority-owned OAuth refresh used by its 
     );
     assert.equal(transports.refreshCalls, 1);
 
-    const resolved = await policy.operations.resolveExecutionConnection(
-      'backend-creation-connection',
-    );
+    const resolved = await policy.operations.resolveExecutionConnection({
+      kind: 'catalog_slug',
+      connectionSlug: 'backend-creation-connection',
+    });
     assert.equal(resolved.kind, 'ready');
     if (resolved.kind === 'ready') {
       const persisted = JSON.parse(
@@ -1155,6 +1186,7 @@ test('hosted execution freezes the headless coding provider wire contract', asyn
           workspace: { kind: 'host_path', path: root },
           modelTarget: {
             kind: 'explicit',
+            connectionId: connection.connectionId,
             connectionSlug: 'profile-deepseek',
             model: 'deepseek-v4-flash',
           },
@@ -1341,6 +1373,7 @@ test('production Host executes a canonical ai-sdk Session against a real provide
     const execution = await openInteractiveExecutionStoresForWrite(owner.lease);
     const session = await execution.sessionStore.create({
       cwd: root,
+      llmConnectionId: connection.connectionId,
       llmConnectionSlug: 'hosted-real-provider',
       model: MODEL_ID,
       permissionMode: 'ask',
@@ -1451,40 +1484,21 @@ test('production Host executes a canonical ai-sdk Session against a real provide
     assert.match(requestText, /HOSTED_MEMORY_SENTINEL/);
     assert.match(JSON.stringify(mainRequests[1]?.body), /HOSTED_SKILL_BODY_MUST_STAY_LAZY/);
     // Tavily is selected but no web-search credential exists, so the provider
-    // must never see WebSearch in the effective root tool surface.
+    // must never see WebSearch in the effective root tool surface. Non-direct
+    // bound tools stay deferred behind tool_search until activated.
     assert.deepEqual(toolNames(request?.body), [
       'ArchiveRead',
       'AskUserQuestion',
       'Bash',
       'Edit',
-      'ExploreAgent',
-      'FormatJson',
       'Glob',
-      'GoalClear',
-      'GoalPause',
-      'GoalResume',
-      'GoalSet',
-      'GoalStatus',
       'Grep',
-      'MakaSettingsGet',
-      'MakaSettingsUpdate',
       'Read',
-      'ReadHistory',
-      'ScheduledTask',
-      'SearchHistory',
       'Skill',
       'SkillSearch',
       'StopBackgroundTask',
       'WebFetch',
       'Write',
-      'WriteStdin',
-      'memory_extract',
-      'memory_remember',
-      'request_sandbox_boundary',
-      'task_create',
-      'task_get',
-      'task_list',
-      'task_update',
       'tool_search',
     ]);
     assert.match(JSON.stringify(compactRequests[0]?.body), /context summarization assistant/);
@@ -1657,6 +1671,7 @@ test('production Host executes and durably supervises an Agent Graph over a real
     const execution = await openInteractiveExecutionStoresForWrite(owner.lease);
     const session = await execution.sessionStore.create({
       cwd: project,
+      llmConnectionId: connection.connectionId,
       llmConnectionSlug: 'hosted-graph-provider',
       model: MODEL_ID,
       permissionMode: 'bypass',
@@ -1856,6 +1871,7 @@ test('production Host executes a durable runnable child with an exact tool ceili
     const execution = await openInteractiveExecutionStoresForWrite(owner.lease);
     const parent = await execution.sessionStore.create({
       cwd: project,
+      llmConnectionId: connection.connectionId,
       llmConnectionSlug: 'hosted-child-provider',
       model: MODEL_ID,
       permissionMode: 'bypass',
@@ -2053,6 +2069,7 @@ test('production Host publishes and retires an implementation child patch', asyn
     const execution = await openInteractiveExecutionStoresForWrite(owner.lease);
     const parent = await execution.sessionStore.create({
       cwd: project,
+      llmConnectionId: connection.connectionId,
       llmConnectionSlug: 'hosted-child-provider',
       model: MODEL_ID,
       permissionMode: 'bypass',
@@ -2307,6 +2324,7 @@ test('Host auxiliary calls preserve resolved DeepSeek reasoning settings', async
     await publishConnectionModel(policy, connection.connectionId, 'deepseek-v4-flash');
     const session = await execution.sessionStore.create({
       cwd: capability.canonicalPath,
+      llmConnectionId: connection.connectionId,
       llmConnectionSlug: 'deepseek-auxiliary',
       model: 'deepseek-v4-flash',
       thinkingLevel: 'high',
@@ -2384,6 +2402,7 @@ test('Host auxiliary models meter provider usage and abort physical requests', {
     await publishConnectionModel(policy, connection.connectionId, MODEL_ID);
     const session = await execution.sessionStore.create({
       cwd: capability.canonicalPath,
+      llmConnectionId: connection.connectionId,
       llmConnectionSlug: 'goal-evaluator-provider',
       model: MODEL_ID,
       permissionMode: 'ask',
@@ -3219,7 +3238,7 @@ test('a bound tool ceiling excludes dynamic Client Capability tools', () => {
 
   assert.deepEqual(composition.tools, [boundTool]);
   assert.equal(
-    composition.toolAvailability.groups?.some((group) => group.id === 'client_fixture'),
+    composition.toolAvailability?.groups?.some((group) => group.id === 'client_fixture') ?? false,
     false,
   );
 });
@@ -3253,7 +3272,7 @@ test('the headless coding profile freezes the Eval prompt and tool ceiling', asy
     composition.tools.map(({ name }) => name),
     ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'apply_patch'],
   );
-  assert.deepEqual(composition.toolAvailability.groups, []);
+  assert.equal(composition.toolAvailability, undefined);
   assert.equal(
     (
       await composition.resolveSystemPrompt({
@@ -3451,7 +3470,8 @@ async function publishConnectionModel(
 
 function backendCreationFixture(input: {
   abortSignal: AbortSignal;
-  resolveExecutionConnection: () => Promise<unknown>;
+  connectionId?: string;
+  resolveExecutionConnection: (ref?: unknown) => Promise<unknown>;
   readPricing: () => Promise<unknown>;
   runtimePolicy?: RuntimePolicyStoresWriter;
   oauthCredentials?: HostOAuthExecutionAuthority;
@@ -3513,6 +3533,7 @@ function backendCreationFixture(input: {
       sessionId: 'backend-creation-session',
       workspaceRoot: '/workspace',
       header: {
+        llmConnectionId: input.connectionId ?? '11111111-1111-4111-8111-111111111111',
         llmConnectionSlug: 'backend-creation-connection',
         model: input.modelId ?? MODEL_ID,
         cwd: '/workspace',
