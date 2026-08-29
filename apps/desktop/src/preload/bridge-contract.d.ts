@@ -386,10 +386,15 @@ export interface DesktopRuntimeHostProfileChangedEvent {
 }
 
 export type DesktopLocalRuntimeHostRemoteAccessSnapshot =
-  | { readonly state: 'unsupported'; readonly message: string }
+  | { readonly state: 'unsupported'; readonly message: string; readonly managedService?: true }
   | { readonly state: 'off'; readonly managedService?: true; readonly sharedAccess?: true }
-  | { readonly state: 'on'; readonly sharedAccess?: true }
-  | { readonly state: 'unavailable'; readonly message: string; readonly sharedAccess?: true };
+  | { readonly state: 'on'; readonly managedService: true; readonly sharedAccess?: true }
+  | {
+      readonly state: 'unavailable';
+      readonly message: string;
+      readonly managedService?: true;
+      readonly sharedAccess?: true;
+    };
 
 export type DesktopRuntimeHostConnectionCodeImportResult =
   | { readonly kind: 'connected'; readonly profileId: string }
@@ -682,9 +687,6 @@ export interface MakaBridge {
     createConnectionCode(): Promise<string>;
     revokeSharedAccess(): Promise<DesktopLocalRuntimeHostRemoteAccessSnapshot>;
     disable(): Promise<DesktopLocalRuntimeHostRemoteAccessSnapshot>;
-    uninstall(input: {
-      readonly allowInterruptActiveTasks: boolean;
-    }): Promise<{ readonly kind: 'active_tasks' | 'uninstalled' }>;
   };
 
   runtimeHostSshTerminal: {
@@ -708,6 +710,7 @@ export interface MakaBridge {
     run(
       profileId: string,
       action: DesktopRuntimeHostManagementAction,
+      allowInterruptActiveTasks?: boolean,
     ): Promise<DesktopRuntimeHostManagementResponse>;
     update(
       profileId: string,
@@ -747,7 +750,11 @@ export interface MakaBridge {
     execute(
       target: DesktopRuntimeHostPeerMeshTarget,
       action: DesktopRuntimeHostPeerMeshAction,
-      input?: { readonly meshId?: string; readonly peerId?: string; readonly invitation?: string },
+      input?: {
+        readonly meshId?: string | null;
+        readonly peerId?: string;
+        readonly invitation?: string;
+      },
     ): Promise<DesktopRuntimeHostPeerMeshResult>;
   };
 

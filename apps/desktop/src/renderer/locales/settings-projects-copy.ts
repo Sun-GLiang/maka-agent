@@ -42,10 +42,6 @@ export type SettingsProjectsCopy = {
     revokeSharedAccessConfirm: string;
     revokeSharedAccessDescription: string;
     revokeSharedAccessDone: string;
-    uninstallLocalService: string;
-    uninstallLocalServiceConfirm: string;
-    uninstallLocalServiceDescription: string;
-    uninstallLocalServiceDone: string;
     createConnectionCode: string;
     connectionCodeTitle: string;
     connectionCodeDescription: string;
@@ -167,6 +163,8 @@ export type SettingsProjectsCopy = {
     refresh: string;
     startService: string;
     restartService: string;
+    restartActiveTasksDescription: string;
+    restartInterrupt: string;
     repairService: string;
     updateService: string;
     updatePolicy: string;
@@ -312,10 +310,6 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
       revokeSharedAccessConfirm: '撤销共享访问？',
       revokeSharedAccessDescription: '已连接的 Desktop 将断开，尚未使用的连接码也会失效。',
       revokeSharedAccessDone: '共享访问已撤销',
-      uninstallLocalService: '移除后台服务',
-      uninstallLocalServiceConfirm: '移除 Runtime Host 后台服务？',
-      uninstallLocalServiceDescription: '数据和已授予的共享访问会保留；Local Host 将恢复为仅在 Maka Desktop 运行时启动。',
-      uninstallLocalServiceDone: '后台服务已移除',
       createConnectionCode: '新建连接码',
       connectionCodeTitle: '连接这台电脑',
       connectionCodeDescription: '连接码将在 15 分钟后过期且只能使用一次。对方将获得 Owner 权限；Direct peer 无后备连接。',
@@ -460,6 +454,8 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
       refresh: '刷新',
       startService: '启动',
       restartService: '重启',
+      restartActiveTasksDescription: '重启会停止当前任务。是否中断这些任务并继续？',
+      restartInterrupt: '中断任务并重启',
       repairService: '修复',
       updateService: '安装配套版本',
       updatePolicy: '更新策略',
@@ -508,7 +504,7 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
       showLogs: '查看日志',
       noLogs: '没有服务日志',
       uninstallService: '卸载服务',
-      uninstallConfirmTitle: '卸载远程 Runtime Host？',
+      uninstallConfirmTitle: '卸载此 Runtime Host？',
       uninstallConfirmBody: '这会停止并移除 Maka 管理的服务与程序，但保留 State Root、项目和任务数据。当前 Desktop Profile 不会被删除。',
       uninstallConfirm: '卸载服务',
       uninstallRetained: (path: string) => `服务已卸载，数据保留在 ${path}`,
@@ -605,10 +601,6 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
       revokeSharedAccessConfirm: 'Revoke shared access?',
       revokeSharedAccessDescription: 'The connected Desktop will be disconnected, and unused connection codes will stop working.',
       revokeSharedAccessDone: 'Shared access revoked',
-      uninstallLocalService: 'Remove background service',
-      uninstallLocalServiceConfirm: 'Remove the Runtime Host background service?',
-      uninstallLocalServiceDescription: 'Data and granted shared access are retained. The Local Host will return to running only while Maka Desktop is open.',
-      uninstallLocalServiceDone: 'Background service removed',
       createConnectionCode: 'New connection code',
       connectionCodeTitle: 'Connect to this computer',
       connectionCodeDescription: 'Expires in 15 minutes and can be used once. The other Desktop receives Owner access. Direct peer has no fallback.',
@@ -753,6 +745,8 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
       refresh: 'Refresh',
       startService: 'Start',
       restartService: 'Restart',
+      restartActiveTasksDescription: 'Restarting stops the current tasks. Interrupt them and continue?',
+      restartInterrupt: 'Interrupt tasks and restart',
       repairService: 'Repair',
       updateService: 'Install matching version',
       updatePolicy: 'Update policy',
@@ -804,7 +798,7 @@ const SETTINGS_PROJECTS_COPY_BY_LOCALE = {
       showLogs: 'View logs',
       noLogs: 'No service logs were found',
       uninstallService: 'Uninstall service',
-      uninstallConfirmTitle: 'Uninstall the remote Runtime Host?',
+      uninstallConfirmTitle: 'Uninstall this Runtime Host?',
       uninstallConfirmBody: 'This stops and removes the Maka-managed service and program, while preserving the State Root, projects, and task data. The Desktop profile is not removed.',
       uninstallConfirm: 'Uninstall service',
       uninstallRetained: (path: string) => `Service uninstalled. Data was retained at ${path}`,

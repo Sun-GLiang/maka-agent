@@ -1234,9 +1234,6 @@ const makaBridge = {
     disable() {
       return ipcRenderer.invoke('local-runtime-host-remote-access:disable');
     },
-    uninstall(input: { readonly allowInterruptActiveTasks: boolean }) {
-      return ipcRenderer.invoke('local-runtime-host-remote-access:uninstall', input);
-    },
   },
   runtimeHostSshTerminal: {
     getSnapshot(): Promise<DesktopRuntimeHostSshTerminalSnapshot> {
@@ -1296,8 +1293,14 @@ const makaBridge = {
     run(
       profileId: string,
       action: DesktopRuntimeHostManagementAction,
+      allowInterruptActiveTasks = false,
     ): Promise<DesktopRuntimeHostManagementResponse> {
-      return ipcRenderer.invoke('runtime-host-management:run', profileId, action);
+      return ipcRenderer.invoke(
+        'runtime-host-management:run',
+        profileId,
+        action,
+        allowInterruptActiveTasks,
+      );
     },
     update(
       profileId: string,
@@ -1381,7 +1384,11 @@ const makaBridge = {
     execute(
       target: import('./bridge-contract.js').DesktopRuntimeHostPeerMeshTarget,
       action: import('./bridge-contract.js').DesktopRuntimeHostPeerMeshAction,
-      input: { readonly meshId?: string; readonly peerId?: string; readonly invitation?: string } = {},
+      input: {
+        readonly meshId?: string | null;
+        readonly peerId?: string;
+        readonly invitation?: string;
+      } = {},
     ) {
       return ipcRenderer.invoke(
         'runtime-host-peer-mesh:execute',

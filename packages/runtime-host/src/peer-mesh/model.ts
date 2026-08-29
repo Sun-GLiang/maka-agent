@@ -43,6 +43,8 @@ export {
   PEER_MESH_MAX_MESHES,
   PEER_MESH_MAX_PENDING_INVITATIONS,
   PEER_MESH_MAX_ROUTE_HINTS,
+  PEER_MESH_MAX_TRANSIT_ADDRESSES_PER_RELAY,
+  PEER_MESH_MAX_TRANSIT_RELAY_ADDRESSES,
   PEER_MESH_ROUTE_RECORD_MAX_BYTES,
 } from './limits.js';
 
@@ -75,6 +77,7 @@ export interface PeerMeshRouteRecordV1 extends PeerMeshAuthorityTarget {
   readonly version: 1;
   readonly sequence: number;
   readonly expiresAt: number;
+  readonly transitMeshId?: string;
 }
 
 export interface SignedPeerMeshRouteRecordV1 {
@@ -231,14 +234,24 @@ export function decodeAuthorityTarget(value: unknown): PeerMeshAuthorityTarget {
 }
 
 export function canonicalPeerMeshRouteRecord(value: unknown): PeerMeshRouteRecordV1 {
-  const record = exactObject(value, 'Peer Mesh route record', [
+  const baseKeys = [
     'version',
     'peerId',
     'sequence',
     'expiresAt',
     'routeHints',
     'coordinationRelays',
-  ]);
+  ];
+  const record = exactObject(
+    value,
+    'Peer Mesh route record',
+    value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.hasOwn(value, 'transitMeshId')
+      ? [...baseKeys, 'transitMeshId']
+      : baseKeys,
+  );
   if (record.version !== 1) throw new Error('Unsupported Peer Mesh route record version');
   const route = Object.freeze({
     version: 1 as const,
@@ -249,6 +262,9 @@ export function canonicalPeerMeshRouteRecord(value: unknown): PeerMeshRouteRecor
     coordinationRelays: Object.freeze(
       addressArray(record.coordinationRelays, 'coordinationRelays'),
     ),
+    ...(record.transitMeshId === undefined
+      ? {}
+      : { transitMeshId: string(record.transitMeshId, 'transitMeshId', 128) }),
   });
   if (peerMeshRouteRecordSigningBytes(route).byteLength > PEER_MESH_ROUTE_RECORD_MAX_BYTES) {
     throw new Error('Peer Mesh route record is too large');
@@ -279,6 +295,7 @@ export function peerMeshRouteRecordSigningBytes(route: PeerMeshRouteRecordV1): B
       peerId: route.peerId,
       routeHints: route.routeHints,
       sequence: route.sequence,
+      ...(route.transitMeshId ? { transitMeshId: route.transitMeshId } : {}),
       version: route.version,
     })}`,
   );

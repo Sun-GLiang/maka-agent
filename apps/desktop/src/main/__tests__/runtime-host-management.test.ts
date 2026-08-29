@@ -25,6 +25,7 @@ import {
   type RuntimeHostServiceManagementFrame,
 } from '@maka/runtime-host/operator';
 import { createDesktopRuntimeHostManagement } from '../runtime-host-management.js';
+import type { DesktopRuntimeHostManagementProvider } from '../runtime-host-management-provider.js';
 import type {
   DesktopRuntimeHostSshAccessInput,
   DesktopRuntimeHostSshCleanupInput,
@@ -35,6 +36,57 @@ import type {
 } from '../runtime-host-ssh-terminal.js';
 
 const DEPLOYMENT_ID = '11111111-1111-4111-8111-111111111111';
+
+test('requires explicit interruption authority before a provider restarts active work', async () => {
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const provider = {
+    profileId: 'local',
+    accessManagementAvailable: false,
+    run: async (action: string, allowInterruptActiveTasks: boolean) => {
+      return action === 'restart' && !allowInterruptActiveTasks
+        ? {
+            schemaVersion: 1 as const,
+            kind: 'error' as const,
+            action: 'restart' as const,
+            error: { code: 'active_tasks', message: 'Runtime Host still owns active work' },
+          }
+        : serviceResult(action as DesktopRuntimeHostSshManagementInput['action']);
+    },
+    uninstall: async () => ({ kind: 'uninstalled' as const, retainedStateRoot: '/state' }),
+  } as unknown as DesktopRuntimeHostManagementProvider;
+  createDesktopRuntimeHostManagement({
+    ...unusedUpdateDependencies(),
+    ipcMain: {
+      handle: (channel, handler) => handlers.set(channel, handler as (...args: unknown[]) => unknown),
+      removeHandler: (channel) => handlers.delete(channel),
+    },
+    profiles: {
+      ...unusedDirectPeerProfileDependencies(),
+      resolveManagedService: async () => assert.fail('Local must not resolve an SSH service'),
+      resolveManagedAccess: async () => assert.fail('Local must not resolve SSH access'),
+      markManagedServiceUninstalling: async () => assert.fail('Local must not mutate SSH state'),
+      markManagedServiceCleanupPending: async () => assert.fail('Local must not mutate SSH state'),
+      clearManagedServiceBinding: async () => assert.fail('Local must not mutate SSH state'),
+      rotateManagedCredential: async () => assert.fail('Local must not mutate SSH state'),
+    },
+    runServiceManagement: async () => assert.fail('Local must not use SSH transport'),
+    runAccessManagement: async () => assert.fail('Local must not use SSH transport'),
+    cleanupManagedDeployment: async () => assert.fail('Local must not use SSH transport'),
+    providers: [provider],
+  });
+
+  const run = handlers.get('runtime-host-management:run');
+  assert.ok(run);
+  const blocked = await run({}, 'local', 'restart');
+  const restarted = await run({}, 'local', 'restart', true);
+
+  assert.equal((blocked as { kind: string }).kind, 'error');
+  assert.equal((restarted as { kind: string }).kind, 'result');
+  assert.throws(
+    () => run({}, 'local', 'status', true),
+    /authority is not valid for this action/u,
+  );
+});
 
 test('identifies, rotates, and revokes managed credentials without exposing secrets', async () => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();

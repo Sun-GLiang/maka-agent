@@ -32,7 +32,6 @@ import type {
   DesktopRuntimeHostPeerMeshTarget,
 } from '../../preload/bridge-contract.js';
 import type {
-  RemoteRuntimeHostProfile,
   RuntimeHostRemoteTransport,
 } from "@maka/runtime-host/client";
 import { isCanonicalRuntimeHostWebSocketPath } from "@maka/runtime-host/protocol";
@@ -52,7 +51,10 @@ import { PasswordInput } from "./password-input.js";
 import { settingsActionErrorMessage } from "./settings-error-copy.js";
 import { SettingsField, SettingsRow, SettingsSection } from "./settings-section.js";
 import { RuntimeHostOnboardingDialog } from './runtime-host-onboarding-dialog.js';
-import { RuntimeHostManagementDialog } from './runtime-host-management-dialog.js';
+import {
+  RuntimeHostManagementDialog,
+  type RuntimeHostManagementTarget,
+} from './runtime-host-management-dialog.js';
 import { RuntimeHostConnectionCodeDialog } from './runtime-host-connection-code-dialog.js';
 import { RuntimeHostPeerMeshDialog } from './runtime-host-peer-mesh-dialog.js';
 
@@ -86,10 +88,15 @@ export function RuntimeHostProfilesSection(props: {
   >();
   const [showAdd, setShowAdd] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [managedProfile, setManagedProfile] = useState<RemoteRuntimeHostProfile>();
+  const [managedTarget, setManagedTarget] = useState<RuntimeHostManagementTarget>();
   const [localAccess, setLocalAccess] = useState<DesktopLocalRuntimeHostRemoteAccessSnapshot>();
   const [connectionCodeDialog, setConnectionCodeDialog] = useState<
-    { readonly mode: 'import' } | { readonly mode: 'share'; readonly connectionCode: string }
+    | { readonly mode: 'import' }
+    | {
+        readonly mode: 'share';
+        readonly connectionCode: string;
+        readonly openManagementOnClose?: true;
+      }
   >();
   const [peerMeshTarget, setPeerMeshTarget] = useState<{
     readonly target: DesktopRuntimeHostPeerMeshTarget;
@@ -256,7 +263,11 @@ export function RuntimeHostProfilesSection(props: {
         coordinationRelays: [],
       });
       if (result.kind === 'enabled') {
-        setConnectionCodeDialog({ mode: 'share', connectionCode: result.connectionCode });
+        setConnectionCodeDialog({
+          mode: 'share',
+          connectionCode: result.connectionCode,
+          openManagementOnClose: true,
+        });
       }
       if (!mountedRef.current) return;
       if (result.kind === 'active_tasks') {
@@ -343,46 +354,11 @@ export function RuntimeHostProfilesSection(props: {
     }
   }
 
-  async function uninstallLocalService(allowInterruptActiveTasks = false): Promise<void> {
-    if (!allowInterruptActiveTasks) {
-      const confirmed = await toast.confirm({
-        title: copy.uninstallLocalServiceConfirm,
-        description: copy.uninstallLocalServiceDescription,
-        confirmLabel: copy.uninstallLocalService,
-        cancelLabel: copy.cancel,
-        destructive: true,
-      });
-      if (!confirmed) return;
-    }
-    setSwitching(true);
-    try {
-      const result = await window.maka.localRuntimeHostRemoteAccess.uninstall({
-        allowInterruptActiveTasks,
-      });
-      if (!mountedRef.current) return;
-      if (result.kind === 'active_tasks') {
-        const confirmed = await toast.confirm({
-          title: copy.remoteAccessActiveTasks,
-          description: copy.uninstallActiveTasksDescription,
-          confirmLabel: copy.interruptAndUninstall,
-          cancelLabel: copy.cancel,
-          destructive: true,
-        });
-        if (confirmed) await uninstallLocalService(true);
-        return;
-      }
-      setLocalAccess({ state: 'off' });
-      toast.success(copy.uninstallLocalServiceDone);
-    } catch (error) {
-      if (mountedRef.current) {
-        toast.error(copy.remoteAccessFailed, settingsActionErrorMessage(error, locale));
-      }
-    } finally {
-      if (mountedRef.current) setSwitching(false);
-    }
-  }
-
   const connectedEntries = snapshot?.entries.filter((entry) => entry.profile.kind !== 'local') ?? [];
+  const localProfile = snapshot?.entries.find((entry) => entry.profile.kind === 'local')?.profile;
+  const localManagementTarget = localProfile
+    ? { id: localProfile.id, name: localProfile.name, directPeerManagement: false }
+    : undefined;
   const profileOptions = (snapshot?.entries ?? [])
     .filter((entry) => entry.enabled)
     .map((entry) => ({
@@ -422,6 +398,15 @@ export function RuntimeHostProfilesSection(props: {
                 variant="neutral"
                 label={localAccess?.state === 'on' ? copy.remoteAccessOn : copy.remoteAccessOff}
               />
+              {localManagementTarget && localAccess?.managedService ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  label={copy.manage}
+                  isDisabled={switching}
+                  onClick={() => setManagedTarget(localManagementTarget)}
+                />
+              ) : null}
               {localAccess?.state === 'on' ? (
                 <MoreMenu
                   label={copy.thisComputerRemoteAccess}
@@ -443,11 +428,6 @@ export function RuntimeHostProfilesSection(props: {
                       label: copy.disableRemoteAccess,
                       isDisabled: switching,
                       onClick: () => void disableLocalRemoteAccess(),
-                    },
-                    {
-                      label: copy.uninstallLocalService,
-                      isDisabled: switching,
-                      onClick: () => void uninstallLocalService(),
                     },
                   ]}
                 />
@@ -476,11 +456,6 @@ export function RuntimeHostProfilesSection(props: {
                               onClick: () => void revokeLocalSharedAccess(),
                             }]
                           : []),
-                        {
-                          label: copy.uninstallLocalService,
-                          isDisabled: switching,
-                          onClick: () => void uninstallLocalService(),
-                        },
                       ]}
                     />
                   ) : null}
@@ -647,6 +622,12 @@ export function RuntimeHostProfilesSection(props: {
             {connectedEntries.map((entry) => {
               const profile = entry.profile;
               if (profile.kind === 'local') return null;
+              const managedSshDestination =
+                profile.kind === 'remote' &&
+                profile.transport.kind === 'ssh' &&
+                entry.managedService
+                  ? profile.transport.destination
+                  : undefined;
               return (
                 <ListItem
                   key={profile.id}
@@ -684,12 +665,16 @@ export function RuntimeHostProfilesSection(props: {
                         label={copy.moreActions(profile.name)}
                         size="sm"
                         items={[
-                          ...(profile.kind === 'remote' &&
-                          profile.transport.kind === "ssh" && entry.managedService
+                          ...(managedSshDestination
                             ? [{
                                 label: copy.manage,
                                 isDisabled: switching,
-                                onClick: () => setManagedProfile(profile),
+                                onClick: () => setManagedTarget({
+                                  id: profile.id,
+                                  name: profile.name,
+                                  subtitle: managedSshDestination,
+                                  directPeerManagement: true,
+                                }),
                               }, {
                                 label: copy.managePeerMesh,
                                 isDisabled: switching,
@@ -726,10 +711,10 @@ export function RuntimeHostProfilesSection(props: {
         onRemoteHostAdded={props.onRemoteHostAdded}
       />
       <RuntimeHostManagementDialog
-        key={managedProfile ? `profile:${managedProfile.id}` : 'no-profile'}
-        profile={managedProfile}
+        key={managedTarget ? `profile:${managedTarget.id}` : 'no-profile'}
+        target={managedTarget}
         onClose={() => {
-          setManagedProfile(undefined);
+          setManagedTarget(undefined);
           void reload();
         }}
       />
@@ -753,7 +738,13 @@ export function RuntimeHostProfilesSection(props: {
         <RuntimeHostConnectionCodeDialog
           mode="share"
           connectionCode={connectionCodeDialog.connectionCode}
-          onClose={() => setConnectionCodeDialog(undefined)}
+          onClose={() => {
+            const openManagement = connectionCodeDialog.openManagementOnClose;
+            setConnectionCodeDialog(undefined);
+            if (openManagement && localManagementTarget) {
+              setManagedTarget(localManagementTarget);
+            }
+          }}
         />
       ) : null}
     </>

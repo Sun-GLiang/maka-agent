@@ -233,7 +233,7 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('publishes a new compatibility epoch for compound proxy updates', () => {
-    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 65);
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 66);
   });
 
   test('publishes a new compatibility epoch for the removed execution.inspect.resolve operation', () => {
