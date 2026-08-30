@@ -142,7 +142,7 @@ export function advanceSessionTurnAdmissionRecovery(
 
 function failAdmissionRecovery(db: DatabaseSync, sessionId: string): never {
   db.prepare(`UPDATE session_turn_index_state
-    SET failure_reason = 'corrupt_source', failure_sequence = 0
+    SET failure_origin = 'admission', failure_reason = 'corrupt_source', failure_sequence = 0
     WHERE session_id = ?`).run(sessionId);
   throw new SessionTurnPositionRecoveryError(sessionId, 'corrupt_source', 0);
 }
