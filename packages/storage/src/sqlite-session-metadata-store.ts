@@ -2783,7 +2783,7 @@ export class SqliteSessionMetadataStore {
               this.db,
               request.sessionId,
               snapshot,
-            ).snapshot;
+            );
           } catch (error) {
             if (error instanceof SessionTurnPositionRecoveryError) {
               this.db
@@ -2814,6 +2814,9 @@ export class SqliteSessionMetadataStore {
             SELECT byte_offset FROM session_turn_identity_recovery WHERE session_id = ?
           `)
           .get(request.sessionId) as { byte_offset: number } | undefined;
+        // Admission reconciliation owns scalar authority, not transcript source
+        // records/bytes. Its persisted cursor is intentionally package-private;
+        // callers observe progress when this phase advances to ordinal building.
         return {
           kind: 'building' as const,
           snapshotKey: snapshotKeyFromRow(snapshot),

@@ -24,14 +24,19 @@ export const SESSION_TURN_ADMISSION_RECOVERY_MAX_ROWS = 1_024;
 
 export interface SessionTurnAdmissionRecoveryResult {
   readonly complete: boolean;
-  readonly lastStepAdmissions: number;
-  readonly cursorAdmittedAt: number | null;
-  readonly cursorTurnId: string | null;
 }
 
 interface PersistedRecoveryFailure {
   readonly failure_reason: 'corrupt_source' | 'incompatible_identity' | 'hybrid_missing_admission';
   readonly failure_sequence: number;
+}
+
+interface AdmissionRecoveryState {
+  readonly admission_cursor_admitted_at: number | null;
+  readonly admission_cursor_turn_id: string | null;
+  readonly admission_recovery_complete: number;
+  readonly failure_reason: PersistedRecoveryFailure['failure_reason'] | null;
+  readonly failure_sequence: number | null;
 }
 
 /**
@@ -42,32 +47,32 @@ export function advanceSessionTurnAdmissionRecovery(
   db: DatabaseSync,
   input: {
     readonly sessionId: string;
-    readonly cursorAdmittedAt: number | null;
-    readonly cursorTurnId: string | null;
     readonly maxAdmissions: number;
   },
 ): SessionTurnAdmissionRecoveryResult {
   if (
     !Number.isSafeInteger(input.maxAdmissions) ||
     input.maxAdmissions < 1 ||
-    input.maxAdmissions > SESSION_TURN_ADMISSION_RECOVERY_MAX_ROWS ||
-    (input.cursorAdmittedAt === null) !== (input.cursorTurnId === null)
+    input.maxAdmissions > SESSION_TURN_ADMISSION_RECOVERY_MAX_ROWS
   ) {
     throw new SessionTurnPositionRecoveryError(input.sessionId, 'corrupt_source');
   }
-  const persistedFailure = db
-    .prepare(`SELECT failure_reason, failure_sequence FROM session_turn_index_state
-      WHERE session_id = ? AND failure_reason IS NOT NULL`)
-    .get(input.sessionId) as PersistedRecoveryFailure | undefined;
-  if (persistedFailure) {
+  const state = db
+    .prepare(`SELECT admission_cursor_admitted_at, admission_cursor_turn_id,
+      admission_recovery_complete, failure_reason, failure_sequence
+      FROM session_turn_index_state WHERE session_id = ?`)
+    .get(input.sessionId) as unknown as AdmissionRecoveryState | undefined;
+  if (!state) throw new SessionTurnPositionRecoveryError(input.sessionId, 'corrupt_source');
+  if (state.failure_reason !== null) {
     throw new SessionTurnPositionRecoveryError(
       input.sessionId,
-      persistedFailure.failure_reason,
-      persistedFailure.failure_sequence,
+      state.failure_reason,
+      state.failure_sequence ?? 0,
     );
   }
+  if (state.admission_recovery_complete === 1) return { complete: true };
   const rows = (
-    input.cursorAdmittedAt === null
+    state.admission_cursor_admitted_at === null
       ? db
           .prepare(`
             SELECT turn_id, admitted_at
@@ -85,7 +90,12 @@ export function advanceSessionTurnAdmissionRecovery(
             ORDER BY admitted_at, turn_id
             LIMIT ?
           `)
-          .all(input.sessionId, input.cursorAdmittedAt, input.cursorTurnId, input.maxAdmissions)
+          .all(
+            input.sessionId,
+            state.admission_cursor_admitted_at,
+            state.admission_cursor_turn_id,
+            input.maxAdmissions,
+          )
   ) as Array<{ turn_id?: unknown; admitted_at?: unknown }>;
   const readExisting = db.prepare(`
     SELECT order_source, admitted_at
@@ -100,8 +110,8 @@ export function advanceSessionTurnAdmissionRecovery(
     ON CONFLICT(session_id, position_kind, position_id) DO UPDATE SET
       order_source = 'admission', admitted_at = excluded.admitted_at
   `);
-  let cursorAdmittedAt = input.cursorAdmittedAt;
-  let cursorTurnId = input.cursorTurnId;
+  let cursorAdmittedAt = state.admission_cursor_admitted_at;
+  let cursorTurnId = state.admission_cursor_turn_id;
   for (const row of rows) {
     if (
       typeof row.turn_id !== 'string' ||
@@ -122,12 +132,12 @@ export function advanceSessionTurnAdmissionRecovery(
     cursorAdmittedAt = row.admitted_at;
     cursorTurnId = row.turn_id;
   }
-  return {
-    complete: rows.length < input.maxAdmissions,
-    lastStepAdmissions: rows.length,
-    cursorAdmittedAt,
-    cursorTurnId,
-  };
+  const complete = rows.length < input.maxAdmissions;
+  db.prepare(`UPDATE session_turn_index_state
+    SET admission_cursor_admitted_at = ?, admission_cursor_turn_id = ?,
+      admission_recovery_complete = ?
+    WHERE session_id = ?`).run(cursorAdmittedAt, cursorTurnId, complete ? 1 : 0, input.sessionId);
+  return { complete };
 }
 
 function failAdmissionRecovery(db: DatabaseSync, sessionId: string): never {
