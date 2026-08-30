@@ -2816,6 +2816,18 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
     throw new Error('Fake subscription does not expose transcript pages');
   }
 
+  async queryTranscriptPositions(): Promise<never> {
+    throw new Error('Fake subscription does not expose semantic transcript positions');
+  }
+
+  async loadTranscriptTurnWindow<T>(): Promise<never> {
+    throw new Error('Fake subscription does not expose semantic transcript windows');
+  }
+
+  async decodeTranscriptTurnWindowPage<T>(): Promise<never> {
+    throw new Error('Fake subscription does not expose semantic transcript windows');
+  }
+
   async close(): Promise<void> {
     this.#closed = true;
     for (const waiter of this.#waiters.splice(0)) {

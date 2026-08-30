@@ -544,6 +544,108 @@ test('decodes one bounded page without walking the remaining transcript', async 
   assert.deepEqual(requests, []);
 });
 
+test('production subscription API queries semantic positions and publishes only a complete window', async () => {
+  const logical = {
+    snapshotToken: 'snapshot-1',
+    startOrdinal: 0,
+    endOrdinalExclusive: 1,
+    totalPositions: 1,
+    positions: [
+      {
+        position: { ordinal: 0, key: { kind: 'turn' as const, id: 'turn-1' } },
+        messages: [{ type: 'user', id: 'user-1', turnId: 'turn-1', ts: 1, text: 'hello' }],
+      },
+    ],
+    hasOlder: false,
+    hasNewer: false,
+  };
+  const bytes = Buffer.from(JSON.stringify(logical), 'utf8');
+  const split = Math.floor(bytes.byteLength / 2);
+  const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}` as const;
+  let windowCalls = 0;
+  const subscription = new ClientSessionSubscription(
+    openResult('host-1', 'subscription-semantic', transcriptBootstrap(Buffer.from('{}'))),
+    async () => undefined,
+    async () => transcriptPage(),
+    async () => undefined,
+    {
+      queryPositions: async (input) => ({
+        kind: 'page',
+        subscriptionId: input.subscriptionId,
+        snapshotToken: 'snapshot-1',
+        totalPositions: 1,
+        startOrdinal: 0,
+        positions: [{ ordinal: 0, key: { kind: 'turn', id: 'turn-1' } }],
+        olderCursor: null,
+        newerCursor: null,
+      }),
+      readTurnWindow: async (input) => {
+        windowCalls += 1;
+        const first = input.kind === 'open';
+        return {
+          kind: 'page',
+          subscriptionId: input.subscriptionId,
+          snapshotToken: 'snapshot-1',
+          windowId: 'window-1',
+          byteOffset: first ? 0 : split,
+          totalBytes: bytes.byteLength,
+          payloadDigest: digest,
+          data: (first ? bytes.subarray(0, split) : bytes.subarray(split)).toString('base64'),
+          nextCursor: first ? 'window-cursor' : null,
+        };
+      },
+    },
+  );
+
+  const positions = await subscription.queryTranscriptPositions({
+    kind: 'acquire',
+    anchor: { kind: 'tail' },
+    maxPositions: 1,
+  });
+  assert.equal(positions.kind, 'page');
+  const window = await subscription.loadTranscriptTurnWindow(
+    {
+      snapshotToken: 'snapshot-1',
+      startOrdinal: 0,
+      maxPositions: 1,
+      replaceCursor: null,
+    },
+    decodeStoredMessage,
+  );
+  assert.equal(windowCalls, 2);
+  assert.deepEqual(window, logical);
+
+  const mismatched = Buffer.from(
+    JSON.stringify({
+      ...logical,
+      positions: [
+        {
+          position: { ordinal: 0, key: { kind: 'turn', id: 'turn-1' } },
+          messages: [{ type: 'user', id: 'user-2', turnId: 'turn-2', ts: 2, text: 'wrong Turn' }],
+        },
+      ],
+    }),
+    'utf8',
+  );
+  await assert.rejects(
+    subscription.decodeTranscriptTurnWindowPage(
+      {
+        kind: 'page',
+        subscriptionId: 'subscription-semantic',
+        snapshotToken: 'snapshot-1',
+        windowId: 'window-mismatched',
+        byteOffset: 0,
+        totalBytes: mismatched.byteLength,
+        payloadDigest: `sha256:${createHash('sha256').update(mismatched).digest('hex')}`,
+        data: mismatched.toString('base64'),
+        nextCursor: null,
+      },
+      decodeStoredMessage,
+    ),
+    /position identity changed/,
+  );
+});
+
 test('assembles the complete edge Turn while paging newer transcript', async () => {
   const prompt = {
     type: 'user' as const,
@@ -1016,6 +1118,66 @@ test('rejects a durable message that does not match its payload digest', async (
     hasSubscriptionReason('correlation_changed'),
   );
   assert.deepEqual(assemblyDeltas, [message.byteLength, -message.byteLength]);
+});
+
+test('releases each completed legacy message assembly before decoding the next message', async () => {
+  const encoded = [0, 1].map((index) =>
+    Buffer.from(
+      JSON.stringify({
+        type: 'user',
+        id: `user-${index}`,
+        turnId: `turn-${index}`,
+        ts: index + 1,
+        text: `message-${index}`,
+      }),
+      'utf8',
+    ),
+  );
+  const subscription = new ClientSessionSubscription(
+    openResult('host-1', 'subscription-immediate-assembly-release', {
+      throughSequence: 1,
+      durableCoverage: 'complete',
+      overlayMessageCount: 0,
+      durable: {
+        ...transcriptPage({
+          rawBytes: encoded[0]!.byteLength + encoded[1]!.byteLength,
+          fragments: encoded
+            .map((message, sequence) => ({
+              kind: 'durable' as const,
+              sequence,
+              byteOffset: 0,
+              totalBytes: message.byteLength,
+              payloadDigest: null,
+              data: message.toString('base64'),
+            }))
+            .reverse(),
+        }),
+        throughSequence: 1,
+      },
+      overlay: { ...transcriptPage({ source: 'overlay' }), throughSequence: 1 },
+    }),
+    async () => undefined,
+    async () => {
+      throw new Error('unexpected page request');
+    },
+  );
+  const assemblyDeltas: number[] = [];
+  const result = await subscription.decodeTranscriptPage(
+    subscription.transcriptBootstrap!.durable,
+    decodeStoredMessage,
+    undefined,
+    (deltaBytes) => assemblyDeltas.push(deltaBytes),
+  );
+  assert.deepEqual(
+    result.messages.map(({ identity }) => identity),
+    [0, 1],
+  );
+  assert.deepEqual(assemblyDeltas, [
+    encoded[1]!.byteLength,
+    -encoded[1]!.byteLength,
+    encoded[0]!.byteLength,
+    -encoded[0]!.byteLength,
+  ]);
 });
 
 test('rejects a transcript cursor that does not advance', async () => {

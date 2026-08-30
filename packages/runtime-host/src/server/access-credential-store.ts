@@ -41,6 +41,8 @@ const LEGACY_TRANSCRIPT_QUERY_GRANT = 'session.transcript.query';
 const TRANSCRIPT_QUERY_REPLACEMENT_GRANTS = [
   'session.transcript.page',
   'session.transcript.overlay.release',
+  'session.transcript.positions.query',
+  'session.transcript.turn_window.page',
 ] as const satisfies readonly OperationKey[];
 const TURN_QUERY_GRANT = 'session.turns.query';
 const TURN_QUERY_REPLACEMENT_GRANTS = [
@@ -74,6 +76,8 @@ export const SESSION_GUEST_OPERATION_GRANTS = Object.freeze([
   'subscription.close',
   'session.transcript.page',
   'session.transcript.overlay.release',
+  'session.transcript.positions.query',
+  'session.transcript.turn_window.page',
 ] as const satisfies readonly OperationKey[]);
 
 export interface StoredAccessCredential {

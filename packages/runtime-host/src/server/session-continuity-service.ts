@@ -27,7 +27,7 @@ export interface SessionContinuityFrameSink {
 export interface SessionContinuityConnection {
   activate(subscriptionId: string): void;
   abort(subscriptionId: string): void;
-  close(): void;
+  close(): Promise<void>;
 }
 
 export interface SessionContinuityService {

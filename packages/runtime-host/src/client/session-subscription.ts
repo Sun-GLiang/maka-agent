@@ -17,7 +17,6 @@
  * under the License.
  */
 
-import { createHash } from 'node:crypto';
 import {
   encodeProtocolMessage,
   type SessionAssistantStreamIdentity,
@@ -31,7 +30,13 @@ import {
   type SessionTranscriptFragment,
   type SessionTranscriptPage,
   type SessionTranscriptPageInput,
+  type SessionTranscriptPositionsInput,
+  type SessionTranscriptPositionsResult,
+  type SessionTranscriptSemanticPosition,
+  type SessionTranscriptTurnWindowInput,
+  type SessionTranscriptTurnWindowResult,
 } from '../protocol/index.js';
+import { TranscriptFragmentAssembler } from './transcript-fragment-assembler.js';
 
 const MAX_CLIENT_QUEUED_FRAMES = 32;
 const MAX_CLIENT_QUEUED_BYTES = 256 * 1024;
@@ -60,6 +65,182 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function acceptSemanticWindowFragment(
+  assembler: TranscriptFragmentAssembler,
+  page: Extract<SessionTranscriptTurnWindowResult, { readonly kind: 'page' }>,
+): void {
+  const data = Buffer.from(page.data, 'base64');
+  try {
+    assembler.accept(page.byteOffset, data);
+  } catch (cause) {
+    throw new RuntimeHostSubscriptionError('correlation_changed', errorMessage(cause), { cause });
+  }
+}
+
+function decodeSemanticTranscriptWindow<T>(
+  bytes: Buffer,
+  expectedSnapshotToken: string,
+  decodeMessage: (value: unknown) => T,
+): DecodedSessionTranscriptTurnWindow<T> {
+  let value: unknown;
+  try {
+    value = JSON.parse(bytes.toString('utf8')) as unknown;
+  } catch (cause) {
+    throw new RuntimeHostSubscriptionError(
+      'correlation_changed',
+      `Semantic transcript window is not valid JSON: ${errorMessage(cause)}`,
+    );
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new RuntimeHostSubscriptionError(
+      'correlation_changed',
+      'Semantic transcript window is not an object',
+    );
+  }
+  const record = value as Record<string, unknown>;
+  const keys = [
+    'snapshotToken',
+    'startOrdinal',
+    'endOrdinalExclusive',
+    'totalPositions',
+    'positions',
+    'hasOlder',
+    'hasNewer',
+  ];
+  if (
+    Object.keys(record).length !== keys.length ||
+    keys.some((key) => !Object.hasOwn(record, key)) ||
+    record.snapshotToken !== expectedSnapshotToken ||
+    !isClientCount(record.startOrdinal) ||
+    !isClientCount(record.endOrdinalExclusive) ||
+    !isClientCount(record.totalPositions) ||
+    typeof record.hasOlder !== 'boolean' ||
+    typeof record.hasNewer !== 'boolean' ||
+    !Array.isArray(record.positions) ||
+    record.positions.length < 1 ||
+    record.positions.length > 10 ||
+    record.endOrdinalExclusive !== record.startOrdinal + record.positions.length ||
+    record.endOrdinalExclusive > record.totalPositions ||
+    record.hasOlder !== record.startOrdinal > 0 ||
+    record.hasNewer !== record.endOrdinalExclusive < record.totalPositions
+  ) {
+    throw new RuntimeHostSubscriptionError(
+      'correlation_changed',
+      'Semantic transcript window metadata changed',
+    );
+  }
+  const startOrdinal = record.startOrdinal as number;
+  const endOrdinalExclusive = record.endOrdinalExclusive as number;
+  const totalPositions = record.totalPositions as number;
+  const hasOlder = record.hasOlder as boolean;
+  const hasNewer = record.hasNewer as boolean;
+  const messageIds = new Set<string>();
+  const positions = record.positions.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new RuntimeHostSubscriptionError(
+        'correlation_changed',
+        'Invalid semantic transcript position',
+      );
+    }
+    const item = entry as Record<string, unknown>;
+    if (
+      Object.keys(item).length !== 2 ||
+      !Object.hasOwn(item, 'position') ||
+      !Object.hasOwn(item, 'messages') ||
+      !item.position ||
+      typeof item.position !== 'object' ||
+      Array.isArray(item.position) ||
+      !Array.isArray(item.messages)
+    ) {
+      throw new RuntimeHostSubscriptionError(
+        'correlation_changed',
+        'Invalid semantic transcript position',
+      );
+    }
+    const position = item.position as Record<string, unknown>;
+    if (
+      Object.keys(position).length !== 2 ||
+      position.ordinal !== startOrdinal + index ||
+      !isSemanticPositionKey(position.key)
+    ) {
+      throw new RuntimeHostSubscriptionError(
+        'correlation_changed',
+        'Semantic transcript position order changed',
+      );
+    }
+    const key = position.key as SessionTranscriptSemanticPosition['key'];
+    const messages = item.messages.map((message) => {
+      if (!semanticMessageMatchesPosition(message, key, messageIds)) {
+        throw new RuntimeHostSubscriptionError(
+          'correlation_changed',
+          'Semantic transcript position identity changed',
+        );
+      }
+      return decodeMessage(message);
+    });
+    return {
+      position: position as unknown as SessionTranscriptSemanticPosition,
+      messages,
+    };
+  });
+  if (
+    positions.some((entry) => entry.position.key.kind === 'empty') &&
+    (totalPositions !== 1 || startOrdinal !== 0 || positions.length !== 1)
+  ) {
+    throw new RuntimeHostSubscriptionError(
+      'correlation_changed',
+      'Semantic transcript empty position changed',
+    );
+  }
+  return {
+    snapshotToken: expectedSnapshotToken,
+    startOrdinal,
+    endOrdinalExclusive,
+    totalPositions,
+    positions,
+    hasOlder,
+    hasNewer,
+  };
+}
+
+function semanticMessageMatchesPosition(
+  value: unknown,
+  key: SessionTranscriptSemanticPosition['key'],
+  messageIds: Set<string>,
+): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || key.kind === 'empty') {
+    return false;
+  }
+  const message = value as Record<string, unknown>;
+  if (typeof message.id !== 'string' || message.id.length === 0 || messageIds.has(message.id)) {
+    return false;
+  }
+  const matches =
+    key.kind === 'turn'
+      ? message.turnId === key.id
+      : message.type === 'system_note' &&
+        message.id === key.id &&
+        !Object.hasOwn(message, 'turnId');
+  if (matches) messageIds.add(message.id);
+  return matches;
+}
+
+function isSemanticPositionKey(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const key = value as Record<string, unknown>;
+  if (key.kind === 'empty') return Object.keys(key).length === 1;
+  return (
+    (key.kind === 'turn' || key.kind === 'note') &&
+    Object.keys(key).length === 2 &&
+    typeof key.id === 'string' &&
+    key.id.length > 0
+  );
+}
+
+function isClientCount(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
 export interface RuntimeHostSessionSubscription extends AsyncIterable<SubscriptionFrame> {
   readonly hostEpoch: string;
   readonly subscriptionId: string;
@@ -81,7 +262,52 @@ export interface RuntimeHostSessionSubscription extends AsyncIterable<Subscripti
   loadTranscriptPage(
     input: Omit<SessionTranscriptPageInput, 'subscriptionId'>,
   ): Promise<SessionTranscriptPage>;
+  queryTranscriptPositions(
+    input: ClientTranscriptPositionsInput,
+  ): Promise<SessionTranscriptPositionsResult>;
+  loadTranscriptTurnWindow<T>(
+    input: ClientTranscriptTurnWindowOpenInput,
+    decodeMessage: (value: unknown) => T,
+  ): Promise<DecodedSessionTranscriptTurnWindow<T> | NonPageTranscriptTurnWindowResult>;
+  decodeTranscriptTurnWindowPage<T>(
+    page: Extract<SessionTranscriptTurnWindowResult, { readonly kind: 'page' }>,
+    decodeMessage: (value: unknown) => T,
+  ): Promise<DecodedSessionTranscriptTurnWindow<T>>;
   close(): Promise<void>;
+}
+
+type WithoutSubscription<T> = T extends { readonly subscriptionId: string }
+  ? Omit<T, 'subscriptionId'>
+  : never;
+
+export type ClientTranscriptPositionsInput = WithoutSubscription<SessionTranscriptPositionsInput>;
+export type ClientTranscriptTurnWindowOpenInput = Omit<
+  Extract<SessionTranscriptTurnWindowInput, { readonly kind: 'open' }>,
+  'kind' | 'subscriptionId'
+>;
+export type NonPageTranscriptTurnWindowResult = Exclude<
+  SessionTranscriptTurnWindowResult,
+  { readonly kind: 'page' }
+>;
+
+export interface DecodedSessionTranscriptTurnWindow<T> {
+  readonly snapshotToken: string;
+  readonly startOrdinal: number;
+  readonly endOrdinalExclusive: number;
+  readonly totalPositions: number;
+  readonly positions: readonly {
+    readonly position: SessionTranscriptSemanticPosition;
+    readonly messages: readonly T[];
+  }[];
+  readonly hasOlder: boolean;
+  readonly hasNewer: boolean;
+}
+
+export interface SessionTranscriptSemanticClientPort {
+  queryPositions(input: SessionTranscriptPositionsInput): Promise<SessionTranscriptPositionsResult>;
+  readTurnWindow(
+    input: SessionTranscriptTurnWindowInput,
+  ): Promise<SessionTranscriptTurnWindowResult>;
 }
 
 export interface DecodedSessionTranscriptPage<T> {
@@ -110,6 +336,7 @@ export class ClientSessionSubscription
     input: SessionTranscriptPageInput,
   ) => Promise<SessionTranscriptPage>;
   readonly #releaseTranscriptOverlay: () => Promise<void>;
+  readonly #semanticTranscript: SessionTranscriptSemanticClientPort | undefined;
   readonly #expectedSessionId: string;
   readonly #queue: QueuedFrame[] = [];
   #queuedBytes = 0;
@@ -136,6 +363,7 @@ export class ClientSessionSubscription
     requestClose: () => Promise<void>,
     readTranscriptPage: (input: SessionTranscriptPageInput) => Promise<SessionTranscriptPage>,
     releaseTranscriptOverlay: () => Promise<void> = async () => undefined,
+    semanticTranscript?: SessionTranscriptSemanticClientPort,
   ) {
     this.hostEpoch = result.hostEpoch;
     this.subscriptionId = result.subscriptionId;
@@ -149,6 +377,7 @@ export class ClientSessionSubscription
     this.#requestClose = requestClose;
     this.#readTranscriptPage = readTranscriptPage;
     this.#releaseTranscriptOverlay = releaseTranscriptOverlay;
+    this.#semanticTranscript = semanticTranscript;
   }
 
   [Symbol.asyncIterator](): AsyncIterator<SubscriptionFrame> {
@@ -228,7 +457,7 @@ export class ClientSessionSubscription
       throughSequence: page.throughSequence,
       maxBytes: Math.max(1, page.rawBytes),
     });
-    const assembler = new TranscriptFragmentAssembler(
+    const assembler = new TranscriptMessageAssembler(
       page.source,
       page.direction,
       maxMessageBytes,
@@ -334,6 +563,119 @@ export class ClientSessionSubscription
     });
   }
 
+  queryTranscriptPositions(
+    input: ClientTranscriptPositionsInput,
+  ): Promise<SessionTranscriptPositionsResult> {
+    this.#assertTranscriptReadable();
+    if (!this.transcriptBootstrap || !this.#semanticTranscript) {
+      return Promise.reject(
+        new RuntimeHostSubscriptionError(
+          'correlation_changed',
+          'Session subscription was opened without semantic transcript access',
+        ),
+      );
+    }
+    return this.#semanticTranscript
+      .queryPositions({
+        ...input,
+        subscriptionId: this.subscriptionId,
+      } as SessionTranscriptPositionsInput)
+      .then((result) => {
+        this.#assertTranscriptReadable();
+        if (result.subscriptionId !== this.subscriptionId) {
+          throw new RuntimeHostSubscriptionError(
+            'correlation_changed',
+            'Semantic transcript position subscription changed',
+          );
+        }
+        return result;
+      });
+  }
+
+  async loadTranscriptTurnWindow<T>(
+    input: ClientTranscriptTurnWindowOpenInput,
+    decodeMessage: (value: unknown) => T,
+  ): Promise<DecodedSessionTranscriptTurnWindow<T> | NonPageTranscriptTurnWindowResult> {
+    this.#assertTranscriptReadable();
+    if (!this.transcriptBootstrap || !this.#semanticTranscript) {
+      throw new RuntimeHostSubscriptionError(
+        'correlation_changed',
+        'Session subscription was opened without semantic transcript access',
+      );
+    }
+    const page = await this.#semanticTranscript.readTurnWindow({
+      kind: 'open',
+      subscriptionId: this.subscriptionId,
+      ...input,
+    });
+    if (page.subscriptionId !== this.subscriptionId) {
+      throw new RuntimeHostSubscriptionError(
+        'correlation_changed',
+        'Semantic transcript window subscription changed',
+      );
+    }
+    return page.kind === 'page' ? this.decodeTranscriptTurnWindowPage(page, decodeMessage) : page;
+  }
+
+  async decodeTranscriptTurnWindowPage<T>(
+    page: Extract<SessionTranscriptTurnWindowResult, { readonly kind: 'page' }>,
+    decodeMessage: (value: unknown) => T,
+  ): Promise<DecodedSessionTranscriptTurnWindow<T>> {
+    this.#assertTranscriptReadable();
+    const semantic = this.#semanticTranscript;
+    if (!semantic || page.subscriptionId !== this.subscriptionId || page.byteOffset !== 0) {
+      throw new RuntimeHostSubscriptionError(
+        'correlation_changed',
+        'Invalid semantic transcript window start',
+      );
+    }
+    const assembler = new TranscriptFragmentAssembler(
+      'newer',
+      page.totalBytes,
+      page.payloadDigest,
+      SESSION_TRANSCRIPT_RANGE_MAX_BYTES,
+    );
+    try {
+      acceptSemanticWindowFragment(assembler, page);
+      let cursor = page.nextCursor;
+      while (cursor !== null) {
+        const requestedCursor = cursor;
+        const continuation = await semantic.readTurnWindow({
+          kind: 'continue',
+          subscriptionId: this.subscriptionId,
+          cursor,
+        });
+        if (
+          continuation.kind !== 'page' ||
+          continuation.subscriptionId !== this.subscriptionId ||
+          continuation.snapshotToken !== page.snapshotToken ||
+          continuation.windowId !== page.windowId ||
+          continuation.totalBytes !== page.totalBytes ||
+          continuation.payloadDigest !== page.payloadDigest ||
+          continuation.nextCursor === requestedCursor
+        ) {
+          throw new RuntimeHostSubscriptionError(
+            'correlation_changed',
+            'Semantic transcript window continuation changed',
+          );
+        }
+        acceptSemanticWindowFragment(assembler, continuation);
+        cursor = continuation.nextCursor;
+      }
+      let bytes: Buffer;
+      try {
+        bytes = assembler.finish();
+      } catch (cause) {
+        throw new RuntimeHostSubscriptionError('correlation_changed', errorMessage(cause), {
+          cause,
+        });
+      }
+      return decodeSemanticTranscriptWindow(bytes, page.snapshotToken, decodeMessage);
+    } finally {
+      assembler.release();
+    }
+  }
+
   async #loadTranscript(): Promise<unknown[]> {
     this.#assertTranscriptReadable();
     const bootstrap = this.transcriptBootstrap;
@@ -424,7 +766,7 @@ export class ClientSessionSubscription
       throughSequence: initial.throughSequence,
       maxBytes: Math.max(1, initial.rawBytes),
     });
-    const assembler = new TranscriptFragmentAssembler(
+    const assembler = new TranscriptMessageAssembler(
       initial.source,
       initial.direction,
       maxMessageBytes,
@@ -608,16 +950,14 @@ export class ClientSessionSubscription
   }
 }
 
-class TranscriptFragmentAssembler {
+class TranscriptMessageAssembler {
   readonly #messages: Array<{ identity: number; value: unknown }> = [];
-  #assemblyBytes = 0;
   #current:
     | {
         identity: number;
         totalBytes: number;
         payloadDigest: `sha256:${string}` | null;
-        data: Buffer;
-        edge: number;
+        assembly: TranscriptFragmentAssembler;
       }
     | undefined;
   #lastStartedIdentity: number | undefined;
@@ -636,7 +976,7 @@ class TranscriptFragmentAssembler {
   get continuationBytes(): number | null {
     const current = this.#current;
     if (!current) return null;
-    return this.direction === 'older' ? current.edge : current.totalBytes - current.edge;
+    return current.assembly.continuationBytes;
   }
 
   finish(): Array<{ identity: number; value: unknown }> {
@@ -651,9 +991,8 @@ class TranscriptFragmentAssembler {
   }
 
   release(): void {
-    if (this.#assemblyBytes === 0) return;
-    this.accountAssemblyBytes(-this.#assemblyBytes);
-    this.#assemblyBytes = 0;
+    this.#current?.assembly.release();
+    this.#current = undefined;
   }
 
   #accept(fragment: SessionTranscriptFragment): void {
@@ -677,29 +1016,12 @@ class TranscriptFragmentAssembler {
         'Session transcript message identity changed between fragments',
       );
     }
-    const expectedOffset =
-      this.direction === 'older' ? this.#current.edge - bytes.byteLength : this.#current.edge;
-    if (fragment.byteOffset !== expectedOffset) {
-      throw new RuntimeHostSubscriptionError(
-        'correlation_changed',
-        'Session transcript message has a fragment gap',
-      );
+    try {
+      this.#current.assembly.accept(fragment.byteOffset, bytes);
+    } catch (cause) {
+      throw new RuntimeHostSubscriptionError('correlation_changed', errorMessage(cause), { cause });
     }
-    if (fragment.byteOffset + bytes.byteLength > this.#current.totalBytes) {
-      throw new RuntimeHostSubscriptionError(
-        'correlation_changed',
-        'Session transcript fragment exceeds its declared message size',
-      );
-    }
-    bytes.copy(this.#current.data, fragment.byteOffset);
-    this.#current.edge =
-      this.direction === 'older' ? fragment.byteOffset : fragment.byteOffset + bytes.byteLength;
-    if (
-      (this.direction === 'older' && this.#current.edge === 0) ||
-      (this.direction === 'newer' && this.#current.edge === fragment.totalBytes)
-    ) {
-      this.#completeCurrent();
-    }
+    if (this.#current.assembly.complete) this.#completeCurrent();
   }
 
   #start(identity: number, totalBytes: number, payloadDigest: `sha256:${string}` | null): void {
@@ -718,43 +1040,32 @@ class TranscriptFragmentAssembler {
       );
     }
     this.#lastStartedIdentity = identity;
-    this.accountAssemblyBytes(totalBytes);
-    try {
-      this.#current = {
-        identity,
-        totalBytes,
-        payloadDigest,
-        data: Buffer.allocUnsafe(totalBytes),
-        edge: this.direction === 'older' ? totalBytes : 0,
-      };
-      this.#assemblyBytes += totalBytes;
-    } catch (error) {
-      this.accountAssemblyBytes(-totalBytes);
-      throw error;
-    }
+    const assembly = new TranscriptFragmentAssembler(
+      this.direction,
+      totalBytes,
+      payloadDigest,
+      this.maxMessageBytes,
+      this.accountAssemblyBytes,
+    );
+    this.#current = { identity, totalBytes, payloadDigest, assembly };
   }
 
   #completeCurrent(): void {
     const current = this.#current!;
     try {
-      if (
-        current.payloadDigest !== null &&
-        `sha256:${createHash('sha256').update(current.data).digest('hex')}` !==
-          current.payloadDigest
-      ) {
-        throw new Error('payload digest mismatch');
-      }
       this.#messages.push({
         identity: current.identity,
-        value: JSON.parse(current.data.toString('utf8')) as unknown,
+        value: JSON.parse(current.assembly.finish().toString('utf8')) as unknown,
       });
     } catch (cause) {
       throw new RuntimeHostSubscriptionError(
         'correlation_changed',
         `Session transcript message failed integrity validation: ${errorMessage(cause)}`,
       );
+    } finally {
+      current.assembly.release();
+      this.#current = undefined;
     }
-    this.#current = undefined;
   }
 }
 

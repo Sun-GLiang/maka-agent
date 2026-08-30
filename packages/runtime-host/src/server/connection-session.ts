@@ -23,6 +23,7 @@ import {
   RUNTIME_HOST_MAX_IN_FLIGHT_DOMAIN_REQUESTS,
   type ClientCapabilityClientFrame,
   type HostOperationErrorCode,
+  type OperationKey,
   type RequestFrame,
 } from '../protocol/index.js';
 import type { RuntimeHostMessageTransport } from '../transport/message-transport.js';
@@ -82,10 +83,11 @@ export class RuntimeHostConnectionSession {
   readonly #options: RuntimeHostConnectionSessionOptions;
   readonly #writer: BoundedSerialOutboundWriter;
   readonly #requests = new Map<string, Promise<void>>();
-  #transcriptPageTail: Promise<void> = Promise.resolve();
+  #transcriptDataPlaneTail: Promise<void> = Promise.resolve();
   #inFlightStatusRequests = 0;
   #continuityService: SessionContinuityService | undefined;
   #continuity: SessionContinuityConnection | undefined;
+  #continuityCloseTask: Promise<void> | undefined;
   #clientCapabilityService: ClientCapabilityService | undefined;
   #clientCapabilities: ClientCapabilityConnection | undefined;
   #clientCapabilityCloseTask: Promise<void> | undefined;
@@ -116,6 +118,7 @@ export class RuntimeHostConnectionSession {
         this.#writer.settled(),
         this.#options.transport.closed,
         this.#clientCapabilityCloseTask?.catch(() => undefined),
+        this.#continuityCloseTask?.catch(() => undefined),
       ]);
     }
   }
@@ -175,10 +178,9 @@ export class RuntimeHostConnectionSession {
 
   #dispatch(frame: RequestFrame): void {
     if (frame.operation === 'host.status') this.#inFlightStatusRequests += 1;
-    const handling =
-      frame.operation === 'session.transcript.page'
-        ? this.#transcriptPageTail.then(() => this.#handleRequest(frame))
-        : this.#handleRequest(frame);
+    const handling = isTranscriptDataPlaneOperation(frame.operation)
+      ? this.#transcriptDataPlaneTail.then(() => this.#handleRequest(frame))
+      : this.#handleRequest(frame);
     const task = handling
       .catch(() => this.#teardown())
       .finally(() => {
@@ -188,8 +190,8 @@ export class RuntimeHostConnectionSession {
         }
       });
     this.#requests.set(frame.requestId, task);
-    if (frame.operation === 'session.transcript.page') {
-      this.#transcriptPageTail = task.catch(() => undefined);
+    if (isTranscriptDataPlaneOperation(frame.operation)) {
+      this.#transcriptDataPlaneTail = task.catch(() => undefined);
     }
   }
 
@@ -221,7 +223,8 @@ export class RuntimeHostConnectionSession {
       const continuity =
         frame.operation === 'subscription.open' ||
         frame.operation === 'subscription.close' ||
-        frame.operation === 'session.transcript.page'
+        isTranscriptDataPlaneOperation(frame.operation) ||
+        frame.operation === 'session.transcript.overlay.release'
           ? this.#ensureContinuity()
           : undefined;
       const response = await dispatchOperation(frame, this.#options.resolveHandlers(), {
@@ -280,7 +283,8 @@ export class RuntimeHostConnectionSession {
   }
 
   #detachContinuity(): void {
-    this.#continuity?.close();
+    const closing = this.#continuity?.close();
+    if (closing) this.#continuityCloseTask = closing;
     this.#continuity = undefined;
     this.#continuityService = undefined;
   }
@@ -396,6 +400,14 @@ export class RuntimeHostConnectionSession {
     this.#options.transport.abort();
     this.#options.onTeardown();
   }
+}
+
+function isTranscriptDataPlaneOperation(operation: OperationKey): boolean {
+  return (
+    operation === 'session.transcript.page' ||
+    operation === 'session.transcript.positions.query' ||
+    operation === 'session.transcript.turn_window.page'
+  );
 }
 
 function isReadEof(error: unknown): boolean {
