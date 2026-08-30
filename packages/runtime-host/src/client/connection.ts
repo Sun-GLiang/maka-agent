@@ -586,6 +586,12 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
               throw error;
             }
           },
+          {
+            queryPositions: (query) =>
+              this.request('session.transcript.positions.query', query, timeoutMs),
+            readTurnWindow: (query) =>
+              this.request('session.transcript.turn_window.page', query, timeoutMs),
+          },
         );
         this.#subscriptions.set(result.subscriptionId, subscription);
         return subscription;

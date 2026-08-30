@@ -24,6 +24,7 @@ import {
   requireExactRecord,
   requireId,
   requireRecord,
+  requireShapedRecord,
   requireUtf8String,
 } from './codec.js';
 import { invalidProtocolFrame } from './errors.js';
@@ -37,6 +38,123 @@ export const SESSION_TRANSCRIPT_RANGE_MAX_MESSAGES = SESSION_TRANSCRIPT_PAGE_MAX
 export const SESSION_TRANSCRIPT_OVERLAY_MAX_MESSAGES = 4_096;
 export const SESSION_TRANSCRIPT_PAGE_RESULT_MAX_BYTES = 744 * 1024;
 export const SESSION_TRANSCRIPT_CURSOR_MAX_BYTES = 1024;
+export const SESSION_TRANSCRIPT_POSITION_PAGE_MAX_POSITIONS = 128;
+export const SESSION_TRANSCRIPT_POSITION_PAGE_MAX_BYTES = 64 * 1024;
+export const SESSION_TRANSCRIPT_WINDOW_MAX_POSITIONS = 10;
+export const SESSION_TRANSCRIPT_WINDOW_MAX_BYTES = 16 * 1024 * 1024;
+
+export type SessionTranscriptSemanticPositionKey =
+  | { readonly kind: 'turn'; readonly id: string }
+  | { readonly kind: 'note'; readonly id: string }
+  | { readonly kind: 'empty' };
+
+export interface SessionTranscriptSemanticPosition {
+  readonly ordinal: number;
+  readonly key: SessionTranscriptSemanticPositionKey;
+}
+
+export type SessionTranscriptVisiblePositionAnchor =
+  | { readonly kind: 'tail' }
+  | { readonly kind: 'ordinal'; readonly ordinal: number }
+  | { readonly kind: 'turn'; readonly turnId: string };
+
+export type SessionTranscriptPositionsInput =
+  | {
+      readonly kind: 'acquire';
+      readonly subscriptionId: string;
+      readonly anchor: SessionTranscriptVisiblePositionAnchor;
+      readonly maxPositions: number;
+    }
+  | {
+      readonly kind: 'page';
+      readonly subscriptionId: string;
+      readonly snapshotToken: string;
+      readonly anchor: SessionTranscriptVisiblePositionAnchor;
+      readonly maxPositions: number;
+    }
+  | {
+      readonly kind: 'continue';
+      readonly subscriptionId: string;
+      readonly cursor: string;
+    }
+  | {
+      readonly kind: 'replace';
+      readonly subscriptionId: string;
+      readonly snapshotToken: string;
+      readonly anchor: SessionTranscriptVisiblePositionAnchor;
+      readonly maxPositions: number;
+    }
+  | {
+      readonly kind: 'release';
+      readonly subscriptionId: string;
+      readonly snapshotToken: string;
+    };
+
+export type SessionTranscriptPositionsResult =
+  | {
+      readonly kind: 'page';
+      readonly subscriptionId: string;
+      readonly snapshotToken: string;
+      readonly totalPositions: number;
+      readonly startOrdinal: number;
+      readonly positions: readonly SessionTranscriptSemanticPosition[];
+      readonly olderCursor: string | null;
+      readonly newerCursor: string | null;
+    }
+  | {
+      readonly kind: 'building' | 'capacity';
+      readonly subscriptionId: string;
+      readonly snapshotToken: string;
+      readonly retryAfterMs: number;
+    }
+  | {
+      readonly kind: 'snapshot_stale' | 'anchor_not_found';
+      readonly subscriptionId: string;
+      readonly snapshotToken: string;
+    }
+  | {
+      readonly kind: 'released';
+      readonly subscriptionId: string;
+    };
+
+export type SessionTranscriptTurnWindowInput =
+  | {
+      readonly kind: 'open';
+      readonly subscriptionId: string;
+      readonly snapshotToken: string;
+      readonly startOrdinal: number;
+      readonly maxPositions: number;
+      readonly replaceCursor?: string | null;
+    }
+  | {
+      readonly kind: 'continue';
+      readonly subscriptionId: string;
+      readonly cursor: string;
+    };
+
+export type SessionTranscriptTurnWindowResult =
+  | {
+      readonly kind: 'page';
+      readonly subscriptionId: string;
+      readonly snapshotToken: string;
+      readonly windowId: string;
+      readonly byteOffset: number;
+      readonly totalBytes: number;
+      readonly payloadDigest: `sha256:${string}`;
+      readonly data: string;
+      readonly nextCursor: string | null;
+    }
+  | {
+      readonly kind: 'building' | 'capacity';
+      readonly subscriptionId: string;
+      readonly snapshotToken: string;
+      readonly retryAfterMs: number;
+    }
+  | {
+      readonly kind: 'snapshot_stale' | 'anchor_not_found' | 'position_too_large';
+      readonly subscriptionId: string;
+      readonly snapshotToken: string;
+    };
 
 export type SessionTranscriptPageSource = 'durable' | 'overlay';
 export type SessionTranscriptPageDirection = 'older' | 'newer';
@@ -132,7 +250,437 @@ export const SESSION_TRANSCRIPT_OPERATION_SPECS = {
       }
     },
   }),
+  'session.transcript.positions.query': defineOperation<
+    SessionTranscriptPositionsInput,
+    SessionTranscriptPositionsResult,
+    (typeof QUERY_ERRORS)[number]
+  >({
+    mode: 'query',
+    availability: 'ready',
+    errors: QUERY_ERRORS,
+    decodeInput: decodeSessionTranscriptPositionsInput,
+    decodeOutput: decodeSessionTranscriptPositionsResult,
+    assertOutputForInput: assertSemanticTranscriptPositionsOutput,
+  }),
+  'session.transcript.turn_window.page': defineOperation<
+    SessionTranscriptTurnWindowInput,
+    SessionTranscriptTurnWindowResult,
+    (typeof QUERY_ERRORS)[number]
+  >({
+    mode: 'query',
+    availability: 'ready',
+    errors: QUERY_ERRORS,
+    decodeInput: decodeSessionTranscriptTurnWindowInput,
+    decodeOutput: decodeSessionTranscriptTurnWindowResult,
+    assertOutputForInput: assertSemanticTranscriptTurnWindowOutput,
+  }),
 } as const;
+
+export function decodeSessionTranscriptPositionsInput(
+  value: unknown,
+): SessionTranscriptPositionsInput {
+  const record = requireRecord(value, 'Session transcript positions input');
+  switch (record.kind) {
+    case 'acquire': {
+      const input = requireExactRecord(record, 'Session transcript positions acquire input', [
+        'kind',
+        'subscriptionId',
+        'anchor',
+        'maxPositions',
+      ]);
+      return {
+        kind: 'acquire',
+        subscriptionId: requireId(input.subscriptionId, 'subscriptionId'),
+        anchor: decodeSemanticPositionAnchor(input.anchor),
+        maxPositions: requireSemanticPositionLimit(input.maxPositions),
+      };
+    }
+    case 'page':
+    case 'replace': {
+      const input = requireExactRecord(
+        record,
+        `Session transcript positions ${record.kind} input`,
+        ['kind', 'subscriptionId', 'snapshotToken', 'anchor', 'maxPositions'],
+      );
+      return {
+        kind: record.kind,
+        subscriptionId: requireId(input.subscriptionId, 'subscriptionId'),
+        snapshotToken: requireOpaqueTranscriptToken(input.snapshotToken, 'snapshot token'),
+        anchor: decodeSemanticPositionAnchor(input.anchor),
+        maxPositions: requireSemanticPositionLimit(input.maxPositions),
+      };
+    }
+    case 'continue': {
+      const input = requireExactRecord(record, 'Session transcript positions continue input', [
+        'kind',
+        'subscriptionId',
+        'cursor',
+      ]);
+      return {
+        kind: 'continue',
+        subscriptionId: requireId(input.subscriptionId, 'subscriptionId'),
+        cursor: requireOpaqueTranscriptToken(input.cursor, 'positions cursor'),
+      };
+    }
+    case 'release': {
+      const input = requireExactRecord(record, 'Session transcript positions release input', [
+        'kind',
+        'subscriptionId',
+        'snapshotToken',
+      ]);
+      return {
+        kind: 'release',
+        subscriptionId: requireId(input.subscriptionId, 'subscriptionId'),
+        snapshotToken: requireOpaqueTranscriptToken(input.snapshotToken, 'snapshot token'),
+      };
+    }
+    default:
+      throw invalidProtocolFrame('Invalid Session transcript positions input kind');
+  }
+}
+
+export function decodeSessionTranscriptPositionsResult(
+  value: unknown,
+): SessionTranscriptPositionsResult {
+  requireEncodedByteLimit(
+    value,
+    'Session transcript positions result',
+    SESSION_TRANSCRIPT_POSITION_PAGE_MAX_BYTES,
+  );
+  const record = requireRecord(value, 'Session transcript positions result');
+  if (record.kind === 'page') {
+    const result = requireExactRecord(record, 'Session transcript positions page result', [
+      'kind',
+      'subscriptionId',
+      'snapshotToken',
+      'totalPositions',
+      'startOrdinal',
+      'positions',
+      'olderCursor',
+      'newerCursor',
+    ]);
+    if (
+      !Array.isArray(result.positions) ||
+      result.positions.length > SESSION_TRANSCRIPT_POSITION_PAGE_MAX_POSITIONS
+    ) {
+      throw invalidProtocolFrame('Invalid Session transcript semantic positions');
+    }
+    const startOrdinal = requireCount(result.startOrdinal, 'Session transcript start ordinal');
+    const positions = result.positions.map((position, index) =>
+      decodeSemanticPosition(position, startOrdinal + index),
+    );
+    const totalPositions = requireCount(
+      result.totalPositions,
+      'Session transcript total positions',
+    );
+    if (
+      positions.length === 0 ||
+      startOrdinal >= totalPositions ||
+      startOrdinal + positions.length > totalPositions ||
+      (positions.some((position) => position.key.kind === 'empty') &&
+        (totalPositions !== 1 || startOrdinal !== 0 || positions.length !== 1))
+    ) {
+      throw invalidProtocolFrame('Invalid Session transcript position page bounds');
+    }
+    return {
+      kind: 'page',
+      subscriptionId: requireId(result.subscriptionId, 'subscriptionId'),
+      snapshotToken: requireOpaqueTranscriptToken(result.snapshotToken, 'snapshot token'),
+      totalPositions,
+      startOrdinal,
+      positions,
+      olderCursor: decodeNullableTranscriptToken(result.olderCursor, 'older positions cursor'),
+      newerCursor: decodeNullableTranscriptToken(result.newerCursor, 'newer positions cursor'),
+    };
+  }
+  if (record.kind === 'building' || record.kind === 'capacity') {
+    const result = requireExactRecord(record, `Session transcript ${record.kind} result`, [
+      'kind',
+      'subscriptionId',
+      'snapshotToken',
+      'retryAfterMs',
+    ]);
+    const retryAfterMs = requireCount(result.retryAfterMs, 'Session transcript retry hint');
+    if (retryAfterMs < 25 || retryAfterMs > 1_000) {
+      throw invalidProtocolFrame('Invalid Session transcript retry hint');
+    }
+    return {
+      kind: record.kind,
+      subscriptionId: requireId(result.subscriptionId, 'subscriptionId'),
+      snapshotToken: requireOpaqueTranscriptToken(result.snapshotToken, 'snapshot token'),
+      retryAfterMs,
+    };
+  }
+  if (record.kind === 'snapshot_stale' || record.kind === 'anchor_not_found') {
+    const result = requireExactRecord(record, `Session transcript ${record.kind} result`, [
+      'kind',
+      'subscriptionId',
+      'snapshotToken',
+    ]);
+    return {
+      kind: record.kind,
+      subscriptionId: requireId(result.subscriptionId, 'subscriptionId'),
+      snapshotToken: requireOpaqueTranscriptToken(result.snapshotToken, 'snapshot token'),
+    };
+  }
+  if (record.kind === 'released') {
+    const result = requireExactRecord(record, 'Session transcript released result', [
+      'kind',
+      'subscriptionId',
+    ]);
+    return {
+      kind: 'released',
+      subscriptionId: requireId(result.subscriptionId, 'subscriptionId'),
+    };
+  }
+  throw invalidProtocolFrame('Invalid Session transcript positions result kind');
+}
+
+export function decodeSessionTranscriptTurnWindowInput(
+  value: unknown,
+): SessionTranscriptTurnWindowInput {
+  const record = requireRecord(value, 'Session transcript Turn-window input');
+  if (record.kind === 'open') {
+    const input = requireShapedRecord(
+      record,
+      'Session transcript Turn-window open input',
+      ['kind', 'subscriptionId', 'snapshotToken', 'startOrdinal', 'maxPositions'],
+      ['replaceCursor'],
+    );
+    const maxPositions = requireCount(
+      input.maxPositions,
+      'Session transcript Turn-window position limit',
+    );
+    if (maxPositions < 1 || maxPositions > SESSION_TRANSCRIPT_WINDOW_MAX_POSITIONS) {
+      throw invalidProtocolFrame('Invalid Session transcript Turn-window position limit');
+    }
+    return {
+      kind: 'open',
+      subscriptionId: requireId(input.subscriptionId, 'subscriptionId'),
+      snapshotToken: requireOpaqueTranscriptToken(input.snapshotToken, 'snapshot token'),
+      startOrdinal: requireCount(input.startOrdinal, 'Session transcript start ordinal'),
+      maxPositions,
+      ...(Object.hasOwn(input, 'replaceCursor')
+        ? {
+            replaceCursor:
+              input.replaceCursor === null
+                ? null
+                : requireOpaqueTranscriptToken(input.replaceCursor, 'window replacement cursor'),
+          }
+        : {}),
+    };
+  }
+  if (record.kind === 'continue') {
+    const input = requireExactRecord(record, 'Session transcript Turn-window continue input', [
+      'kind',
+      'subscriptionId',
+      'cursor',
+    ]);
+    return {
+      kind: 'continue',
+      subscriptionId: requireId(input.subscriptionId, 'subscriptionId'),
+      cursor: requireOpaqueTranscriptToken(input.cursor, 'window cursor'),
+    };
+  }
+  throw invalidProtocolFrame('Invalid Session transcript Turn-window input kind');
+}
+
+export function decodeSessionTranscriptTurnWindowResult(
+  value: unknown,
+): SessionTranscriptTurnWindowResult {
+  requireEncodedByteLimit(
+    value,
+    'Session transcript Turn-window result',
+    SESSION_TRANSCRIPT_PAGE_RESULT_MAX_BYTES,
+  );
+  const record = requireRecord(value, 'Session transcript Turn-window result');
+  if (record.kind === 'page') {
+    const result = requireExactRecord(record, 'Session transcript Turn-window page result', [
+      'kind',
+      'subscriptionId',
+      'snapshotToken',
+      'windowId',
+      'byteOffset',
+      'totalBytes',
+      'payloadDigest',
+      'data',
+      'nextCursor',
+    ]);
+    const byteOffset = requireCount(result.byteOffset, 'Session transcript window byte offset');
+    const totalBytes = requireCount(result.totalBytes, 'Session transcript window total bytes');
+    const data = requireBase64Fragment(result.data);
+    const dataBytes = Buffer.from(data, 'base64').byteLength;
+    if (
+      totalBytes < 1 ||
+      totalBytes > SESSION_TRANSCRIPT_WINDOW_MAX_BYTES ||
+      byteOffset >= totalBytes ||
+      byteOffset + dataBytes > totalBytes
+    ) {
+      throw invalidProtocolFrame('Invalid Session transcript Turn-window fragment bounds');
+    }
+    return {
+      kind: 'page',
+      subscriptionId: requireId(result.subscriptionId, 'subscriptionId'),
+      snapshotToken: requireOpaqueTranscriptToken(result.snapshotToken, 'snapshot token'),
+      windowId: requireId(result.windowId, 'windowId'),
+      byteOffset,
+      totalBytes,
+      payloadDigest: requirePayloadDigest(result.payloadDigest, 'Turn-window payload digest'),
+      data,
+      nextCursor: decodeNullableTranscriptToken(result.nextCursor, 'window cursor'),
+    };
+  }
+  if (record.kind === 'building' || record.kind === 'capacity') {
+    const result = requireExactRecord(record, `Session transcript ${record.kind} result`, [
+      'kind',
+      'subscriptionId',
+      'snapshotToken',
+      'retryAfterMs',
+    ]);
+    const retryAfterMs = requireCount(result.retryAfterMs, 'Session transcript retry hint');
+    if (retryAfterMs < 25 || retryAfterMs > 1_000) {
+      throw invalidProtocolFrame('Invalid Session transcript retry hint');
+    }
+    return {
+      kind: record.kind,
+      subscriptionId: requireId(result.subscriptionId, 'subscriptionId'),
+      snapshotToken: requireOpaqueTranscriptToken(result.snapshotToken, 'snapshot token'),
+      retryAfterMs,
+    };
+  }
+  if (
+    record.kind === 'snapshot_stale' ||
+    record.kind === 'anchor_not_found' ||
+    record.kind === 'position_too_large'
+  ) {
+    const result = requireExactRecord(record, `Session transcript ${record.kind} result`, [
+      'kind',
+      'subscriptionId',
+      'snapshotToken',
+    ]);
+    return {
+      kind: record.kind,
+      subscriptionId: requireId(result.subscriptionId, 'subscriptionId'),
+      snapshotToken: requireOpaqueTranscriptToken(result.snapshotToken, 'snapshot token'),
+    };
+  }
+  throw invalidProtocolFrame('Invalid Session transcript Turn-window result kind');
+}
+
+function assertSemanticTranscriptSubscription(
+  input: { readonly subscriptionId: string },
+  output: { readonly subscriptionId: string },
+): void {
+  if (input.subscriptionId !== output.subscriptionId) {
+    throw invalidProtocolFrame('Session semantic transcript subscription changed');
+  }
+}
+
+function assertSemanticTranscriptPositionsOutput(
+  input: SessionTranscriptPositionsInput,
+  output: SessionTranscriptPositionsResult,
+): void {
+  assertSemanticTranscriptSubscription(input, output);
+  if (
+    output.kind === 'page' &&
+    input.kind !== 'continue' &&
+    input.kind !== 'release' &&
+    output.positions.length > input.maxPositions
+  ) {
+    throw invalidProtocolFrame('Session transcript position page exceeds request limit');
+  }
+  if (
+    input.kind === 'page' &&
+    'snapshotToken' in output &&
+    output.snapshotToken !== input.snapshotToken
+  ) {
+    throw invalidProtocolFrame('Session transcript snapshot token changed');
+  }
+}
+
+function assertSemanticTranscriptTurnWindowOutput(
+  input: SessionTranscriptTurnWindowInput,
+  output: SessionTranscriptTurnWindowResult,
+): void {
+  assertSemanticTranscriptSubscription(input, output);
+  if (input.kind === 'open' && output.snapshotToken !== input.snapshotToken) {
+    throw invalidProtocolFrame('Session transcript window snapshot token changed');
+  }
+}
+
+function decodeSemanticPositionAnchor(value: unknown): SessionTranscriptVisiblePositionAnchor {
+  const anchor = requireRecord(value, 'Session transcript semantic position anchor');
+  if (anchor.kind === 'tail') {
+    requireExactRecord(anchor, 'Session transcript tail anchor', ['kind']);
+    return { kind: 'tail' };
+  }
+  if (anchor.kind === 'ordinal') {
+    const exact = requireExactRecord(anchor, 'Session transcript ordinal anchor', [
+      'kind',
+      'ordinal',
+    ]);
+    return {
+      kind: 'ordinal',
+      ordinal: requireCount(exact.ordinal, 'Session transcript position ordinal'),
+    };
+  }
+  if (anchor.kind === 'turn') {
+    const exact = requireExactRecord(anchor, 'Session transcript Turn anchor', ['kind', 'turnId']);
+    return { kind: 'turn', turnId: requireId(exact.turnId, 'turnId') };
+  }
+  throw invalidProtocolFrame('Invalid Session transcript semantic position anchor');
+}
+
+function decodeSemanticPosition(
+  value: unknown,
+  expectedOrdinal: number,
+): SessionTranscriptSemanticPosition {
+  const position = requireExactRecord(value, 'Session transcript semantic position', [
+    'ordinal',
+    'key',
+  ]);
+  const ordinal = requireCount(position.ordinal, 'Session transcript position ordinal');
+  if (ordinal !== expectedOrdinal) {
+    throw invalidProtocolFrame('Session transcript semantic position ordinals are not contiguous');
+  }
+  return { ordinal, key: decodeSemanticPositionKey(position.key) };
+}
+
+function decodeSemanticPositionKey(value: unknown): SessionTranscriptSemanticPositionKey {
+  const key = requireRecord(value, 'Session transcript semantic position key');
+  if (key.kind === 'empty') {
+    requireExactRecord(key, 'Session transcript empty position key', ['kind']);
+    return { kind: 'empty' };
+  }
+  if (key.kind === 'turn' || key.kind === 'note') {
+    const exact = requireExactRecord(key, 'Session transcript semantic position key', [
+      'kind',
+      'id',
+    ]);
+    return { kind: key.kind, id: requireId(exact.id, 'Session transcript position identity') };
+  }
+  throw invalidProtocolFrame('Invalid Session transcript semantic position key');
+}
+
+function requireSemanticPositionLimit(value: unknown): number {
+  const limit = requireCount(value, 'Session transcript semantic position limit');
+  if (limit < 1 || limit > SESSION_TRANSCRIPT_POSITION_PAGE_MAX_POSITIONS) {
+    throw invalidProtocolFrame('Invalid Session transcript semantic position limit');
+  }
+  return limit;
+}
+
+function requireOpaqueTranscriptToken(value: unknown, label: string): string {
+  return requireUtf8String(
+    value,
+    `Session transcript ${label}`,
+    SESSION_TRANSCRIPT_CURSOR_MAX_BYTES,
+  );
+}
+
+function decodeNullableTranscriptToken(value: unknown, label: string): string | null {
+  return value === null ? null : requireOpaqueTranscriptToken(value, label);
+}
 
 function decodeSessionTranscriptOverlayReleaseInput(
   value: unknown,

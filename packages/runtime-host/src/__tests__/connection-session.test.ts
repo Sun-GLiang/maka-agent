@@ -134,13 +134,22 @@ test('concurrent responses remain framed and correlated in reverse completion or
   );
 });
 
-test('transcript pages are serialized per connection before their responses are retained', async () => {
+test('all transcript data-plane operations are serialized per connection', async () => {
   const pair = await openTransportPair();
   const entered = Array.from({ length: 3 }, () => deferred());
   const release = Array.from({ length: 3 }, () => deferred());
   let calls = 0;
   let active = 0;
   let maxActive = 0;
+  const enter = async () => {
+    const index = calls;
+    calls += 1;
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    entered[index]?.resolve();
+    await release[index]?.promise;
+    active -= 1;
+  };
   const handlers: OperationHandlerMap = {
     'host.status': async () => ({
       ok: true,
@@ -161,13 +170,7 @@ test('transcript pages are serialized per connection before their responses are 
       result: runningSnapshot(input.sessionId, input.turnId),
     })),
     'session.transcript.page': async (input) => {
-      const index = calls;
-      calls += 1;
-      active += 1;
-      maxActive = Math.max(maxActive, active);
-      entered[index]?.resolve();
-      await release[index]?.promise;
-      active -= 1;
+      await enter();
       return {
         ok: true,
         result: {
@@ -181,6 +184,27 @@ test('transcript pages are serialized per connection before their responses are 
           rangeBoundarySequence: null,
           protectedTurnSequence: null,
           nextCursor: null,
+        },
+      };
+    },
+    'session.transcript.positions.query': async (input) => {
+      await enter();
+      return {
+        ok: true,
+        result: {
+          kind: 'released',
+          subscriptionId: input.subscriptionId,
+        },
+      };
+    },
+    'session.transcript.turn_window.page': async (input) => {
+      await enter();
+      return {
+        ok: true,
+        result: {
+          kind: 'snapshot_stale',
+          subscriptionId: input.subscriptionId,
+          snapshotToken: input.kind === 'open' ? input.snapshotToken : 'snapshot-token',
         },
       };
     },
@@ -199,21 +223,40 @@ test('transcript pages are serialized per connection before their responses are 
   });
   const run = session.run();
   try {
-    for (let index = 0; index < 3; index += 1) {
-      await writeProtocolFrame(pair.clientTransport, {
-        requestId: `transcript-page-${index}`,
-        operation: 'session.transcript.page',
-        input: {
-          subscriptionId: 'subscription-1',
-          source: 'durable',
-          direction: 'older',
-          throughSequence: null,
-          cursor: null,
-          anchorSequence: null,
-          maxBytes: 512 * 1024,
-        },
-      });
-    }
+    await writeProtocolFrame(pair.clientTransport, {
+      requestId: 'transcript-data-plane-0',
+      operation: 'session.transcript.page',
+      input: {
+        subscriptionId: 'subscription-1',
+        source: 'durable',
+        direction: 'older',
+        throughSequence: null,
+        cursor: null,
+        anchorSequence: null,
+        maxBytes: 512 * 1024,
+      },
+    });
+    await writeProtocolFrame(pair.clientTransport, {
+      requestId: 'transcript-data-plane-1',
+      operation: 'session.transcript.positions.query',
+      input: {
+        kind: 'release',
+        subscriptionId: 'subscription-1',
+        snapshotToken: 'snapshot-token',
+      },
+    });
+    await writeProtocolFrame(pair.clientTransport, {
+      requestId: 'transcript-data-plane-2',
+      operation: 'session.transcript.turn_window.page',
+      input: {
+        kind: 'open',
+        subscriptionId: 'subscription-1',
+        snapshotToken: 'snapshot-token',
+        startOrdinal: 0,
+        maxPositions: 1,
+        replaceCursor: null,
+      },
+    });
     await withTimeout(entered[0]!.promise, 1_000, 'first transcript page was not admitted');
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(calls, 1);
@@ -222,7 +265,9 @@ test('transcript pages are serialized per connection before their responses are 
       release[index]!.resolve();
       const response = decodeHostFrame(await pair.clientTransport.read(1_000));
       assert.equal('kind' in response, false);
-      if (!('kind' in response)) assert.equal(response.requestId, `transcript-page-${index}`);
+      if (!('kind' in response)) {
+        assert.equal(response.requestId, `transcript-data-plane-${index}`);
+      }
       if (index < 2) {
         await withTimeout(
           entered[index + 1]!.promise,
@@ -460,6 +505,14 @@ test('flushes concurrent subscription opens before activating their live frame s
         ok: false,
         error: { code: 'operation_unavailable', message: 'not used' },
       }),
+      'session.transcript.positions.query': async () => ({
+        ok: false,
+        error: { code: 'operation_unavailable', message: 'not used' },
+      }),
+      'session.transcript.turn_window.page': async () => ({
+        ok: false,
+        error: { code: 'operation_unavailable', message: 'not used' },
+      }),
     },
     attachConnection: (_connectionId, attachedSink) => {
       sink = attachedSink;
@@ -477,7 +530,7 @@ test('flushes concurrent subscription opens before activating their live frame s
             .catch(() => undefined);
         },
         abort() {},
-        close() {},
+        async close() {},
       };
     },
   };

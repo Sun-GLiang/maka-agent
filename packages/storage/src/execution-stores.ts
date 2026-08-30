@@ -123,6 +123,13 @@ export type {
   ProvenSteeringMessageHandoff,
 } from './message-admission-store.js';
 export { submittedTurnIntentsEqual } from './submitted-turn-intent.js';
+export {
+  SESSION_TURN_POSITION_BODY_MAX_BYTES,
+  SESSION_TURN_POSITION_BODY_MAX_KEYS,
+  SESSION_TURN_POSITION_BODY_MAX_RECORDS,
+  SESSION_TURN_POSITION_MAX_PAGE_BYTES,
+  SESSION_TURN_POSITION_MAX_PAGE_POSITIONS,
+} from './session-turn-position-snapshots.js';
 export type { SubmittedTurnIntent } from './submitted-turn-intent.js';
 export type {
   ProbeSessionRemovalResult,

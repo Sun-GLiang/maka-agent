@@ -1141,6 +1141,43 @@ test('migrates the released transcript query grant when opening an existing acce
       'host.status',
       'session.transcript.page',
       'session.transcript.overlay.release',
+      'session.transcript.positions.query',
+      'session.transcript.turn_window.page',
+    ]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('does not expand a modern transcript-page-only credential to semantic operations', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'maka-access-authority-transcript-modern-'));
+  const credential = 'maka_rh_existing_transcript_page_client';
+  try {
+    await writeFile(
+      join(directory, 'runtime-host-access.json'),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        credentials: [
+          {
+            credentialId: 'existing-transcript-page-client',
+            credentialHash: createHash('sha256').update(credential).digest('hex'),
+            principalId: 'existing-transcript-page-client',
+            principalKind: 'remote_owner',
+            status: 'active',
+            operationGrants: ['host.status', 'session.transcript.page'],
+            canPublishClientCapabilities: false,
+            canUseHostPaths: false,
+            createdAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    const authority = await openRuntimeHostAccessAuthority(directory);
+    assert.deepEqual(authority.authenticate(credential)?.operationGrants, [
+      'host.status',
+      'session.transcript.page',
     ]);
   } finally {
     await rm(directory, { recursive: true, force: true });

@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import type { StoredMessage } from '@maka/core/session';
 import {
   SESSION_TRANSCRIPT_PAGE_MAX_MESSAGES,
@@ -37,6 +37,11 @@ import {
   type SessionTranscriptReader,
 } from './session-transcript-reader.js';
 import { projectSharedSessionTranscriptMessage } from './shared-session-transcript.js';
+import {
+  decodeTranscriptSignedToken,
+  encodeTranscriptSignedToken,
+} from './transcript-signed-token.js';
+import { selectTranscriptBuffer } from './transcript-buffer-slice.js';
 
 type SessionTranscriptProjection = 'owner' | 'shared';
 
@@ -490,11 +495,12 @@ async function readSharedDurablePage(
         record.sequence === position && request.byteOffset !== undefined
           ? request.byteOffset
           : null;
-      const selected = selectBuffer(
+      const selected = selectTranscriptBuffer(
         bytes,
         request.direction,
         continuationOffset,
         request.maxBytes - rawBytes,
+        () => new TranscriptPageRequestError('Invalid cursor byte offset'),
       );
       if (!selected) {
         next = { position: record.sequence, byteOffset: null };
@@ -655,7 +661,13 @@ function selectOverlay(
     fragments.length < maxMessages
   ) {
     const message = messages[index]!;
-    const selected = selectBuffer(message, direction, offset, maxBytes - rawBytes);
+    const selected = selectTranscriptBuffer(
+      message,
+      direction,
+      offset,
+      maxBytes - rawBytes,
+      () => new TranscriptPageRequestError('Invalid cursor byte offset'),
+    );
     if (!selected) break;
     fragments.push({
       kind: 'overlay',
@@ -679,43 +691,6 @@ function selectOverlay(
     fragments,
     rawBytes,
     next: index >= 0 && index < messages.length ? { position: index, byteOffset: null } : null,
-  };
-}
-
-function selectBuffer(
-  bytes: Buffer,
-  direction: SessionTranscriptPageDirection,
-  byteOffset: number | null,
-  budget: number,
-): {
-  byteOffset: number;
-  data: Buffer;
-  complete: boolean;
-  nextOffset: number;
-} | null {
-  if (budget < 1) return null;
-  if (direction === 'older') {
-    const end = byteOffset ?? bytes.byteLength;
-    if (end < 1 || end > bytes.byteLength)
-      throw new TranscriptPageRequestError('Invalid cursor byte offset');
-    const start = Math.max(0, end - budget);
-    return {
-      byteOffset: start,
-      data: bytes.subarray(start, end),
-      complete: start === 0,
-      nextOffset: start,
-    };
-  }
-  const start = byteOffset ?? 0;
-  if (start < 0 || start >= bytes.byteLength) {
-    throw new TranscriptPageRequestError('Invalid cursor byte offset');
-  }
-  const end = Math.min(bytes.byteLength, start + budget);
-  return {
-    byteOffset: start,
-    data: bytes.subarray(start, end),
-    complete: end === bytes.byteLength,
-    nextOffset: end,
   };
 }
 
@@ -783,28 +758,13 @@ function emptyPage(
 }
 
 function encodeCursor(cursor: TranscriptCursorState, secret: Buffer): string {
-  const payload = Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
-  return `${payload}.${signCursor(payload, secret).toString('base64url')}`;
+  return encodeTranscriptSignedToken('legacy-page', cursor, secret);
 }
 
 function decodeCursor(value: string, secret: Buffer): TranscriptCursorState {
   let decoded: unknown;
   try {
-    const parts = value.split('.');
-    if (parts.length !== 2) throw new Error('invalid cursor envelope');
-    const [payload, signatureValue] = parts as [string, string];
-    const bytes = Buffer.from(payload, 'base64url');
-    const signature = Buffer.from(signatureValue, 'base64url');
-    const expected = signCursor(payload, secret);
-    if (
-      bytes.toString('base64url') !== payload ||
-      signature.toString('base64url') !== signatureValue ||
-      signature.byteLength !== expected.byteLength ||
-      !timingSafeEqual(signature, expected)
-    ) {
-      throw new Error('invalid cursor signature');
-    }
-    decoded = JSON.parse(bytes.toString('utf8')) as unknown;
+    decoded = decodeTranscriptSignedToken('legacy-page', value, secret);
   } catch (cause) {
     throw new TranscriptPageRequestError('Invalid transcript cursor', { cause });
   }
@@ -843,10 +803,6 @@ function decodeCursor(value: string, secret: Buffer): TranscriptCursorState {
     throw new TranscriptPageRequestError('Invalid transcript cursor values');
   }
   return cursor as unknown as TranscriptCursorState;
-}
-
-function signCursor(payload: string, secret: Buffer): Buffer {
-  return createHmac('sha256', secret).update(payload, 'utf8').digest();
 }
 
 function mergeActiveAssistantStreams(

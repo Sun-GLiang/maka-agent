@@ -322,6 +322,65 @@ test('stops an oversized active projection before retaining the full RuntimeEven
   assert.equal(visited, 8_193);
 });
 
+test('forwards semantic position snapshot operations through the existing execution-store adapter', async () => {
+  const calls: string[] = [];
+  const stores = {
+    sessionStore: {
+      readTurnPositionPageSnapshot: async () => {
+        calls.push('positions');
+        return {
+          kind: 'capacity' as const,
+          projection: 'owner' as const,
+          throughSequence: 3,
+          authorityRevision: 1,
+          retainedSnapshots: 2 as const,
+        };
+      },
+      readTranscriptRecordsByPositionKeysSnapshot: async () => {
+        calls.push('records');
+        return {
+          projection: 'owner' as const,
+          snapshotKey: { throughSequence: 3, authorityRevision: 1, snapshotGeneration: 2 },
+          records: [],
+          rawBytes: 0,
+        };
+      },
+      releaseTurnPositionSnapshot: async () => {
+        calls.push('release');
+      },
+    },
+  } as unknown as ExecutionStoresWriter<'interactive'>;
+  const reader = createSessionTranscriptReader({
+    stores,
+    canonicalPermissionOutcomes: { readPermissionOutcome: async () => undefined },
+  });
+  const snapshotKey = { throughSequence: 3, authorityRevision: 1, snapshotGeneration: 2 };
+  await reader.readPositionPage({
+    sessionId: 'session-1',
+    projection: 'owner',
+    snapshotLeaseId: 'lease-1',
+    throughSequence: 3,
+    anchor: { kind: 'tail' },
+    maxPositions: 1,
+  });
+  await reader.readPositionRecords({
+    sessionId: 'session-1',
+    projection: 'owner',
+    snapshotLeaseId: 'lease-1',
+    snapshotKey,
+    positionKeys: [{ kind: 'turn', id: 'turn-1' }],
+    maxBytes: 1024,
+    maxRecords: 1,
+  });
+  await reader.releasePositionSnapshot({
+    sessionId: 'session-1',
+    projection: 'owner',
+    snapshotLeaseId: 'lease-1',
+    snapshotKey,
+  });
+  assert.deepEqual(calls, ['positions', 'records', 'release']);
+});
+
 function runHeader(sessionId: string): AgentRunHeader {
   return {
     runId: 'run-1',
