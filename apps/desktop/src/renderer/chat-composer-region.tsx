@@ -217,6 +217,10 @@ export function ChatComposerRegion({
       <Composer
         ref={composerRef}
         {...composerRest}
+        // AppShell carries staged attachments into both queued and steering
+        // follow-ups. Other Composer hosts remain gated by default because a
+        // text-only running-turn submission would leave attachments behind.
+        allowAttachmentImportWhileStreaming
         mentionSkills={mentions?.mentionSkills}
         mentionSkillsUnavailable={mentions?.mentionSkillsUnavailable}
         mentionSkillsLoading={mentions?.mentionSkillsLoading}

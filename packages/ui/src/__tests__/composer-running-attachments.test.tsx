@@ -25,7 +25,7 @@ import { parseHTML } from 'linkedom';
 import { Composer } from '../composer.js';
 import { LocaleProvider } from '../locale-context.js';
 
-test('accepts a pasted image while the current turn is running', async () => {
+test('only an attachment-capable running-turn host accepts a pasted image', async () => {
   const original = {
     document: globalThis.document,
     window: globalThis.window,
@@ -45,12 +45,26 @@ test('accepts a pasted image while the current turn is running', async () => {
   assert.ok(container);
   const root = createRoot(container);
   const attached: File[][] = [];
+  const image = new window.File(['image'], 'screenshot.png', { type: 'image/png' });
 
-  try {
+  function pasteImage(): Event {
+    const paste = new window.Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, 'clipboardData', {
+      value: {
+        files: [image],
+        getData: () => '',
+      },
+    });
+    return paste;
+  }
+
+  async function render(allowAttachmentImportWhileStreaming: boolean): Promise<void> {
     await act(() => root.render(
       <LocaleProvider locale="en">
         <Composer
           streaming
+          allowAttachmentImportWhileStreaming={allowAttachmentImportWhileStreaming}
+          onPickAttachments={() => undefined}
           onAttachFilePaths={(files) => {
             attached.push(files);
           }}
@@ -59,26 +73,42 @@ test('accepts a pasted image while the current turn is running', async () => {
         />
       </LocaleProvider>,
     ));
+  }
 
+  function attachmentPickerItem(): HTMLElement | undefined {
+    return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (item) => item.textContent?.includes('Add file or directory'),
+    );
+  }
+
+  try {
+    // Text-only steering hosts, such as Workbar side chat, retain the default
+    // gate so a successful text submit cannot leave a staged image behind.
+    await render(false);
     const form = container.querySelector('form');
-    assert.equal(form?.getAttribute('data-maka-file-drop-target'), 'true');
     const input = container.querySelector<HTMLElement>('[role="textbox"]');
     assert.ok(input);
-    const image = new window.File(['image'], 'screenshot.png', { type: 'image/png' });
-    const paste = new window.Event('paste', { bubbles: true, cancelable: true });
-    Object.defineProperty(paste, 'clipboardData', {
-      value: {
-        files: [image],
-        getData: () => '',
-      },
-    });
-
+    assert.equal(form?.getAttribute('data-maka-file-drop-target'), null);
+    assert.equal(attachmentPickerItem()?.getAttribute('aria-disabled'), 'true');
+    const rejectedPaste = pasteImage();
     await act(async () => {
-      input.dispatchEvent(paste);
+      input.dispatchEvent(rejectedPaste);
       await Promise.resolve();
     });
+    assert.equal(rejectedPaste.defaultPrevented, true);
+    assert.deepEqual(attached, []);
 
-    assert.equal(paste.defaultPrevented, true);
+    // AppShell opts in because both its queued and steering follow-ups carry
+    // the staged attachment into the submitted message.
+    await render(true);
+    assert.equal(form?.getAttribute('data-maka-file-drop-target'), 'true');
+    assert.notEqual(attachmentPickerItem()?.getAttribute('aria-disabled'), 'true');
+    const acceptedPaste = pasteImage();
+    await act(async () => {
+      input.dispatchEvent(acceptedPaste);
+      await Promise.resolve();
+    });
+    assert.equal(acceptedPaste.defaultPrevented, true);
     assert.deepEqual(attached, [[image]]);
   } finally {
     await act(() => root.unmount());
