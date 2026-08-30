@@ -100,6 +100,8 @@ export interface RootTurnSourceMessage {
   messageId: string;
   content: MessageContent;
   submittedContentDigest?: `sha256:${string}`;
+  /** The original placement before queue promotion; absent legacy records use `placement`. */
+  submittedPlacement?: 'current_turn' | 'next_turn';
   /** The admission-time Skill outcome for this exact source Message. */
   skillInvocation?: SkillInvocationResult;
   /**
@@ -1670,6 +1672,7 @@ function normalizeRootTurnSourceMessages(value: unknown): readonly RootTurnSourc
         'placement',
         'disposition',
         ...(Object.hasOwn(item, 'submittedContentDigest') ? ['submittedContentDigest'] : []),
+        ...(Object.hasOwn(item, 'submittedPlacement') ? ['submittedPlacement'] : []),
         ...(Object.hasOwn(item, 'submittedIntent') ? ['submittedIntent'] : []),
         ...(Object.hasOwn(item, 'skillInvocation') ? ['skillInvocation'] : []),
       ])
@@ -1680,6 +1683,7 @@ function normalizeRootTurnSourceMessages(value: unknown): readonly RootTurnSourc
       messageId,
       content,
       submittedContentDigest,
+      submittedPlacement,
       submittedIntent,
       skillInvocation,
       placement,
@@ -1694,6 +1698,9 @@ function normalizeRootTurnSourceMessages(value: unknown): readonly RootTurnSourc
         disposition !== 'turn_started') ||
       (disposition === 'steering' && placement !== 'current_turn') ||
       (disposition === 'followup' && placement !== 'next_turn') ||
+      (submittedPlacement !== undefined &&
+        submittedPlacement !== 'current_turn' &&
+        submittedPlacement !== 'next_turn') ||
       (submittedContentDigest !== undefined && !isSha256Digest(submittedContentDigest))
     ) {
       throw new Error(`Invalid root turn source message at index ${index}`);
@@ -1710,6 +1717,7 @@ function normalizeRootTurnSourceMessages(value: unknown): readonly RootTurnSourc
         MAX_ATTACHMENT_COUNT,
       ),
       ...(submittedContentDigest !== undefined ? { submittedContentDigest } : {}),
+      ...(submittedPlacement !== undefined ? { submittedPlacement } : {}),
       ...(submittedIntent !== undefined
         ? { submittedIntent: normalizeSubmittedTurnIntent(submittedIntent) }
         : {}),
@@ -1744,6 +1752,8 @@ function rootTurnAdmissionPayloadsEqual(
         source.placement === other.placement &&
         source.disposition === other.disposition &&
         source.submittedContentDigest === other.submittedContentDigest &&
+        (source.submittedPlacement ?? source.placement) ===
+          (other.submittedPlacement ?? other.placement) &&
         submittedTurnIntentsEqual(source.submittedIntent, other.submittedIntent) &&
         isDeepStrictEqual(source.skillInvocation, other.skillInvocation) &&
         messageContentsEqual(source.content, other.content)

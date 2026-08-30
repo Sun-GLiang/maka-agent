@@ -135,6 +135,8 @@ function sameRootAdmission(left: RootTurnAdmission, right: RootTurnAdmission): b
         source.placement === other.placement &&
         source.disposition === other.disposition &&
         source.submittedContentDigest === other.submittedContentDigest &&
+        (source.submittedPlacement ?? source.placement) ===
+          (other.submittedPlacement ?? other.placement) &&
         submittedTurnIntentsEqual(source.submittedIntent, other.submittedIntent) &&
         isDeepStrictEqual(source.skillInvocation, other.skillInvocation) &&
         messageContentsEqual(source.content, other.content)

@@ -149,6 +149,15 @@ test('fails closed when a known durable admission identity drifts', async () => 
     );
     const [firstSource] = first.admission.sourceMessages;
     assert.ok(firstSource);
+    assert.doesNotThrow(() =>
+      owner.assertKnownAdmission({
+        ...first.admission,
+        sourceMessages: [
+          { ...firstSource, submittedPlacement: firstSource.placement },
+          ...first.admission.sourceMessages.slice(1),
+        ],
+      }),
+    );
     const sourceDrifts: RootTurnAdmission[] = [
       {
         ...first.admission,
@@ -179,6 +188,13 @@ test('fails closed when a known durable admission identity drifts', async () => 
         ...first.admission,
         sourceMessages: [
           { ...firstSource, disposition: 'followup' },
+          ...first.admission.sourceMessages.slice(1),
+        ],
+      },
+      {
+        ...first.admission,
+        sourceMessages: [
+          { ...firstSource, submittedPlacement: 'next_turn' },
           ...first.admission.sourceMessages.slice(1),
         ],
       },

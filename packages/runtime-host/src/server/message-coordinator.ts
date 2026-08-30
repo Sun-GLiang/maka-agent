@@ -249,6 +249,7 @@ interface LiveEntry {
   content: MessageContent;
   modelContent: MessageContent;
   submittedContentDigest: `sha256:${string}`;
+  readonly submittedPlacement: MessagePlacement;
   skillInvocation: SkillInvocationResult;
   readonly placement: MessagePlacement;
   readonly disposition: 'steering' | 'followup';
@@ -889,6 +890,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
         content: submittedProjectionContent(admission.content),
         modelContent: admission.content,
         submittedContentDigest: admission.submittedContentDigest,
+        submittedPlacement: admission.submittedPlacement,
         skillInvocation: admission.skillInvocation,
         placement: admission.placement,
         disposition: admission.disposition,
@@ -1027,6 +1029,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
             messageId: input.messageId,
             content: payload.content,
             submittedContentDigest: messageContentDigest(payload.content),
+            submittedPlacement: input.placement,
             ...(intent ? { submittedIntent: intent } : {}),
             placement: input.placement,
             disposition: 'turn_started',
@@ -1217,6 +1220,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           messageId: input.messageId,
           content: prepared.content,
           submittedContentDigest: messageContentDigest(payload.content),
+          submittedPlacement: input.placement,
           skillInvocation: prepared.skillInvocation,
           placement: input.placement,
           disposition,
@@ -1278,6 +1282,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           content: payload.content,
           modelContent: prepared.content,
           submittedContentDigest: messageAdmission.submittedContentDigest,
+          submittedPlacement: messageAdmission.submittedPlacement,
           skillInvocation: messageAdmission.skillInvocation,
           placement: input.placement,
           disposition,
@@ -1591,7 +1596,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       messageId: entry.messageId,
       content: entry.modelContent,
       submittedContentDigest: entry.submittedContentDigest,
-      submittedPlacement: 'next_turn',
+      submittedPlacement: entry.submittedPlacement,
       placement: 'current_turn',
       disposition: 'steering',
       skillInvocation: entry.skillInvocation,
@@ -2436,7 +2441,7 @@ function sameSourcePayload(
     (durableDigest
       ? durableDigest === messageContentDigest(input.content)
       : messageContentsEqual(source.content, input.content)) &&
-    source.placement === input.placement &&
+    (source.submittedPlacement ?? source.placement) === input.placement &&
     submittedTurnIntentsEqual(source.submittedIntent, submittedTurnIntent(input))
   );
 }
@@ -2446,6 +2451,7 @@ function sourceFromEntry(entry: LiveEntry): RootFollowupSource {
     messageId: entry.messageId,
     content: normalizeMessageContent(entry.modelContent),
     submittedContentDigest: entry.submittedContentDigest,
+    submittedPlacement: entry.submittedPlacement,
     skillInvocation: entry.skillInvocation,
     placement: entry.placement,
     disposition: entry.disposition,
@@ -2457,6 +2463,7 @@ function pendingMessageSource(admission: PendingMessageAdmission): RootTurnSourc
     messageId: admission.messageId,
     content: normalizeMessageContent(admission.content),
     submittedContentDigest: admission.submittedContentDigest,
+    submittedPlacement: admission.submittedPlacement,
     ...(admission.submittedIntent ? { submittedIntent: admission.submittedIntent } : {}),
     skillInvocation: admission.skillInvocation,
     placement: admission.placement,
