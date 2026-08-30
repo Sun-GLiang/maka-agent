@@ -118,7 +118,7 @@ test('Runtime Host credentials-only export includes only schema-v1 credential fi
     ['credentials'],
     {
       client: {
-        loadConnectionCatalog: async () => ({ ...CATALOG, connections: [] }),
+        loadConnectionCatalog: async () => CATALOG,
         exportConfigurationCredentials: async ({ locator }: { locator: CredentialLocator }) => {
           const secret = secretFor(locator);
           return {
@@ -142,6 +142,65 @@ test('Runtime Host credentials-only export includes only schema-v1 credential fi
     network: { proxy: { password: 'proxy-host' } },
     webSearch: { providers: { tavily: { apiKey: 'tavily-host' } } },
   });
+  assert.deepEqual(bundle.data.credentials, [
+    { slug: 'deepseek-main', kind: 'api_key', value: 'sk-host' },
+  ]);
+});
+
+test('Runtime Host credentials-only export omits each absent settings-carried secret', async () => {
+  const cases = [
+    {
+      presentScope: 'web_search',
+      expected: {
+        webSearch: { providers: { tavily: { apiKey: 'tavily-host' } } },
+      },
+    },
+    {
+      presentScope: 'network_proxy',
+      expected: {
+        network: { proxy: { password: 'proxy-host' } },
+      },
+    },
+    {
+      presentScope: null,
+      expected: undefined,
+    },
+  ] as const;
+
+  for (const { presentScope, expected } of cases) {
+    const bundle = await gatherRuntimeHostConfig(
+      ['credentials'],
+      {
+        client: {
+          loadConnectionCatalog: async () => ({ ...CATALOG, connections: [] }),
+          exportConfigurationCredentials: async ({
+            locator,
+          }: {
+            locator: CredentialLocator;
+          }) => {
+            const secret = locator.scope === presentScope ? secretFor(locator) : null;
+            return {
+              credential:
+                secret === null
+                  ? null
+                  : {
+                      locator,
+                      secretBase64: Buffer.from(secret).toString('base64'),
+                    },
+            };
+          },
+        },
+        appVersion: '0.1.0',
+        getSettings: async () => settingsWithSecrets(),
+      } as never,
+    );
+
+    assert.deepEqual(bundle.data.settings, expected);
+    assert.deepEqual(
+      bundle.includedData,
+      expected === undefined ? ['credentials'] : ['settings', 'credentials'],
+    );
+  }
 });
 
 test('Runtime Host config export writes an empty v1 proxy password when none is configured', async () => {

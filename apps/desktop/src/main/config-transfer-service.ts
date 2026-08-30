@@ -72,10 +72,10 @@ export async function applyConfigImport(
   deps: ConfigTransferDeps,
 ): Promise<ConfigImportResult> {
   const result: ConfigImportResult = {};
-  // Credentials are only applied for connections actually written this import
-  // (created or overwritten). A slug the user chose to skip must not have its
-  // stored secret silently overwritten.
-  const appliedConnectionSlugs = new Set<string>();
+  // A connection snapshot limits credential writes to connections created or
+  // overwritten by this import. Credentials-only bundles instead bind to an
+  // already-existing logical connection with the same slug.
+  const credentialTargetSlugs = new Set<string>();
 
   if (Array.isArray(bundle.data.connections)) {
     const incoming = bundle.data.connections as LlmConnection[];
@@ -91,13 +91,25 @@ export async function applyConfigImport(
         ? reconcileConnectionAfterEnabledModelsChange(connection, connection.enabledModelIds)
         : null;
       await deps.connectionStore.save(selection ? { ...connection, ...selection } : connection);
-      appliedConnectionSlugs.add(connection.slug);
+      credentialTargetSlugs.add(connection.slug);
     }
     result.connections = {
       created: plan.create.length,
       overwritten: plan.overwrite.length,
       skipped: plan.skipped.length,
     };
+  } else if (
+    !bundle.includedData.includes('connections') &&
+    Array.isArray(bundle.data.credentials)
+  ) {
+    // Without a connection snapshot, the credential slug names an existing
+    // logical connection directly. A bundle that does include connections
+    // still uses the create/overwrite set above so an explicit skip cannot
+    // overwrite the target's credential.
+    const existing = await deps.connectionStore.list();
+    for (const connection of existing) {
+      credentialTargetSlugs.add(connection.slug);
+    }
   }
 
   if (bundle.data.settings && typeof bundle.data.settings === 'object') {
@@ -116,10 +128,9 @@ export async function applyConfigImport(
         entry.value.length > 0 &&
         VALID_CREDENTIAL_KINDS.has(entry.kind);
       if (!valid) continue;
-      // Only write a secret for a connection that was created or overwritten
-      // in this import. Skipped (or not-imported) slugs keep their existing
-      // stored secret untouched.
-      if (!appliedConnectionSlugs.has(entry.slug)) {
+      // Unknown targets and connections explicitly skipped by a connection
+      // snapshot keep their existing stored secret untouched.
+      if (!credentialTargetSlugs.has(entry.slug)) {
         skipped += 1;
         continue;
       }

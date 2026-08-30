@@ -160,6 +160,28 @@ describe('config-transfer-service', () => {
     assert.deepEqual(setCreds, [{ slug: 'deepseek-main', kind: 'api_key', value: 'sk-new' }]);
     assert.deepEqual(result.credentials, { applied: 1, skipped: 0 });
   });
+
+  it('writes a credentials-only bundle to an existing connection', async () => {
+    const { deps, saved, setCreds } = makeDeps();
+    const bundle = {
+      schemaVersion: 1,
+      exportedAt: '',
+      appVersion: '0.1.0',
+      includedData: ['credentials'] as const,
+      data: {
+        credentials: [{ slug: 'deepseek-main', kind: 'api_key', value: 'sk-restored' }],
+      },
+    };
+
+    const result = await applyConfigImport(bundle as any, 'skip', deps);
+
+    assert.deepEqual(saved, [], 'credentials-only import does not rewrite the connection');
+    assert.deepEqual(setCreds, [
+      { slug: 'deepseek-main', kind: 'api_key', value: 'sk-restored' },
+    ]);
+    assert.deepEqual(result.credentials, { applied: 1, skipped: 0 });
+  });
+
   it('restores the whole bundle when it carries a retained retired connection', async () => {
     // A backup taken before the retirement still lists the connection, and the
     // catalog refuses to create one. Before this was planned as skipped, the

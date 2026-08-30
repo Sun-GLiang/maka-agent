@@ -198,7 +198,8 @@ export async function gatherRuntimeHostConfig(
       ? restoreHostSettingsSecrets(settings, secrets)
       : stripSettingsSecretsForExport(settings);
   } else if (selected.has('credentials')) {
-    data.settings = projectHostSettingsSecrets(secrets);
+    const settingsSecrets = projectHostSettingsSecrets(secrets);
+    if (settingsSecrets) data.settings = settingsSecrets;
   }
   if (selected.has('credentials') && catalog) {
     data.credentials = connectionCredentials(catalog.connections, secrets);
@@ -414,24 +415,32 @@ function restoreHostSettingsSecrets(
 
 function projectHostSettingsSecrets(
   secrets: ReadonlyMap<string, string>,
-): Record<string, unknown> {
+): Record<string, unknown> | undefined {
+  const proxy = secrets.get(
+    locatorKey({ scope: 'network_proxy', kind: 'password' }),
+  );
+  const tavily = secrets.get(
+    locatorKey({ scope: 'web_search', provider: 'tavily', kind: 'api_key' }),
+  );
+  if (proxy === undefined && tavily === undefined) return undefined;
+
   return {
-    network: {
-      proxy: {
-        password:
-          secrets.get(locatorKey({ scope: 'network_proxy', kind: 'password' })) ?? '',
-      },
-    },
-    webSearch: {
-      providers: {
-        tavily: {
-          apiKey:
-            secrets.get(
-              locatorKey({ scope: 'web_search', provider: 'tavily', kind: 'api_key' }),
-            ) ?? '',
-        },
-      },
-    },
+    ...(proxy === undefined
+      ? {}
+      : {
+          network: {
+            proxy: { password: proxy },
+          },
+        }),
+    ...(tavily === undefined
+      ? {}
+      : {
+          webSearch: {
+            providers: {
+              tavily: { apiKey: tavily },
+            },
+          },
+        }),
   };
 }
 
