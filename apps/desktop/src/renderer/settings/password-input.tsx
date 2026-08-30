@@ -35,7 +35,7 @@ import {
   useToast,
   useUiLocale,
 } from '@maka/ui';
-import { useActionGuard } from './use-action-guard.js';
+import { useActionGuard } from './use-action-guard';
 import { getSettingsPreferencesCopy } from '../locales/settings-preferences-copy.js';
 
 /**

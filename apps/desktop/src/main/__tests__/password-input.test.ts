@@ -18,16 +18,22 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, test } from "node:test";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { parseHTML } from "linkedom";
+import { build } from "esbuild";
 import {
   AstryxLocaleProvider,
   LocaleProvider,
   ToastProvider,
 } from "@maka/ui";
-import { PasswordInput } from "../../renderer/settings/password-input.js";
+import type * as PasswordInputModule from "../../renderer/settings/password-input.js";
+
+const REPO_ROOT = resolve(import.meta.dirname, "../../../../..");
 
 const originalGlobals = {
   document: globalThis.document,
@@ -141,6 +147,7 @@ async function renderPasswordInputs(): Promise<{
   focusExit(from: Element, to: Element | null): void;
   setDocumentFocused(focused: boolean): void;
 }> {
+  const { PasswordInput } = await importPasswordInput();
   const { document, window } = parseHTML(
     '<div id="root"></div><button id="outside">outside</button>',
   );
@@ -222,6 +229,33 @@ async function renderPasswordInputs(): Promise<{
       documentFocused = focused;
     },
   };
+}
+
+async function importPasswordInput(): Promise<typeof PasswordInputModule> {
+  const outdir = await mkdtemp(
+    resolve(REPO_ROOT, "apps/desktop/dist/main/__tests__/password-input-"),
+  );
+  const outfile = resolve(outdir, "password-input.mjs");
+  await mkdir(dirname(outfile), { recursive: true });
+  await build({
+    entryPoints: [
+      resolve(
+        REPO_ROOT,
+        "apps/desktop/src/renderer/settings/password-input.tsx",
+      ),
+    ],
+    outfile,
+    bundle: true,
+    packages: "external",
+    platform: "node",
+    format: "esm",
+    jsx: "automatic",
+    target: "node20",
+    logLevel: "silent",
+  });
+  return (await import(
+    `${pathToFileURL(outfile).href}?t=${Date.now()}`
+  )) as typeof PasswordInputModule;
 }
 
 function reactProps(element: Element): Record<string, unknown> {

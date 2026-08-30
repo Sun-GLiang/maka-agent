@@ -3083,6 +3083,7 @@
         "unresolvedDependencies": 0,
         "actionFactories": [],
         "dependencyPaths": {
+          "../features/network-proxy/index.js": 1,
           "../locales/settings-preferences-copy.js": 1,
           "../locales/settings-shared-copy.js": 1,
           "../locales/settings-test-result-copy.js": 1,
@@ -3102,7 +3103,6 @@
           "@maka/core/llm-connections": 1,
           "@maka/core/model-thinking": 1,
           "@maka/core/settings": 3,
-          "@maka/core/settings/network-settings": 1,
           "@maka/ui": 2,
           "react": 1
         }

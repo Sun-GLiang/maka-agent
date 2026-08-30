@@ -17,23 +17,8 @@
  * under the License.
  */
 
-import { useEffect, useReducer, useRef } from "react";
-import {
+export {
   createProxyPasswordDraft,
+  runAfterProxyPasswordCommit,
   type ProxyPasswordDraft,
-} from "./proxy-password-draft.js";
-
-export function useProxyPasswordDraft(
-  save: (secret: string) => Promise<void>,
-): ProxyPasswordDraft {
-  const saveRef = useRef(save);
-  saveRef.current = save;
-  const draftRef = useRef<ProxyPasswordDraft | null>(null);
-  draftRef.current ??= createProxyPasswordDraft((secret) =>
-    saveRef.current(secret),
-  );
-  const draft = draftRef.current;
-  const [, rerender] = useReducer((value: number) => value + 1, 0);
-  useEffect(() => draft.subscribe(rerender), [draft]);
-  return draft;
-}
+} from "./model/proxy-password-draft.js";

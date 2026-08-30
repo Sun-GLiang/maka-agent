@@ -22,7 +22,7 @@ import test from "node:test";
 import {
   createProxyPasswordDraft,
   runAfterProxyPasswordCommit,
-} from "../../renderer/settings/proxy-password-draft.js";
+} from "../../renderer/features/network-proxy/testing.js";
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;

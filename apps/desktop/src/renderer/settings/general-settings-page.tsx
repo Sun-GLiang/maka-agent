@@ -36,7 +36,6 @@ import type {
 } from '@maka/core/settings';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { IdentifiedLlmConnection } from '@maka/core/llm-connections';
-import type { TestProxyInput } from "@maka/core/settings/network-settings";
 import { buildChatModelChoices } from "@maka/core/chat-model-choice";
 import {
   Button,
@@ -61,8 +60,12 @@ import { getConversationCopy } from '@maka/ui';
 import { settingsActionErrorMessage } from "./settings-error-copy";
 import { useActionGuard, useKeyedActionGuard } from "./use-action-guard";
 import { useOptimisticSettingsDraft } from "./use-optimistic-settings-draft";
-import { useProxyPasswordDraft } from "./use-proxy-password-draft.js";
-import { runAfterProxyPasswordCommit } from "./proxy-password-draft.js";
+import {
+  NetworkProxyPasswordDraft,
+  runAfterProxyPasswordCommit,
+  type ProxyPasswordDraft,
+  type TestProxyInput,
+} from "../features/network-proxy/index.js";
 import { getSettingsPreferencesCopy } from "../locales/settings-preferences-copy.js";
 import { settingsTestResultMessage } from "../locales/settings-test-result-copy.js";
 import { getShellCopy } from "../locales/shell-copy.js";
@@ -786,7 +789,7 @@ function NetworkProxySection(props: {
     return update(patch);
   }
 
-  const passwordDraft = useProxyPasswordDraft(async (secret) => {
+  async function saveProxyPassword(secret: string) {
     try {
       await props.onUpdate({
         network: {
@@ -797,9 +800,9 @@ function NetworkProxySection(props: {
       reportNetworkSaveError(error);
       throw error;
     }
-  });
+  }
 
-  async function testProxy() {
+  async function testProxy(passwordDraft: ProxyPasswordDraft) {
     if (!props.isInteractive) return;
     if (!proxyTestGuard.begin("test")) return;
     setTesting(true);
@@ -838,7 +841,9 @@ function NetworkProxySection(props: {
   }
 
   return (
-    <>
+    <NetworkProxyPasswordDraft save={saveProxyPassword}>
+      {(passwordDraft) => (
+        <>
       <SettingsRow
         label={copy.proxy}
         description={copy.proxyHelp}
@@ -972,13 +977,15 @@ function NetworkProxySection(props: {
               variant="primary"
               isLoading={testing}
               isDisabled={!props.isInteractive}
-              onClick={() => void testProxy()}
+              onClick={() => void testProxy(passwordDraft)}
               label={copy.testCurrent}
             />
           </SettingsActions>
         </>
       )}
-    </>
+        </>
+      )}
+    </NetworkProxyPasswordDraft>
   );
 }
 
