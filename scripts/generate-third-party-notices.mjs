@@ -109,6 +109,42 @@ const APACHE_TEXT_OVERRIDE_KEYS = new Set([
   '@ai-sdk/provider-utils@5.0.32',
   '@sigstore/verify@4.1.2',
 ]);
+const BRUMME_ZLIB_TEXT = `Copyright (c) Stephan Brumme
+
+This software is provided 'as-is', without any express or implied warranty. In no event will the author be held liable for any damages arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose, including commercial applications, and to alter it and redistribute it freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not claim that you wrote the original software.
+2. If you use this software in a product, an acknowledgment in the product documentation would be appreciated but is not required.
+3. Altered source versions must be plainly marked as such, and must not be misrepresented as being the original software.`;
+const GO_BSD3_TEXT = `Copyright (c) 2009 The Go Authors. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google Inc. nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.`;
 const EMBEDDED_COMPONENT_LICENSES = new Map([
   [
     '@ai-sdk/code-mode',
@@ -128,6 +164,64 @@ const EMBEDDED_COMPONENT_LICENSES = new Map([
             'Copyright (c) 2017-2021 Charlie Gordon',
           ].join('\n'),
         },
+      ],
+    },
+  ],
+  [
+    'hash-wasm',
+    {
+      version: '4.12.0',
+      components: [
+        {
+          name: 'Go crypto Argon2 implementation basis',
+          repository: 'https://go.googlesource.com/crypto',
+          license: 'BSD-3-Clause',
+          text: GO_BSD3_TEXT,
+        },
+        {
+          name: 'Stephan Brumme CRC32/CRC64/xxHash32/xxHash64 implementations',
+          repository: 'https://create.stephan-brumme.com',
+          license: 'Zlib-like',
+          text: BRUMME_ZLIB_TEXT,
+        },
+        {
+          name: 'Yanbo Li SM3 implementation',
+          repository: 'https://github.com/Daninet/hash-wasm',
+          copyright: 'Copyright 2016 Yanbo Li dreamfly281@gmail.com, goldboar@163.com',
+        },
+      ],
+    },
+  ],
+]);
+const EMBEDDED_SOURCE_NOTICES = new Map([
+  [
+    'hash-wasm',
+    {
+      version: '4.12.0',
+      sourceDirectory: 'src',
+      files: [
+        'adler32.c',
+        'argon2.c',
+        'bcrypt.c',
+        'blake2b.c',
+        'blake2s.c',
+        'blake3.c',
+        'crc32.c',
+        'crc64.c',
+        'md4.c',
+        'md5.c',
+        'ripemd160.c',
+        'scrypt.c',
+        'sha1.c',
+        'sha256.c',
+        'sha3.c',
+        'sha512.c',
+        'sm3.c',
+        'whirlpool.c',
+        'xxhash128.c',
+        'xxhash3.c',
+        'xxhash32.c',
+        'xxhash64.c',
       ],
     },
   ],
@@ -268,6 +362,24 @@ function readLicenseFiles(directory) {
     }))
     .filter((entry) => entry.text.length > 0)
     .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function readLeadingSourceNotice(path) {
+  const source = readFileSync(path, 'utf8').replace(/\r\n?/g, '\n');
+  if (source.startsWith('/*')) {
+    const end = source.indexOf('*/');
+    if (end < 0) throw new Error(`${path}: unterminated embedded source notice`);
+    return normalizeText(source.slice(0, end + 2));
+  }
+  if (source.startsWith('//')) {
+    const lines = source.split('\n');
+    let end = 0;
+    while (end < lines.length && (lines[end].startsWith('//') || lines[end].trim() === '')) {
+      end += 1;
+    }
+    return normalizeText(lines.slice(0, end).join('\n'));
+  }
+  throw new Error(`${path}: embedded source has no leading license/attribution notice`);
 }
 
 function overrideLicenseText(packageKey, selectedLicense) {
@@ -436,15 +548,48 @@ function renderNotice() {
         throw new Error(`${owner}: embedded component licenses require exact-version review`);
       }
       for (const component of inventory.components) {
+        const selectedLicense = component.license ?? 'MIT';
+        const licenseText = component.text ?? MIT_TEXT(component.copyright);
         sections.push(
           [
             `Embedded component: ${component.name}`,
             `Embedded by: ${owner}`,
-            'Selected license: MIT',
+            `Selected license: ${selectedLicense}`,
             `Repository: ${component.repository}`,
             '',
             '--- VERSION-PINNED EMBEDDED LICENSE TEXT ---',
-            MIT_TEXT(component.copyright),
+            licenseText,
+          ].join('\n'),
+        );
+      }
+    }
+  }
+  for (const [packageName, inventory] of EMBEDDED_SOURCE_NOTICES) {
+    const matchingDependencies = dependencies.filter((candidate) => candidate.name === packageName);
+    for (const dependency of matchingDependencies) {
+      const owner = `${dependency.name}@${dependency.version}`;
+      if (dependency.version !== inventory.version) {
+        throw new Error(`${owner}: embedded source notices require exact-version review`);
+      }
+      const candidates = lockIndex.get(owner);
+      const directory = packageDirectory(owner, candidates);
+      const sourceDirectory = join(directory, inventory.sourceDirectory);
+      const actualFiles = readdirSync(sourceDirectory)
+        .filter((name) => name.endsWith('.c'))
+        .sort();
+      const expectedFiles = [...inventory.files].sort();
+      if (actualFiles.join('\n') !== expectedFiles.join('\n')) {
+        throw new Error(`${owner}: embedded source inventory changed and requires review`);
+      }
+      for (const file of inventory.files) {
+        sections.push(
+          [
+            `Embedded source notice: ${file}`,
+            `Embedded by: ${owner}`,
+            `Source: ${inventory.sourceDirectory}/${file}`,
+            '',
+            '--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---',
+            readLeadingSourceNotice(join(sourceDirectory, file)),
           ].join('\n'),
         );
       }

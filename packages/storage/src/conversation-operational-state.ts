@@ -23,6 +23,7 @@ import {
   type OperationalStateDatabaseLease,
 } from './operational-state-store.js';
 import { isRuntimeStorageSafeId } from './runtime-event-invariants.js';
+import { recordRootTurnAdmissionsPurgedForPositionIndex } from './session-turn-position-index.js';
 
 export interface ConversationOperationalStateStore {
   purge(sessionId: string): Promise<void>;
@@ -82,6 +83,7 @@ class SqliteConversationOperationalStateStore implements ConversationOperational
         .prepare('DELETE FROM core_agent_run_projections WHERE session_id = ?')
         .run(sessionId);
       database.prepare('DELETE FROM core_root_turn_admissions WHERE session_id = ?').run(sessionId);
+      recordRootTurnAdmissionsPurgedForPositionIndex(database, sessionId);
       database
         .prepare('DELETE FROM core_root_turn_start_rejections WHERE session_id = ?')
         .run(sessionId);
