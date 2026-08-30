@@ -19,7 +19,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { decodeStoredMessage } from '@maka/core/session';
+import { classifySharedSessionTranscriptVisibility, decodeStoredMessage } from '@maka/core/session';
 import {
   advanceSessionTurnIdentityScanner,
   completeSessionTurnIdentityScanner,
@@ -54,7 +54,7 @@ test('extracts only the top-level identity envelope across arbitrary fragment bo
     id: 'message-1',
     ts: 1,
   });
-  const expected = { kind: 'turn', turnId: 'turn-一' };
+  const expected = { kind: 'turn', positionId: 'turn-一', sharedVisibility: true };
   assert.deepEqual(scan(json), expected);
   for (let split = 1; split < Buffer.byteLength(json); split += 1) {
     assert.deepEqual(scan(json, [split]), expected);
@@ -68,7 +68,7 @@ test('handles escaped identity values and visible/invisible turnless notes', () 
       [2, 7, 19, 31, 47],
       { messageId: 'note-1', messageType: 'system_note' },
     ),
-    { kind: 'note', turnId: 'session-note:note-1' },
+    { kind: 'note', positionId: 'note-1', sharedVisibility: true },
   );
   assert.deepEqual(
     scan('{"id":"hidden","type":"system_note","kind":"mode_change"}', [], {
@@ -87,11 +87,28 @@ test('rejects duplicate, empty, missing, nested, mismatched, and non-string iden
     '{"id":"message-1","type":"user","nested":{"turnId":"turn"}}',
     '{"id":"message-1","type":"user","turnId":1}',
     '{"id":"message-1","type":"user","turnId":{"value":"turn"}}',
+    '{"id":"message-1","type":"future_message","turnId":"turn"}',
   ];
   for (const json of invalid) {
     assert.throws(() => scan(json), SessionTurnIdentityScannerError);
   }
   assert.throws(() => scan('{"id":"other","type":"user","turnId":"turn"}'), /mismatch/u);
+  assert.throws(
+    () =>
+      scan('{"id":"note","type":"system_note","kind":"future_note"}', [], {
+        messageId: 'note',
+        messageType: 'system_note',
+      }),
+    SessionTurnIdentityScannerError,
+  );
+  assert.throws(
+    () =>
+      scan('{"id":"note","type":"system_note","kind":"step_limit","turnId":""}', [], {
+        messageId: 'note',
+        messageType: 'system_note',
+      }),
+    SessionTurnIdentityScannerError,
+  );
 });
 
 test('rejects invalid UTF-8, truncated JSON, excessive nesting, and corrupt persisted state', () => {
@@ -157,7 +174,7 @@ test('rejects captured identity larger than 32 KiB without retaining body fields
       }),
       [4 * 1024],
     ),
-    { kind: 'turn', turnId: 'turn' },
+    { kind: 'turn', positionId: 'turn', sharedVisibility: true },
   );
   assert.deepEqual(
     scan(
@@ -169,7 +186,7 @@ test('rejects captured identity larger than 32 KiB without retaining body fields
       }),
       [4 * 1024],
     ),
-    { kind: 'turn', turnId: 'turn' },
+    { kind: 'turn', positionId: 'turn', sharedVisibility: true },
   );
 });
 
@@ -255,7 +272,16 @@ test('differentially extracts every canonical StoredMessage identity under key r
         messageId: 'message-1',
         messageType: message.type,
       }),
-      { kind: 'turn', turnId: 'turn-1' },
+      {
+        kind: 'turn',
+        positionId: 'turn-1',
+        sharedVisibility:
+          classifySharedSessionTranscriptVisibility(
+            decoded.type === 'system_note'
+              ? { type: decoded.type, kind: decoded.kind }
+              : { type: decoded.type },
+          ) === 'visible',
+      },
     );
   }
 });

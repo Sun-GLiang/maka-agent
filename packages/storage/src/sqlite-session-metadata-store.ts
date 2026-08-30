@@ -89,6 +89,7 @@ import {
   isSubagentSessionParent,
   isSubagentSessionRuntime,
   isSubagentSessionSpawn,
+  SHARED_SESSION_TRANSCRIPT_VISIBILITY_POLICY_VERSION,
   type SessionHeader,
   type SessionHeaderPatch,
   type StoredMessage,
@@ -146,17 +147,19 @@ import {
   type SessionTurnContribution,
   type SessionTurnContributionPage,
   type SessionTurnLandmarkSnapshot,
-  type SessionTranscriptRecordsByTurnIdsSnapshotRequest,
-  type SessionTranscriptRecordsByTurnIdsSnapshotResult,
+  type SessionTranscriptRecordsByPositionKeysSnapshotRequest,
+  type SessionTranscriptRecordsByPositionKeysSnapshotResult,
   type SessionTurnPositionPageSnapshotRequest,
   type SessionTurnPositionReadResult,
   type SessionTurnPositionSnapshotKey,
+  type SessionTurnPositionSnapshotReleaseRequest,
 } from './session-store.js';
 import {
   isDiscardableConversationCopy,
   isValidConversationCopyTransition,
 } from './session-conversation-copy.js';
 import { catalogPreviewForUserMessage } from './session-message-projection.js';
+import { classifyStoredMessageTurnIdentity } from './session-turn-membership.js';
 import {
   configureSqliteSessionMetadataDatabase,
   migrateSqliteSessionMetadataDatabase,
@@ -168,6 +171,7 @@ import {
 import {
   advanceSessionTurnPositionOrdinalBuild,
   allocateOrRequireSessionTurnPositionSnapshot,
+  ensureTurnIndexRows,
   invalidateSessionTurnPositionIndex,
   markSessionTurnRecoveryComplete,
   pageReadySessionTurnPositionSnapshot,
@@ -1492,12 +1496,12 @@ export class SqliteSessionMetadataStore {
       const inserted = this.tryInsertHeader(normalized, 1, normalized.createdAt, true);
       if (!inserted) return 'existing';
       if (encoded.length > 0) {
-        this.insertSessionMessagesSync(normalized.id, 0, encoded);
+        const recordBytes = this.insertSessionMessagesSync(normalized.id, 0, encoded);
         recordAppendedSessionTurnMetadata(
           this.db,
           normalized.id,
           0,
-          encoded.map(({ message }) => message),
+          encoded.map(({ message }, index) => ({ message, recordBytes: recordBytes[index]! })),
         );
         // Align with appendMessages' connection-lock semantics: a session
         // with any user message is treated as connection-locked, even when
@@ -1617,12 +1621,12 @@ export class SqliteSessionMetadataStore {
         throw new Error(`Invalid Session message sequence for ${sessionId}`);
       }
       const sequence = row.last_sequence + 1;
-      this.insertSessionMessagesSync(sessionId, sequence, encoded);
+      const recordBytes = this.insertSessionMessagesSync(sessionId, sequence, encoded);
       recordAppendedSessionTurnMetadata(
         this.db,
         sessionId,
         sequence,
-        encoded.map(({ message }) => message),
+        encoded.map(({ message }, index) => ({ message, recordBytes: recordBytes[index]! })),
       );
       this.updateCatalogProjectionSync(sessionId, projection, false, lockConnection);
     });
@@ -1847,7 +1851,7 @@ export class SqliteSessionMetadataStore {
       ) {
         throw new SessionMetadataConflictError('Invalid WorkHub transcript sequence');
       }
-      this.insertSessionMessagesSync(
+      const recordBytes = this.insertSessionMessagesSync(
         WORKHUB_COORDINATION_SESSION_ID,
         sequenceRow.last_sequence + 1,
         [{ message: assignment, json: assignmentJson }],
@@ -1856,7 +1860,7 @@ export class SqliteSessionMetadataStore {
         this.db,
         WORKHUB_COORDINATION_SESSION_ID,
         sequenceRow.last_sequence + 1,
-        [assignment],
+        [{ message: assignment, recordBytes: recordBytes[0]! }],
       );
       this.updateCatalogProjectionSync(WORKHUB_COORDINATION_SESSION_ID, request.projection, false);
       return { kind: 'assigned' as const, targetCreated, assignment };
@@ -2718,6 +2722,9 @@ export class SqliteSessionMetadataStore {
   ): Promise<SessionTurnPositionReadResult> {
     this.assertOpen();
     assertSafeSessionId(request.sessionId);
+    if (!isSessionTurnVisibilityPolicyCurrent(this.db, request.sessionId)) {
+      this.transaction(() => ensureTurnIndexRows(this.db, request.sessionId));
+    }
     if (request.snapshotKey) {
       const ready = this.readTransaction(() => {
         const snapshot = requireSnapshot(this.db, request.sessionId, request.snapshotKey!);
@@ -2779,13 +2786,17 @@ export class SqliteSessionMetadataStore {
         return {
           kind: 'building' as const,
           snapshotKey: snapshotKeyFromRow(snapshot),
+          projection: request.projection,
           progress: {
             phase: 'recovering' as const,
             nextSequence: state.indexed_through_sequence + 1,
             currentByteOffset: partial?.byte_offset ?? 0,
             sourceRecords: state.source_records,
             sourceBytes: state.source_bytes,
-            builtPositions: snapshot.build_next_ordinal,
+            builtPositions:
+              request.projection === 'owner'
+                ? snapshot.build_next_owner_ordinal
+                : snapshot.build_next_shared_ordinal,
             lastStepRecords: recovery && !('failure' in recovery) ? recovery.lastStepRecords : 0,
             lastStepBytes: recovery && !('failure' in recovery) ? recovery.lastStepBytes : 0,
             lastStepPositions: 0,
@@ -2822,16 +2833,23 @@ export class SqliteSessionMetadataStore {
       return {
         kind: 'building' as const,
         snapshotKey: snapshotKeyFromRow(step.snapshot),
+        projection: request.projection,
         progress: {
           phase: step.executedPhase,
           nextSequence: state.indexed_through_sequence + 1,
           currentByteOffset: 0,
           sourceRecords: state.source_records,
           sourceBytes: state.source_bytes,
-          builtPositions: step.snapshot.build_next_ordinal,
+          builtPositions:
+            request.projection === 'owner'
+              ? step.snapshot.build_next_owner_ordinal
+              : step.snapshot.build_next_shared_ordinal,
           lastStepRecords: 0,
           lastStepBytes: 0,
-          lastStepPositions: step.lastStepPositions,
+          lastStepPositions:
+            request.projection === 'owner'
+              ? step.snapshot.build_next_owner_ordinal - snapshot.build_next_owner_ordinal
+              : step.snapshot.build_next_shared_ordinal - snapshot.build_next_shared_ordinal,
         },
       };
     });
@@ -2845,40 +2863,70 @@ export class SqliteSessionMetadataStore {
     return outcome;
   }
 
-  async readTranscriptRecordsByTurnIds(
-    request: SessionTranscriptRecordsByTurnIdsSnapshotRequest,
-  ): Promise<SessionTranscriptRecordsByTurnIdsSnapshotResult> {
+  async readTranscriptRecordsByPositionKeys(
+    request: SessionTranscriptRecordsByPositionKeysSnapshotRequest,
+  ): Promise<SessionTranscriptRecordsByPositionKeysSnapshotResult> {
     this.assertOpen();
     assertSafeSessionId(request.sessionId);
+    if (!isSessionTurnVisibilityPolicyCurrent(this.db, request.sessionId)) {
+      this.transaction(() => ensureTurnIndexRows(this.db, request.sessionId));
+    }
     return this.readTransaction(() => {
       const preflight = readSessionTurnMembershipPreflight(this.db, request);
-      const records: Array<{ sequence: number; message: StoredMessage }> = [];
-      for (const row of readStoredMessageRows(this.db, request.sessionId, preflight.sequences)) {
+      const decodedBySequence = new Map<number, StoredMessage>();
+      for (const row of readStoredMessageRows(
+        this.db,
+        request.sessionId,
+        preflight.records.map((record) => record.sequence),
+      )) {
         try {
-          records.push({
-            sequence: row.sequence,
-            message: decodeStoredMessage(JSON.parse(row.recordJson) as unknown),
-          });
+          decodedBySequence.set(
+            row.sequence,
+            decodeStoredMessage(JSON.parse(row.recordJson) as unknown),
+          );
         } catch (error) {
           throw new StoredSessionMessageIncompatibleError(request.sessionId, row.sequence, {
             cause: error,
           });
         }
       }
-      return { snapshotKey: request.snapshotKey, records, rawBytes: preflight.storedBytes };
+      const records = preflight.records.map(({ positionKey, sequence }) => {
+        const message = decodedBySequence.get(sequence);
+        if (!message) throw new StoredSessionMessageIncompatibleError(request.sessionId, sequence);
+        try {
+          const identity = classifyStoredMessageTurnIdentity(message);
+          if (
+            identity.kind === 'ignored' ||
+            identity.kind !== positionKey.kind ||
+            identity.positionId !== positionKey.id
+          ) {
+            throw new Error('decoded transcript identity no longer matches the exact position');
+          }
+        } catch (error) {
+          throw new StoredSessionMessageIncompatibleError(request.sessionId, sequence, {
+            cause: error,
+          });
+        }
+        return { positionKey, sequence, message };
+      });
+      return {
+        snapshotKey: request.snapshotKey,
+        projection: request.projection,
+        records,
+        rawBytes: preflight.storedBytes,
+      };
     });
   }
 
   async releaseTurnPositionSnapshot(
-    sessionId: string,
-    snapshotLeaseId: string,
-    snapshotKey: SessionTurnPositionSnapshotKey,
+    request: SessionTurnPositionSnapshotReleaseRequest,
   ): Promise<void> {
     this.assertOpen();
-    assertSafeSessionId(sessionId);
-    this.transaction(() =>
-      releaseSessionTurnPositionSnapshot(this.db, sessionId, snapshotLeaseId, snapshotKey),
-    );
+    assertSafeSessionId(request.sessionId);
+    if (!isSessionTurnVisibilityPolicyCurrent(this.db, request.sessionId)) {
+      this.transaction(() => ensureTurnIndexRows(this.db, request.sessionId));
+    }
+    this.transaction(() => releaseSessionTurnPositionSnapshot(this.db, request));
   }
 
   async readTurnContributions(
@@ -5384,7 +5432,7 @@ export class SqliteSessionMetadataStore {
       readonly message: StoredMessage;
       readonly json: string;
     }[],
-  ): void {
+  ): readonly number[] {
     if (
       !Number.isSafeInteger(firstSequence) ||
       firstSequence < 0 ||
@@ -5405,10 +5453,12 @@ export class SqliteSessionMetadataStore {
       INSERT INTO session_message_chunks(session_id, sequence, chunk_index, data, sha256)
       VALUES (?, ?, ?, ?, ?)
     `);
+    const recordBytes: number[] = [];
     for (let index = 0; index < entries.length; index += 1) {
       const entry = entries[index]!;
       const sequence = firstSequence + index;
       const encoded = Buffer.from(entry.json, 'utf8');
+      recordBytes.push(encoded.byteLength);
       const chunked = encoded.byteLength > SQLITE_SESSION_MESSAGE_CHUNK_BYTES;
       insertMessage.run(
         sessionId,
@@ -5440,6 +5490,7 @@ export class SqliteSessionMetadataStore {
         );
       }
     }
+    return recordBytes;
   }
 
   private replaceSessionMessageSync(
@@ -7150,6 +7201,17 @@ function readChunkedTranscriptRecord(
 function nullableStoredMessageSequence(value: unknown, sessionId: string): number | null {
   if (value === null || value === undefined) return null;
   return requireStoredMessageSequence(value, sessionId);
+}
+
+function isSessionTurnVisibilityPolicyCurrent(db: DatabaseSync, sessionId: string): boolean {
+  const row = db
+    .prepare(`SELECT visibility_policy_version FROM session_turn_authority_revisions
+      WHERE session_id = ?`)
+    .get(sessionId) as { visibility_policy_version: number } | undefined;
+  return (
+    row === undefined ||
+    row.visibility_policy_version === SHARED_SESSION_TRANSCRIPT_VISIBILITY_POLICY_VERSION
+  );
 }
 
 function requireTranscriptPayloadDigest(

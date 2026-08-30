@@ -780,17 +780,6 @@ export function userFacingText(message: Pick<UserMessage, 'text' | 'displayText'
   return message.displayText ?? message.text;
 }
 
-const USER_VISIBLE_SESSION_SYSTEM_NOTES = new Set([
-  'context_compacted',
-  'context_compaction_failed_open',
-  'step_limit',
-]);
-
-/** Closed policy for system notes that are part of the user-visible transcript. */
-export function isUserVisibleSessionSystemNote(kind: string): boolean {
-  return USER_VISIBLE_SESSION_SYSTEM_NOTES.has(kind);
-}
-
 export interface AssistantMessage {
   type: 'assistant';
   id: string;
@@ -1014,6 +1003,81 @@ export interface SystemNoteMessage {
   data?: unknown;
 }
 
+export const SHARED_SESSION_TRANSCRIPT_VISIBILITY_POLICY_VERSION = 1 as const;
+
+export type SharedSessionTranscriptVisibility = 'visible' | 'hidden';
+
+export type SharedSessionTranscriptVisibilityEnvelope =
+  | {
+      readonly type: 'system_note';
+      readonly kind: SystemNoteMessage['kind'];
+    }
+  | {
+      readonly type: Exclude<StoredMessage['type'], 'system_note'>;
+    };
+
+const SHARED_SESSION_SYSTEM_NOTE_VISIBILITY = {
+  session_start: 'hidden',
+  session_resume: 'hidden',
+  mode_change: 'hidden',
+  model_change: 'hidden',
+  context_compacted: 'visible',
+  context_compaction_failed_open: 'visible',
+  step_limit: 'visible',
+  error: 'hidden',
+  abort: 'hidden',
+} as const satisfies Record<SystemNoteMessage['kind'], SharedSessionTranscriptVisibility>;
+
+/** Closed scalar policy for records admitted to a shared transcript projection. */
+export function classifySharedSessionTranscriptVisibility(
+  envelope: SharedSessionTranscriptVisibilityEnvelope,
+): SharedSessionTranscriptVisibility {
+  switch (envelope.type) {
+    case 'user':
+    case 'assistant':
+    case 'tool_call':
+    case 'tool_result':
+    case 'turn_state':
+    case 'token_usage':
+      return 'visible';
+    case 'permission_decision':
+    case 'workhub_coordination':
+      return 'hidden';
+    case 'system_note':
+      return SHARED_SESSION_SYSTEM_NOTE_VISIBILITY[envelope.kind];
+    default: {
+      const unreachable: never = envelope;
+      return unreachable;
+    }
+  }
+}
+
+export function isSessionSystemNoteKind(value: unknown): value is SystemNoteMessage['kind'] {
+  return typeof value === 'string' && Object.hasOwn(SHARED_SESSION_SYSTEM_NOTE_VISIBILITY, value);
+}
+
+export function isStoredMessageType(value: unknown): value is StoredMessage['type'] {
+  switch (value) {
+    case 'user':
+    case 'assistant':
+    case 'tool_call':
+    case 'tool_result':
+    case 'permission_decision':
+    case 'token_usage':
+    case 'turn_state':
+    case 'workhub_coordination':
+    case 'system_note':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** Closed policy for system notes that are part of the user-visible transcript. */
+export function isUserVisibleSessionSystemNote(kind: string): boolean {
+  return isSessionSystemNoteKind(kind) && SHARED_SESSION_SYSTEM_NOTE_VISIBILITY[kind] === 'visible';
+}
+
 const USER_MESSAGE_SHAPE = defineObjectShape<UserMessage>()(
   ['type', 'id', 'turnId', 'ts', 'text'],
   ['displayText', 'attachments', 'quotes', 'inlineReferences', 'steeringEventId', 'origin'],
@@ -1135,18 +1199,6 @@ const ASSISTANT_THINKING_SHAPE = defineObjectShape<AssistantThinking>()(
   ['text'],
   ['signature', 'providerOptions', 'parts'],
 );
-const SYSTEM_NOTE_KINDS = new Set([
-  'session_start',
-  'session_resume',
-  'mode_change',
-  'model_change',
-  'context_compacted',
-  'context_compaction_failed_open',
-  'step_limit',
-  'error',
-  'abort',
-]);
-
 export function decodeCanonicalMessage(value: unknown): StoredMessage {
   return decodeMessage(value, decodeCanonicalToolResultContent);
 }
@@ -1280,7 +1332,7 @@ function decodeMessage(
         hasExactShape(message, SYSTEM_NOTE_MESSAGE_SHAPE) &&
         hasMessageEnvelope(message, false) &&
         isOptionalString(message.turnId) &&
-        SYSTEM_NOTE_KINDS.has(message.kind as string)
+        isSessionSystemNoteKind(message.kind)
       )
         return message as unknown as SystemNoteMessage;
       break;

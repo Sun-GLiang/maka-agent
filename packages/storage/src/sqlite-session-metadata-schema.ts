@@ -1231,6 +1231,8 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
     CREATE TABLE IF NOT EXISTS session_turn_authority_revisions (
       session_id TEXT PRIMARY KEY,
       authority_revision INTEGER NOT NULL DEFAULT 0 CHECK (authority_revision >= 0),
+      visibility_policy_version INTEGER NOT NULL DEFAULT 1
+        CHECK (visibility_policy_version >= 1),
       next_snapshot_generation INTEGER NOT NULL DEFAULT 1
         CHECK (next_snapshot_generation >= 1),
       FOREIGN KEY(session_id) REFERENCES session_metadata(session_id) ON DELETE CASCADE
@@ -1273,41 +1275,49 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
 
     CREATE TABLE IF NOT EXISTS session_turn_metadata (
       session_id TEXT NOT NULL,
-      turn_id TEXT NOT NULL,
-      identity_kind TEXT NOT NULL CHECK (identity_kind IN ('turn', 'note', 'synthetic')),
-      order_source TEXT NOT NULL CHECK (order_source IN ('legacy', 'admission', 'synthetic')),
+      position_kind TEXT NOT NULL CHECK (position_kind IN ('turn', 'note')),
+      position_id TEXT NOT NULL CHECK (length(CAST(position_id AS BLOB)) > 0),
+      order_source TEXT NOT NULL CHECK (order_source IN ('legacy', 'admission')),
       admitted_at INTEGER CHECK (admitted_at >= 0),
-      first_sequence INTEGER CHECK (first_sequence >= 0),
-      PRIMARY KEY(session_id, turn_id),
-      UNIQUE(session_id, first_sequence),
+      owner_first_sequence INTEGER CHECK (owner_first_sequence >= 0),
+      shared_first_sequence INTEGER CHECK (shared_first_sequence >= 0),
+      PRIMARY KEY(session_id, position_kind, position_id),
+      UNIQUE(session_id, owner_first_sequence),
+      UNIQUE(session_id, shared_first_sequence),
       FOREIGN KEY(session_id) REFERENCES session_metadata(session_id) ON DELETE CASCADE
     ) WITHOUT ROWID;
 
     CREATE INDEX IF NOT EXISTS session_turn_metadata_by_legacy_order
-      ON session_turn_metadata(session_id, first_sequence, turn_id)
+      ON session_turn_metadata(session_id, owner_first_sequence, position_kind, position_id)
       WHERE order_source = 'legacy';
 
     CREATE INDEX IF NOT EXISTS session_turn_metadata_by_admission_order
-      ON session_turn_metadata(session_id, admitted_at, turn_id)
+      ON session_turn_metadata(session_id, admitted_at, position_id)
       WHERE order_source = 'admission';
 
     CREATE INDEX IF NOT EXISTS session_turn_metadata_by_admission_sequence
-      ON session_turn_metadata(session_id, first_sequence)
+      ON session_turn_metadata(session_id, owner_first_sequence)
       WHERE order_source = 'admission';
+
+    CREATE INDEX IF NOT EXISTS session_turn_metadata_by_shared_sequence
+      ON session_turn_metadata(session_id, shared_first_sequence, position_kind, position_id)
+      WHERE shared_first_sequence IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS session_turn_memberships (
       session_id TEXT NOT NULL,
       sequence INTEGER NOT NULL CHECK (sequence >= 0),
-      turn_id TEXT NOT NULL,
+      position_kind TEXT NOT NULL CHECK (position_kind IN ('turn', 'note')),
+      position_id TEXT NOT NULL CHECK (length(CAST(position_id AS BLOB)) > 0),
+      shared_visibility INTEGER NOT NULL CHECK (shared_visibility IN (0, 1)),
       PRIMARY KEY(session_id, sequence),
-      FOREIGN KEY(session_id, turn_id)
-        REFERENCES session_turn_metadata(session_id, turn_id) ON DELETE CASCADE,
+      FOREIGN KEY(session_id, position_kind, position_id)
+        REFERENCES session_turn_metadata(session_id, position_kind, position_id) ON DELETE CASCADE,
       FOREIGN KEY(session_id, sequence)
         REFERENCES session_messages(session_id, sequence) ON DELETE CASCADE ON UPDATE CASCADE
     ) WITHOUT ROWID;
 
-    CREATE INDEX IF NOT EXISTS session_turn_memberships_by_turn
-      ON session_turn_memberships(session_id, turn_id, sequence);
+    CREATE INDEX IF NOT EXISTS session_turn_memberships_by_position
+      ON session_turn_memberships(session_id, position_kind, position_id, sequence);
 
     CREATE TABLE IF NOT EXISTS session_turn_position_snapshots (
       session_id TEXT NOT NULL,
@@ -1318,11 +1328,26 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
       state TEXT NOT NULL CHECK (state IN ('building', 'ready')),
       build_phase TEXT NOT NULL DEFAULT 'recovering'
         CHECK (build_phase IN ('recovering', 'legacy', 'admission', 'notes', 'ready')),
-      build_next_ordinal INTEGER NOT NULL DEFAULT 0 CHECK (build_next_ordinal >= 0),
+      build_next_owner_ordinal INTEGER NOT NULL DEFAULT 0
+        CHECK (build_next_owner_ordinal >= 0),
+      build_next_shared_ordinal INTEGER NOT NULL DEFAULT 0
+        CHECK (build_next_shared_ordinal >= 0),
       build_cursor_sequence INTEGER NOT NULL DEFAULT -1 CHECK (build_cursor_sequence >= -1),
       build_cursor_admitted_at INTEGER CHECK (build_cursor_admitted_at >= 0),
-      build_cursor_turn_id TEXT,
-      ready_total INTEGER CHECK (ready_total >= 0),
+      build_cursor_position_kind TEXT CHECK (
+        build_cursor_position_kind IS NULL OR build_cursor_position_kind IN ('turn', 'note')
+      ),
+      build_cursor_position_id TEXT,
+      ready_owner_total INTEGER CHECK (ready_owner_total >= 0),
+      ready_shared_total INTEGER CHECK (ready_shared_total >= 0),
+      CHECK (
+        (state = 'building' AND build_phase <> 'ready'
+          AND ready_owner_total IS NULL AND ready_shared_total IS NULL)
+        OR
+        (state = 'ready' AND build_phase = 'ready'
+          AND ready_owner_total >= 1 AND ready_shared_total >= 1)
+      ),
+      CHECK ((build_cursor_position_kind IS NULL) = (build_cursor_position_id IS NULL)),
       PRIMARY KEY(session_id, slot),
       UNIQUE(session_id, snapshot_generation),
       UNIQUE(session_id, through_sequence, authority_revision),
@@ -1339,30 +1364,63 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
     CREATE TABLE IF NOT EXISTS session_turn_snapshot_positions (
       session_id TEXT NOT NULL,
       snapshot_generation INTEGER NOT NULL CHECK (snapshot_generation >= 1),
-      ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-      turn_id TEXT NOT NULL,
-      first_sequence INTEGER CHECK (first_sequence >= 0),
-      PRIMARY KEY(session_id, snapshot_generation, ordinal),
-      UNIQUE(session_id, snapshot_generation, turn_id),
+      position_kind TEXT NOT NULL CHECK (position_kind IN ('turn', 'note', 'empty')),
+      position_id TEXT NOT NULL,
+      owner_ordinal INTEGER CHECK (owner_ordinal >= 0),
+      shared_ordinal INTEGER CHECK (shared_ordinal >= 0),
+      owner_first_sequence INTEGER CHECK (owner_first_sequence >= 0),
+      shared_first_sequence INTEGER CHECK (shared_first_sequence >= 0),
+      CHECK ((position_kind = 'empty' AND position_id = '') OR
+        (position_kind <> 'empty' AND length(CAST(position_id AS BLOB)) > 0)),
+      CHECK (owner_ordinal IS NOT NULL OR shared_ordinal IS NOT NULL),
+      CHECK (position_kind = 'empty' OR owner_ordinal IS NOT NULL),
+      CHECK (shared_ordinal IS NULL OR position_kind = 'empty'
+        OR shared_first_sequence IS NOT NULL),
+      CHECK (shared_ordinal IS NOT NULL OR shared_first_sequence IS NULL),
+      CHECK (position_kind <> 'empty' OR
+        (owner_first_sequence IS NULL AND shared_first_sequence IS NULL)),
+      PRIMARY KEY(session_id, snapshot_generation, position_kind, position_id),
       FOREIGN KEY(session_id, snapshot_generation)
         REFERENCES session_turn_position_snapshots(session_id, snapshot_generation)
         ON DELETE CASCADE
     ) WITHOUT ROWID;
 
-    CREATE INDEX IF NOT EXISTS session_turn_snapshot_positions_by_sequence
+    CREATE UNIQUE INDEX IF NOT EXISTS session_turn_snapshot_positions_by_owner_ordinal
+      ON session_turn_snapshot_positions(session_id, snapshot_generation, owner_ordinal)
+      WHERE owner_ordinal IS NOT NULL;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS session_turn_snapshot_positions_by_shared_ordinal
+      ON session_turn_snapshot_positions(session_id, snapshot_generation, shared_ordinal)
+      WHERE shared_ordinal IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS session_turn_snapshot_positions_by_owner_sequence
       ON session_turn_snapshot_positions(
         session_id,
         snapshot_generation,
-        first_sequence,
-        ordinal
-      );
+        owner_first_sequence,
+        owner_ordinal
+      ) WHERE owner_ordinal IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS session_turn_snapshot_positions_by_shared_sequence
+      ON session_turn_snapshot_positions(
+        session_id,
+        snapshot_generation,
+        shared_first_sequence,
+        shared_ordinal
+      ) WHERE shared_ordinal IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS session_turn_snapshot_positions_by_turn_anchor
+      ON session_turn_snapshot_positions(
+        session_id, snapshot_generation, position_kind, position_id
+      ) WHERE position_kind = 'turn';
 
     CREATE TABLE IF NOT EXISTS session_turn_snapshot_leases (
       session_id TEXT NOT NULL,
       snapshot_generation INTEGER NOT NULL CHECK (snapshot_generation >= 1),
+      projection TEXT NOT NULL CHECK (projection IN ('owner', 'shared')),
       lease_id TEXT NOT NULL CHECK (length(CAST(lease_id AS BLOB)) BETWEEN 1 AND 128),
-      PRIMARY KEY(session_id, snapshot_generation, lease_id),
-      UNIQUE(session_id, lease_id),
+      PRIMARY KEY(session_id, snapshot_generation, projection, lease_id),
+      UNIQUE(session_id, projection, lease_id),
       FOREIGN KEY(session_id, snapshot_generation)
         REFERENCES session_turn_position_snapshots(session_id, snapshot_generation)
         ON DELETE CASCADE
