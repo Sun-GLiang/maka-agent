@@ -4641,6 +4641,53 @@ SOFTWARE.
 
 ================================================================================
 
+Package: hash-wasm@4.12.0
+Declared license: MIT
+Selected license: MIT
+Repository: git+https://github.com/Daninet/hash-wasm.git
+
+--- LICENSE ---
+MIT License
+
+Copyright (c) 2020 Dani Biró
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Embedded C implementations might use other, similarly permissive licenses.
+Check the beginning of the files from the /src directory.
+
+Special thank you to the authors of original C algorithms:
+- Alexander Peslyak <solar@openwall.com>
+- Aleksey Kravchenko <rhash.admin@gmail.com>
+- Colin Percival
+- Stephan Brumme <create@stephan-brumme.com>
+- Steve Reid <steve@edmweb.com>
+- Samuel Neves <sneves@dei.uc.pt>
+- Solar Designer <solar@openwall.com>
+- Project Nayuki
+- ARM Limited
+- Yanbo Li dreamfly281@gmail.com, goldboar@163.comYanbo Li
+- Mark Adler
+- Yann Collet
+
+================================================================================
+
 Package: hasown@2.0.4
 Declared license: MIT
 Selected license: MIT
@@ -7803,3 +7850,704 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+================================================================================
+
+Embedded component: Go crypto Argon2 implementation basis
+Embedded by: hash-wasm@4.12.0
+Selected license: BSD-3-Clause
+Repository: https://go.googlesource.com/crypto
+
+--- VERSION-PINNED EMBEDDED LICENSE TEXT ---
+Copyright (c) 2009 The Go Authors. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google Inc. nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+================================================================================
+
+Embedded component: Stephan Brumme CRC32/CRC64/xxHash32/xxHash64 implementations
+Embedded by: hash-wasm@4.12.0
+Selected license: Zlib-like
+Repository: https://create.stephan-brumme.com
+
+--- VERSION-PINNED EMBEDDED LICENSE TEXT ---
+Copyright (c) Stephan Brumme
+
+This software is provided 'as-is', without any express or implied warranty. In no event will the author be held liable for any damages arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose, including commercial applications, and to alter it and redistribute it freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not claim that you wrote the original software.
+2. If you use this software in a product, an acknowledgment in the product documentation would be appreciated but is not required.
+3. Altered source versions must be plainly marked as such, and must not be misrepresented as being the original software.
+
+================================================================================
+
+Embedded component: Yanbo Li SM3 implementation
+Embedded by: hash-wasm@4.12.0
+Selected license: MIT
+Repository: https://github.com/Daninet/hash-wasm
+
+--- VERSION-PINNED EMBEDDED LICENSE TEXT ---
+MIT License
+
+Copyright 2016 Yanbo Li dreamfly281@gmail.com, goldboar@163.com
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+
+Embedded source notice: adler32.c
+Embedded by: hash-wasm@4.12.0
+Source: src/adler32.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+  adler32.c -- compute the Adler-32 checksum of a data stream
+  Copyright (C) 1995-2011, 2016 Mark Adler
+
+    Licensed under the zlib license:
+
+    Copyright (C) 1995-2017 Jean-loup Gailly and Mark Adler
+
+    This software is provided 'as-is', without any express or implied
+    warranty.  In no event will the authors be held liable for any damages
+    arising from the use of this software.
+
+    Permission is granted to anyone to use this software for any purpose,
+    including commercial applications, and to alter it and redistribute it
+    freely, subject to the following restrictions:
+
+    1. The origin of this software must not be misrepresented; you must not
+       claim that you wrote the original software. If you use this software
+       in a product, an acknowledgment in the product documentation would be
+       appreciated but is not required.
+    2. Altered source versions must be plainly marked as such, and must not be
+       misrepresented as being the original software.
+    3. This notice may not be removed or altered from any source distribution.
+
+    Jean-loup Gailly        Mark Adler
+    jloup@gzip.org          madler@alumni.caltech.edu
+
+  Modified for hash-wasm by Nicholas Sherlock and Dani Biro, 2021
+*/
+
+================================================================================
+
+Embedded source notice: argon2.c
+Embedded by: hash-wasm@4.12.0
+Source: src/argon2.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+  Based on Golang's Argon2 implementation from crypto package
+
+  Written for hash-wasm by Dani Biró
+*/
+
+================================================================================
+
+Embedded source notice: bcrypt.c
+Embedded by: hash-wasm@4.12.0
+Source: src/bcrypt.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+ * The crypt_blowfish homepage is:
+ *
+ *	http://www.openwall.com/crypt/
+ *
+ * This code comes from John the Ripper password cracker, with reentrant
+ * and crypt(3) interfaces added, but optimizations specific to password
+ * cracking removed.
+ *
+ * Written by Solar Designer <solar at openwall.com> in 1998-2014.
+ * No copyright is claimed, and the software is hereby placed in the public
+ * domain.  In case this attempt to disclaim copyright and place the software
+ * in the public domain is deemed null and void, then the software is
+ * Copyright (c) 1998-2014 Solar Designer and it is hereby released to the
+ * general public under the following terms:
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted.
+ *
+ * There's ABSOLUTELY NO WARRANTY, express or implied.
+ *
+ * It is my intent that you should be able to use this on your system,
+ * as part of a software package, or anywhere else to improve security,
+ * ensure compatibility, or for any other purpose.  I would appreciate
+ * it if you give credit where it is due and keep your modifications in
+ * the public domain as well, but I don't require that in order to let
+ * you place this code and any modifications you make under a license
+ * of your choice.
+ *
+ * This implementation is fully compatible with OpenBSD's bcrypt.c for prefix
+ * "$2b$", originally by Niels Provos <provos at citi.umich.edu>, and it uses
+ * some of his ideas.  The password hashing algorithm was designed by David
+ * Mazieres <dm at lcs.mit.edu>.  For information on the level of
+ * compatibility for bcrypt hash prefixes other than "$2b$", please refer to
+ * the comments in BF_set_key() below and to the included crypt(3) man page.
+ *
+ * There's a paper on the algorithm that explains its design decisions:
+ *
+ *	http://www.usenix.org/events/usenix99/provos.html
+ *
+ * Some of the tricks in BF_ROUND might be inspired by Eric Young's
+ * Blowfish library (I can't be sure if I would think of something if I
+ * hadn't seen his code).
+ *
+ * Modified for hash-wasm by Dani Biró
+ */
+
+================================================================================
+
+Embedded source notice: blake2b.c
+Embedded by: hash-wasm@4.12.0
+Source: src/blake2b.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+  BLAKE2 reference source code package - reference C implementations
+  Copyright 2012, Samuel Neves <sneves@dei.uc.pt>.  You may use this under the
+  terms of the CC0, the OpenSSL Licence, or the Apache Public License 2.0, at
+  your option.  The terms of these licenses can be found at:
+  - CC0 1.0 Universal : http://creativecommons.org/publicdomain/zero/1.0
+  - OpenSSL license   : https://www.openssl.org/source/license.html
+  - Apache 2.0        : http://www.apache.org/licenses/LICENSE-2.0
+
+  More information about the BLAKE2 hash function can be found at
+  https://blake2.net.
+
+  Modified for hash-wasm by Dani Biró
+*/
+
+================================================================================
+
+Embedded source notice: blake2s.c
+Embedded by: hash-wasm@4.12.0
+Source: src/blake2s.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+  BLAKE2 reference source code package - reference C implementations
+  Copyright 2012, Samuel Neves <sneves@dei.uc.pt>.  You may use this under the
+  terms of the CC0, the OpenSSL Licence, or the Apache Public License 2.0, at
+  your option.  The terms of these licenses can be found at:
+  - CC0 1.0 Universal : http://creativecommons.org/publicdomain/zero/1.0
+  - OpenSSL license   : https://www.openssl.org/source/license.html
+  - Apache 2.0        : http://www.apache.org/licenses/LICENSE-2.0
+
+  More information about the BLAKE2 hash function can be found at
+  https://blake2.net.
+
+  Modified for hash-wasm by Dani Biró
+*/
+
+================================================================================
+
+Embedded source notice: blake3.c
+Embedded by: hash-wasm@4.12.0
+Source: src/blake3.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+  BLAKE3 - reference C implementation
+  https://github.com/BLAKE3-team/BLAKE3
+  This work is released into the public domain with CC0 1.0. Alternatively, it
+  is licensed under the Apache License 2.0.
+
+  Modified for hash-wasm by Dani Biró
+*/
+
+================================================================================
+
+Embedded source notice: crc32.c
+Embedded by: hash-wasm@4.12.0
+Source: src/crc32.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+// //////////////////////////////////////////////////////////
+// Crc32.cpp
+// Copyright (c) 2011-2019 Stephan Brumme. All rights reserved.
+// Slicing-by-16 contributed by Bulat Ziganshin
+// Tableless bytewise CRC contributed by Hagai Gold
+// see http://create.stephan-brumme.com/disclaimer.html
+//
+// Modified for hash-wasm by Dani Biró
+//
+
+================================================================================
+
+Embedded source notice: crc64.c
+Embedded by: hash-wasm@4.12.0
+Source: src/crc64.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+// Based on crc32.c implementation of Stephan Brumme
+// Modified for hash-wasm by Dani Biró
+
+================================================================================
+
+Embedded source notice: md4.c
+Embedded by: hash-wasm@4.12.0
+Source: src/md4.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+ * This is an OpenSSL-compatible implementation of the RSA Data Security, Inc.
+ * MD4 Message-Digest Algorithm (RFC 1320).
+ *
+ * Homepage:
+ * http://openwall.info/wiki/people/solar/software/public-domain-source-code/md4
+ *
+ * Author:
+ * Alexander Peslyak, better known as Solar Designer <solar at openwall.com>
+ *
+ * This software was written by Alexander Peslyak in 2001.  No copyright is
+ * claimed, and the software is hereby placed in the public domain.
+ * In case this attempt to disclaim copyright and place the software in the
+ * public domain is deemed null and void, then the software is
+ * Copyright (c) 2001 Alexander Peslyak and it is hereby released to the
+ * general public under the following terms:
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted.
+ *
+ * There's ABSOLUTELY NO WARRANTY, express or implied.
+ *
+ * (This is a heavily cut-down "BSD license".)
+ *
+ * This differs from Colin Plumb's older public domain implementation in that
+ * no exactly 32-bit integer data type is required (any 32-bit or wider
+ * unsigned integer data type will do), there's no compile-time endianness
+ * configuration, and the function prototypes match OpenSSL's.  No code from
+ * Colin Plumb's implementation has been reused; this comment merely compares
+ * the properties of the two independent implementations.
+ *
+ * The primary goals of this implementation are portability and ease of use.
+ * It is meant to be fast, but not as fast as possible.  Some known
+ * optimizations are not included to reduce source code size and avoid
+ * compile-time configuration.
+ *
+ * Modified for hash-wasm by Dani Biró
+ */
+
+================================================================================
+
+Embedded source notice: md5.c
+Embedded by: hash-wasm@4.12.0
+Source: src/md5.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+ * This is an OpenSSL-compatible implementation of the RSA Data Security, Inc.
+ * MD5 Message-Digest Algorithm (RFC 1321).
+ *
+ * Homepage:
+ * http://openwall.info/wiki/people/solar/software/public-domain-source-code/md5
+ *
+ * Author:
+ * Alexander Peslyak, better known as Solar Designer <solar at openwall.com>
+ *
+ * This software was written by Alexander Peslyak in 2001.  No copyright is
+ * claimed, and the software is hereby placed in the public domain.
+ * In case this attempt to disclaim copyright and place the software in the
+ * public domain is deemed null and void, then the software is
+ * Copyright (c) 2001 Alexander Peslyak and it is hereby released to the
+ * general public under the following terms:
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted.
+ *
+ * There's ABSOLUTELY NO WARRANTY, express or implied.
+ *
+ * (This is a heavily cut-down "BSD license".)
+ *
+ * This differs from Colin Plumb's older public domain implementation in that
+ * no exactly 32-bit integer data type is required (any 32-bit or wider
+ * unsigned integer data type will do), there's no compile-time endianness
+ * configuration, and the function prototypes match OpenSSL's.  No code from
+ * Colin Plumb's implementation has been reused; this comment merely compares
+ * the properties of the two independent implementations.
+ *
+ * The primary goals of this implementation are portability and ease of use.
+ * It is meant to be fast, but not as fast as possible.  Some known
+ * optimizations are not included to reduce source code size and avoid
+ * compile-time configuration.
+ *
+ * Modified for hash-wasm by Dani Biró
+ */
+
+================================================================================
+
+Embedded source notice: ripemd160.c
+Embedded by: hash-wasm@4.12.0
+Source: src/ripemd160.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+ * RIPE MD-160 implementation
+ *
+ * Copyright (C) 2006-2015, ARM Limited, All Rights Reserved
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * This file is part of mbed TLS (https://tls.mbed.org)
+ *
+ * Modified for hash-wasm by Dani Biró
+ */
+
+================================================================================
+
+Embedded source notice: scrypt.c
+Embedded by: hash-wasm@4.12.0
+Source: src/scrypt.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+ * Copyright 2009 Colin Percival
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * This file was originally written by Colin Percival as part of the Tarsnap
+ * online backup system.
+ *
+ * Modified for hash-wasm by Dani Biró
+ */
+
+================================================================================
+
+Embedded source notice: sha1.c
+Embedded by: hash-wasm@4.12.0
+Source: src/sha1.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+SHA-1 in C
+By Steve Reid <steve@edmweb.com>
+100% Public Domain
+
+Modified for hash-wasm by Dani Biró
+*/
+
+================================================================================
+
+Embedded source notice: sha256.c
+Embedded by: hash-wasm@4.12.0
+Source: src/sha256.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/* sha256.c - an implementation of SHA-256/224 hash functions
+ * based on FIPS 180-3 (Federal Information Processing Standart).
+ *
+ * Copyright (c) 2010, Aleksey Kravchenko <rhash.admin@gmail.com>
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+ * REGARD TO THIS SOFTWARE  INCLUDING ALL IMPLIED WARRANTIES OF  MERCHANTABILITY
+ * AND FITNESS.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+ * INDIRECT,  OR CONSEQUENTIAL DAMAGES  OR ANY DAMAGES WHATSOEVER RESULTING FROM
+ * LOSS OF USE,  DATA OR PROFITS,  WHETHER IN AN ACTION OF CONTRACT,  NEGLIGENCE
+ * OR OTHER TORTIOUS ACTION,  ARISING OUT OF  OR IN CONNECTION  WITH THE USE  OR
+ * PERFORMANCE OF THIS SOFTWARE.
+
+ * Modified for hash-wasm by Dani Biró
+ */
+
+================================================================================
+
+Embedded source notice: sha3.c
+Embedded by: hash-wasm@4.12.0
+Source: src/sha3.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/* sha3.c - an implementation of Secure Hash Algorithm 3 (Keccak).
+ * based on the
+ * The Keccak SHA-3 submission. Submission to NIST (Round 3), 2011
+ * by Guido Bertoni, Joan Daemen, Michaël Peeters and Gilles Van Assche
+ *
+ * Copyright (c) 2013, Aleksey Kravchenko <rhash.admin@gmail.com>
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+ * REGARD TO THIS SOFTWARE  INCLUDING ALL IMPLIED WARRANTIES OF  MERCHANTABILITY
+ * AND FITNESS.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+ * INDIRECT,  OR CONSEQUENTIAL DAMAGES  OR ANY DAMAGES WHATSOEVER RESULTING FROM
+ * LOSS OF USE,  DATA OR PROFITS,  WHETHER IN AN ACTION OF CONTRACT,  NEGLIGENCE
+ * OR OTHER TORTIOUS ACTION,  ARISING OUT OF  OR IN CONNECTION  WITH THE USE  OR
+ * PERFORMANCE OF THIS SOFTWARE.
+
+ * Modified for hash-wasm by Dani Biró
+ */
+
+================================================================================
+
+Embedded source notice: sha512.c
+Embedded by: hash-wasm@4.12.0
+Source: src/sha512.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/* sha512.c - an implementation of SHA-384/512 hash functions
+ * based on FIPS 180-3 (Federal Information Processing Standart).
+ *
+ * Copyright (c) 2010, Aleksey Kravchenko <rhash.admin@gmail.com>
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+ * REGARD TO THIS SOFTWARE  INCLUDING ALL IMPLIED WARRANTIES OF  MERCHANTABILITY
+ * AND FITNESS.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+ * INDIRECT,  OR CONSEQUENTIAL DAMAGES  OR ANY DAMAGES WHATSOEVER RESULTING FROM
+ * LOSS OF USE,  DATA OR PROFITS,  WHETHER IN AN ACTION OF CONTRACT,  NEGLIGENCE
+ * OR OTHER TORTIOUS ACTION,  ARISING OUT OF  OR IN CONNECTION  WITH THE USE  OR
+ * PERFORMANCE OF THIS SOFTWARE.
+
+ * Modified for hash-wasm by Dani Biró
+ */
+
+================================================================================
+
+Embedded source notice: sm3.c
+Embedded by: hash-wasm@4.12.0
+Source: src/sm3.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*******************************************************************************
+ * SM3 function implementation
+ * Copyright 2016 Yanbo Li dreamfly281@gmail.com, goldboar@163.com
+ * MIT License
+ *
+ * Modified for hash-wasm by Dani Biró
+ */
+
+================================================================================
+
+Embedded source notice: whirlpool.c
+Embedded by: hash-wasm@4.12.0
+Source: src/whirlpool.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/**
+ * Whirlpool hash in C
+ *
+ * Copyright (c) 2017 Project Nayuki. (MIT License)
+ * https://www.nayuki.io/page/fast-whirlpool-hash-in-x86-assembly
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ * - The above copyright notice and this permission notice shall be included in
+ *   all copies or substantial portions of the Software.
+ * - The Software is provided "as is", without warranty of any kind, express or
+ *   implied, including but not limited to the warranties of merchantability,
+ *   fitness for a particular purpose and noninfringement. In no event shall the
+ *   authors or copyright holders be liable for any claim, damages or other
+ *   liability, whether in an action of contract, tort or otherwise, arising from,
+ *   out of or in connection with the Software or the use or other dealings in the
+ *   Software.
+ *
+ * Modified for hash-wasm by Dani Biró
+ */
+
+================================================================================
+
+Embedded source notice: xxhash128.c
+Embedded by: hash-wasm@4.12.0
+Source: src/xxhash128.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+ * xxHash - Extremely Fast Hash algorithm
+ * Header File
+ * Copyright (C) 2012-2020 Yann Collet
+ *
+ * BSD 2-Clause License (https://www.opensource.org/licenses/bsd-license.php)
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following disclaimer
+ *      in the documentation and/or other materials provided with the
+ *      distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * You can contact the author at:
+ *   - xxHash homepage: https://www.xxhash.com
+ *   - xxHash source repository: https://github.com/Cyan4973/xxHash
+ *
+ * Modified for hash-wasm by Dani Biró
+ */
+
+================================================================================
+
+Embedded source notice: xxhash3.c
+Embedded by: hash-wasm@4.12.0
+Source: src/xxhash3.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+/*
+ * xxHash - Extremely Fast Hash algorithm
+ * Header File
+ * Copyright (C) 2012-2020 Yann Collet
+ *
+ * BSD 2-Clause License (https://www.opensource.org/licenses/bsd-license.php)
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following disclaimer
+ *      in the documentation and/or other materials provided with the
+ *      distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * You can contact the author at:
+ *   - xxHash homepage: https://www.xxhash.com
+ *   - xxHash source repository: https://github.com/Cyan4973/xxHash
+ *
+ * Modified for hash-wasm by Dani Biró
+ */
+
+================================================================================
+
+Embedded source notice: xxhash32.c
+Embedded by: hash-wasm@4.12.0
+Source: src/xxhash32.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+// //////////////////////////////////////////////////////////
+// xxhash32.h
+// Copyright (c) 2016 Stephan Brumme. All rights reserved.
+// see http://create.stephan-brumme.com/disclaimer.html
+//
+// XXHash (32 bit), based on Yann Collet's descriptions, see
+// http://cyan4973.github.io/xxHash/
+//
+// Modified for hash-wasm by Dani Biró
+//
+
+================================================================================
+
+Embedded source notice: xxhash64.c
+Embedded by: hash-wasm@4.12.0
+Source: src/xxhash64.c
+
+--- VERSION-PINNED UPSTREAM SOURCE NOTICE ---
+// //////////////////////////////////////////////////////////
+// xxhash64.h
+// Copyright (c) 2016 Stephan Brumme. All rights reserved.
+// see http://create.stephan-brumme.com/disclaimer.html
+//
+// XXHash (64 bit), based on Yann Collet's descriptions, see
+// http://cyan4973.github.io/xxHash/
+//
+// Modified for hash-wasm by Dani Biró
+//

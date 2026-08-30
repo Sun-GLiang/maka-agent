@@ -19,6 +19,7 @@
 
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
+import { createSHA256 } from 'hash-wasm';
 import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { existsSync, mkdirSync } from 'node:fs';
@@ -134,6 +135,8 @@ import {
   decodePersistedSessionHeader,
   normalizeSessionHeader,
   SessionNotFoundError,
+  SessionTurnPositionLimitError,
+  SessionTurnPositionRecoveryError,
   type ExternalSessionImportLookupResult,
   type SessionTranscriptMessageLookupRequest,
   type SessionTranscriptPageRequest,
@@ -143,6 +146,11 @@ import {
   type SessionTurnContribution,
   type SessionTurnContributionPage,
   type SessionTurnLandmarkSnapshot,
+  type SessionTranscriptRecordsByTurnIdsSnapshotRequest,
+  type SessionTranscriptRecordsByTurnIdsSnapshotResult,
+  type SessionTurnPositionPageSnapshotRequest,
+  type SessionTurnPositionReadResult,
+  type SessionTurnPositionSnapshotKey,
 } from './session-store.js';
 import {
   isDiscardableConversationCopy,
@@ -157,6 +165,19 @@ import {
   SQLITE_SESSION_MESSAGE_CHUNK_BYTES,
   SQLITE_SESSION_MESSAGE_CHUNK_MARKER,
 } from './sqlite-session-metadata-schema.js';
+import {
+  advanceSessionTurnPositionOrdinalBuild,
+  allocateOrRequireSessionTurnPositionSnapshot,
+  invalidateSessionTurnPositionIndex,
+  markSessionTurnRecoveryComplete,
+  pageReadySessionTurnPositionSnapshot,
+  readSessionTurnMembershipPreflight,
+  recordAppendedSessionTurnMetadata,
+  releaseSessionTurnPositionSnapshot,
+  requireSnapshot,
+  snapshotKeyFromRow,
+} from './session-turn-position-index.js';
+import { advanceSessionTurnIdentityRecovery } from './session-turn-identity-recovery.js';
 import type { OperationalStateDatabaseLease } from './operational-state-store.js';
 import {
   buildSqliteSessionCatalogPageQuery,
@@ -166,6 +187,13 @@ import {
   sqliteOrdinarySessionRolePredicate,
   sqliteRecoverableSessionRolePredicate,
 } from './sqlite-session-role-scope.js';
+import {
+  readTranscriptSlices,
+  StoredSessionMessageIncompatibleError,
+  type TranscriptRecordSlice,
+} from './sqlite-session-transcript-slices.js';
+
+export { StoredSessionMessageIncompatibleError } from './sqlite-session-transcript-slices.js';
 
 export { SQLITE_SESSION_METADATA_SCHEMA_VERSION } from './sqlite-session-metadata-schema.js';
 
@@ -408,19 +436,6 @@ export interface IdempotentAgentGraphOperatorMetadataResult
 
 export class SessionMetadataConflictError extends Error {
   readonly name: string = 'SessionMetadataConflictError';
-}
-
-export class StoredSessionMessageIncompatibleError extends Error {
-  readonly name = 'StoredSessionMessageIncompatibleError';
-  readonly code = 'stored_session_message_incompatible';
-
-  constructor(
-    readonly sessionId: string,
-    readonly sequence: number,
-    options?: ErrorOptions,
-  ) {
-    super(`Stored Session message ${sequence} for ${sessionId} is incompatible`, options);
-  }
 }
 
 export class SessionMetadataVersionConflictError extends SessionMetadataConflictError {
@@ -1481,6 +1496,13 @@ export class SqliteSessionMetadataStore {
       if (!inserted) return 'existing';
       if (encoded.length > 0) {
         this.insertSessionMessagesSync(normalized.id, 0, encoded);
+        recordAppendedSessionTurnMetadata(
+          this.db,
+          normalized.id,
+          0,
+          encoded.map(({ message }) => message),
+          encoded.map(({ json }) => Buffer.byteLength(json, 'utf8')),
+        );
         // Align with appendMessages' connection-lock semantics: a session
         // with any user message is treated as connection-locked, even when
         // the legacy header did not record it.
@@ -1600,6 +1622,13 @@ export class SqliteSessionMetadataStore {
       }
       const sequence = row.last_sequence + 1;
       this.insertSessionMessagesSync(sessionId, sequence, encoded);
+      recordAppendedSessionTurnMetadata(
+        this.db,
+        sessionId,
+        sequence,
+        encoded.map(({ message }) => message),
+        encoded.map(({ json }) => Buffer.byteLength(json, 'utf8')),
+      );
       this.updateCatalogProjectionSync(sessionId, projection, false, lockConnection);
     });
   }
@@ -1828,6 +1857,13 @@ export class SqliteSessionMetadataStore {
         WORKHUB_COORDINATION_SESSION_ID,
         sequenceRow.last_sequence + 1,
         [{ message: assignment, json: assignmentJson }],
+      );
+      recordAppendedSessionTurnMetadata(
+        this.db,
+        WORKHUB_COORDINATION_SESSION_ID,
+        sequenceRow.last_sequence + 1,
+        [assignment],
+        [Buffer.byteLength(assignmentJson, 'utf8')],
       );
       this.updateCatalogProjectionSync(WORKHUB_COORDINATION_SESSION_ID, request.projection, false);
       return { kind: 'assigned' as const, targetCreated, assignment };
@@ -2187,6 +2223,13 @@ export class SqliteSessionMetadataStore {
         }
         this.insertSessionMessagesSync(input.sessionId, currentLastSequence + 1, ordinaryEntries);
         tailLatest = ordinaryEntries.at(-1)?.message;
+      }
+      if (historicalMissingMessages.size > 0 || ordinaryMissingMessages.size > 0) {
+        // Handoff recovery can insert into the historical prefix and shift
+        // durable sequence anchors. Expire every exact snapshot atomically
+        // with that mutation; an old key must fail closed rather than observe
+        // a position list whose body anchors have moved.
+        invalidateSessionTurnPositionIndex(this.db, input.sessionId);
       }
       if (tailLatest?.type === 'user') {
         this.updateCatalogProjectionSync(
@@ -2679,6 +2722,174 @@ export class SqliteSessionMetadataStore {
     return nullableStoredMessageSequence(row.high_water, sessionId);
   }
 
+  async readTurnPositionPage(
+    request: SessionTurnPositionPageSnapshotRequest,
+  ): Promise<SessionTurnPositionReadResult> {
+    this.assertOpen();
+    assertSafeSessionId(request.sessionId);
+    if (request.snapshotKey) {
+      const ready = this.readTransaction(() => {
+        const snapshot = requireSnapshot(this.db, request.sessionId, request.snapshotKey!);
+        return snapshot.state === 'ready'
+          ? pageReadySessionTurnPositionSnapshot(this.db, request, snapshot)
+          : null;
+      });
+      if (ready) return ready;
+    }
+    const hasher = await createSHA256();
+    const outcome = this.transaction(() => {
+      const allocation = allocateOrRequireSessionTurnPositionSnapshot(this.db, request);
+      if (allocation.kind === 'capacity') return allocation;
+      let snapshot = allocation.snapshot;
+      if (snapshot.state === 'ready') {
+        return pageReadySessionTurnPositionSnapshot(this.db, request, snapshot);
+      }
+      if (snapshot.build_phase === 'recovering') {
+        let recovery: ReturnType<typeof advanceSessionTurnIdentityRecovery> | undefined;
+        if (snapshot.through_sequence !== null) {
+          const indexed = this.db
+            .prepare(`
+              SELECT indexed_through_sequence FROM session_turn_index_state WHERE session_id = ?
+            `)
+            .get(request.sessionId) as { indexed_through_sequence: number };
+          if (indexed.indexed_through_sequence < snapshot.through_sequence) {
+            recovery = advanceSessionTurnIdentityRecovery(this.db, {
+              sessionId: request.sessionId,
+              throughSequence: snapshot.through_sequence,
+              maxSourceBytes: 4 * 1024 * 1024,
+              maxCompletedRecords: 1_024,
+              hasher,
+            });
+            if ('failure' in recovery) {
+              this.db
+                .prepare(`DELETE FROM session_turn_position_snapshots
+                  WHERE session_id = ? AND slot = ? AND state = 'building'`)
+                .run(request.sessionId, snapshot.slot);
+              return recovery;
+            }
+          }
+        }
+        snapshot = markSessionTurnRecoveryComplete(this.db, request.sessionId, snapshot);
+        const state = this.db
+          .prepare(`
+            SELECT indexed_through_sequence, source_records, source_bytes
+            FROM session_turn_index_state WHERE session_id = ?
+          `)
+          .get(request.sessionId) as {
+          indexed_through_sequence: number;
+          source_records: number;
+          source_bytes: number;
+        };
+        const partial = this.db
+          .prepare(`
+            SELECT byte_offset FROM session_turn_identity_recovery WHERE session_id = ?
+          `)
+          .get(request.sessionId) as { byte_offset: number } | undefined;
+        return {
+          kind: 'building' as const,
+          snapshotKey: snapshotKeyFromRow(snapshot),
+          progress: {
+            phase: 'recovering' as const,
+            nextSequence: state.indexed_through_sequence + 1,
+            currentByteOffset: partial?.byte_offset ?? 0,
+            sourceRecords: state.source_records,
+            sourceBytes: state.source_bytes,
+            builtPositions: snapshot.build_next_ordinal,
+            lastStepRecords: recovery && !('failure' in recovery) ? recovery.lastStepRecords : 0,
+            lastStepBytes: recovery && !('failure' in recovery) ? recovery.lastStepBytes : 0,
+            lastStepPositions: 0,
+          },
+        };
+      }
+      let step: ReturnType<typeof advanceSessionTurnPositionOrdinalBuild>;
+      try {
+        step = advanceSessionTurnPositionOrdinalBuild(this.db, request.sessionId, snapshot);
+      } catch (error) {
+        if (error instanceof SessionTurnPositionRecoveryError) {
+          this.db
+            .prepare(`DELETE FROM session_turn_position_snapshots
+              WHERE session_id = ? AND slot = ? AND state = 'building'`)
+            .run(request.sessionId, snapshot.slot);
+          return {
+            complete: false as const,
+            failure: error.reason,
+            failureSequence: error.sequence ?? 0,
+          };
+        }
+        throw error;
+      }
+      const state = this.db
+        .prepare(`
+          SELECT indexed_through_sequence, source_records, source_bytes
+          FROM session_turn_index_state WHERE session_id = ?
+        `)
+        .get(request.sessionId) as {
+        indexed_through_sequence: number;
+        source_records: number;
+        source_bytes: number;
+      };
+      return {
+        kind: 'building' as const,
+        snapshotKey: snapshotKeyFromRow(step.snapshot),
+        progress: {
+          phase: step.executedPhase,
+          nextSequence: state.indexed_through_sequence + 1,
+          currentByteOffset: 0,
+          sourceRecords: state.source_records,
+          sourceBytes: state.source_bytes,
+          builtPositions: step.snapshot.build_next_ordinal,
+          lastStepRecords: 0,
+          lastStepBytes: 0,
+          lastStepPositions: step.lastStepPositions,
+        },
+      };
+    });
+    if ('failure' in outcome) {
+      throw new SessionTurnPositionRecoveryError(
+        request.sessionId,
+        outcome.failure,
+        outcome.failureSequence,
+      );
+    }
+    return outcome;
+  }
+
+  async readTranscriptRecordsByTurnIds(
+    request: SessionTranscriptRecordsByTurnIdsSnapshotRequest,
+  ): Promise<SessionTranscriptRecordsByTurnIdsSnapshotResult> {
+    this.assertOpen();
+    assertSafeSessionId(request.sessionId);
+    return this.readTransaction(() => {
+      const preflight = readSessionTurnMembershipPreflight(this.db, request);
+      const records: Array<{ sequence: number; message: StoredMessage }> = [];
+      for (const row of readStoredMessageRows(this.db, request.sessionId, preflight.sequences)) {
+        try {
+          records.push({
+            sequence: row.sequence,
+            message: decodeStoredMessage(JSON.parse(row.recordJson) as unknown),
+          });
+        } catch (error) {
+          throw new StoredSessionMessageIncompatibleError(request.sessionId, row.sequence, {
+            cause: error,
+          });
+        }
+      }
+      return { snapshotKey: request.snapshotKey, records, rawBytes: preflight.storedBytes };
+    });
+  }
+
+  async releaseTurnPositionSnapshot(
+    sessionId: string,
+    snapshotLeaseId: string,
+    snapshotKey: SessionTurnPositionSnapshotKey,
+  ): Promise<void> {
+    this.assertOpen();
+    assertSafeSessionId(sessionId);
+    this.transaction(() =>
+      releaseSessionTurnPositionSnapshot(this.db, sessionId, snapshotLeaseId, snapshotKey),
+    );
+  }
+
   async readTurnContributions(
     sessionId: string,
     throughSequence: number | null,
@@ -2716,21 +2927,13 @@ export class SqliteSessionMetadataStore {
       let sourceMessages = 0;
       let sourceBytes = 0;
       while (nextPosition <= fixedThrough) {
-        const rows = this.db
-          .prepare(
-            `
-            SELECT message.sequence, message.record_json, payload.record_bytes, payload.sha256
-            FROM session_messages AS message
-            LEFT JOIN session_message_payloads AS payload
-              ON payload.session_id = message.session_id AND payload.sequence = message.sequence
-            WHERE message.session_id = ?
-              AND message.sequence >= ?
-              AND message.sequence <= ?
-            ORDER BY message.sequence ASC
-            LIMIT 128
-          `,
-          )
-          .all(sessionId, nextPosition, fixedThrough) as StoredSessionMessagePayloadRow[];
+        const rows = readStoredMessagePayloadRange(
+          this.db,
+          sessionId,
+          nextPosition,
+          fixedThrough,
+          128,
+        );
         if (rows.length === 0) {
           throw new StoredSessionMessageIncompatibleError(sessionId, nextPosition);
         }
@@ -6807,8 +7010,9 @@ function readStoredMessageRecordJson(
     ) {
       throw new StoredSessionMessageIncompatibleError(sessionId, sequence);
     }
-    const data = readChunkedTranscriptRecord(db, sessionId, sequence, recordBytes);
-    if (createHash('sha256').update(data).digest('hex') !== row.sha256) {
+    const payloadDigest = requireTranscriptPayloadDigest(row.sha256, sessionId, sequence);
+    const data = readChunkedTranscriptRecord(db, sessionId, sequence, recordBytes, payloadDigest);
+    if (`sha256:${createHash('sha256').update(data).digest('hex')}` !== payloadDigest) {
       throw new StoredSessionMessageIncompatibleError(sessionId, sequence);
     }
     recordJson = data.toString('utf8');
@@ -6876,6 +7080,28 @@ function foldTurnContribution(
   };
 }
 
+function readStoredMessagePayloadRange(
+  db: DatabaseSync,
+  sessionId: string,
+  startSequence: number,
+  throughSequence: number,
+  limit: number,
+): StoredSessionMessagePayloadRow[] {
+  return db
+    .prepare(`
+      SELECT message.sequence, message.record_json, payload.record_bytes, payload.sha256
+      FROM session_messages AS message
+      LEFT JOIN session_message_payloads AS payload
+        ON payload.session_id = message.session_id AND payload.sequence = message.sequence
+      WHERE message.session_id = ?
+        AND message.sequence >= ?
+        AND message.sequence <= ?
+      ORDER BY message.sequence ASC
+      LIMIT ?
+    `)
+    .all(sessionId, startSequence, throughSequence, limit) as StoredSessionMessagePayloadRow[];
+}
+
 function readStoredMessageRows(
   db: DatabaseSync,
   sessionId: string,
@@ -6912,41 +7138,19 @@ function readChunkedTranscriptRecord(
   sessionId: string,
   sequence: number,
   recordBytes: number,
+  payloadDigest: `sha256:${string}`,
 ): Buffer {
-  const rows = db
-    .prepare(
-      `
-      SELECT chunk_index, data, sha256
-      FROM session_message_chunks
-      WHERE session_id = ? AND sequence = ?
-      ORDER BY chunk_index
-    `,
-    )
-    .all(sessionId, sequence) as Array<{
-    chunk_index?: unknown;
-    data?: unknown;
-    sha256?: unknown;
-  }>;
-  const expectedChunks = Math.ceil(recordBytes / SQLITE_SESSION_MESSAGE_CHUNK_BYTES);
-  if (rows.length !== expectedChunks) {
-    throw new StoredSessionMessageIncompatibleError(sessionId, sequence);
-  }
-  const chunks = rows.map((row, index) => {
-    if (
-      row.chunk_index !== index ||
-      !(row.data instanceof Uint8Array) ||
-      typeof row.sha256 !== 'string'
-    ) {
-      throw new StoredSessionMessageIncompatibleError(sessionId, sequence);
-    }
-    const chunk = Buffer.from(row.data);
-    if (createHash('sha256').update(chunk).digest('hex') !== row.sha256) {
-      throw new StoredSessionMessageIncompatibleError(sessionId, sequence);
-    }
-    return chunk;
-  });
-  const data = Buffer.concat(chunks, recordBytes);
-  if (data.byteLength !== recordBytes) {
+  const data = readTranscriptSlices(db, sessionId, [
+    {
+      sequence,
+      byteOffset: 0,
+      totalBytes: recordBytes,
+      byteLength: recordBytes,
+      chunked: true,
+      payloadDigest,
+    },
+  ]).get(sequence);
+  if (!data || data.byteLength !== recordBytes) {
     throw new StoredSessionMessageIncompatibleError(sessionId, sequence);
   }
   return data;
@@ -6962,15 +7166,6 @@ function requireStoredMessageSequence(value: unknown, sessionId: string): number
 function nullableStoredMessageSequence(value: unknown, sessionId: string): number | null {
   if (value === null || value === undefined) return null;
   return requireStoredMessageSequence(value, sessionId);
-}
-
-interface TranscriptRecordSlice {
-  readonly sequence: number;
-  readonly byteOffset: number;
-  readonly totalBytes: number;
-  readonly byteLength: number;
-  readonly chunked: boolean;
-  readonly payloadDigest: `sha256:${string}` | null;
 }
 
 function requireTranscriptPayloadDigest(
@@ -6993,118 +7188,6 @@ function requireTranscriptRecordByteLength(
     throw new StoredSessionMessageIncompatibleError(sessionId, sequence);
   }
   return value as number;
-}
-
-function readTranscriptSlices(
-  db: DatabaseSync,
-  sessionId: string,
-  slices: readonly TranscriptRecordSlice[],
-): Map<number, Buffer> {
-  if (slices.length === 0) return new Map();
-  const chunkedSlices = slices.filter((slice) => slice.chunked);
-  const values = chunkedSlices.map(() => '(?, ?, ?)').join(', ');
-  const parameters = chunkedSlices.flatMap((slice) => [
-    slice.sequence,
-    Math.floor(slice.byteOffset / SQLITE_SESSION_MESSAGE_CHUNK_BYTES),
-    Math.floor((slice.byteOffset + slice.byteLength - 1) / SQLITE_SESSION_MESSAGE_CHUNK_BYTES),
-  ]);
-  const rows =
-    chunkedSlices.length === 0
-      ? []
-      : (db
-          .prepare(
-            `
-        WITH requested(sequence, first_chunk, last_chunk) AS (VALUES ${values})
-        SELECT requested.sequence, chunk.chunk_index, chunk.data, chunk.sha256
-        FROM requested
-        INNER JOIN session_message_chunks AS chunk
-          ON chunk.session_id = ?
-          AND chunk.sequence = requested.sequence
-          AND chunk.chunk_index BETWEEN requested.first_chunk AND requested.last_chunk
-        ORDER BY requested.sequence, chunk.chunk_index
-      `,
-          )
-          .all(...parameters, sessionId) as Array<{
-          sequence?: unknown;
-          chunk_index?: unknown;
-          data?: unknown;
-          sha256?: unknown;
-        }>);
-  const rowsBySequence = new Map<number, typeof rows>();
-  for (const row of rows) {
-    const sequence = requireStoredMessageSequence(row.sequence, sessionId);
-    const grouped = rowsBySequence.get(sequence);
-    if (grouped) grouped.push(row);
-    else rowsBySequence.set(sequence, [row]);
-  }
-  const result = new Map<number, Buffer>();
-  for (const slice of slices) {
-    if (!slice.chunked) continue;
-    const selected = rowsBySequence.get(slice.sequence) ?? [];
-    const firstChunk = Math.floor(slice.byteOffset / SQLITE_SESSION_MESSAGE_CHUNK_BYTES);
-    const lastChunk = Math.floor(
-      (slice.byteOffset + slice.byteLength - 1) / SQLITE_SESSION_MESSAGE_CHUNK_BYTES,
-    );
-    if (selected.length !== lastChunk - firstChunk + 1) {
-      throw new StoredSessionMessageIncompatibleError(sessionId, slice.sequence);
-    }
-    const chunks: Buffer[] = [];
-    for (let index = 0; index < selected.length; index += 1) {
-      const row = selected[index]!;
-      if (
-        row.chunk_index !== firstChunk + index ||
-        !(row.data instanceof Uint8Array) ||
-        typeof row.sha256 !== 'string'
-      ) {
-        throw new StoredSessionMessageIncompatibleError(sessionId, slice.sequence);
-      }
-      const chunk = Buffer.from(row.data);
-      if (createHash('sha256').update(chunk).digest('hex') !== row.sha256) {
-        throw new StoredSessionMessageIncompatibleError(sessionId, slice.sequence);
-      }
-      chunks.push(chunk);
-    }
-    const joined = Buffer.concat(chunks);
-    const start = slice.byteOffset - firstChunk * SQLITE_SESSION_MESSAGE_CHUNK_BYTES;
-    const data = joined.subarray(start, start + slice.byteLength);
-    if (data.byteLength !== slice.byteLength) {
-      throw new StoredSessionMessageIncompatibleError(sessionId, slice.sequence);
-    }
-    result.set(slice.sequence, data);
-  }
-  const inlineSlices = slices.filter((slice) => !slice.chunked);
-  if (inlineSlices.length > 0) {
-    const inlineValues = inlineSlices.map(() => '(?, ?, ?)').join(', ');
-    const inlineParameters = inlineSlices.flatMap((slice) => [
-      slice.sequence,
-      slice.byteOffset + 1,
-      slice.byteLength,
-    ]);
-    const inlineRows = db
-      .prepare(
-        `
-          WITH requested(sequence, byte_start, byte_length) AS (VALUES ${inlineValues})
-          SELECT requested.sequence,
-            substr(CAST(message.record_json AS BLOB), requested.byte_start, requested.byte_length)
-              AS data
-          FROM requested
-          INNER JOIN session_messages AS message
-            ON message.session_id = ? AND message.sequence = requested.sequence
-        `,
-      )
-      .all(...inlineParameters, sessionId) as Array<{
-      sequence?: unknown;
-      data?: unknown;
-    }>;
-    for (const row of inlineRows) {
-      const sequence = requireStoredMessageSequence(row.sequence, sessionId);
-      if (!(row.data instanceof Uint8Array)) {
-        throw new StoredSessionMessageIncompatibleError(sessionId, sequence);
-      }
-      result.set(sequence, Buffer.from(row.data));
-    }
-  }
-  return result;
 }
 
 function validateTranscriptRecord(

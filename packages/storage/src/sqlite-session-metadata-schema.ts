@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 35;
+export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 36;
 export const SQLITE_SESSION_MESSAGE_CHUNK_BYTES = 64 * 1024;
 export const SQLITE_SESSION_MESSAGE_CHUNK_MARKER = '{"$maka":"session-message-chunks-v1"}';
 
@@ -1232,6 +1232,193 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
       ADD COLUMN skill_invocation_json TEXT NOT NULL
       DEFAULT '{"loaded":[],"failed":[],"receipts":[]}';
   `,
+  ],
+  [
+    36,
+    `
+    CREATE TABLE IF NOT EXISTS session_turn_authority_revisions (
+      session_id TEXT PRIMARY KEY,
+      authority_revision INTEGER NOT NULL DEFAULT 0 CHECK (authority_revision >= 0),
+      next_snapshot_generation INTEGER NOT NULL DEFAULT 1
+        CHECK (next_snapshot_generation >= 1),
+      FOREIGN KEY(session_id) REFERENCES session_metadata(session_id) ON DELETE CASCADE
+    ) WITHOUT ROWID;
+
+    CREATE TABLE IF NOT EXISTS session_turn_index_state (
+      session_id TEXT PRIMARY KEY,
+      indexed_through_sequence INTEGER NOT NULL DEFAULT -1
+        CHECK (indexed_through_sequence >= -1),
+      source_records INTEGER NOT NULL DEFAULT 0 CHECK (source_records >= 0),
+      source_bytes INTEGER NOT NULL DEFAULT 0 CHECK (source_bytes >= 0),
+      failure_reason TEXT
+        CHECK (failure_reason IN ('corrupt_source', 'incompatible_identity',
+          'hybrid_missing_admission')),
+      failure_sequence INTEGER CHECK (failure_sequence >= 0),
+      CHECK ((failure_reason IS NULL) = (failure_sequence IS NULL)),
+      FOREIGN KEY(session_id) REFERENCES session_metadata(session_id) ON DELETE CASCADE
+    ) WITHOUT ROWID;
+
+    CREATE TABLE IF NOT EXISTS session_turn_identity_recovery (
+      session_id TEXT PRIMARY KEY,
+      sequence INTEGER NOT NULL CHECK (sequence >= 0),
+      byte_offset INTEGER NOT NULL CHECK (byte_offset >= 0),
+      record_bytes INTEGER NOT NULL CHECK (record_bytes > 0),
+      chunked INTEGER NOT NULL CHECK (chunked IN (0, 1)),
+      expected_digest TEXT CHECK (expected_digest IS NULL OR length(expected_digest) = 64),
+      message_id TEXT NOT NULL,
+      message_type TEXT NOT NULL,
+      hash_state_version INTEGER NOT NULL CHECK (hash_state_version = 1),
+      hash_algorithm TEXT NOT NULL CHECK (hash_algorithm = 'sha256'),
+      hash_implementation TEXT NOT NULL CHECK (hash_implementation = 'hash-wasm@4.12.0'),
+      hash_state BLOB NOT NULL CHECK (length(hash_state) BETWEEN 1 AND 65536),
+      scanner_state_version INTEGER NOT NULL CHECK (scanner_state_version = 1),
+      scanner_state TEXT NOT NULL CHECK (length(CAST(scanner_state AS BLOB)) <= 65536),
+      derived_state_digest TEXT NOT NULL CHECK (length(derived_state_digest) = 64),
+      FOREIGN KEY(session_id) REFERENCES session_metadata(session_id) ON DELETE CASCADE,
+      FOREIGN KEY(session_id, sequence)
+        REFERENCES session_messages(session_id, sequence) ON DELETE CASCADE ON UPDATE CASCADE
+    ) WITHOUT ROWID;
+
+    CREATE TABLE IF NOT EXISTS session_turn_metadata (
+      session_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL,
+      identity_kind TEXT NOT NULL CHECK (identity_kind IN ('turn', 'note', 'synthetic')),
+      order_source TEXT NOT NULL CHECK (order_source IN ('legacy', 'admission', 'synthetic')),
+      admitted_at INTEGER CHECK (admitted_at >= 0),
+      first_sequence INTEGER CHECK (first_sequence >= 0),
+      PRIMARY KEY(session_id, turn_id),
+      UNIQUE(session_id, first_sequence),
+      FOREIGN KEY(session_id) REFERENCES session_metadata(session_id) ON DELETE CASCADE
+    ) WITHOUT ROWID;
+
+    CREATE INDEX IF NOT EXISTS session_turn_metadata_by_legacy_order
+      ON session_turn_metadata(session_id, first_sequence, turn_id)
+      WHERE order_source = 'legacy';
+
+    CREATE INDEX IF NOT EXISTS session_turn_metadata_by_admission_order
+      ON session_turn_metadata(session_id, admitted_at, turn_id)
+      WHERE order_source = 'admission';
+
+    CREATE INDEX IF NOT EXISTS session_turn_metadata_by_admission_sequence
+      ON session_turn_metadata(session_id, first_sequence)
+      WHERE order_source = 'admission';
+
+    CREATE TABLE IF NOT EXISTS session_turn_memberships (
+      session_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence >= 0),
+      turn_id TEXT NOT NULL,
+      PRIMARY KEY(session_id, sequence),
+      FOREIGN KEY(session_id, turn_id)
+        REFERENCES session_turn_metadata(session_id, turn_id) ON DELETE CASCADE,
+      FOREIGN KEY(session_id, sequence)
+        REFERENCES session_messages(session_id, sequence) ON DELETE CASCADE ON UPDATE CASCADE
+    ) WITHOUT ROWID;
+
+    CREATE INDEX IF NOT EXISTS session_turn_memberships_by_turn
+      ON session_turn_memberships(session_id, turn_id, sequence);
+
+    CREATE TABLE IF NOT EXISTS session_turn_position_snapshots (
+      session_id TEXT NOT NULL,
+      slot INTEGER NOT NULL CHECK (slot IN (0, 1)),
+      through_sequence INTEGER CHECK (through_sequence >= 0),
+      authority_revision INTEGER NOT NULL CHECK (authority_revision >= 0),
+      snapshot_generation INTEGER NOT NULL CHECK (snapshot_generation >= 1),
+      state TEXT NOT NULL CHECK (state IN ('building', 'ready')),
+      build_phase TEXT NOT NULL DEFAULT 'recovering'
+        CHECK (build_phase IN ('recovering', 'legacy', 'admission', 'notes', 'ready')),
+      build_next_ordinal INTEGER NOT NULL DEFAULT 0 CHECK (build_next_ordinal >= 0),
+      build_cursor_sequence INTEGER NOT NULL DEFAULT -1 CHECK (build_cursor_sequence >= -1),
+      build_cursor_admitted_at INTEGER CHECK (build_cursor_admitted_at >= 0),
+      build_cursor_turn_id TEXT,
+      ready_total INTEGER CHECK (ready_total >= 0),
+      PRIMARY KEY(session_id, slot),
+      UNIQUE(session_id, snapshot_generation),
+      UNIQUE(session_id, through_sequence, authority_revision),
+      FOREIGN KEY(session_id) REFERENCES session_metadata(session_id) ON DELETE CASCADE
+    ) WITHOUT ROWID;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS session_turn_position_snapshots_by_exact_authority
+      ON session_turn_position_snapshots(
+        session_id,
+        COALESCE(through_sequence, -1),
+        authority_revision
+      );
+
+    CREATE TABLE IF NOT EXISTS session_turn_snapshot_positions (
+      session_id TEXT NOT NULL,
+      snapshot_generation INTEGER NOT NULL CHECK (snapshot_generation >= 1),
+      ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+      turn_id TEXT NOT NULL,
+      first_sequence INTEGER CHECK (first_sequence >= 0),
+      PRIMARY KEY(session_id, snapshot_generation, ordinal),
+      UNIQUE(session_id, snapshot_generation, turn_id),
+      FOREIGN KEY(session_id, snapshot_generation)
+        REFERENCES session_turn_position_snapshots(session_id, snapshot_generation)
+        ON DELETE CASCADE
+    ) WITHOUT ROWID;
+
+    CREATE INDEX IF NOT EXISTS session_turn_snapshot_positions_by_sequence
+      ON session_turn_snapshot_positions(
+        session_id,
+        snapshot_generation,
+        first_sequence,
+        ordinal
+      );
+
+    CREATE TABLE IF NOT EXISTS session_turn_snapshot_leases (
+      session_id TEXT NOT NULL,
+      snapshot_generation INTEGER NOT NULL CHECK (snapshot_generation >= 1),
+      lease_id TEXT NOT NULL CHECK (length(CAST(lease_id AS BLOB)) BETWEEN 1 AND 128),
+      PRIMARY KEY(session_id, snapshot_generation, lease_id),
+      UNIQUE(session_id, lease_id),
+      FOREIGN KEY(session_id, snapshot_generation)
+        REFERENCES session_turn_position_snapshots(session_id, snapshot_generation)
+        ON DELETE CASCADE
+    ) WITHOUT ROWID;
+
+    CREATE TRIGGER IF NOT EXISTS session_turn_ready_positions_no_insert
+    BEFORE INSERT ON session_turn_snapshot_positions
+    WHEN EXISTS (
+      SELECT 1 FROM session_turn_position_snapshots
+      WHERE session_id = NEW.session_id
+        AND snapshot_generation = NEW.snapshot_generation
+        AND state = 'ready'
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'ready Session Turn snapshot positions are immutable');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS session_turn_ready_positions_no_update
+    BEFORE UPDATE ON session_turn_snapshot_positions
+    WHEN EXISTS (
+      SELECT 1 FROM session_turn_position_snapshots
+      WHERE session_id = OLD.session_id
+        AND snapshot_generation = OLD.snapshot_generation
+        AND state = 'ready'
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'ready Session Turn snapshot positions are immutable');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS session_turn_ready_positions_no_delete
+    BEFORE DELETE ON session_turn_snapshot_positions
+    WHEN EXISTS (
+      SELECT 1 FROM session_turn_position_snapshots
+      WHERE session_id = OLD.session_id
+        AND snapshot_generation = OLD.snapshot_generation
+        AND state = 'ready'
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'ready Session Turn snapshot positions are immutable');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS session_turn_ready_snapshot_no_update
+    BEFORE UPDATE ON session_turn_position_snapshots
+    WHEN OLD.state = 'ready'
+    BEGIN
+      SELECT RAISE(ABORT, 'ready Session Turn snapshot is immutable');
+    END;
+    `,
   ],
 ]);
 

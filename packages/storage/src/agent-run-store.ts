@@ -34,6 +34,7 @@ import {
   type SubmittedTurnIntent,
 } from './submitted-turn-intent.js';
 import { assertNoReservedWorkspaceAuthorityAppend } from './runtime-event-authority.js';
+import { recordRootTurnAdmissionForPositionIndex } from './session-turn-position-index.js';
 import {
   acquireOperationalStateDatabase,
   type OperationalStateDatabaseLease,
@@ -742,6 +743,12 @@ class SqliteAgentRunStore implements DurableAgentRunStore {
           admission.admittedAt,
           JSON.stringify(admission),
         );
+      recordRootTurnAdmissionForPositionIndex(
+        this.#lease.database,
+        admission.sessionId,
+        admission.turnId,
+        admission.admittedAt,
+      );
       for (const source of admission.sourceMessages) {
         this.#lease.database
           .prepare(`

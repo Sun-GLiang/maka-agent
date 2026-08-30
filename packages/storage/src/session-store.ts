@@ -301,6 +301,133 @@ export interface SessionTurnLandmarkSnapshot {
   readonly landmarks: readonly SessionTurnLandmark[];
 }
 
+export interface SessionTurnPositionSnapshotKey {
+  readonly throughSequence: number | null;
+  readonly authorityRevision: number;
+  readonly snapshotGeneration: number;
+}
+
+export type SessionTurnPositionAnchor =
+  /** The final position, returned as the inclusive end of a tail-sized page. */
+  | { readonly kind: 'tail' }
+  /** An inclusive ordinal; values beyond the end clamp to the final position. */
+  | { readonly kind: 'ordinal'; readonly ordinal: number }
+  /** The position with the greatest firstSequence at or before this inclusive sequence. */
+  | { readonly kind: 'sequence'; readonly sequence: number }
+  /** An exact non-empty Turn identity; a missing Turn fails with a typed anchor error. */
+  | { readonly kind: 'turn'; readonly turnId: string };
+
+export interface SessionTurnPosition {
+  readonly ordinal: number;
+  readonly turnId: string;
+  readonly firstSequence: number | null;
+}
+
+export interface SessionTurnPositionPageSnapshotRequest {
+  readonly sessionId: string;
+  readonly snapshotLeaseId: string;
+  /** Exact continuation identity. Omit only when allocating a new snapshot. */
+  readonly snapshotKey?: SessionTurnPositionSnapshotKey;
+  /** Inclusive durable watermark. Omit to capture the current durable tail. */
+  readonly throughSequence?: number | null;
+  readonly anchor: SessionTurnPositionAnchor;
+  readonly maxPositions: number;
+}
+
+export type SessionTurnPositionReadResult =
+  | {
+      readonly kind: 'building';
+      readonly snapshotKey: SessionTurnPositionSnapshotKey;
+      readonly progress: {
+        readonly phase: 'recovering' | 'legacy' | 'admission' | 'notes';
+        readonly nextSequence: number;
+        readonly currentByteOffset: number;
+        readonly sourceRecords: number;
+        readonly sourceBytes: number;
+        readonly builtPositions: number;
+        readonly lastStepRecords: number;
+        readonly lastStepBytes: number;
+        readonly lastStepPositions: number;
+      };
+    }
+  | {
+      readonly kind: 'capacity';
+      readonly throughSequence: number | null;
+      readonly authorityRevision: number;
+      readonly retainedSnapshots: 2;
+    }
+  | {
+      readonly kind: 'page';
+      readonly snapshotKey: SessionTurnPositionSnapshotKey;
+      readonly startOrdinal: number;
+      readonly totalTurns: number;
+      readonly positions: readonly SessionTurnPosition[];
+      readonly hasOlder: boolean;
+      readonly hasNewer: boolean;
+    };
+
+export interface SessionTranscriptRecordsByTurnIdsSnapshotRequest {
+  readonly sessionId: string;
+  readonly snapshotLeaseId: string;
+  readonly snapshotKey: SessionTurnPositionSnapshotKey;
+  readonly turnIds: readonly string[];
+  readonly maxBytes: number;
+  readonly maxRecords: number;
+}
+
+export interface SessionTranscriptRecordsByTurnIdsSnapshotResult {
+  readonly snapshotKey: SessionTurnPositionSnapshotKey;
+  readonly records: readonly { readonly sequence: number; readonly message: StoredMessage }[];
+  readonly rawBytes: number;
+}
+
+export class SessionTurnPositionSnapshotMismatchError extends Error {
+  readonly name = 'SessionTurnPositionSnapshotMismatchError';
+  readonly code = 'session_turn_position_snapshot_mismatch';
+
+  constructor(readonly sessionId: string) {
+    super(`Session Turn-position snapshot is stale or mismatched: ${sessionId}`);
+  }
+}
+
+export class SessionTurnPositionRecoveryError extends Error {
+  readonly name = 'SessionTurnPositionRecoveryError';
+  readonly code = 'session_turn_position_recovery_failed';
+
+  constructor(
+    readonly sessionId: string,
+    readonly reason: 'corrupt_source' | 'incompatible_identity' | 'hybrid_missing_admission',
+    readonly sequence?: number,
+    options?: ErrorOptions,
+  ) {
+    super(`Session Turn-position recovery failed (${reason}): ${sessionId}`, options);
+  }
+}
+
+export class SessionTurnPositionAnchorNotFoundError extends Error {
+  readonly name = 'SessionTurnPositionAnchorNotFoundError';
+  readonly code = 'session_turn_position_anchor_not_found';
+
+  constructor(
+    readonly sessionId: string,
+    readonly turnId: string,
+  ) {
+    super(`Session Turn-position anchor does not exist: ${sessionId}/${turnId}`);
+  }
+}
+
+export class SessionTurnPositionLimitError extends Error {
+  readonly name = 'SessionTurnPositionLimitError';
+  readonly code = 'session_turn_position_limit_exceeded';
+
+  constructor(
+    readonly sessionId: string,
+    readonly reason: 'page_metadata_bytes' | 'transcript_record_count' | 'transcript_record_bytes',
+  ) {
+    super(`Session Turn-position limit exceeded (${reason}): ${sessionId}`);
+  }
+}
+
 export interface SessionStore {
   create(input: CreateSessionInput, initialBoundary?: ExecutionBoundary): Promise<SessionHeader>;
   list(filter?: SessionListFilter): Promise<SessionSummary[]>;
@@ -327,6 +454,17 @@ export interface SessionStore {
     sessionId: string,
     maxLandmarks: number,
   ): Promise<SessionTurnLandmarkSnapshot>;
+  readTurnPositionPageSnapshot(
+    request: SessionTurnPositionPageSnapshotRequest,
+  ): Promise<SessionTurnPositionReadResult>;
+  readTranscriptRecordsByTurnIdsSnapshot(
+    request: SessionTranscriptRecordsByTurnIdsSnapshotRequest,
+  ): Promise<SessionTranscriptRecordsByTurnIdsSnapshotResult>;
+  releaseTurnPositionSnapshot(
+    sessionId: string,
+    snapshotLeaseId: string,
+    snapshotKey: SessionTurnPositionSnapshotKey,
+  ): Promise<void>;
   /** Read durable messages for startup recovery. */
   readMessagesForRecovery(sessionId: string): Promise<StoredMessage[]>;
   /** Derive durable turns without triggering connection-lock self-healing. */
@@ -944,6 +1082,29 @@ class SqliteSessionStore implements SessionAuthorityStore {
   ): Promise<SessionTurnLandmarkSnapshot> {
     await this.ensureReady();
     return this.metadata.readTurnLandmarks(sessionId, maxLandmarks);
+  }
+
+  async readTurnPositionPageSnapshot(
+    request: SessionTurnPositionPageSnapshotRequest,
+  ): Promise<SessionTurnPositionReadResult> {
+    await this.ensureReady();
+    return this.metadata.readTurnPositionPage(request);
+  }
+
+  async readTranscriptRecordsByTurnIdsSnapshot(
+    request: SessionTranscriptRecordsByTurnIdsSnapshotRequest,
+  ): Promise<SessionTranscriptRecordsByTurnIdsSnapshotResult> {
+    await this.ensureReady();
+    return this.metadata.readTranscriptRecordsByTurnIds(request);
+  }
+
+  async releaseTurnPositionSnapshot(
+    sessionId: string,
+    snapshotLeaseId: string,
+    snapshotKey: SessionTurnPositionSnapshotKey,
+  ): Promise<void> {
+    await this.ensureReady();
+    await this.metadata.releaseTurnPositionSnapshot(sessionId, snapshotLeaseId, snapshotKey);
   }
 
   async readMessagesForRecovery(sessionId: string): Promise<StoredMessage[]> {
