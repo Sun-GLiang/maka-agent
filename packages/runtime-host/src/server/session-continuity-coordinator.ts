@@ -46,6 +46,8 @@ import {
   type SessionToolEvent,
   type SessionTranscriptAdvancedFrame,
   type SessionTranscriptPageInput,
+  type SessionTranscriptPositionsInput,
+  type SessionTranscriptTurnWindowInput,
   type OperationOutcome,
   type SubscriptionFrame,
   type SubscriptionOpenInput,
@@ -82,6 +84,16 @@ import {
   type SessionTranscriptReader,
 } from './session-transcript-reader.js';
 import { projectSharedSessionMessageContent } from './shared-session-transcript.js';
+import {
+  confirmSemanticTranscriptWatermark,
+  createSubscriberSemanticTranscriptState,
+  querySemanticTranscriptPositions,
+  readSemanticTranscriptTurnWindow,
+  releaseSubscriberSemanticTranscript,
+  SemanticTranscriptConflictError,
+  SemanticTranscriptRequestError,
+  type SubscriberSemanticTranscriptState,
+} from './semantic-session-transcript-pager.js';
 
 const MAX_CONNECTION_SUBSCRIPTIONS = 16;
 const MAX_SUBSCRIBER_QUEUED_FRAMES = 32;
@@ -171,6 +183,7 @@ interface Subscriber {
   pumping: boolean;
   terminalQueued: boolean;
   transcript?: SubscriberTranscriptState;
+  semanticTranscript?: SubscriberSemanticTranscriptState;
   retainedTranscriptOverlay?: RetainedTranscriptOverlay;
 }
 
@@ -253,6 +266,10 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
     },
     'session.transcript.page': (input, context) =>
       this.#readTranscriptPage(context.connectionId, input),
+    'session.transcript.positions.query': (input, context) =>
+      this.#queryTranscriptPositions(context.connectionId, input),
+    'session.transcript.turn_window.page': (input, context) =>
+      this.#readTranscriptTurnWindow(context.connectionId, input),
     'session.transcript.overlay.release': async (input, context) => {
       const existing = this.#subscriptions.get(input.subscriptionId);
       if (!existing) {
@@ -284,6 +301,8 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
   #closed = false;
   #preparingTranscriptOverlayBytes = 0;
   #retainedTranscriptOverlayBytes = 0;
+  #retainedSemanticWindows = 0;
+  readonly #semanticReleaseTasks = new Set<Promise<void>>();
   readonly #sessionAccessAuthority:
     | Pick<RuntimeHostAccessAuthority, 'activeSessionGrant' | 'subscribeGrantRevocations'>
     | undefined;
@@ -345,9 +364,9 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
         if (attached) this.#abortSubscription(connectionId, subscriptionId);
       },
       close: () => {
-        if (!attached) return;
+        if (!attached) return this.settled();
         attached = false;
-        this.#closeConnection(connectionId);
+        return this.#closeConnection(connectionId);
       },
     };
   }
@@ -821,8 +840,8 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
     }
   }
 
-  close(): void {
-    if (this.#closed) return;
+  close(): Promise<void> {
+    if (this.#closed) return this.settled();
     this.#closed = true;
     this.#unsubscribeGrantRevocations?.();
     this.#cancelTranscriptOverlayPreparationWaiters();
@@ -833,6 +852,13 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
     this.#pendingRefreshes.clear();
     this.#pendingAgentGraphChanges.clear();
     this.#pendingSessionDomainChanges.clear();
+    return this.settled();
+  }
+
+  async settled(): Promise<void> {
+    while (this.#semanticReleaseTasks.size > 0) {
+      await Promise.allSettled([...this.#semanticReleaseTasks]);
+    }
   }
 
   async #open(
@@ -1011,6 +1037,16 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
                 pumping: false,
                 terminalQueued: false,
                 ...(transcript ? { transcript } : {}),
+                ...(transcript
+                  ? {
+                      semanticTranscript: createSubscriberSemanticTranscriptState({
+                        sessionId,
+                        subscriptionId,
+                        projection: transcript.projection,
+                        cursorSecret: transcript.cursorSecret,
+                      }),
+                    }
+                  : {}),
                 ...(retainedTranscriptOverlay ? { retainedTranscriptOverlay } : {}),
               };
               if (subscriber.retainedTranscriptOverlay)
@@ -1148,6 +1184,180 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
         };
       }
     });
+  }
+
+  async #queryTranscriptPositions(
+    connectionId: string,
+    input: SessionTranscriptPositionsInput,
+  ): Promise<OperationOutcome<'session.transcript.positions.query'>> {
+    const subscriber = this.#ownedSubscriber(connectionId, input.subscriptionId);
+    if (!subscriber) return transcriptSubscriptionNotFound();
+    if (!this.#transcriptReader || !subscriber.semanticTranscript) {
+      return {
+        ok: false,
+        error: { code: 'operation_unavailable', message: 'Semantic transcript is unavailable' },
+      };
+    }
+    const semanticTranscript = subscriber.semanticTranscript;
+    const connection = this.#connections.get(connectionId);
+    if (!connection || !this.#canObserve(subscriber, subscriber.sessionId)) {
+      this.#closeSubscriber(subscriber, 'access_revoked');
+      return transcriptSubscriptionNotFound();
+    }
+    return this.sessionAdmission.run(subscriber.sessionId, async () => {
+      if (!this.#semanticRequestStillAuthorized(connectionId, connection, subscriber)) {
+        this.#closeSubscriber(subscriber, 'access_revoked');
+        return transcriptSubscriptionNotFound();
+      }
+      try {
+        const result = await querySemanticTranscriptPositions({
+          reader: this.#transcriptReader!,
+          state: semanticTranscript,
+          request: input,
+          accounting: {
+            retain: (bytes) => this.#retainSemanticWindow(bytes),
+            release: (bytes) => this.#releaseSemanticWindow(bytes),
+          },
+        });
+        if (!this.#semanticRequestStillAuthorized(connectionId, connection, subscriber)) {
+          this.#closeSubscriber(subscriber, 'access_revoked');
+          await this.#releaseDetachedSemanticTranscript(semanticTranscript);
+          return transcriptSubscriptionNotFound();
+        }
+        return { ok: true, result };
+      } catch (error) {
+        if (!this.#semanticRequestStillAuthorized(connectionId, connection, subscriber)) {
+          this.#closeSubscriber(subscriber, 'access_revoked');
+          await this.#releaseDetachedSemanticTranscript(semanticTranscript);
+          return transcriptSubscriptionNotFound();
+        }
+        if (error instanceof SemanticTranscriptRequestError) {
+          return { ok: false, error: { code: 'invalid_request', message: error.message } };
+        }
+        if (error instanceof SemanticTranscriptConflictError) {
+          return { ok: false, error: { code: 'operation_conflict', message: error.message } };
+        }
+        return {
+          ok: false,
+          error: { code: 'persistence_failed', message: 'Semantic transcript is unavailable' },
+        };
+      }
+    });
+  }
+
+  async #readTranscriptTurnWindow(
+    connectionId: string,
+    input: SessionTranscriptTurnWindowInput,
+  ): Promise<OperationOutcome<'session.transcript.turn_window.page'>> {
+    const subscriber = this.#ownedSubscriber(connectionId, input.subscriptionId);
+    if (!subscriber) return transcriptSubscriptionNotFound();
+    if (!this.#transcriptReader || !subscriber.semanticTranscript) {
+      return {
+        ok: false,
+        error: { code: 'operation_unavailable', message: 'Semantic transcript is unavailable' },
+      };
+    }
+    const semanticTranscript = subscriber.semanticTranscript;
+    const connection = this.#connections.get(connectionId);
+    if (!connection || !this.#canObserve(subscriber, subscriber.sessionId)) {
+      this.#closeSubscriber(subscriber, 'access_revoked');
+      return transcriptSubscriptionNotFound();
+    }
+    let preparationPermit: TranscriptOverlayPreparationPermit | undefined;
+    let releasePreparation: (() => void) | undefined;
+    try {
+      if (input.kind === 'open') {
+        preparationPermit = await this.#acquireTranscriptOverlayPreparation(connection);
+        releasePreparation = preparationPermit.take();
+      }
+      return await this.sessionAdmission.run(subscriber.sessionId, async () => {
+        if (!this.#semanticRequestStillAuthorized(connectionId, connection, subscriber)) {
+          this.#closeSubscriber(subscriber, 'access_revoked');
+          return transcriptSubscriptionNotFound();
+        }
+        try {
+          const result = await readSemanticTranscriptTurnWindow({
+            reader: this.#transcriptReader!,
+            state: semanticTranscript,
+            request: input,
+            accounting: {
+              retain: (bytes) => this.#retainSemanticWindow(bytes),
+              release: (bytes) => this.#releaseSemanticWindow(bytes),
+            },
+          });
+          if (!this.#semanticRequestStillAuthorized(connectionId, connection, subscriber)) {
+            this.#closeSubscriber(subscriber, 'access_revoked');
+            await this.#releaseDetachedSemanticTranscript(semanticTranscript);
+            return transcriptSubscriptionNotFound();
+          }
+          return { ok: true, result };
+        } catch (error) {
+          if (!this.#semanticRequestStillAuthorized(connectionId, connection, subscriber)) {
+            this.#closeSubscriber(subscriber, 'access_revoked');
+            await this.#releaseDetachedSemanticTranscript(semanticTranscript);
+            return transcriptSubscriptionNotFound();
+          }
+          if (error instanceof SemanticTranscriptRequestError) {
+            return { ok: false, error: { code: 'invalid_request', message: error.message } };
+          }
+          if (error instanceof SemanticTranscriptConflictError) {
+            return { ok: false, error: { code: 'operation_conflict', message: error.message } };
+          }
+          return {
+            ok: false,
+            error: { code: 'persistence_failed', message: 'Semantic transcript is unavailable' },
+          };
+        }
+      });
+    } catch (error) {
+      return error instanceof TranscriptOverlayCapacityError && input.kind === 'open'
+        ? {
+            ok: true,
+            result: {
+              kind: 'capacity',
+              subscriptionId: subscriber.subscriptionId,
+              snapshotToken: input.snapshotToken,
+              retryAfterMs: 50,
+            },
+          }
+        : transcriptSubscriptionNotFound();
+    } finally {
+      releasePreparation?.();
+      preparationPermit?.release();
+    }
+  }
+
+  #semanticRequestStillAuthorized(
+    connectionId: string,
+    connection: ConnectionState,
+    subscriber: Subscriber,
+  ): boolean {
+    return (
+      this.#ownedSubscriber(connectionId, subscriber.subscriptionId) === subscriber &&
+      this.#connections.get(connectionId) === connection &&
+      this.#canObserve(subscriber, subscriber.sessionId)
+    );
+  }
+
+  #retainSemanticWindow(bytes: number): boolean {
+    if (
+      this.#retainedSemanticWindows >= 64 ||
+      this.#retainedTranscriptOverlayBytes + bytes > MAX_RETAINED_TRANSCRIPT_OVERLAY_BYTES
+    ) {
+      return false;
+    }
+    this.#retainedSemanticWindows += 1;
+    this.#retainedTranscriptOverlayBytes += bytes;
+    return true;
+  }
+
+  #releaseSemanticWindow(bytes: number): void {
+    if (this.#retainedSemanticWindows < 1 || this.#retainedTranscriptOverlayBytes < bytes) {
+      throw new Error('Semantic transcript retained accounting underflow');
+    }
+    this.#retainedSemanticWindows -= 1;
+    this.#retainedTranscriptOverlayBytes -= bytes;
+    this.#drainTranscriptOverlayPreparationWaiters();
   }
 
   #prepareTranscriptOverlay(
@@ -1412,6 +1622,12 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
     const subscriber = this.#ownedSubscriber(connectionId, subscriptionId);
     if (!subscriber || subscriber.activated || subscriber.phase === 'closed') return;
     subscriber.activated = true;
+    if (subscriber.semanticTranscript && subscriber.transcript) {
+      confirmSemanticTranscriptWatermark(
+        subscriber.semanticTranscript,
+        subscriber.transcript.openedThroughSequence,
+      );
+    }
     this.#pump(subscriber);
   }
 
@@ -1435,15 +1651,16 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
     return true;
   }
 
-  #closeConnection(connectionId: string): void {
+  #closeConnection(connectionId: string): Promise<void> {
     const connection = this.#connections.get(connectionId);
-    if (!connection) return;
+    if (!connection) return this.settled();
     connection.resolveClosed();
     for (const subscriptionId of [...connection.subscriptionIds]) {
       const subscriber = this.#ownedSubscriber(connectionId, subscriptionId);
       if (subscriber) this.#removeSubscriber(subscriber);
     }
     this.#connections.delete(connectionId);
+    return this.settled();
   }
 
   #enqueue(subscriber: Subscriber, frame: SubscriptionFrame): void {
@@ -1511,6 +1728,7 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
   #closeSubscriber(subscriber: Subscriber, reason: 'slow_consumer' | 'access_revoked'): void {
     if (subscriber.phase !== 'open') return;
     subscriber.phase = 'closing';
+    this.#trackSemanticRelease(subscriber);
     const inFlight = subscriber.pumping ? subscriber.queue[0] : undefined;
     subscriber.queue = [];
     subscriber.queuedBytes = 0;
@@ -1660,6 +1878,7 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
 
   #enqueueSessionRemoved(subscriber: Subscriber): void {
     if (subscriber.phase !== 'open' || subscriber.terminalQueued) return;
+    this.#trackSemanticRelease(subscriber);
     const frame: SubscriptionFrame = {
       kind: 'subscription.closed',
       hostEpoch: this.#hostEpoch,
@@ -1702,6 +1921,15 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
           subscriber.queuedBytes -= queued.encodedBytes;
         }
         subscriber.lastFlushedSequence = queued.frame.sequence;
+        if (
+          queued.frame.kind === 'subscription.transcript_advanced' &&
+          subscriber.semanticTranscript
+        ) {
+          confirmSemanticTranscriptWatermark(
+            subscriber.semanticTranscript,
+            queued.frame.throughSequence,
+          );
+        }
         if (queued.frame.kind === 'subscription.closed') {
           this.#removeSubscriber(subscriber);
           return;
@@ -1723,12 +1951,40 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
     this.#connections
       .get(subscriber.connectionId)
       ?.subscriptionIds.delete(subscriber.subscriptionId);
+    this.#trackSemanticRelease(subscriber);
     this.#releaseSubscriberTranscriptOverlay(subscriber);
     if (!this.#closed && state && removed) {
       if (!this.#hasTranscriptOverlayConsumer(state)) this.#invalidateTranscriptOverlay(state);
       if (state.subscribers.size === 0) {
         this.#scheduleInactiveStateCleanup(subscriber.sessionId, state);
       }
+    }
+  }
+
+  #trackSemanticRelease(subscriber: Subscriber): void {
+    const semantic = subscriber.semanticTranscript;
+    if (!semantic || !this.#transcriptReader) return;
+    subscriber.semanticTranscript = undefined;
+    const task = releaseSubscriberSemanticTranscript(this.#transcriptReader, semantic, {
+      retain: (bytes) => this.#retainSemanticWindow(bytes),
+      release: (bytes) => this.#releaseSemanticWindow(bytes),
+    })
+      .catch((error: unknown) => this.onPublicationFailure(error))
+      .finally(() => this.#semanticReleaseTasks.delete(task));
+    this.#semanticReleaseTasks.add(task);
+  }
+
+  async #releaseDetachedSemanticTranscript(
+    semantic: SubscriberSemanticTranscriptState,
+  ): Promise<void> {
+    if (!this.#transcriptReader) return;
+    try {
+      await releaseSubscriberSemanticTranscript(this.#transcriptReader, semantic, {
+        retain: (bytes) => this.#retainSemanticWindow(bytes),
+        release: (bytes) => this.#releaseSemanticWindow(bytes),
+      });
+    } catch (error) {
+      this.onPublicationFailure(error);
     }
   }
 
@@ -1868,11 +2124,16 @@ function assistantStreamKey(kind: SessionAssistantDelta['kind'], messageId: stri
   return `${kind}\0${messageId}`;
 }
 
-function transcriptSubscriptionNotFound(): OperationOutcome<'session.transcript.page'> {
+function transcriptSubscriptionNotFound<
+  K extends
+    | 'session.transcript.page'
+    | 'session.transcript.positions.query'
+    | 'session.transcript.turn_window.page',
+>(): OperationOutcome<K> {
   return {
     ok: false,
     error: { code: 'not_found', message: 'Session subscription was not found' },
-  };
+  } as OperationOutcome<K>;
 }
 
 function terminalFrameByteBudget(subscriber: Subscriber, hostEpoch: string): number {

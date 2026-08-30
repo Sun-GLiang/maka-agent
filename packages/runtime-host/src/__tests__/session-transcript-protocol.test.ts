@@ -21,12 +21,17 @@ import { RuntimeHostProtocolError } from '../protocol/errors.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  decodeSessionTranscriptPositionsInput,
+  decodeSessionTranscriptPositionsResult,
   decodeSessionTranscriptBootstrap,
   decodeSessionTranscriptPage,
   decodeSessionTranscriptPageInput,
+  decodeSessionTranscriptTurnWindowInput,
+  decodeSessionTranscriptTurnWindowResult,
   encodeProtocolMessage,
   HOST_OPERATION_SPECS,
   RUNTIME_HOST_MAX_MESSAGE_BYTES,
+  SESSION_TRANSCRIPT_POSITION_PAGE_MAX_POSITIONS,
   SESSION_TRANSCRIPT_PAGE_MAX_BYTES,
 } from '../protocol/index.js';
 
@@ -214,6 +219,221 @@ test('Session transcript protocol rejects malformed and uncorrelated values', ()
       }),
     isProtocolError,
   );
+});
+
+test('semantic transcript operations accept only opaque subscription-scoped requests', () => {
+  const acquire = {
+    kind: 'acquire' as const,
+    subscriptionId: 'subscription-1',
+    anchor: { kind: 'tail' as const },
+    maxPositions: SESSION_TRANSCRIPT_POSITION_PAGE_MAX_POSITIONS,
+  };
+  const page = {
+    kind: 'page' as const,
+    subscriptionId: 'subscription-1',
+    snapshotToken: 'snapshot-token',
+    anchor: { kind: 'turn' as const, turnId: 'turn-1' },
+    maxPositions: 1,
+  };
+  const continuation = {
+    kind: 'continue' as const,
+    subscriptionId: 'subscription-1',
+    cursor: 'positions-cursor',
+  };
+  const replace = {
+    kind: 'replace' as const,
+    subscriptionId: 'subscription-1',
+    snapshotToken: 'snapshot-token',
+    anchor: { kind: 'ordinal' as const, ordinal: 4 },
+    maxPositions: 8,
+  };
+  const release = {
+    kind: 'release' as const,
+    subscriptionId: 'subscription-1',
+    snapshotToken: 'snapshot-token',
+  };
+  for (const input of [acquire, page, continuation, replace, release]) {
+    assert.deepEqual(decodeSessionTranscriptPositionsInput(input), input);
+  }
+
+  assert.throws(
+    () => decodeSessionTranscriptPositionsInput({ ...acquire, sessionId: 'session-1' }),
+    isProtocolError,
+  );
+  assert.throws(
+    () => decodeSessionTranscriptPositionsInput({ ...acquire, maxPositions: 0 }),
+    isProtocolError,
+  );
+  assert.throws(
+    () => decodeSessionTranscriptPositionsInput({ ...acquire, maxPositions: 129 }),
+    isProtocolError,
+  );
+  assert.throws(
+    () => decodeSessionTranscriptPositionsInput({ ...page, snapshotToken: 'x'.repeat(1_025) }),
+    isProtocolError,
+  );
+
+  const result = {
+    kind: 'page' as const,
+    subscriptionId: 'subscription-1',
+    snapshotToken: 'snapshot-token',
+    totalPositions: 3,
+    startOrdinal: 1,
+    positions: [
+      { ordinal: 1, key: { kind: 'note' as const, id: 'note-1' } },
+      { ordinal: 2, key: { kind: 'turn' as const, id: 'turn-2' } },
+    ],
+    olderCursor: 'older-cursor',
+    newerCursor: null,
+  };
+  assert.deepEqual(decodeSessionTranscriptPositionsResult(result), result);
+  assert.throws(
+    () =>
+      decodeSessionTranscriptPositionsResult({
+        ...result,
+        positions: [{ ordinal: 1, key: { kind: 'turn', id: '' } }],
+      }),
+    isProtocolError,
+  );
+  assert.throws(
+    () => decodeSessionTranscriptPositionsResult({ ...result, authorityRevision: 1 }),
+    isProtocolError,
+  );
+  assert.throws(
+    () =>
+      decodeSessionTranscriptPositionsResult({
+        ...result,
+        totalPositions: 2,
+        startOrdinal: 0,
+        positions: [
+          { ordinal: 0, key: { kind: 'empty' } },
+          { ordinal: 1, key: { kind: 'turn', id: 'turn-1' } },
+        ],
+      }),
+    isProtocolError,
+  );
+  for (const semanticResult of [
+    {
+      kind: 'building',
+      subscriptionId: 'subscription-1',
+      snapshotToken: 'snapshot-token',
+      retryAfterMs: 25,
+    },
+    {
+      kind: 'capacity',
+      subscriptionId: 'subscription-1',
+      snapshotToken: 'snapshot-token',
+      retryAfterMs: 1_000,
+    },
+    {
+      kind: 'snapshot_stale',
+      subscriptionId: 'subscription-1',
+      snapshotToken: 'snapshot-token',
+    },
+    {
+      kind: 'anchor_not_found',
+      subscriptionId: 'subscription-1',
+      snapshotToken: 'snapshot-token',
+    },
+    { kind: 'released', subscriptionId: 'subscription-1' },
+  ]) {
+    assert.deepEqual(decodeSessionTranscriptPositionsResult(semanticResult), semanticResult);
+  }
+});
+
+test('semantic Turn-window protocol keeps retained fragments opaque and bounded', () => {
+  const open = {
+    kind: 'open' as const,
+    subscriptionId: 'subscription-1',
+    snapshotToken: 'snapshot-token',
+    startOrdinal: 4,
+    maxPositions: 10,
+    replaceCursor: null,
+  };
+  const continuation = {
+    kind: 'continue' as const,
+    subscriptionId: 'subscription-1',
+    cursor: 'window-cursor',
+  };
+  assert.deepEqual(decodeSessionTranscriptTurnWindowInput(open), open);
+  assert.deepEqual(
+    decodeSessionTranscriptTurnWindowInput({
+      kind: 'open',
+      subscriptionId: 'subscription-1',
+      snapshotToken: 'snapshot-token',
+      startOrdinal: 4,
+      maxPositions: 10,
+    }),
+    {
+      kind: 'open',
+      subscriptionId: 'subscription-1',
+      snapshotToken: 'snapshot-token',
+      startOrdinal: 4,
+      maxPositions: 10,
+    },
+  );
+  assert.deepEqual(decodeSessionTranscriptTurnWindowInput(continuation), continuation);
+  assert.throws(
+    () => decodeSessionTranscriptTurnWindowInput({ ...open, maxPositions: 0 }),
+    isProtocolError,
+  );
+  assert.throws(
+    () => decodeSessionTranscriptTurnWindowInput({ ...open, maxPositions: 11 }),
+    isProtocolError,
+  );
+
+  const bytes = Buffer.from('{"positions":[]}');
+  const result = {
+    kind: 'page' as const,
+    subscriptionId: 'subscription-1',
+    snapshotToken: 'snapshot-token',
+    windowId: 'window-1',
+    byteOffset: 0,
+    totalBytes: bytes.byteLength,
+    payloadDigest: `sha256:${'a'.repeat(64)}` as const,
+    data: bytes.toString('base64'),
+    nextCursor: null,
+  };
+  assert.deepEqual(decodeSessionTranscriptTurnWindowResult(result), result);
+  assert.throws(
+    () => decodeSessionTranscriptTurnWindowResult({ ...result, data: 'not base64' }),
+    isProtocolError,
+  );
+  assert.throws(
+    () => decodeSessionTranscriptTurnWindowResult({ ...result, snapshotGeneration: 3 }),
+    isProtocolError,
+  );
+  for (const semanticResult of [
+    {
+      kind: 'building',
+      subscriptionId: 'subscription-1',
+      snapshotToken: 'snapshot-token',
+      retryAfterMs: 25,
+    },
+    {
+      kind: 'capacity',
+      subscriptionId: 'subscription-1',
+      snapshotToken: 'snapshot-token',
+      retryAfterMs: 1_000,
+    },
+    {
+      kind: 'snapshot_stale',
+      subscriptionId: 'subscription-1',
+      snapshotToken: 'snapshot-token',
+    },
+    {
+      kind: 'anchor_not_found',
+      subscriptionId: 'subscription-1',
+      snapshotToken: 'snapshot-token',
+    },
+    {
+      kind: 'position_too_large',
+      subscriptionId: 'subscription-1',
+      snapshotToken: 'snapshot-token',
+    },
+  ]) {
+    assert.deepEqual(decodeSessionTranscriptTurnWindowResult(semanticResult), semanticResult);
+  }
 });
 
 function isProtocolError(error: unknown): boolean {

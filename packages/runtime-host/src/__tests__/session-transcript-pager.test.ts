@@ -36,7 +36,22 @@ import {
 } from '../server/session-transcript-pager.js';
 import type { SessionTranscriptReader } from '../server/session-transcript-reader.js';
 import { projectSharedSessionTranscriptMessage } from '../server/shared-session-transcript.js';
+import {
+  decodeTranscriptSignedToken,
+  encodeTranscriptSignedToken,
+} from '../server/transcript-signed-token.js';
 import { transcriptReader } from './fixtures/session-transcript-reader.js';
+
+test('signed transcript tokens are canonical and domain separated', () => {
+  const secret = Buffer.alloc(32, 0x5a);
+  const token = encodeTranscriptSignedToken('positions', { version: 1, ordinal: 4 }, secret);
+  assert.deepEqual(decodeTranscriptSignedToken('positions', token, secret), {
+    version: 1,
+    ordinal: 4,
+  });
+  assert.throws(() => decodeTranscriptSignedToken('window', token, secret));
+  assert.throws(() => decodeTranscriptSignedToken('positions', `${token.slice(0, -1)}x`, secret));
+});
 
 test('reads newly durable messages forward from an announced watermark', async () => {
   const durable = [userMessage(0), userMessage(1)];

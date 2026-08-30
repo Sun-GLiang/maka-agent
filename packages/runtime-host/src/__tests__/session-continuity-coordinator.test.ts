@@ -55,6 +55,10 @@ type TestIdentity =
   | typeof TEST_OWNER_IDENTITY
   | {
       readonly principalId: string;
+      readonly principalKind: 'remote_owner';
+    }
+  | {
+      readonly principalId: string;
       readonly principalKind: 'session_guest';
     };
 
@@ -1848,6 +1852,344 @@ test('an in-flight transcript page cannot outlive its owning connection', async 
     error: { code: 'not_found', message: 'Session subscription was not found' },
   });
   coordinator.close();
+});
+
+test('semantic positions bind to delivered subscription watermark and release on close', async () => {
+  const snapshotKey = { throughSequence: 0, authorityRevision: 0, snapshotGeneration: 1 };
+  const reads: unknown[] = [];
+  const releases: unknown[] = [];
+  const baseReader = transcriptReader([
+    { type: 'user', id: 'user-1', turnId: 'turn-1', ts: 1, text: 'hello' },
+  ]);
+  const reader: SessionTranscriptReader = {
+    ...baseReader,
+    readPositionPage: async (request) => {
+      reads.push(request);
+      return {
+        kind: 'page',
+        projection: request.projection,
+        snapshotKey,
+        startOrdinal: 0,
+        totalPositions: 1,
+        positions: [{ ordinal: 0, key: { kind: 'turn', id: 'turn-1' }, firstSequence: 0 }],
+        hasOlder: false,
+        hasNewer: false,
+      };
+    },
+    releasePositionSnapshot: async (request) => {
+      releases.push(request);
+    },
+  };
+  const coordinator = new SessionContinuityCoordinator(
+    HOST_EPOCH,
+    async () => canonical(),
+    new SessionAdmissionGate(),
+    undefined,
+    reader,
+  );
+  const connection = coordinator.attachConnection('connection-semantic', new RecordingSink());
+  const opened = await open(coordinator, 'connection-semantic', {
+    kind: 'tail',
+    maxBytes: SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES,
+  });
+  const beforeActivation = await coordinator.handlers['session.transcript.positions.query'](
+    {
+      kind: 'acquire',
+      subscriptionId: opened.subscriptionId,
+      anchor: { kind: 'tail' },
+      maxPositions: 1,
+    },
+    connectionContext('connection-semantic'),
+  );
+  assert.equal(beforeActivation.ok, false);
+  connection.activate(opened.subscriptionId);
+
+  const acquired = await coordinator.handlers['session.transcript.positions.query'](
+    {
+      kind: 'acquire',
+      subscriptionId: opened.subscriptionId,
+      anchor: { kind: 'tail' },
+      maxPositions: 1,
+    },
+    connectionContext('connection-semantic'),
+  );
+  assert.equal(acquired.ok, true);
+  if (!acquired.ok || acquired.result.kind !== 'page') assert.fail('expected semantic page');
+  assert.equal((reads[0] as { throughSequence: number }).throughSequence, 0);
+
+  await coordinator.handlers['subscription.close'](
+    { subscriptionId: opened.subscriptionId },
+    connectionContext('connection-semantic'),
+  );
+  await coordinator.settled();
+  assert.equal(releases.length, 1);
+  await coordinator.close();
+});
+
+test('explicit remote owners read owner semantics while active Guests read dense shared semantics', async () => {
+  const projections: string[] = [];
+  const baseReader = transcriptReader([
+    { type: 'user', id: 'user-1', turnId: 'turn-1', ts: 1, text: 'hello' },
+  ]);
+  const reader: SessionTranscriptReader = {
+    ...baseReader,
+    readPositionPage: async (request) => {
+      projections.push(request.projection);
+      return {
+        kind: 'page',
+        projection: request.projection,
+        snapshotKey: { throughSequence: 0, authorityRevision: 0, snapshotGeneration: 1 },
+        startOrdinal: 0,
+        totalPositions: 1,
+        positions: [
+          request.projection === 'owner'
+            ? { ordinal: 0, key: { kind: 'turn', id: 'owner-turn' }, firstSequence: 0 }
+            : { ordinal: 0, key: { kind: 'empty' }, firstSequence: null },
+        ],
+        hasOlder: false,
+        hasNewer: false,
+      };
+    },
+    releasePositionSnapshot: async () => undefined,
+  };
+  const grant = {
+    kind: 'session_observation' as const,
+    grantId: 'active-semantic-grant',
+    principalId: 'active-semantic-guest',
+    sessionId: SESSION_ID,
+    createdAt: '2026-08-31T00:00:00.000Z',
+  };
+  const coordinator = new SessionContinuityCoordinator(
+    HOST_EPOCH,
+    async () => canonical(),
+    new SessionAdmissionGate(),
+    undefined,
+    reader,
+    undefined,
+    {
+      activeSessionGrant: () => grant,
+      subscribeGrantRevocations: () => () => undefined,
+    },
+  );
+  for (const identity of [
+    { principalId: 'explicit-remote-owner', principalKind: 'remote_owner' as const },
+    { principalId: grant.principalId, principalKind: 'session_guest' as const },
+  ]) {
+    const connectionId = `connection-${identity.principalKind}`;
+    const connection = coordinator.attachConnection(connectionId, new RecordingSink());
+    const opened = await open(
+      coordinator,
+      connectionId,
+      { kind: 'tail', maxBytes: SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES },
+      identity,
+    );
+    connection.activate(opened.subscriptionId);
+    const result = await coordinator.handlers['session.transcript.positions.query'](
+      {
+        kind: 'acquire',
+        subscriptionId: opened.subscriptionId,
+        anchor: { kind: 'tail' },
+        maxPositions: 1,
+      },
+      connectionContext(connectionId, identity),
+    );
+    assert.equal(result.ok, true);
+    if (!result.ok || result.result.kind !== 'page') assert.fail('expected semantic positions');
+    assert.deepEqual(
+      result.result.positions,
+      identity.principalKind === 'remote_owner'
+        ? [{ ordinal: 0, key: { kind: 'turn', id: 'owner-turn' } }]
+        : [{ ordinal: 0, key: { kind: 'empty' } }],
+    );
+    await connection.close();
+  }
+  assert.deepEqual(projections, ['owner', 'shared']);
+  await coordinator.close();
+});
+
+test('semantic replacement waits for transcript_advanced delivery before using its watermark', async () => {
+  const durable: StoredMessage[] = [
+    { type: 'user', id: 'user-1', turnId: 'turn-1', ts: 1, text: 'one' },
+  ];
+  const baseReader = transcriptReader(durable);
+  const capturedWatermarks: Array<number | null | undefined> = [];
+  let generation = 0;
+  const reader: SessionTranscriptReader = {
+    ...baseReader,
+    readPositionPage: async (request) => {
+      capturedWatermarks.push(request.snapshotKey?.throughSequence ?? request.throughSequence);
+      const throughSequence =
+        request.snapshotKey?.throughSequence ?? request.throughSequence ?? null;
+      const snapshotKey = {
+        throughSequence,
+        authorityRevision: 0,
+        snapshotGeneration: request.snapshotKey?.snapshotGeneration ?? ++generation,
+      };
+      return {
+        kind: 'page',
+        projection: request.projection,
+        snapshotKey,
+        startOrdinal: 0,
+        totalPositions: 1,
+        positions: [{ ordinal: 0, key: { kind: 'turn', id: 'turn-1' }, firstSequence: 0 }],
+        hasOlder: false,
+        hasNewer: false,
+      };
+    },
+    releasePositionSnapshot: async () => undefined,
+  };
+  const advancedFlushed = deferred<void>();
+  const advancedSent = deferred<void>();
+  const sink: SessionContinuityFrameSink = {
+    send: async (frame) => {
+      if (frame.kind === 'subscription.transcript_advanced') {
+        advancedSent.resolve();
+        await advancedFlushed.promise;
+      }
+    },
+  };
+  const coordinator = new SessionContinuityCoordinator(
+    HOST_EPOCH,
+    async () => canonical(),
+    new SessionAdmissionGate(),
+    undefined,
+    reader,
+  );
+  const connection = coordinator.attachConnection('connection-watermark', sink);
+  const opened = await open(coordinator, 'connection-watermark', {
+    kind: 'tail',
+    maxBytes: SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES,
+  });
+  connection.activate(opened.subscriptionId);
+  const first = await coordinator.handlers['session.transcript.positions.query'](
+    {
+      kind: 'acquire',
+      subscriptionId: opened.subscriptionId,
+      anchor: { kind: 'tail' },
+      maxPositions: 1,
+    },
+    connectionContext('connection-watermark'),
+  );
+  assert.equal(first.ok, true);
+  if (!first.ok || first.result.kind !== 'page') assert.fail('expected first snapshot');
+
+  durable.push({ type: 'user', id: 'user-2', turnId: 'turn-2', ts: 2, text: 'two' });
+  await coordinator.refreshCanonical(SESSION_ID);
+  await advancedSent.promise;
+  const beforeFlush = await coordinator.handlers['session.transcript.positions.query'](
+    {
+      kind: 'replace',
+      subscriptionId: opened.subscriptionId,
+      snapshotToken: first.result.snapshotToken,
+      anchor: { kind: 'tail' },
+      maxPositions: 1,
+    },
+    connectionContext('connection-watermark'),
+  );
+  assert.equal(beforeFlush.ok, true);
+  if (!beforeFlush.ok || beforeFlush.result.kind !== 'page') assert.fail('expected replacement');
+  assert.equal(capturedWatermarks.at(-1), 0);
+
+  advancedFlushed.resolve();
+  await delayImmediate();
+  await coordinator.handlers['session.transcript.positions.query'](
+    {
+      kind: 'replace',
+      subscriptionId: opened.subscriptionId,
+      snapshotToken: beforeFlush.result.snapshotToken,
+      anchor: { kind: 'tail' },
+      maxPositions: 1,
+    },
+    connectionContext('connection-watermark'),
+  );
+  assert.equal(capturedWatermarks.at(-1), 1);
+  await connection.close();
+  await coordinator.close();
+});
+
+test('revoking a Guest during first semantic I/O releases the late-bound snapshot lease', async () => {
+  const snapshotKey = { throughSequence: 0, authorityRevision: 0, snapshotGeneration: 1 };
+  const continued = deferred<void>();
+  const entered = deferred<void>();
+  let releases = 0;
+  const baseReader = transcriptReader([
+    { type: 'user', id: 'user-1', turnId: 'turn-1', ts: 1, text: 'hello' },
+  ]);
+  const reader: SessionTranscriptReader = {
+    ...baseReader,
+    readPositionPage: async (request) => {
+      entered.resolve();
+      await continued.promise;
+      return {
+        kind: 'page',
+        projection: request.projection,
+        snapshotKey,
+        startOrdinal: 0,
+        totalPositions: 1,
+        positions: [{ ordinal: 0, key: { kind: 'turn', id: 'turn-1' }, firstSequence: 0 }],
+        hasOlder: false,
+        hasNewer: false,
+      };
+    },
+    releasePositionSnapshot: async () => {
+      releases += 1;
+    },
+  };
+  const grant = {
+    kind: 'session_observation' as const,
+    grantId: 'semantic-grant-1',
+    principalId: 'semantic-guest-1',
+    sessionId: SESSION_ID,
+    createdAt: '2026-08-31T00:00:00.000Z',
+  };
+  let active = true;
+  let publishRevocation: ((revoked: typeof grant) => void) | undefined;
+  const coordinator = new SessionContinuityCoordinator(
+    HOST_EPOCH,
+    async () => canonical(),
+    new SessionAdmissionGate(),
+    undefined,
+    reader,
+    undefined,
+    {
+      activeSessionGrant: () => (active ? grant : undefined),
+      subscribeGrantRevocations: (listener) => {
+        publishRevocation = listener;
+        return () => undefined;
+      },
+    },
+  );
+  const connection = coordinator.attachConnection('semantic-guest-connection', new RecordingSink());
+  const opened = await open(
+    coordinator,
+    'semantic-guest-connection',
+    { kind: 'tail', maxBytes: SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES },
+    { principalId: grant.principalId, principalKind: 'session_guest' },
+  );
+  connection.activate(opened.subscriptionId);
+  const reading = coordinator.handlers['session.transcript.positions.query'](
+    {
+      kind: 'acquire',
+      subscriptionId: opened.subscriptionId,
+      anchor: { kind: 'tail' },
+      maxPositions: 1,
+    },
+    connectionContext('semantic-guest-connection', {
+      principalId: grant.principalId,
+      principalKind: 'session_guest',
+    }),
+  );
+  await entered.promise;
+  active = false;
+  publishRevocation?.(grant);
+  continued.resolve();
+  assert.deepEqual(await reading, {
+    ok: false,
+    error: { code: 'not_found', message: 'Session subscription was not found' },
+  });
+  await coordinator.settled();
+  assert.equal(releases, 1);
+  await coordinator.close();
 });
 
 test('an in-flight transcript page cannot outlive its Guest observation grant', async () => {

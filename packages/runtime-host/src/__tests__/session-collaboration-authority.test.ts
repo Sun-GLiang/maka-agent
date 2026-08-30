@@ -78,6 +78,8 @@ test('Session Guest invitation, grants, and revocation form one durable authorit
       'subscription.close',
       'session.transcript.page',
       'session.transcript.overlay.release',
+      'session.transcript.positions.query',
+      'session.transcript.turn_window.page',
       'access.credential.finalize',
     ]);
     assert.ok(activeGuest);
