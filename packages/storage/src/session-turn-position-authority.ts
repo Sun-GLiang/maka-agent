@@ -120,9 +120,17 @@ export function recordRootTurnAdmissionForPositionIndex(
         OR (admission_cursor_admitted_at, admission_cursor_turn_id) < (?, ?))
   `).run(admittedAt, turnId, sessionId, admittedAt, turnId);
   db.prepare(`
-    UPDATE session_turn_index_state SET failure_reason = NULL, failure_sequence = NULL
-    WHERE session_id = ? AND failure_reason = 'hybrid_missing_admission'
-  `).run(sessionId);
+    UPDATE session_turn_index_state
+    SET failure_origin = NULL, failure_reason = NULL, failure_sequence = NULL
+    WHERE session_id = ? AND failure_origin = 'admission'
+      AND failure_reason = 'hybrid_missing_admission'
+      AND EXISTS (
+        SELECT 1 FROM session_turn_memberships AS membership
+        WHERE membership.session_id = session_turn_index_state.session_id
+          AND membership.sequence = session_turn_index_state.failure_sequence
+          AND membership.position_kind = 'turn' AND membership.position_id = ?
+      )
+  `).run(sessionId, turnId);
   invalidateBuildingSnapshots(db, sessionId);
   advanceAuthorityRevision(db, sessionId);
 }
@@ -152,8 +160,9 @@ export function recordRootTurnAdmissionsPurgedForPositionIndex(
   if (!canonicalAdmissionsDeleted && removed.changes === 0 && downgraded.changes === 0) return;
   resetSessionTurnAdmissionRecoveryState(db, sessionId);
   db.prepare(`
-    UPDATE session_turn_index_state SET failure_reason = NULL, failure_sequence = NULL
-    WHERE session_id = ? AND failure_reason = 'hybrid_missing_admission'
+    UPDATE session_turn_index_state
+    SET failure_origin = NULL, failure_reason = NULL, failure_sequence = NULL
+    WHERE session_id = ? AND failure_origin = 'admission'
   `).run(sessionId);
   invalidateBuildingSnapshots(db, sessionId);
   advanceAuthorityRevision(db, sessionId);
@@ -169,7 +178,7 @@ export function invalidateSessionTurnPositionIndex(db: DatabaseSync, sessionId: 
   db.prepare(`
     UPDATE session_turn_index_state
     SET indexed_through_sequence = -1, source_records = 0, source_bytes = 0,
-      failure_reason = NULL, failure_sequence = NULL
+      failure_origin = NULL, failure_reason = NULL, failure_sequence = NULL
     WHERE session_id = ?
   `).run(sessionId);
   advanceAuthorityRevision(db, sessionId);
@@ -200,7 +209,7 @@ export function ensureTurnIndexRows(db: DatabaseSync, sessionId: string): void {
   db.prepare(`
     UPDATE session_turn_index_state
     SET indexed_through_sequence = -1, source_records = 0, source_bytes = 0,
-      failure_reason = NULL, failure_sequence = NULL
+      failure_origin = NULL, failure_reason = NULL, failure_sequence = NULL
     WHERE session_id = ?
   `).run(sessionId);
   db.prepare(`
