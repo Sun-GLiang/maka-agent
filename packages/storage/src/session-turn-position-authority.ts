@@ -130,6 +130,7 @@ export function recordRootTurnAdmissionForPositionIndex(
 export function recordRootTurnAdmissionsPurgedForPositionIndex(
   db: DatabaseSync,
   sessionId: string,
+  canonicalAdmissionsDeleted: boolean,
 ): void {
   if (!sqliteTableExists(db, 'session_turn_metadata')) return;
   if (!db.prepare('SELECT 1 FROM session_metadata WHERE session_id = ?').get(sessionId)) return;
@@ -148,7 +149,8 @@ export function recordRootTurnAdmissionsPurgedForPositionIndex(
       AND order_source = 'admission' AND owner_first_sequence IS NOT NULL
   `)
     .run(sessionId);
-  if (removed.changes === 0 && downgraded.changes === 0) return;
+  if (!canonicalAdmissionsDeleted && removed.changes === 0 && downgraded.changes === 0) return;
+  resetSessionTurnAdmissionRecoveryState(db, sessionId);
   db.prepare(`
     UPDATE session_turn_index_state SET failure_reason = NULL, failure_sequence = NULL
     WHERE session_id = ? AND failure_reason = 'hybrid_missing_admission'
@@ -163,11 +165,10 @@ export function invalidateSessionTurnPositionIndex(db: DatabaseSync, sessionId: 
   db.prepare('DELETE FROM session_turn_position_snapshots WHERE session_id = ?').run(sessionId);
   db.prepare('DELETE FROM session_turn_identity_recovery WHERE session_id = ?').run(sessionId);
   db.prepare('DELETE FROM session_turn_metadata WHERE session_id = ?').run(sessionId);
+  resetSessionTurnAdmissionRecoveryState(db, sessionId);
   db.prepare(`
     UPDATE session_turn_index_state
     SET indexed_through_sequence = -1, source_records = 0, source_bytes = 0,
-      admission_cursor_admitted_at = NULL, admission_cursor_turn_id = NULL,
-      admission_recovery_complete = 0,
       failure_reason = NULL, failure_sequence = NULL
     WHERE session_id = ?
   `).run(sessionId);
@@ -195,11 +196,10 @@ export function ensureTurnIndexRows(db: DatabaseSync, sessionId: string): void {
   db.prepare('DELETE FROM session_turn_position_snapshots WHERE session_id = ?').run(sessionId);
   db.prepare('DELETE FROM session_turn_identity_recovery WHERE session_id = ?').run(sessionId);
   db.prepare('DELETE FROM session_turn_metadata WHERE session_id = ?').run(sessionId);
+  resetSessionTurnAdmissionRecoveryState(db, sessionId);
   db.prepare(`
     UPDATE session_turn_index_state
     SET indexed_through_sequence = -1, source_records = 0, source_bytes = 0,
-      admission_cursor_admitted_at = NULL, admission_cursor_turn_id = NULL,
-      admission_recovery_complete = 0,
       failure_reason = NULL, failure_sequence = NULL
     WHERE session_id = ?
   `).run(sessionId);
@@ -241,6 +241,15 @@ function publishCanonicalMembership(
 function invalidateBuildingSnapshots(db: DatabaseSync, sessionId: string): void {
   db.prepare(`
     DELETE FROM session_turn_position_snapshots WHERE session_id = ? AND state = 'building'
+  `).run(sessionId);
+}
+
+function resetSessionTurnAdmissionRecoveryState(db: DatabaseSync, sessionId: string): void {
+  db.prepare(`
+    UPDATE session_turn_index_state
+    SET admission_cursor_admitted_at = NULL, admission_cursor_turn_id = NULL,
+      admission_recovery_complete = 0
+    WHERE session_id = ?
   `).run(sessionId);
 }
 
