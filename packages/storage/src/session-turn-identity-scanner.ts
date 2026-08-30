@@ -17,7 +17,11 @@
  * under the License.
  */
 
-import { isUserVisibleSessionSystemNote } from '@maka/core/session';
+import {
+  classifySessionTurnIdentity,
+  SessionTurnIdentityClassificationError,
+  type SessionTurnIdentity,
+} from './session-turn-membership.js';
 
 export const SESSION_TURN_IDENTITY_SCANNER_VERSION = 1;
 export const SESSION_TURN_IDENTITY_SCANNER_MAX_STATE_BYTES = 64 * 1024;
@@ -79,10 +83,7 @@ export interface SessionTurnIdentityScannerStateV1 {
   capturedBytes: number;
 }
 
-export type SessionTurnRecoveredIdentity =
-  | { readonly kind: 'turn'; readonly turnId: string }
-  | { readonly kind: 'note'; readonly turnId: string }
-  | { readonly kind: 'ignored' };
+export type SessionTurnRecoveredIdentity = SessionTurnIdentity;
 
 export class SessionTurnIdentityScannerError extends Error {
   readonly code = 'session_turn_identity_incompatible';
@@ -181,30 +182,21 @@ export function completeSessionTurnIdentityScanner(
       'incompatible_identity',
     );
   }
-  if (turnIdPresent) {
-    if (typeof turnId !== 'string' || turnId.length === 0) {
-      throw new SessionTurnIdentityScannerError(
-        'turnId must be a non-empty string',
-        'incompatible_identity',
-      );
+  try {
+    return classifySessionTurnIdentity({
+      id,
+      type,
+      turnIdPresent,
+      turnId,
+      kindPresent,
+      kind,
+    });
+  } catch (error) {
+    if (error instanceof SessionTurnIdentityClassificationError) {
+      throw new SessionTurnIdentityScannerError(error.detail, 'incompatible_identity');
     }
-    return { kind: 'turn', turnId };
+    throw error;
   }
-  if (type !== 'system_note') {
-    throw new SessionTurnIdentityScannerError(
-      'non-system message is missing turnId',
-      'incompatible_identity',
-    );
-  }
-  if (!kindPresent || typeof kind !== 'string' || kind.length === 0) {
-    throw new SessionTurnIdentityScannerError(
-      'turnless system note is missing kind',
-      'incompatible_identity',
-    );
-  }
-  return isUserVisibleSessionSystemNote(kind)
-    ? { kind: 'note', turnId: `session-note:${id}` }
-    : { kind: 'ignored' };
 }
 
 function consumeCodePoint(state: SessionTurnIdentityScannerStateV1, codePoint: number): void {

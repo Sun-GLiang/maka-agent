@@ -18,20 +18,23 @@
  */
 
 import type { DatabaseSync } from 'node:sqlite';
-import { isUserVisibleSessionSystemNote, type StoredMessage } from '@maka/core/session';
+import type { StoredMessage } from '@maka/core/session';
 import { SessionTurnPositionRecoveryError } from './session-store.js';
+import {
+  classifyStoredMessageTurnIdentity,
+  publishSessionTurnMembership,
+  SessionTurnIdentityClassificationError,
+  SessionTurnMembershipPublicationError,
+} from './session-turn-membership.js';
+import { sqliteTableExists } from './sqlite-schema-introspection.js';
 
 export function recordAppendedSessionTurnMetadata(
   db: DatabaseSync,
   sessionId: string,
   firstSequence: number,
   messages: readonly StoredMessage[],
-  encodedByteLengths: readonly number[],
 ): void {
-  if (!tableExists(db, 'session_turn_metadata') || messages.length === 0) return;
-  if (messages.length !== encodedByteLengths.length) {
-    throw new Error('Session Turn metadata byte evidence is incomplete');
-  }
+  if (!sqliteTableExists(db, 'session_turn_metadata') || messages.length === 0) return;
   ensureTurnIndexRows(db, sessionId);
   const fillsBodylessAdmission = messages.some((message) => {
     const turnId = (message as { turnId?: unknown }).turnId;
@@ -68,7 +71,7 @@ export function recordRootTurnAdmissionForPositionIndex(
   turnId: string,
   admittedAt: number,
 ): void {
-  if (!tableExists(db, 'session_turn_metadata')) return;
+  if (!sqliteTableExists(db, 'session_turn_metadata')) return;
   if (!db.prepare('SELECT 1 FROM session_metadata WHERE session_id = ?').get(sessionId)) return;
   if (!turnId || !Number.isSafeInteger(admittedAt) || admittedAt < 0) {
     throw new SessionTurnPositionRecoveryError(sessionId, 'incompatible_identity');
@@ -112,7 +115,7 @@ export function recordRootTurnAdmissionsPurgedForPositionIndex(
   db: DatabaseSync,
   sessionId: string,
 ): void {
-  if (!tableExists(db, 'session_turn_metadata')) return;
+  if (!sqliteTableExists(db, 'session_turn_metadata')) return;
   if (!db.prepare('SELECT 1 FROM session_metadata WHERE session_id = ?').get(sessionId)) return;
   ensureTurnIndexRows(db, sessionId);
   const removed = db
@@ -139,7 +142,7 @@ export function recordRootTurnAdmissionsPurgedForPositionIndex(
 }
 
 export function invalidateSessionTurnPositionIndex(db: DatabaseSync, sessionId: string): void {
-  if (!tableExists(db, 'session_turn_metadata')) return;
+  if (!sqliteTableExists(db, 'session_turn_metadata')) return;
   ensureTurnIndexRows(db, sessionId);
   db.prepare('DELETE FROM session_turn_position_snapshots WHERE session_id = ?').run(sessionId);
   db.prepare('DELETE FROM session_turn_identity_recovery WHERE session_id = ?').run(sessionId);
@@ -170,71 +173,26 @@ function publishCanonicalMembership(
   sequence: number,
   message: StoredMessage,
 ): void {
-  const explicitTurnId = (message as { turnId?: unknown }).turnId;
-  let turnId: string;
-  let identityKind: 'turn' | 'note';
-  if (typeof explicitTurnId === 'string') {
-    if (explicitTurnId.length === 0) {
-      throw new SessionTurnPositionRecoveryError(sessionId, 'incompatible_identity', sequence);
+  try {
+    publishSessionTurnMembership(
+      db,
+      sessionId,
+      sequence,
+      classifyStoredMessageTurnIdentity(message),
+    );
+  } catch (error) {
+    if (error instanceof SessionTurnIdentityClassificationError) {
+      throw new SessionTurnPositionRecoveryError(sessionId, 'incompatible_identity', sequence, {
+        cause: error,
+      });
     }
-    turnId = explicitTurnId;
-    identityKind = 'turn';
-  } else if (message.type === 'system_note') {
-    if (!message.id || !isUserVisibleSessionSystemNote(message.kind)) return;
-    turnId = `session-note:${message.id}`;
-    identityKind = 'note';
-  } else {
-    throw new SessionTurnPositionRecoveryError(sessionId, 'incompatible_identity', sequence);
+    if (error instanceof SessionTurnMembershipPublicationError) {
+      throw new SessionTurnPositionRecoveryError(sessionId, error.reason, sequence, {
+        cause: error,
+      });
+    }
+    throw error;
   }
-  const admission =
-    identityKind === 'turn' && tableExists(db, 'core_root_turn_admissions')
-      ? (db
-          .prepare(`
-            SELECT admitted_at FROM core_root_turn_admissions
-            WHERE session_id = ? AND turn_id = ?
-          `)
-          .get(sessionId, turnId) as { admitted_at: number } | undefined)
-      : undefined;
-  const existingIdentity = db
-    .prepare(`
-      SELECT identity_kind FROM session_turn_metadata
-      WHERE session_id = ? AND turn_id = ?
-    `)
-    .get(sessionId, turnId) as { identity_kind: string } | undefined;
-  if (existingIdentity && existingIdentity.identity_kind !== identityKind) {
-    throw new SessionTurnPositionRecoveryError(sessionId, 'incompatible_identity', sequence);
-  }
-  db.prepare(`
-    INSERT INTO session_turn_metadata(
-      session_id, turn_id, identity_kind, order_source, admitted_at, first_sequence
-    ) VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(session_id, turn_id) DO UPDATE SET
-      order_source = CASE WHEN excluded.order_source = 'admission' THEN 'admission'
-        ELSE session_turn_metadata.order_source END,
-      admitted_at = COALESCE(excluded.admitted_at, session_turn_metadata.admitted_at),
-      first_sequence = CASE WHEN session_turn_metadata.first_sequence IS NULL
-        THEN excluded.first_sequence
-        ELSE MIN(session_turn_metadata.first_sequence, excluded.first_sequence) END
-  `).run(
-    sessionId,
-    turnId,
-    identityKind,
-    admission ? 'admission' : 'legacy',
-    admission?.admitted_at ?? null,
-    sequence,
-  );
-  const existing = db
-    .prepare(`
-      SELECT turn_id FROM session_turn_memberships WHERE session_id = ? AND sequence = ?
-    `)
-    .get(sessionId, sequence) as { turn_id: string } | undefined;
-  if (existing && existing.turn_id !== turnId) {
-    throw new SessionTurnPositionRecoveryError(sessionId, 'corrupt_source', sequence);
-  }
-  db.prepare(`
-    INSERT INTO session_turn_memberships(session_id, sequence, turn_id)
-    VALUES (?, ?, ?) ON CONFLICT(session_id, sequence) DO NOTHING
-  `).run(sessionId, sequence, turnId);
 }
 
 function invalidateBuildingSnapshots(db: DatabaseSync, sessionId: string): void {
@@ -248,10 +206,4 @@ function advanceAuthorityRevision(db: DatabaseSync, sessionId: string): void {
     UPDATE session_turn_authority_revisions
     SET authority_revision = authority_revision + 1 WHERE session_id = ?
   `).run(sessionId);
-}
-
-function tableExists(db: DatabaseSync, table: string): boolean {
-  return Boolean(
-    db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(table),
-  );
 }
