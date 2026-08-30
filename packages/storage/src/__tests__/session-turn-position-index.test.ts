@@ -739,6 +739,55 @@ describe('Session Turn position snapshots', () => {
     }
   });
 
+  test('resumes legacy inline records larger than one recovery step', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-legacy-inline-source-'));
+    let store = createSessionStore(root);
+    const session = await store.create(makeInput());
+    const message = {
+      ...user('turn-legacy-inline', 0),
+      text: 'x'.repeat(4 * 1024 * 1024 + 1024),
+    };
+    try {
+      await store.appendMessage(session.id, message);
+      await store.close?.();
+      const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+      try {
+        database.exec('PRAGMA foreign_keys = ON');
+        database.exec('BEGIN IMMEDIATE');
+        database
+          .prepare(`UPDATE session_messages SET record_json = ?
+            WHERE session_id = ? AND sequence = 0`)
+          .run(JSON.stringify(message), session.id);
+        database
+          .prepare('DELETE FROM session_message_payloads WHERE session_id = ? AND sequence = 0')
+          .run(session.id);
+        database.exec('COMMIT');
+      } finally {
+        database.close();
+      }
+      resetProjection(root, session.id);
+      store = createSessionStore(root);
+
+      const first = await store.readTurnPositionPageSnapshot({
+        sessionId: session.id,
+        snapshotLeaseId: 'lease-legacy-inline',
+        anchor: { kind: 'tail' },
+        maxPositions: 8,
+      });
+      assert.equal(first.kind, 'building');
+      if (first.kind !== 'building') assert.fail('expected partial inline scalar recovery');
+      assert.equal(first.progress.lastStepBytes, 4 * 1024 * 1024);
+      assert.equal(first.progress.lastStepRecords, 0);
+      assert.equal(first.progress.currentByteOffset, 4 * 1024 * 1024);
+
+      const ready = await readyPage(store, session.id, 'lease-legacy-inline');
+      assert.equal(ready.positions[0]?.turnId, 'turn-legacy-inline');
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('accounts exact 4 MiB boundaries and resumes identity located after a huge body', async () => {
     const targets = [4 * 1024 * 1024 - 1, 4 * 1024 * 1024, 4 * 1024 * 1024 + 1, 9 * 1024 * 1024];
     for (const [index, targetBytes] of targets.entries()) {

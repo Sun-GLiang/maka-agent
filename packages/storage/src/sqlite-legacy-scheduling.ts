@@ -26,6 +26,7 @@ import type {
 } from '@maka/core/scheduled-task';
 import type { DatabaseSync } from 'node:sqlite';
 import { canonicalizeLegacyPlanReminderCronExpression } from './legacy-cron-expression.js';
+import { sqliteTableExists } from './sqlite-schema-introspection.js';
 
 const LEGACY_AUTOMATION_TABLES = [
   'automation_authority_state',
@@ -40,7 +41,9 @@ export function assertLegacySchedulingSchema(
   versions: ReadonlyMap<string, number>,
 ): void {
   const automationVersion = versions.get('automation');
-  const automationTables = LEGACY_AUTOMATION_TABLES.filter((table) => hasTable(database, table));
+  const automationTables = LEGACY_AUTOMATION_TABLES.filter((table) =>
+    sqliteTableExists(database, table),
+  );
   if (automationTables.length > 0 && automationVersion === undefined) {
     throw new Error('Legacy Automation schema registry is missing');
   }
@@ -55,14 +58,14 @@ export function assertLegacySchedulingSchema(
   if (
     workflowVersion !== undefined &&
     workflowVersion <= LAST_RELEASED_PLAN_REMINDER_WORKFLOW_VERSION &&
-    !hasTable(database, 'workflow_plan_reminders')
+    !sqliteTableExists(database, 'workflow_plan_reminders')
   ) {
     throw new Error('The released Workflow schema is missing workflow_plan_reminders');
   }
   if (
     workflowVersion !== undefined &&
     workflowVersion > LAST_RELEASED_PLAN_REMINDER_WORKFLOW_VERSION &&
-    hasTable(database, 'workflow_plan_reminders')
+    sqliteTableExists(database, 'workflow_plan_reminders')
   ) {
     throw new Error('The current Workflow schema still contains released Plan Reminder state');
   }
@@ -113,7 +116,7 @@ function assertLegacyAutomationEmpty(database: DatabaseSync): void {
 }
 
 function readLegacyPlanReminders(database: DatabaseSync): ScheduledTask[] {
-  if (!hasTable(database, 'workflow_plan_reminders')) {
+  if (!sqliteTableExists(database, 'workflow_plan_reminders')) {
     return [];
   }
   return database
@@ -284,13 +287,6 @@ function boolean(value: unknown, label: string): boolean {
 function enumValue<const T extends readonly string[]>(value: unknown, values: T): T[number] {
   if (typeof value !== 'string' || !values.includes(value)) throw new Error('Invalid enum value');
   return value as T[number];
-}
-
-function hasTable(database: DatabaseSync, name: string): boolean {
-  return (
-    database.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name) !==
-    undefined
-  );
 }
 
 function hasColumn(database: DatabaseSync, table: string, column: string): boolean {

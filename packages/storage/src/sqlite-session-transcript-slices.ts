@@ -43,6 +43,17 @@ export interface TranscriptRecordSlice {
   readonly payloadDigest: `sha256:${string}` | null;
 }
 
+export function planForwardTranscriptSlice(
+  totalBytes: number,
+  byteOffset: number,
+  availableBytes: number,
+  alignmentBytes = 1,
+): number {
+  const remainingBytes = totalBytes - byteOffset;
+  if (remainingBytes <= availableBytes) return remainingBytes;
+  return Math.floor(availableBytes / alignmentBytes) * alignmentBytes;
+}
+
 /**
  * The single physical byte-slice primitive shared by the public transcript
  * pager and the package-private scalar identity recovery scanner.
@@ -84,7 +95,7 @@ export function readTranscriptSlices(
         }>);
   const rowsBySequence = new Map<number, typeof rows>();
   for (const row of rows) {
-    const sequence = requireSequence(row.sequence, sessionId);
+    const sequence = requireStoredMessageSequence(row.sequence, sessionId);
     const grouped = rowsBySequence.get(sequence);
     if (grouped) grouped.push(row);
     else rowsBySequence.set(sequence, [row]);
@@ -157,7 +168,7 @@ export function readTranscriptSlices(
       data?: unknown;
     }>;
     for (const row of inlineRows) {
-      const sequence = requireSequence(row.sequence, sessionId);
+      const sequence = requireStoredMessageSequence(row.sequence, sessionId);
       if (!(row.data instanceof Uint8Array)) {
         throw new StoredSessionMessageIncompatibleError(sessionId, sequence);
       }
@@ -167,7 +178,7 @@ export function readTranscriptSlices(
   return result;
 }
 
-function requireSequence(value: unknown, sessionId: string): number {
+export function requireStoredMessageSequence(value: unknown, sessionId: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new StoredSessionMessageIncompatibleError(sessionId, -1);
   }

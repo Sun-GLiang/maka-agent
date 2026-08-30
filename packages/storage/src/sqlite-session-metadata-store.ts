@@ -188,7 +188,9 @@ import {
   sqliteRecoverableSessionRolePredicate,
 } from './sqlite-session-role-scope.js';
 import {
+  planForwardTranscriptSlice,
   readTranscriptSlices,
+  requireStoredMessageSequence,
   StoredSessionMessageIncompatibleError,
   type TranscriptRecordSlice,
 } from './sqlite-session-transcript-slices.js';
@@ -1496,7 +1498,6 @@ export class SqliteSessionMetadataStore {
           normalized.id,
           0,
           encoded.map(({ message }) => message),
-          encoded.map(({ json }) => Buffer.byteLength(json, 'utf8')),
         );
         // Align with appendMessages' connection-lock semantics: a session
         // with any user message is treated as connection-locked, even when
@@ -1622,7 +1623,6 @@ export class SqliteSessionMetadataStore {
         sessionId,
         sequence,
         encoded.map(({ message }) => message),
-        encoded.map(({ json }) => Buffer.byteLength(json, 'utf8')),
       );
       this.updateCatalogProjectionSync(sessionId, projection, false, lockConnection);
     });
@@ -1857,7 +1857,6 @@ export class SqliteSessionMetadataStore {
         WORKHUB_COORDINATION_SESSION_ID,
         sequenceRow.last_sequence + 1,
         [assignment],
-        [Buffer.byteLength(assignmentJson, 'utf8')],
       );
       this.updateCatalogProjectionSync(WORKHUB_COORDINATION_SESSION_ID, request.projection, false);
       return { kind: 'assigned' as const, targetCreated, assignment };
@@ -2473,7 +2472,7 @@ export class SqliteSessionMetadataStore {
         const byteLength =
           request.direction === 'older'
             ? edge - byteOffset
-            : Math.min(totalBytes - edge, available);
+            : planForwardTranscriptSlice(totalBytes, edge, available);
         const complete =
           request.direction === 'older' ? byteOffset === 0 : byteOffset + byteLength === totalBytes;
         slices.push({
@@ -7146,13 +7145,6 @@ function readChunkedTranscriptRecord(
     throw new StoredSessionMessageIncompatibleError(sessionId, sequence);
   }
   return data;
-}
-
-function requireStoredMessageSequence(value: unknown, sessionId: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
-    throw new StoredSessionMessageIncompatibleError(sessionId, -1);
-  }
-  return value as number;
 }
 
 function nullableStoredMessageSequence(value: unknown, sessionId: string): number | null {
