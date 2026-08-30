@@ -85,6 +85,10 @@ export { normalizeRootTurnAdmissionPayload } from './agent-run-store.js';
 export {
   isSessionNotFoundError,
   SessionReadMarkerMessageNotFoundError,
+  SessionTurnPositionAnchorNotFoundError,
+  SessionTurnPositionLimitError,
+  SessionTurnPositionRecoveryError,
+  SessionTurnPositionSnapshotMismatchError,
 } from './session-store.js';
 export {
   SessionMetadataConflictError,
@@ -133,6 +137,13 @@ export type {
   SessionTranscriptRecordScanRequest,
   SessionTranscriptStoragePage,
   SessionTranscriptStorageFragment,
+  SessionTranscriptRecordsByTurnIdsSnapshotRequest,
+  SessionTranscriptRecordsByTurnIdsSnapshotResult,
+  SessionTurnPosition,
+  SessionTurnPositionAnchor,
+  SessionTurnPositionPageSnapshotRequest,
+  SessionTurnPositionReadResult,
+  SessionTurnPositionSnapshotKey,
 } from './session-store.js';
 
 export type ExecutionSessionWriter = SessionAuthorityStore;
@@ -412,6 +423,14 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
         ),
       readTurnLandmarksSnapshot: (sessionId, maxLandmarks) =>
         run(() => sessionStore.readTurnLandmarksSnapshot(sessionId, maxLandmarks)),
+      readTurnPositionPageSnapshot: (request) =>
+        run(() => sessionStore.readTurnPositionPageSnapshot(request)),
+      readTranscriptRecordsByTurnIdsSnapshot: (request) =>
+        run(() => sessionStore.readTranscriptRecordsByTurnIdsSnapshot(request)),
+      releaseTurnPositionSnapshot: (sessionId, snapshotLeaseId, snapshotKey) =>
+        run(() =>
+          sessionStore.releaseTurnPositionSnapshot(sessionId, snapshotLeaseId, snapshotKey),
+        ),
       readMessagesForRecovery: (sessionId) =>
         run(() => sessionStore.readMessagesForRecovery(sessionId)),
       listTurnsSnapshot: (sessionId) => run(() => sessionStore.listTurnsSnapshot(sessionId)),

@@ -57,6 +57,7 @@ import {
   ensureOperationalSchemaRegistry,
   isCurrentOperationalTargetSchema,
 } from './operational-target-schema.js';
+import { reclaimSessionTurnPositionSnapshotsForNewOwner } from './session-turn-position-index.js';
 
 export const OPERATIONAL_STATE_DATABASE_NAME = 'runtime.sqlite';
 export const OPERATIONAL_STATE_SCHEMA_VERSION = 2;
@@ -201,6 +202,14 @@ class OperationalStateDatabaseOwner {
       this.database.exec('PRAGMA foreign_keys = ON');
       inspectAndMigrateOperationalState(this.database, options.now ?? Date.now);
       configureSqliteRuntimeDatabase(this.database);
+      this.database.exec('BEGIN IMMEDIATE');
+      try {
+        reclaimSessionTurnPositionSnapshotsForNewOwner(this.database);
+        this.database.exec('COMMIT');
+      } catch (error) {
+        rollback(this.database);
+        throw error;
+      }
     } catch (error) {
       this.database.close();
       this.closed = true;
