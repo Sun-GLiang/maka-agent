@@ -18,7 +18,12 @@
  */
 
 import { createServer } from "node:http";
-import { test, expect, COMPOSER_INPUT } from "./fixtures";
+import {
+  test,
+  expect,
+  COMPOSER_INPUT,
+  ensureSidebarExpanded,
+} from "./fixtures";
 
 test("proxy password drafts save once, reload safely, and authenticate offline", async ({
   window: page,
@@ -45,6 +50,7 @@ test("proxy password drafts save once, reload safely, and authenticate offline",
   }
 
   try {
+    await ensureSidebarExpanded(page);
     await page.getByRole("button", { name: "设置" }).click();
     await page.getByRole("button", { name: "通用", exact: true }).click();
     await page.getByRole("switch", { name: "启用代理服务器" }).click();
@@ -101,6 +107,7 @@ test("proxy password drafts save once, reload safely, and authenticate offline",
 
     await page.reload();
     await page.waitForSelector(COMPOSER_INPUT);
+    await ensureSidebarExpanded(page);
     await page.getByRole("button", { name: "设置" }).click();
     await page.getByRole("button", { name: "通用", exact: true }).click();
     const reloadedPassword = page.getByPlaceholder(
@@ -125,6 +132,7 @@ test("proxy password drafts save once, reload safely, and authenticate offline",
 
     await page.reload();
     await page.waitForSelector(COMPOSER_INPUT);
+    await ensureSidebarExpanded(page);
     await page.getByRole("button", { name: "设置" }).click();
     await page.getByRole("button", { name: "通用", exact: true }).click();
     await expect(
