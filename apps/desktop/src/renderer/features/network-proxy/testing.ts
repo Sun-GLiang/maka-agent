@@ -20,5 +20,4 @@
 export {
   createProxyPasswordDraft,
   runAfterProxyPasswordCommit,
-  type ProxyPasswordDraft,
 } from "./model/proxy-password-draft.js";
