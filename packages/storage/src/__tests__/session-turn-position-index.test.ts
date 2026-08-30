@@ -1069,7 +1069,7 @@ describe('Session Turn position snapshots', () => {
     }
   });
 
-  test('rejects partial persisted failure provenance triples', async () => {
+  test('enforces the persisted failure provenance pair matrix', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-failure-provenance-check-'));
     const store = createSessionStore(root);
     try {
@@ -1094,11 +1094,32 @@ describe('Session Turn position snapshots', () => {
             /CHECK constraint failed/,
           );
         }
-        database
-          .prepare(`UPDATE session_turn_index_state
-            SET failure_origin = 'transcript', failure_reason = 'corrupt_source',
-              failure_sequence = 0 WHERE session_id = ?`)
-          .run(session.id);
+        for (const [origin, reason] of [
+          ['transcript', 'corrupt_source'],
+          ['transcript', 'incompatible_identity'],
+          ['admission', 'corrupt_source'],
+          ['admission', 'hybrid_missing_admission'],
+        ] as const) {
+          database
+            .prepare(`UPDATE session_turn_index_state
+              SET failure_origin = ?, failure_reason = ?, failure_sequence = 0
+              WHERE session_id = ?`)
+            .run(origin, reason, session.id);
+        }
+        for (const [origin, reason] of [
+          ['transcript', 'hybrid_missing_admission'],
+          ['admission', 'incompatible_identity'],
+        ] as const) {
+          assert.throws(
+            () =>
+              database
+                .prepare(`UPDATE session_turn_index_state
+                  SET failure_origin = ?, failure_reason = ?, failure_sequence = 0
+                  WHERE session_id = ?`)
+                .run(origin, reason, session.id),
+            /CHECK constraint failed/,
+          );
+        }
         assert.throws(
           () =>
             database
@@ -2937,6 +2958,11 @@ describe('Session Turn position snapshots', () => {
       await runs.admitRootTurn(rootAdmission(session.id, 'turn-reset', 'user-reset', 9));
       await readyPage(store, session.id, 'admission-reset-before', 'owner');
       const database = (store as unknown as { metadata: { db: DatabaseSync } }).metadata.db;
+      database
+        .prepare(`UPDATE session_turn_index_state
+          SET failure_origin = 'transcript', failure_reason = 'corrupt_source',
+            failure_sequence = 0 WHERE session_id = ?`)
+        .run(session.id);
       database.exec('BEGIN IMMEDIATE');
       try {
         invalidateSessionTurnPositionIndex(database, session.id);
@@ -2958,6 +2984,11 @@ describe('Session Turn position snapshots', () => {
           admission_recovery_complete: 0,
         },
       );
+      assert.deepEqual(readTurnIndexFailure(root, session.id), {
+        failure_origin: null,
+        failure_reason: null,
+        failure_sequence: null,
+      });
       assert.equal(
         (
           database
@@ -3203,6 +3234,11 @@ describe('Session Turn position snapshots', () => {
       const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
       try {
         database
+          .prepare(`UPDATE session_turn_index_state
+            SET failure_origin = 'admission', failure_reason = 'corrupt_source',
+              failure_sequence = 0 WHERE session_id = ?`)
+          .run(session.id);
+        database
           .prepare(`UPDATE session_turn_authority_revisions
             SET visibility_policy_version = 999 WHERE session_id = ?`)
           .run(session.id);
@@ -3223,6 +3259,11 @@ describe('Session Turn position snapshots', () => {
       assert.deepEqual(shared.positions, [
         { ordinal: 0, key: { kind: 'empty' }, firstSequence: null },
       ]);
+      assert.deepEqual(readTurnIndexFailure(root, session.id), {
+        failure_origin: null,
+        failure_reason: null,
+        failure_sequence: null,
+      });
     } finally {
       runs.close?.();
       await store.close?.();

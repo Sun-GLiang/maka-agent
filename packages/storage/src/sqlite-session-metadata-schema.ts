@@ -1257,6 +1257,11 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
       CHECK ((admission_cursor_admitted_at IS NULL) = (admission_cursor_turn_id IS NULL)),
       CHECK ((failure_origin IS NULL) = (failure_reason IS NULL)
         AND (failure_reason IS NULL) = (failure_sequence IS NULL)),
+      CHECK (failure_origin IS NULL
+        OR (failure_origin = 'transcript'
+          AND failure_reason IN ('corrupt_source', 'incompatible_identity'))
+        OR (failure_origin = 'admission'
+          AND failure_reason IN ('corrupt_source', 'hybrid_missing_admission'))),
       FOREIGN KEY(session_id) REFERENCES session_metadata(session_id) ON DELETE CASCADE
     ) WITHOUT ROWID;
 
