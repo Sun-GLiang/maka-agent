@@ -74,6 +74,7 @@ interface ChatComposerRegionProps
     | 'hidden'
     | 'draftKey'
     | 'stopPending'
+    | 'allowAttachmentImportWhileStreaming'
     // Read from ComposerMentionsProvider, so a catalog reload repaints the
     // popups without re-rendering the shell that would otherwise pass them.
     | 'mentionSkills'
