@@ -65,11 +65,24 @@ export interface ProvenRootMessageHandoff {
   readonly admittedAt: number;
 }
 
+/** Immutable proof that an admission was delivered as steering by a later execution owner. */
+export interface ProvenSteeringMessageHandoff {
+  readonly messageId: string;
+  readonly admissionTurnId: string;
+  readonly admissionRunId: string;
+  readonly executionTurnId: string;
+  readonly eventId: string;
+  readonly eventTs: number;
+  readonly content: MessageContent;
+  readonly admittedAt: number;
+}
+
 export interface MarkMessagesHandedOffInput {
   readonly sessionId: string;
   readonly messageIds: readonly string[];
   readonly turnId: string;
   readonly provenRootMessages?: readonly ProvenRootMessageHandoff[];
+  readonly provenSteeringMessages?: readonly ProvenSteeringMessageHandoff[];
 }
 
 export interface MessageAdmissionStore {
@@ -139,6 +152,23 @@ export function normalizeProvenRootMessageHandoff(
     ...handoff,
     content: decodeMessageContent(handoff.content),
   });
+}
+
+export function normalizeProvenSteeringMessageHandoff(
+  handoff: ProvenSteeringMessageHandoff,
+): ProvenSteeringMessageHandoff {
+  assertSafeId(handoff.messageId, 'Invalid proven steering Message identity');
+  assertSafeId(handoff.admissionTurnId, 'Invalid proven steering admission Turn');
+  assertSafeId(handoff.admissionRunId, 'Invalid proven steering admission Run');
+  assertSafeId(handoff.executionTurnId, 'Invalid proven steering execution Turn');
+  assertSafeId(handoff.eventId, 'Invalid proven steering RuntimeEvent identity');
+  if (!Number.isSafeInteger(handoff.eventTs) || handoff.eventTs < 0) {
+    throw new Error('Invalid proven steering RuntimeEvent timestamp');
+  }
+  if (!Number.isSafeInteger(handoff.admittedAt) || handoff.admittedAt < 0) {
+    throw new Error('Invalid proven steering Message timestamp');
+  }
+  return Object.freeze({ ...handoff, content: decodeMessageContent(handoff.content) });
 }
 
 export function samePendingMessageAdmission(

@@ -74,7 +74,7 @@
     "./deep-research-client-progress": "./dist/deep-research-client-progress.js",
     "./daily-review": "./dist/daily-review.js",
     "./work-board": "./dist/work-board.js",
-    "./explore-agent": "./dist/explore-agent.js",
+    "./deep-research": "./dist/deep-research.js",
     "./long-term-memory": "./dist/long-term-memory.js",
     "./local-memory": "./dist/local-memory.js",
     "./web-search": "./dist/web-search.js",
@@ -148,5 +148,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run clean && npm run build && npm run test:dist",
     "test:dist": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "intl-messageformat": "11.2.12"
   }
 }

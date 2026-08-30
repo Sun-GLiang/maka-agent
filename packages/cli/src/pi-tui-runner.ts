@@ -52,7 +52,7 @@ import {
   type SessionSummary,
   type StoredMessage,
 } from '@maka/core/session';
-import type { UiLocale } from '@maka/core/ui-locale';
+import { formatUiMessage, type UiLocale } from '@maka/core/ui-locale';
 import {
   buildForeignSessionHandoffMessage,
   foreignSessionHandoffDisplayText,
@@ -144,12 +144,14 @@ import {
 import {
   MakaAutocompleteProvider,
   DirectoryPickerOverlay,
-  MODEL_SWITCH_CACHE_WARNING,
   ModelSearchOverlay,
   OnboardingWizard,
   PickerOverlay,
   UserQuestionOverlay,
+  modelChoiceConnectionLabels,
+  getTuiPickerCopy,
   modelPickerItems,
+  onboardingFailureMessage,
   permissionModePickerItems,
   skillPickerItems,
   thinkingLevelPickerItems,
@@ -360,6 +362,7 @@ function sessionConnectionIdentityNotice(
 
 export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   const locale = input.locale ?? 'en';
+  const pickerCopy = getTuiPickerCopy(locale);
   const primaryGuidance = getTuiPrimaryGuidance(locale);
   const terminal = input.terminal ?? new ProcessTerminal();
   const taskbarProgress = resolveTaskbarProgress(input.taskbarProgress);
@@ -1159,7 +1162,6 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   // success notice beside the input field instead of the transcript entry flow.
   let wizardOverlay: OverlayHandle | undefined;
   let wizard: OnboardingWizard | undefined;
-  let wizardProviderType: ProviderType | undefined;
   // The user's supplied key from the key step ('' reuses the stored secret for an
   // existing connection) and the models from the last verify (cached on save).
   // The runner holds them so the wizard stays UI-only; the secret never crosses
@@ -1169,7 +1171,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   let wizardBaseUrl = '';
   // The existing connection the picked provider resolved to, so saving edits
   // it in place (a Desktop-created relay may live under a custom slug).
-  let wizardConnectionId: string | undefined;
+  let wizardTarget: OnboardingProviderEntry['target'] | undefined;
   let wizardModels: readonly ModelInfo[] = [];
   // Authoritative ready model choices for `/model`. A startup snapshot refreshed
   // in place after `/setup` saves so newly configured models are immediately
@@ -1551,10 +1553,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     }
     const previousModel = transcriptLastUsedModel ?? model;
     const previousConnectionSlug = connectionSlug;
-    const previousChoice = modelChoices?.find(
-      (candidate) =>
-        candidate.model === previousModel && candidate.connectionSlug === previousConnectionSlug,
-    );
+    const connectionLabels = modelChoiceConnectionLabels(modelChoices ?? [choice]);
     await input.driver.setModel(choice.model, choice.connectionSlug, choice.connectionId);
     model = choice.model;
     connectionId = choice.connectionId;
@@ -1570,7 +1569,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       text:
         previousConnectionSlug === choice.connectionSlug
           ? `Model changed: ${previousModel} → ${choice.model}`
-          : `Model changed: ${previousModel} (${previousChoice?.connectionName || previousConnectionSlug}) → ${choice.model} (${choice.connectionName || choice.connectionSlug})`,
+          : `Model changed: ${previousModel} (${connectionLabels.get(previousConnectionSlug) ?? previousConnectionSlug}) → ${choice.model} (${connectionLabels.get(choice.connectionSlug) ?? choice.connectionSlug})`,
     });
     requestRender();
   };
@@ -2081,7 +2080,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     const picker = new PickerOverlay(list, {
       title,
       rightLabel,
-      hint: options.hint,
+      hint: options.hint ?? pickerCopy.selectPickerHint,
       notice: options.notice,
     });
     let overlay: OverlayHandle | undefined;
@@ -2101,10 +2100,9 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     wizardOverlay?.hide();
     wizardOverlay = undefined;
     wizard = undefined;
-    wizardProviderType = undefined;
     wizardApiKey = '';
     wizardBaseUrl = '';
-    wizardConnectionId = undefined;
+    wizardTarget = undefined;
     wizardModels = [];
   };
 
@@ -2112,15 +2110,15 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   // still escapes the wizard) instead of being stored as an API key; every
   // in-flight state stays inside the wizard overlay, never the transcript.
   const submitWizardKey = (apiKey: string): void => {
-    const providerType = wizardProviderType;
-    if (!providerType || !wizard) return;
+    const target = wizardTarget;
+    if (!target || !wizard) return;
     if (apiKey.startsWith('/')) {
       closeWizard();
       handleSlashCommand(apiKey, 0);
       return;
     }
     if (!input.onboarding) {
-      wizard.setKeyError('Onboarding 不可用：当前运行环境未提供配置入口。');
+      wizard.setKeyError(pickerCopy.onboardingUnavailable);
       requestRender();
       return;
     }
@@ -2129,32 +2127,24 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     const attempt = ++wizardAttempt;
     targetWizard.setVerifying();
     requestRender();
-    void input.onboarding
-      .verify({ providerType, connectionId: wizardConnectionId, apiKey, baseUrl: wizardBaseUrl })
-      .then(
-        (result) => {
-          if (closed || wizard !== targetWizard || attempt !== wizardAttempt) return;
-          if (result.kind === 'error') {
-            // Probe failed: re-arm the key field in place. The host stores nothing
-            // during verify, so retrying with a corrected key is clean.
-            // A stale snapshot (the targeted connection is gone) is not a key
-            // problem — retyping cannot fix it, so skip that framing.
-            wizard.setKeyError(
-              result.stale ? result.text : `API key 验证失败：${result.text}。请检查后重新输入。`,
-            );
-            requestRender();
-            return;
-          }
-          wizardModels = result.models;
-          wizard.setModels(result.models); // advance to the models step
+    void input.onboarding.verify({ target, apiKey, baseUrl: wizardBaseUrl }).then(
+      (result) => {
+        if (closed || wizard !== targetWizard || attempt !== wizardAttempt) return;
+        if (result.kind !== 'ok') {
+          wizard.setKeyError(onboardingFailureMessage(result, locale));
           requestRender();
-        },
-        (error) => {
-          if (closed || wizard !== targetWizard || attempt !== wizardAttempt) return;
-          wizard.setKeyError(`配置失败：${error instanceof Error ? error.message : String(error)}`);
-          requestRender();
-        },
-      );
+          return;
+        }
+        wizardModels = result.models;
+        wizard.setModels(result.models); // advance to the models step
+        requestRender();
+      },
+      () => {
+        if (closed || wizard !== targetWizard || attempt !== wizardAttempt) return;
+        wizard.setKeyError(onboardingFailureMessage({ kind: 'unavailable' }, locale));
+        requestRender();
+      },
+    );
   };
 
   // Models submit from the wizard: persist the curated enabled set, refresh the
@@ -2162,10 +2152,10 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   // success (first-run closes the TUI so the host re-resolves the new default).
   // Setup never appends a transcript Note and never switches the active session.
   const submitWizardModels = (enabledModelIds: readonly string[]): void => {
-    const providerType = wizardProviderType;
-    if (!providerType || !wizard) return;
+    const target = wizardTarget;
+    if (!target || !wizard) return;
     if (!input.onboarding) {
-      wizard.setModelError('Onboarding 不可用：当前运行环境未提供配置入口。');
+      wizard.setModelError(pickerCopy.onboardingUnavailable);
       requestRender();
       return;
     }
@@ -2175,8 +2165,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     requestRender();
     void input.onboarding
       .save({
-        providerType,
-        connectionId: wizardConnectionId,
+        target,
         apiKey: wizardApiKey,
         baseUrl: wizardBaseUrl,
         enabledModelIds,
@@ -2184,31 +2173,41 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       })
       .then(
         (result) => {
-          if (result.kind === 'error') {
+          if (result.kind !== 'ok') {
             if (closed || wizard !== targetWizard || attempt !== wizardAttempt) return;
-            wizard.setModelError(result.text);
+            wizard.setModelError(onboardingFailureMessage(result, locale));
             requestRender();
             return;
           }
-          // Authoritatively refresh the running TUI's ready model choices so the
-          // newly configured models are immediately available from /model — even
-          // if the user abandoned the wizard mid-save. Abandonment only drops the
-          // in-frame success UI, not the background state sync. The active
-          // session is not switched.
-          modelChoices = result.modelChoices;
+          // The durable save may finish after the user backed out of the models
+          // step. Preserve the Host-assigned identity while this wizard still
+          // points at the same target, so submitting it again edits that exact
+          // Connection instead of allocating a duplicate account.
+          if (wizard === targetWizard && wizardTarget === target) {
+            wizardTarget = {
+              kind: 'existing',
+              connectionId: result.connection.connectionId,
+            };
+          }
           if (closed || wizard !== targetWizard || attempt !== wizardAttempt) return;
+          // Catalog projection is attempt-scoped: a late save from an abandoned
+          // attempt must not overwrite choices refreshed by a newer save.
+          if (result.refresh.kind === 'ok') {
+            modelChoices = result.refresh.modelChoices;
+          }
           if (input.firstRun) {
             beginClose();
             return;
           }
-          wizard.setSuccess(enabledModelIds.length);
+          wizard.setSuccess(
+            enabledModelIds.length,
+            result.refresh.kind === 'failed' ? pickerCopy.accountSavedRefreshFailed : undefined,
+          );
           requestRender();
         },
-        (error) => {
+        () => {
           if (closed || wizard !== targetWizard || attempt !== wizardAttempt) return;
-          wizard.setModelError(
-            `保存失败：${error instanceof Error ? error.message : String(error)}`,
-          );
+          wizard.setModelError(onboardingFailureMessage({ kind: 'unavailable' }, locale));
           requestRender();
         },
       );
@@ -2219,11 +2218,11 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     if (input.onboarding) {
       try {
         providers = await input.onboarding.listProviders();
-      } catch (error) {
+      } catch {
         state.entries.push({
           kind: 'notice',
           level: 'info',
-          text: `无法读取已配置的连接：${error instanceof Error ? error.message : String(error)}`,
+          text: pickerCopy.listProvidersFailed,
         });
         requestRender();
         return;
@@ -2233,7 +2232,8 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       // wizard can report unavailability in-frame at submit instead of throwing.
       providers = listApiKeyOnboardableProviders().map((provider) => ({
         ...provider,
-        hasConnection: false,
+        target: { kind: 'create' as const, providerType: provider.providerType },
+        label: provider.label,
         enabledModelIds: [],
       }));
     }
@@ -2241,19 +2241,22 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       state.entries.push({
         kind: 'notice',
         level: 'info',
-        text: '没有可配置的 API key 类供应商。',
+        text: pickerCopy.noConfigurableProviders,
       });
       requestRender();
       return;
     }
     wizardOverlay?.hide();
     wizard = new OnboardingWizard(tui, {
+      locale,
       providers,
-      onPickProvider: (providerType, existingConnectionId) => {
-        wizardProviderType = providerType;
+      onPickProvider: (provider) => {
+        // Each picker selection is a new logical intent, even when the user
+        // reselects the same catalog row. A late save may converge only the
+        // exact target object captured by its own submit.
+        wizardTarget = { ...provider.target };
         wizardApiKey = '';
         wizardBaseUrl = '';
-        wizardConnectionId = existingConnectionId;
         wizardModels = [];
         wizardAttempt += 1; // a new pick supersedes any in-flight attempt
         requestRender();
@@ -2752,6 +2755,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     if (choices && choices.length > 0) {
       let overlay: OverlayHandle | undefined;
       const picker = new ModelSearchOverlay(tui, {
+        locale,
         choices,
         current: { model, connectionId, connectionSlug },
         showCacheWarning: hasConversationHistory,
@@ -2765,16 +2769,16 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       return;
     }
     showSelectPicker(
-      'Select Model',
+      pickerCopy.modelPickerTitle,
       connectionSlug,
-      modelPickerItems(model, input.models),
+      modelPickerItems(model, input.models, locale),
       (item) => {
         void runControl(() => setModel(item.value));
       },
       {
         minPrimaryColumnWidth: 24,
         maxPrimaryColumnWidth: 48,
-        notice: hasConversationHistory ? MODEL_SWITCH_CACHE_WARNING : undefined,
+        notice: hasConversationHistory ? pickerCopy.modelSwitchCacheWarning : undefined,
       },
     );
   };
@@ -2807,9 +2811,9 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   };
 
   const showThinkingLevelList = () => {
-    const items = thinkingLevelPickerItems(thinkingLevels, thinkingLevel);
+    const items = thinkingLevelPickerItems(thinkingLevels, thinkingLevel, locale);
     showSelectPicker(
-      'Select Thinking Level',
+      pickerCopy.thinkingPickerTitle,
       thinkingLevel ?? 'default',
       items,
       (item) => {
@@ -3404,7 +3408,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
             state.entries.push({
               kind: 'notice',
               level: 'info',
-              text: '当前模型不支持思考级别切换。',
+              text: pickerCopy.thinkingUnsupported,
             });
             requestRender();
             return;
@@ -3425,7 +3429,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
             level: 'error',
             text:
               thinkingLevels.length === 0
-                ? '当前模型不支持思考级别切换。'
+                ? pickerCopy.thinkingUnsupported
                 : `Usage: /thinking ${['default', ...thinkingLevels].join('|')}`,
           });
           requestRender();

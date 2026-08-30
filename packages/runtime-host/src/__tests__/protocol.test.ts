@@ -59,6 +59,7 @@ import {
   TURN_MESSAGE_QUOTE_MAX_COUNT,
   TURN_MESSAGE_QUOTE_TEXT_MAX_LENGTH,
   TURN_FAILURE_MESSAGE_MAX_BYTES,
+  decodeMessageContent,
   TURN_SKILL_ID_MAX_COUNT,
   TURN_SKILL_ID_MAX_LENGTH,
 } from '../protocol/turn.js';
@@ -212,6 +213,12 @@ describe('Runtime Host bootstrap protocol', () => {
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 44);
   });
 
+  test('publishes a new compatibility epoch for explicit onboarding targets', () => {
+    // Epoch 51 peers require nullable connectionId targeting and decode a
+    // successful save without its committed Connection identity.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 52);
+  });
+
   test('publishes a new compatibility epoch for queued message editing', () => {
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 45);
   });
@@ -297,6 +304,39 @@ describe('Runtime Host bootstrap protocol', () => {
         requiredActiveCredentialId: 'credential-current',
       },
     );
+  });
+
+  test('decodes Host-bound capability-provider ownership at a new compatibility boundary', () => {
+    const input = {
+      principalKind: 'capability_provider',
+      principalId: 'terminal-mcp-provider',
+      operationGrants: ['client.capability.replace', 'client.capability.unregister'],
+      canPublishClientCapabilities: true,
+      canUseHostPaths: false,
+      capabilityOwnerCredentialId: 'terminal-owner-credential',
+    };
+    assert.deepEqual(HOST_OPERATION_SPECS['access.credential.issue'].decodeInput(input), input);
+    assert.throws(() =>
+      HOST_OPERATION_SPECS['access.credential.prepare'].decodeInput({
+        ...input,
+        bindClientInstance: true,
+      }),
+    );
+    const output = {
+      credentialId: 'provider-credential',
+      deliveryId: 'provider-delivery',
+      principalKind: 'capability_provider',
+      principalId: 'terminal-mcp-provider',
+      operationGrants: ['client.capability.replace', 'client.capability.unregister'],
+      canPublishClientCapabilities: true,
+      canUseHostPaths: false,
+      capabilityOwner: {
+        principalId: 'terminal-owner',
+        clientInstanceId: 'terminal-client',
+      },
+    };
+    assert.deepEqual(HOST_OPERATION_SPECS['access.credential.issue'].decodeOutput(output), output);
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 67);
   });
 
   test('decodes atomic principal revocation and publishes its compatibility boundary', () => {
@@ -1550,6 +1590,18 @@ describe('Runtime Host bootstrap protocol', () => {
         ),
       }),
     );
+    const contextContent = {
+      text: 'valid context ref',
+      attachments: [
+        attachmentRef({
+          kind: 'session_context' as const,
+          sessionId: 'session-1',
+          refId: 'read-image:owner-1',
+        }),
+      ],
+    };
+    assert.throws(() => submit(contextContent), isInvalidFrame);
+    assert.deepEqual(decodeMessageContent(contextContent), contextContent);
     assert.throws(
       () =>
         submit({
@@ -1570,6 +1622,8 @@ describe('Runtime Host bootstrap protocol', () => {
       { ...attachmentRef({ kind: 'workspace_file', relativePath: 'a.ts' }), mimeType: '' },
       attachmentRef({ kind: 'workspace_file', relativePath: 'a'.repeat(4097) }),
       attachmentRef({ kind: 'session_file', sessionId: 'bad/id', relativePath: 'a.ts' }),
+      attachmentRef({ kind: 'session_context', sessionId: 'session-1', refId: '' }),
+      attachmentRef({ kind: 'session_context', sessionId: 'session-1', refId: 'a'.repeat(513) }),
       attachmentRef({ kind: 'workspace_file', relativePath: '../secret' }),
       attachmentRef({ kind: 'workspace_file', relativePath: 'src//a.ts' }),
       attachmentRef({ kind: 'external_file', absolutePath: 'relative/a.ts' }),
@@ -2099,6 +2153,7 @@ function retractedMessage(text = 'do this next') {
 function attachmentRef(
   ref:
     | { kind: 'session_file'; sessionId: string; relativePath: string }
+    | { kind: 'session_context'; sessionId: string; refId: string }
     | { kind: 'workspace_file'; relativePath: string }
     | { kind: 'external_file'; absolutePath: string },
 ) {

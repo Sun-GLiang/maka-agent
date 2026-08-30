@@ -40,6 +40,7 @@ import {
   type DurableRuntimeEventStore,
   type EvidenceReadBudget,
   type RootTurnAdmission,
+  type RootTurnAdmissionAuthorization,
   type RootTurnSourceMessageReceipt,
 } from './agent-run-store.js';
 import {
@@ -105,6 +106,7 @@ export type {
   EvidenceReadBudget,
   ImmutableSteeringMessageProof,
   RootTurnAdmission,
+  RootTurnAdmissionAuthorization,
   RootTurnAdmissionStore,
   RootTurnStartRejectionStore,
   RootTurnSourceMessage,
@@ -117,6 +119,7 @@ export type {
   MarkMessagesHandedOffInput,
   MessageAdmissionStore,
   PendingMessageAdmission,
+  ProvenSteeringMessageHandoff,
 } from './message-admission-store.js';
 export { submittedTurnIntentsEqual } from './submitted-turn-intent.js';
 export type { SubmittedTurnIntent } from './submitted-turn-intent.js';
@@ -129,6 +132,8 @@ export type {
   SessionHeaderSnapshot,
   SessionTranscriptMessageLookupRequest,
   SessionTranscriptPageRequest,
+  SessionTranscriptRecordScanPage,
+  SessionTranscriptRecordScanRequest,
   SessionTranscriptStoragePage,
   SessionTranscriptStorageFragment,
 } from './session-store.js';
@@ -393,6 +398,8 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
       readMessagesSnapshot: (sessionId) => run(() => sessionStore.readMessagesSnapshot(sessionId)),
       readTranscriptPageSnapshot: (sessionId, request) =>
         run(() => sessionStore.readTranscriptPageSnapshot(sessionId, request)),
+      readTranscriptRecordsSnapshot: (sessionId, request) =>
+        run(() => sessionStore.readTranscriptRecordsSnapshot(sessionId, request)),
       readTranscriptMessagesSnapshot: (sessionId, request) =>
         run(() => sessionStore.readTranscriptMessagesSnapshot(sessionId, request)),
       readTranscriptHighWaterSnapshot: (sessionId) =>

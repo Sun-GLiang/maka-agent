@@ -33,6 +33,7 @@ import { type SessionEvent, type ShellRunUpdate } from '@maka/core/events';
 import { type SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
 import { type SessionSummary, type StoredMessage } from '@maka/core/session';
 import { type ThinkingLevel } from '@maka/core/model-thinking';
+import type { ConnectionCatalogSnapshot } from '@maka/core/runtime-policy';
 import { type UserQuestionResponse } from '@maka/core/user-question';
 import type { SkillInvocationResult } from '@maka/core/skill-invocation';
 import type {
@@ -60,15 +61,18 @@ import type {
 import { skillInvocationBlockedMessage } from '../session-driver.js';
 import { SafeBoundaryResumeParkedError } from '../runtime-host-session-driver.js';
 import { listApiKeyOnboardableProviders } from '../onboarding-catalog.js';
+import { projectRuntimeHostModelChoices } from '../runtime-host-onboarding.js';
+import { modelChoiceConnectionLabels } from '../pi-tui-pickers.js';
 import type {
   MakaOnboardingSurface,
   MakaPiTuiTurnActivitySurface,
   ModelChoice,
   OnboardingProviderEntry,
+  OnboardingSaveInput,
   OnboardingSaveResult,
+  OnboardingVerifyInput,
   OnboardingVerifyResult,
 } from '../pi-tui-contracts.js';
-import type { ModelInfo, ProviderType } from '@maka/core/llm-connections';
 import {
   resolveTaskbarProgress,
   runMakaPiTui as runMakaPiTuiImpl,
@@ -177,29 +181,20 @@ function historicalGraphSnapshot(graphId: string): AgentGraphClientSnapshot {
 }
 
 /** Catalog API-key providers as wizard entries with no existing connection —
- *  the default `/setup` provider list for tests that don't need 已设置 state. */
+ *  the default `/setup` provider list for tests that don't need configured state. */
 function defaultOnboardingProviders(): OnboardingProviderEntry[] {
   return listApiKeyOnboardableProviders().map((provider) => ({
     ...provider,
-    hasConnection: false,
+    target: { kind: 'create', providerType: provider.providerType },
+    label: provider.label,
     enabledModelIds: [],
   }));
 }
 
 interface FakeOnboardingOpts {
   providers?: OnboardingProviderEntry[];
-  verify?: (input: {
-    providerType: ProviderType;
-    apiKey?: string;
-    baseUrl?: string;
-  }) => Promise<OnboardingVerifyResult>;
-  save?: (input: {
-    providerType: ProviderType;
-    apiKey?: string;
-    baseUrl?: string;
-    enabledModelIds: readonly string[];
-    models: readonly ModelInfo[];
-  }) => Promise<OnboardingSaveResult>;
+  verify?: (input: OnboardingVerifyInput) => Promise<OnboardingVerifyResult>;
+  save?: (input: OnboardingSaveInput) => Promise<OnboardingSaveResult>;
 }
 
 /** A controllable `/setup` surface: the wizard calls `listProviders` to open,
@@ -212,7 +207,39 @@ function fakeOnboardingSurface(opts: FakeOnboardingOpts = {}): MakaOnboardingSur
     verify:
       opts.verify ??
       (async () => ({ kind: 'ok', models: [{ id: 'gpt-5.5' }, { id: 'gpt-5.5-mini' }] })),
-    save: opts.save ?? (async () => ({ kind: 'ok', modelChoices: [] })),
+    save: opts.save ?? (async () => savedOnboardingResult()),
+  };
+}
+
+function savedOnboardingResult(
+  modelChoices: ModelChoice[] = [],
+  connectionId = 'saved-connection-id',
+): OnboardingSaveResult {
+  return {
+    kind: 'ok',
+    connection: {
+      connectionId,
+      revision: 1,
+      slug: 'openai',
+      providerType: 'openai',
+    },
+    refresh: { kind: 'ok', modelChoices },
+  };
+}
+
+function savedOnboardingRefreshFailed(connectionId = 'saved-connection-id'): OnboardingSaveResult {
+  return {
+    kind: 'ok',
+    connection: {
+      connectionId,
+      revision: 1,
+      slug: 'openai',
+      providerType: 'openai',
+    },
+    refresh: {
+      kind: 'failed',
+      reason: 'catalog_unavailable',
+    },
   };
 }
 
@@ -768,12 +795,13 @@ describe('Maka Pi TUI runner', () => {
       model: 'claude-sonnet-4-5',
       connectionSlug: 'claude-subscription',
       permissionMode: 'bypass',
+      locale: 'zh',
       terminal,
       onboarding: fakeOnboardingSurface({
         verify: async (input) => {
           verifyCalls.push(input.apiKey ?? '');
           return verifyCalls.length === 1
-            ? { kind: 'error', text: 'HTTP 401 Unauthorized' }
+            ? { kind: 'rejected', reason: 'connection_not_found' }
             : { kind: 'ok', models: [{ id: 'gpt-5.5' }] };
         },
       }),
@@ -784,7 +812,7 @@ describe('Maka Pi TUI runner', () => {
     terminal.input('\r');
     await waitFor(() => {
       try {
-        return latestPlainLineContaining(terminal.writes.join(''), 'Set Up Provider') !== null;
+        return latestPlainLineContaining(terminal.writes.join(''), '配置模型提供商') !== null;
       } catch {
         return false;
       }
@@ -802,7 +830,7 @@ describe('Maka Pi TUI runner', () => {
     await waitFor(() => verifyCalls.length === 1);
     await waitFor(() => {
       try {
-        return latestPlainLineContaining(terminal.writes.join(''), '验证失败') !== null;
+        return latestPlainLineContaining(terminal.writes.join(''), '该连接已不存在') !== null;
       } catch {
         return false;
       }
@@ -813,6 +841,126 @@ describe('Maka Pi TUI runner', () => {
     await waitFor(() => verifyCalls.length === 2);
     await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('3/3'));
     assert.deepEqual(verifyCalls, ['sk-bad', 'sk-good']);
+
+    process.emit('SIGTERM');
+    await Promise.race([
+      run,
+      delay(CLOSE_BUDGET_MS).then(() => {
+        throw new Error('TUI did not close after SIGTERM');
+      }),
+    ]);
+  });
+
+  test('localizes a save rejection without displaying Host text', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new SlashCommandDriver();
+    let saveCalls = 0;
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'claude-sonnet-4-5',
+      connectionSlug: 'claude-subscription',
+      permissionMode: 'bypass',
+      locale: 'zh',
+      terminal,
+      onboarding: fakeOnboardingSurface({
+        save: async () => {
+          saveCalls += 1;
+          return { kind: 'rejected', reason: 'superseded' };
+        },
+      }),
+    });
+
+    await waitForTuiPaint(terminal);
+    terminal.input('/setup');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('配置模型提供商'));
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('API key'));
+    terminal.input('sk-test');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('3/3'));
+    terminal.input(' ');
+    terminal.input('\r');
+    await waitFor(() => saveCalls === 1);
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('该连接已发生变化'));
+    assert.doesNotMatch(plainTerminalOutput(terminal.screenOutput()), /This connection changed/);
+
+    process.emit('SIGTERM');
+    await Promise.race([
+      run,
+      delay(CLOSE_BUDGET_MS).then(() => {
+        throw new Error('TUI did not close after SIGTERM');
+      }),
+    ]);
+  });
+
+  test('threads the selected same-provider account identity through verify and save', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new SlashCommandDriver();
+    const verifyCalls: OnboardingVerifyInput[] = [];
+    const saveCalls: OnboardingSaveInput[] = [];
+    const provider = listApiKeyOnboardableProviders().find(
+      (candidate) => candidate.providerType === 'openai',
+    );
+    assert.ok(provider);
+    const providers: OnboardingProviderEntry[] = [
+      {
+        ...provider,
+        label: 'OpenAI · openai',
+        target: { kind: 'existing', connectionId: 'connection-openai-1' },
+        connectionSlug: 'openai',
+        enabledModelIds: [],
+      },
+      {
+        ...provider,
+        label: 'OpenAI · openai-2',
+        target: { kind: 'existing', connectionId: 'connection-openai-2' },
+        connectionSlug: 'openai-2',
+        enabledModelIds: [],
+      },
+    ];
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'gpt-5.5',
+      connectionId: 'connection-openai-1',
+      connectionSlug: 'openai',
+      providerType: 'openai',
+      permissionMode: 'bypass',
+      terminal,
+      onboarding: fakeOnboardingSurface({
+        providers,
+        verify: async (input) => {
+          verifyCalls.push(input);
+          return { kind: 'ok', models: [{ id: 'gpt-5.5' }] };
+        },
+        save: async (input) => {
+          saveCalls.push(input);
+          return savedOnboardingResult([], 'connection-openai-2');
+        },
+      }),
+    });
+
+    await waitForTuiPaint(terminal);
+    terminal.input('/setup');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('openai-2'));
+    terminal.input('\x1b[B');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('API key'));
+    terminal.input('\r'); // reuse the selected account's stored key
+    await waitFor(() => verifyCalls.length === 1);
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('3/3'));
+    terminal.input(' ');
+    terminal.input('\r');
+    await waitFor(() => saveCalls.length === 1);
+
+    const expectedTarget = { kind: 'existing' as const, connectionId: 'connection-openai-2' };
+    assert.deepEqual(verifyCalls[0]?.target, expectedTarget);
+    assert.deepEqual(saveCalls[0]?.target, expectedTarget);
 
     process.emit('SIGTERM');
     await Promise.race([
@@ -922,7 +1070,9 @@ describe('Maka Pi TUI runner', () => {
     terminal.input('\r');
     await waitFor(() => {
       try {
-        return latestPlainLineContaining(terminal.writes.join(''), 'Onboarding 不可用') !== null;
+        return (
+          latestPlainLineContaining(terminal.writes.join(''), 'Onboarding is unavailable') !== null
+        );
       } catch {
         return false;
       }
@@ -953,7 +1103,7 @@ describe('Maka Pi TUI runner', () => {
           throw new Error('storage read failed');
         },
         verify: async () => ({ kind: 'ok', models: [] }),
-        save: async () => ({ kind: 'ok', modelChoices: [] }),
+        save: async () => savedOnboardingResult(),
       },
     });
 
@@ -961,11 +1111,14 @@ describe('Maka Pi TUI runner', () => {
     terminal.input('/setup');
     terminal.input('\r');
     await waitFor(() =>
-      plainTerminalOutput(terminal.screenOutput()).includes('storage read failed'),
+      plainTerminalOutput(terminal.screenOutput()).includes(
+        'Could not read configured connections',
+      ),
     );
+    assert.doesNotMatch(plainTerminalOutput(terminal.screenOutput()), /storage read failed/);
     assert.doesNotMatch(
       plainTerminalOutput(terminal.screenOutput()),
-      /没有可配置的 API key 类供应商/,
+      /No configurable API key providers are available/,
     );
 
     process.emit('SIGTERM');
@@ -1025,7 +1178,7 @@ describe('Maka Pi TUI runner', () => {
     await waitFor(() => verifyCalls.length === 1);
     await waitFor(() => {
       try {
-        return latestPlainLineContaining(terminal.writes.join(''), '验证') !== null;
+        return latestPlainLineContaining(terminal.writes.join(''), 'Verifying') !== null;
       } catch {
         return false;
       }
@@ -1053,7 +1206,7 @@ describe('Maka Pi TUI runner', () => {
     await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('sk-b'));
     // A's verify now resolves with a failure. It must not clobber attempt B:
     // no failure status line, and the key being typed for B survives.
-    resolveFirst({ kind: 'error', text: 'HTTP 401 Unauthorized' });
+    resolveFirst({ kind: 'failed', errorClass: 'auth' });
     // Sentinel render: one more typed key char forces a full repaint that lands
     // after A's settled continuation, so a wrongly-applied failure line would be
     // in this exact frame.
@@ -1071,10 +1224,10 @@ describe('Maka Pi TUI runner', () => {
     ]);
   });
 
-  test('wizard ignores a save result from an abandoned attempt', async () => {
+  test('an abandoned create save keeps its committed identity for retry', async () => {
     const terminal = new FakeTerminal();
     const driver = new SlashCommandDriver();
-    const saveCalls: Array<{ enabledModelIds: readonly string[] }> = [];
+    const saveCalls: OnboardingSaveInput[] = [];
     let resolveFirstSave!: (value: OnboardingSaveResult) => void;
     const run = runMakaPiTui({
       title: 'Maka',
@@ -1091,7 +1244,7 @@ describe('Maka Pi TUI runner', () => {
             ? new Promise<OnboardingSaveResult>((r) => {
                 resolveFirstSave = r;
               })
-            : Promise.resolve<OnboardingSaveResult>({ kind: 'ok', modelChoices: [] });
+            : Promise.resolve(savedOnboardingResult([], 'committed-openai-id'));
         },
       }),
     });
@@ -1122,7 +1275,7 @@ describe('Maka Pi TUI runner', () => {
     await waitFor(() => saveCalls.length === 1);
     await waitFor(() => {
       try {
-        return latestPlainLineContaining(terminal.writes.join(''), '保存') !== null;
+        return latestPlainLineContaining(terminal.writes.join(''), 'Saving') !== null;
       } catch {
         return false;
       }
@@ -1136,14 +1289,87 @@ describe('Maka Pi TUI runner', () => {
         return false;
       }
     });
-    // A's save now resolves ok. It must not show success or refresh choices.
-    resolveFirstSave({ kind: 'ok', modelChoices: [] });
+    // A's durable create succeeds but its follow-up catalog refresh fails. The
+    // abandoned attempt must not show stale success, while its exact committed
+    // identity must still replace the create target for a later submit.
+    resolveFirstSave(savedOnboardingRefreshFailed('committed-openai-id'));
     // Sentinel render: typing into the key field forces a repaint that lands
     // after A's settled save continuation, so a wrongly-shown success frame
     // would be in this exact frame.
     terminal.input('sk-z');
     await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('sk-z'));
-    assert.doesNotMatch(plainTerminalOutput(terminal.screenOutput()), /已启用/);
+    assert.doesNotMatch(plainTerminalOutput(terminal.screenOutput()), /Models enabled/u);
+
+    terminal.input('\r'); // verify the now-existing Connection
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('3/3'));
+    terminal.input('\r'); // preserve the prior selection and save again
+    await waitFor(() => saveCalls.length === 2);
+    assert.deepEqual(saveCalls[1]?.target, {
+      kind: 'existing',
+      connectionId: 'committed-openai-id',
+    });
+
+    process.emit('SIGTERM');
+    await Promise.race([
+      run,
+      delay(CLOSE_BUDGET_MS).then(() => {
+        throw new Error('TUI did not close after SIGTERM');
+      }),
+    ]);
+  });
+
+  test('a late save cannot rebind a reselected create row', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new SlashCommandDriver();
+    const saveCalls: OnboardingSaveInput[] = [];
+    let resolveFirstSave!: (value: OnboardingSaveResult) => void;
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'claude-sonnet-4-5',
+      connectionSlug: 'claude-subscription',
+      permissionMode: 'bypass',
+      terminal,
+      onboarding: fakeOnboardingSurface({
+        save: (input) => {
+          saveCalls.push(input);
+          return saveCalls.length === 1
+            ? new Promise<OnboardingSaveResult>((resolve) => {
+                resolveFirstSave = resolve;
+              })
+            : Promise.resolve(savedOnboardingResult([], 'second-account-id'));
+        },
+      }),
+    });
+
+    await waitForTuiPaint(terminal);
+    terminal.input('/setup');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('Set Up Provider'));
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('API key'));
+    terminal.input('sk-a');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('3/3'));
+    terminal.input(' ');
+    terminal.input('\r');
+    await waitFor(() => saveCalls.length === 1);
+
+    terminal.input('\x1b'); // models -> key
+    terminal.input('\x1b'); // key -> provider search
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('1/3'));
+    terminal.input('\r'); // reselect the same add-account row as a new intent
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('API key'));
+    resolveFirstSave(savedOnboardingRefreshFailed('first-account-id'));
+    terminal.input('sk-b');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('3/3'));
+    terminal.input(' ');
+    terminal.input('\r');
+    await waitFor(() => saveCalls.length === 2);
+    assert.deepEqual(saveCalls[1]?.target, saveCalls[0]?.target);
+    assert.equal(saveCalls[1]?.target.kind, 'create');
 
     process.emit('SIGTERM');
     await Promise.race([
@@ -1174,7 +1400,7 @@ describe('Maka Pi TUI runner', () => {
         },
         save: async (input) => {
           saveCalls.push(input);
-          return { kind: 'ok', modelChoices: [] };
+          return savedOnboardingRefreshFailed('relay-connection-id');
         },
       }),
     });
@@ -1198,7 +1424,7 @@ describe('Maka Pi TUI runner', () => {
     // A malformed endpoint is rejected in place, before any host call.
     terminal.input('not a url');
     terminal.input('\r');
-    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('不是有效的 URL'));
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('not a valid URL'));
     for (let i = 0; i < 'not a url'.length; i++) terminal.input('\x7f'); // clear the field
     terminal.input('https://relay.example.test/v1');
     terminal.input('\r');
@@ -1218,7 +1444,11 @@ describe('Maka Pi TUI runner', () => {
     terminal.input('\r'); // save
     await waitFor(() => saveCalls.length === 1);
     assert.equal(saveCalls[0]?.baseUrl, 'https://relay.example.test/v1');
-    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('已启用'));
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('Models enabled'));
+    assert.match(
+      plainTerminalOutput(terminal.screenOutput()),
+      /Account saved, but the model list has not refreshed/,
+    );
 
     process.emit('SIGTERM');
     await Promise.race([
@@ -1229,7 +1459,7 @@ describe('Maka Pi TUI runner', () => {
     ]);
   });
 
-  test('save refreshes the running model choices even when the user backs out during saving', async () => {
+  test('a late abandoned save cannot replace the running model choices', async () => {
     const terminal = new FakeTerminal();
     const driver = new SlashCommandDriver();
     let resolveFirstSave!: (value: OnboardingSaveResult) => void;
@@ -1289,12 +1519,10 @@ describe('Maka Pi TUI runner', () => {
     // The wizard frame leaving the screen proves the overlay released input
     // focus, so the next line routes to the editor.
     await waitFor(() => !plainTerminalOutput(terminal.screenOutput()).includes('2/3'));
-    // The save completes after the user left. The running TUI's ready model
-    // choices are still authoritatively refreshed — abandoning the wizard only
-    // drops the in-frame success UI, not the background state sync.
-    resolveFirstSave({
-      kind: 'ok',
-      modelChoices: [
+    // The save completes after the user left. Its projection may be older than
+    // a newer attempt, so it must not replace the running model choices.
+    resolveFirstSave(
+      savedOnboardingResult([
         {
           connectionSlug: 'openai',
           connectionName: 'OpenAI',
@@ -1302,15 +1530,14 @@ describe('Maka Pi TUI runner', () => {
           model: 'gpt-5.5-new',
           isDefaultConnection: true,
         },
-      ],
-    });
-    // The refresh (`modelChoices = result.modelChoices`) lands in the save
-    // promise's first continuation; one macrotask turn runs strictly after
-    // every queued microtask, so the choices are applied by the time it fires.
+      ]),
+    );
+    // One macrotask turn lands after the save continuation.
     await delay(0);
     terminal.input('/model');
     terminal.input('\r');
-    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('gpt-5.5-new'));
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('Select Model'));
+    assert.doesNotMatch(plainTerminalOutput(terminal.screenOutput()), /gpt-5\.5-new/);
     assert.deepEqual(driver.models, []);
 
     process.emit('SIGTERM');
@@ -1386,6 +1613,41 @@ describe('Maka Pi TUI runner', () => {
         throw new Error('TUI did not close after SIGTERM');
       }),
     ]);
+  });
+
+  test('first-run closes after a durable save even when catalog refresh fails', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new SlashCommandDriver();
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: '',
+      connectionSlug: '',
+      permissionMode: 'bypass',
+      terminal,
+      firstRun: true,
+      onboarding: fakeOnboardingSurface({
+        save: async () => savedOnboardingRefreshFailed('first-run-connection-id'),
+      }),
+    });
+
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('Set Up Provider'));
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('API key'));
+    terminal.input('sk-test');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('3/3'));
+    terminal.input(' ');
+    terminal.input('\r');
+
+    await Promise.race([
+      run,
+      delay(CLOSE_BUDGET_MS).then(() => {
+        throw new Error('first-run TUI did not close after the committed save');
+      }),
+    ]);
+    assert.equal(terminal.stopCalls, 1);
   });
 
   test('freezes and preserves the editor draft while a boundary request owns input', async () => {
@@ -3387,6 +3649,42 @@ describe('Maka Pi TUI runner', () => {
     ]);
   });
 
+  test('localizes generic model and thinking picker hints in Chinese', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new SlashCommandDriver();
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'gpt-5',
+      models: ['gpt-5', 'gpt-5-mini'],
+      connectionSlug: 'openai',
+      providerType: 'openai',
+      permissionMode: 'ask',
+      locale: 'zh',
+      terminal,
+    });
+
+    terminal.input('/model');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('选择模型'));
+    assert.match(plainTerminalOutput(terminal.screenOutput()), /↑↓ 选择 · Enter 确认 · Esc 关闭/u);
+    terminal.input('\x1b');
+
+    terminal.input('/thinking');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('选择思考级别'));
+    assert.match(plainTerminalOutput(terminal.screenOutput()), /↑↓ 选择 · Enter 确认 · Esc 关闭/u);
+    assert.doesNotMatch(
+      plainTerminalOutput(terminal.screenOutput()),
+      /enter select \/ esc close/iu,
+    );
+
+    terminal.input('\x1b');
+    exitMaka(terminal);
+    await run;
+  });
+
   test('resumes a read-only session as Read only, and never marks Auto as current', async () => {
     // #1611 in the TUI: the resumed boundary is read-only, so the status line
     // must name it and the picker must not present Auto as "the option you are
@@ -3449,6 +3747,7 @@ describe('Maka Pi TUI runner', () => {
       connectionId: 'connection-openai',
       connectionSlug: 'openai',
       providerType: 'openai',
+      locale: 'en',
       modelChoices: [
         {
           connectionId: 'connection-openai',
@@ -3483,7 +3782,7 @@ describe('Maka Pi TUI runner', () => {
     await waitFor(() => terminal.output().includes('GLM 5.2'));
     assert.match(
       plainTerminalOutput(terminal.screenOutput()),
-      /切换模型可能需要重建提示缓存；下一次请求可能更慢或成本更高/,
+      /Switching models may rebuild the prompt cache; the next request may be slower/,
     );
     // The picker opens on the current model (gpt-5.5); move down to the choice on
     // the other connection and select it.
@@ -3495,7 +3794,7 @@ describe('Maka Pi TUI runner', () => {
     assert.deepEqual(driver.modelConnections, ['zai']);
     await waitFor(() =>
       plainTerminalOutput(terminal.screenOutput()).includes(
-        'Model changed: gpt-5.5 (OpenAI) → glm-5.2 (Z.ai)',
+        'Model changed: gpt-5.5 (OpenAI · openai) → glm-5.2 (Z.ai · zai)',
       ),
     );
     // The status line now reflects both the new model and the new connection.
@@ -3565,9 +3864,8 @@ describe('Maka Pi TUI runner', () => {
     });
     assert.doesNotMatch(
       plainTerminalOutput(terminal.screenOutput()),
-      /切换模型可能需要重建提示缓存/,
+      /Switching models may rebuild the prompt cache/,
     );
-
     // Each query isolates exactly one of the five match criteria named by #1098
     // (model id, connection name, connection slug, provider type, provider
     // label) and keeps only its matching choice. The fixture's three distinct
@@ -3648,9 +3946,8 @@ describe('Maka Pi TUI runner', () => {
     await waitFor(() => terminal.output().includes('gpt-5.6'));
     assert.doesNotMatch(
       plainTerminalOutput(terminal.screenOutput()),
-      /切换模型可能需要重建提示缓存/,
+      /Switching models may rebuild the prompt cache/,
     );
-
     terminal.input('\x1b[B');
     terminal.input('\r');
     await waitFor(() => driver.models.length === 1);
@@ -3669,6 +3966,7 @@ describe('Maka Pi TUI runner', () => {
 
   test('names both connections when the model id stays the same', async () => {
     const terminal = new FakeTerminal();
+    terminal.resize(120, 40);
     const driver = new SlashCommandDriver();
     const run = runMakaPiTui({
       title: 'Maka',
@@ -3711,7 +4009,7 @@ describe('Maka Pi TUI runner', () => {
     assert.deepEqual(driver.modelConnections, ['relay']);
     await waitFor(() =>
       plainTerminalOutput(terminal.screenOutput()).includes(
-        'Model changed: shared-model (Primary) → shared-model (Relay)',
+        'Model changed: shared-model (Primary · primary) → shared-model (Relay · relay)',
       ),
     );
 
@@ -3722,6 +4020,136 @@ describe('Maka Pi TUI runner', () => {
         throw new Error('TUI did not close during test cleanup');
       }),
     ]);
+  });
+
+  test('disambiguates same-name onboarded accounts and selects the exact slug', async () => {
+    const terminal = new FakeTerminal();
+    terminal.resize(180, 40);
+    const driver = new SlashCommandDriver();
+    const catalog: ConnectionCatalogSnapshot = {
+      revision: 2,
+      defaultTarget: { connectionId: 'openai-account-1', modelId: 'shared-model' },
+      connections: [
+        {
+          connectionId: 'openai-account-1',
+          revision: 1,
+          slug: 'openai',
+          name: 'OpenAI',
+          providerType: 'openai',
+          enabled: true,
+          enabledModelIds: ['shared-model'],
+          models: [{ id: 'shared-model' }],
+        },
+        {
+          connectionId: 'openai-account-2',
+          revision: 1,
+          slug: 'openai-2',
+          name: 'OpenAI',
+          providerType: 'openai',
+          enabled: true,
+          enabledModelIds: ['shared-model'],
+          models: [{ id: 'shared-model' }],
+        },
+      ],
+    };
+    const modelChoices = projectRuntimeHostModelChoices(catalog);
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'shared-model',
+      connectionSlug: 'openai',
+      providerType: 'openai',
+      modelChoices,
+      permissionMode: 'ask',
+      terminal,
+    });
+
+    await waitForTuiPaint(terminal);
+    terminal.input('/model');
+    terminal.input('\r');
+    await waitFor(() => {
+      const output = plainTerminalOutput(terminal.screenOutput());
+      return output.includes('OpenAI · openai') && output.includes('OpenAI · openai-2');
+    });
+    terminal.input('\x1b[B');
+    terminal.input('\r');
+
+    await waitFor(() => driver.modelConnections.length === 1);
+    assert.deepEqual(driver.modelConnections, ['openai-2']);
+    await waitFor(() =>
+      plainTerminalOutput(terminal.screenOutput()).includes(
+        'Model changed: shared-model (OpenAI · openai) → shared-model (OpenAI · openai-2)',
+      ),
+    );
+
+    exitMaka(terminal);
+    await Promise.race([
+      run,
+      delay(CLOSE_BUDGET_MS).then(() => {
+        throw new Error('TUI did not close during test cleanup');
+      }),
+    ]);
+  });
+
+  test('disambiguates a connection name that collides with another fallback slug', () => {
+    assert.deepEqual(
+      [
+        ...modelChoiceConnectionLabels([
+          {
+            connectionSlug: 'openai',
+            connectionName: 'openai-2',
+            providerType: 'openai',
+            model: 'model-a',
+            isDefaultConnection: true,
+          },
+          {
+            connectionSlug: 'openai-2',
+            connectionName: '   ',
+            providerType: 'openai',
+            model: 'model-b',
+            isDefaultConnection: false,
+          },
+        ]),
+      ],
+      [
+        ['openai-2', 'openai-2'],
+        ['openai', 'openai-2 · openai'],
+      ],
+    );
+  });
+
+  test('keeps final account labels globally unique after formatting collisions', () => {
+    const labels = modelChoiceConnectionLabels([
+      {
+        connectionId: 'connection-a',
+        connectionSlug: 'openai',
+        connectionName: 'OpenAI',
+        providerType: 'openai',
+        model: 'model-a',
+        isDefaultConnection: true,
+      },
+      {
+        connectionId: 'connection-b',
+        connectionSlug: 'openai-2',
+        connectionName: 'OpenAI',
+        providerType: 'openai',
+        model: 'model-b',
+        isDefaultConnection: false,
+      },
+      {
+        connectionId: 'connection-c',
+        connectionSlug: 'relay',
+        connectionName: 'OpenAI · openai',
+        providerType: 'openai',
+        model: 'model-c',
+        isDefaultConnection: false,
+      },
+    ]);
+
+    assert.equal(new Set(labels.values()).size, 3);
+    assert.equal(labels.get('openai'), 'OpenAI · openai');
+    assert.equal(labels.get('relay'), 'OpenAI · openai · relay');
   });
 
   test('ignores a delayed title refresh after switching sessions', async () => {
