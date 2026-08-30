@@ -405,7 +405,8 @@ function fail(
   cause?: unknown,
 ): SessionTurnIdentityRecoveryFailureFact {
   db.prepare(`
-    UPDATE session_turn_index_state SET failure_reason = ?, failure_sequence = ?
+    UPDATE session_turn_index_state
+    SET failure_origin = 'transcript', failure_reason = ?, failure_sequence = ?
     WHERE session_id = ?
   `).run(reason, sequence, sessionId);
   db.prepare('DELETE FROM session_turn_identity_recovery WHERE session_id = ?').run(sessionId);

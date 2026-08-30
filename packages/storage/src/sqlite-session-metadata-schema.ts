@@ -1257,12 +1257,14 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
         CHECK (admission_cursor_turn_id IS NULL OR length(CAST(admission_cursor_turn_id AS BLOB)) > 0),
       admission_recovery_complete INTEGER NOT NULL DEFAULT 0
         CHECK (admission_recovery_complete IN (0, 1)),
+      failure_origin TEXT CHECK (failure_origin IN ('transcript', 'admission')),
       failure_reason TEXT
         CHECK (failure_reason IN ('corrupt_source', 'incompatible_identity',
           'hybrid_missing_admission')),
       failure_sequence INTEGER CHECK (failure_sequence >= 0),
       CHECK ((admission_cursor_admitted_at IS NULL) = (admission_cursor_turn_id IS NULL)),
-      CHECK ((failure_reason IS NULL) = (failure_sequence IS NULL)),
+      CHECK ((failure_origin IS NULL) = (failure_reason IS NULL)
+        AND (failure_reason IS NULL) = (failure_sequence IS NULL)),
       FOREIGN KEY(session_id) REFERENCES session_metadata(session_id) ON DELETE CASCADE
     ) WITHOUT ROWID;
 

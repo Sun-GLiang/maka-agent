@@ -863,6 +863,259 @@ describe('Session Turn position snapshots', () => {
     }
   });
 
+  test('clears an admission-origin corrupt source after purge removes its cause', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-admission-failure-purge-'));
+    const store = createSessionStore(root);
+    const conversation = createConversationOperationalStateStore(root);
+    try {
+      const session = await store.create(makeInput());
+      const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+      try {
+        database
+          .prepare(`INSERT INTO core_root_turn_admissions(
+            session_id, turn_id, admitted_at, record_json
+          ) VALUES (?, '', 1, '{}')`)
+          .run(session.id);
+      } finally {
+        database.close();
+      }
+      await assert.rejects(
+        store.readTurnPositionPageSnapshot({
+          sessionId: session.id,
+          projection: 'owner',
+          snapshotLeaseId: 'admission-failure-before-purge',
+          anchor: { kind: 'tail' },
+          maxPositions: 8,
+        }),
+        (error: unknown) => (error as { reason?: unknown }).reason === 'corrupt_source',
+      );
+      assert.deepEqual(readTurnIndexFailure(root, session.id), {
+        failure_origin: 'admission',
+        failure_reason: 'corrupt_source',
+        failure_sequence: 0,
+      });
+
+      await conversation.purge(session.id);
+      assert.deepEqual(readTurnIndexFailure(root, session.id), {
+        failure_origin: null,
+        failure_reason: null,
+        failure_sequence: null,
+      });
+      const rebuilt = await readyPage(store, session.id, 'admission-failure-after-purge', 'owner');
+      assert.deepEqual(rebuilt.positions, [
+        { ordinal: 0, key: { kind: 'empty' }, firstSequence: null },
+      ]);
+    } finally {
+      conversation.close();
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('retains transcript-origin corrupt source across an admission purge', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-transcript-failure-admission-purge-'));
+    let store = createSessionStore(root);
+    const runs = createSqliteAgentRunStore(root);
+    let conversation: ReturnType<typeof createConversationOperationalStateStore> | undefined;
+    const session = await store.create(makeInput());
+    try {
+      await store.appendMessage(session.id, user('turn-corrupt-transcript', 0));
+      await runs.admitRootTurn(
+        rootAdmission(session.id, 'turn-bodyless-to-purge', 'future-purged-user', 5),
+      );
+      runs.close?.();
+      await store.close?.();
+      resetProjection(root, session.id);
+      const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+      try {
+        database
+          .prepare(`UPDATE session_messages SET record_json = '{'
+            WHERE session_id = ? AND sequence = 0`)
+          .run(session.id);
+      } finally {
+        database.close();
+      }
+
+      store = createSessionStore(root);
+      conversation = createConversationOperationalStateStore(root);
+      await assert.rejects(
+        store.readTurnPositionPageSnapshot({
+          sessionId: session.id,
+          projection: 'owner',
+          snapshotLeaseId: 'transcript-failure-before-purge',
+          anchor: { kind: 'tail' },
+          maxPositions: 8,
+        }),
+        (error: unknown) => (error as { reason?: unknown }).reason === 'corrupt_source',
+      );
+      assert.deepEqual(readTurnIndexFailure(root, session.id), {
+        failure_origin: 'transcript',
+        failure_reason: 'corrupt_source',
+        failure_sequence: 0,
+      });
+
+      await conversation.purge(session.id);
+      assert.deepEqual(readTurnIndexFailure(root, session.id), {
+        failure_origin: 'transcript',
+        failure_reason: 'corrupt_source',
+        failure_sequence: 0,
+      });
+      await assert.rejects(
+        store.readTurnPositionPageSnapshot({
+          sessionId: session.id,
+          projection: 'owner',
+          snapshotLeaseId: 'transcript-failure-after-purge',
+          anchor: { kind: 'tail' },
+          maxPositions: 8,
+        }),
+        (error: unknown) => (error as { reason?: unknown }).reason === 'corrupt_source',
+      );
+    } finally {
+      conversation?.close();
+      runs.close?.();
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('tags hybrid failure as admission and clears it only for resolving authority', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-hybrid-failure-origin-'));
+    const store = createSessionStore(root);
+    const runs = createSqliteAgentRunStore(root);
+    const conversation = createConversationOperationalStateStore(root);
+    try {
+      const resolvedSession = await store.create(makeInput({ name: 'Resolved hybrid' }));
+      await runs.admitRootTurn(rootAdmission(resolvedSession.id, 'turn-modern', 'user-modern', 10));
+      await store.appendMessages(resolvedSession.id, [
+        { type: 'user', id: 'user-modern', turnId: 'turn-modern', ts: 1, text: 'modern' },
+        { type: 'user', id: 'user-missing', turnId: 'turn-missing', ts: 2, text: 'missing' },
+      ]);
+      await assert.rejects(readyPage(store, resolvedSession.id), (error: unknown) => {
+        return (error as { reason?: unknown }).reason === 'hybrid_missing_admission';
+      });
+      assert.deepEqual(readTurnIndexFailure(root, resolvedSession.id), {
+        failure_origin: 'admission',
+        failure_reason: 'hybrid_missing_admission',
+        failure_sequence: 1,
+      });
+
+      await runs.admitRootTurn(
+        rootAdmission(resolvedSession.id, 'turn-unrelated', 'future-unrelated-user', 12),
+      );
+      assert.deepEqual(readTurnIndexFailure(root, resolvedSession.id), {
+        failure_origin: 'admission',
+        failure_reason: 'hybrid_missing_admission',
+        failure_sequence: 1,
+      });
+      await runs.admitRootTurn(
+        rootAdmission(resolvedSession.id, 'turn-missing', 'user-missing', 11),
+      );
+      assert.deepEqual(readTurnIndexFailure(root, resolvedSession.id), {
+        failure_origin: null,
+        failure_reason: null,
+        failure_sequence: null,
+      });
+      const resolved = await readyPage(store, resolvedSession.id, 'hybrid-resolved', 'owner');
+      assert.deepEqual(
+        resolved.positions.map(({ key }) => key),
+        [
+          { kind: 'turn', id: 'turn-modern' },
+          { kind: 'turn', id: 'turn-missing' },
+          { kind: 'turn', id: 'turn-unrelated' },
+        ],
+      );
+
+      const purgedSession = await store.create(makeInput({ name: 'Purged hybrid' }));
+      await runs.admitRootTurn(
+        rootAdmission(purgedSession.id, 'turn-modern-purge', 'user-modern-purge', 20),
+      );
+      await store.appendMessages(purgedSession.id, [
+        {
+          type: 'user',
+          id: 'user-modern-purge',
+          turnId: 'turn-modern-purge',
+          ts: 1,
+          text: 'modern',
+        },
+        {
+          type: 'user',
+          id: 'user-missing-purge',
+          turnId: 'turn-missing-purge',
+          ts: 2,
+          text: 'missing',
+        },
+      ]);
+      await assert.rejects(readyPage(store, purgedSession.id), (error: unknown) => {
+        return (error as { reason?: unknown }).reason === 'hybrid_missing_admission';
+      });
+      assert.deepEqual(readTurnIndexFailure(root, purgedSession.id), {
+        failure_origin: 'admission',
+        failure_reason: 'hybrid_missing_admission',
+        failure_sequence: 1,
+      });
+      await conversation.purge(purgedSession.id);
+      assert.deepEqual(readTurnIndexFailure(root, purgedSession.id), {
+        failure_origin: null,
+        failure_reason: null,
+        failure_sequence: null,
+      });
+      const purged = await readyPage(store, purgedSession.id, 'hybrid-purged', 'owner');
+      assert.equal(purged.totalPositions, 2);
+    } finally {
+      conversation.close();
+      runs.close?.();
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects partial persisted failure provenance triples', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-failure-provenance-check-'));
+    const store = createSessionStore(root);
+    try {
+      const session = await store.create(makeInput());
+      await readyPage(store, session.id, 'failure-provenance-schema', 'owner');
+      const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+      try {
+        for (const statement of [
+          `UPDATE session_turn_index_state SET failure_origin = 'transcript'
+            WHERE session_id = ?`,
+          `UPDATE session_turn_index_state
+            SET failure_reason = 'corrupt_source', failure_sequence = 0 WHERE session_id = ?`,
+          `UPDATE session_turn_index_state
+            SET failure_origin = 'admission', failure_reason = 'corrupt_source'
+            WHERE session_id = ?`,
+          `UPDATE session_turn_index_state
+            SET failure_origin = 'other', failure_reason = 'corrupt_source', failure_sequence = 0
+            WHERE session_id = ?`,
+        ]) {
+          assert.throws(
+            () => database.prepare(statement).run(session.id),
+            /CHECK constraint failed/,
+          );
+        }
+        database
+          .prepare(`UPDATE session_turn_index_state
+            SET failure_origin = 'transcript', failure_reason = 'corrupt_source',
+              failure_sequence = 0 WHERE session_id = ?`)
+          .run(session.id);
+        assert.throws(
+          () =>
+            database
+              .prepare(`UPDATE session_turn_index_state SET failure_origin = NULL
+                WHERE session_id = ?`)
+              .run(session.id),
+          /CHECK constraint failed/,
+        );
+      } finally {
+        database.close();
+      }
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('shares one exact generation across leases and releases only after the last consumer', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-shared-position-lease-'));
     const store = createSessionStore(root);
@@ -1156,7 +1409,8 @@ describe('Session Turn position snapshots', () => {
         database
           .prepare(`UPDATE session_turn_index_state SET indexed_through_sequence = -1,
             source_records = 0, source_bytes = 0,
-            failure_reason = NULL, failure_sequence = NULL WHERE session_id = ?`)
+            failure_origin = NULL, failure_reason = NULL, failure_sequence = NULL
+            WHERE session_id = ?`)
           .run(session.id);
       } finally {
         database.close();
@@ -1560,9 +1814,14 @@ describe('Session Turn position snapshots', () => {
       });
       try {
         const failure = failed
-          .prepare(`SELECT failure_reason, failure_sequence
+          .prepare(`SELECT failure_origin, failure_reason, failure_sequence
             FROM session_turn_index_state WHERE session_id = ?`)
-          .get(session.id) as { failure_reason: string; failure_sequence: number };
+          .get(session.id) as {
+          failure_origin: string;
+          failure_reason: string;
+          failure_sequence: number;
+        };
+        assert.equal(failure.failure_origin, 'transcript');
         assert.equal(failure.failure_reason, 'corrupt_source');
         assert.equal(failure.failure_sequence, 0);
       } finally {
@@ -3021,11 +3280,15 @@ describe('Session Turn position snapshots', () => {
           assert.deepEqual(
             {
               ...(failed
-                .prepare(`SELECT failure_reason, failure_sequence
+                .prepare(`SELECT failure_origin, failure_reason, failure_sequence
                   FROM session_turn_index_state WHERE session_id = ?`)
                 .get(sessionId) as Record<string, unknown>),
             },
-            { failure_reason: 'corrupt_source', failure_sequence: 0 },
+            {
+              failure_origin: 'admission',
+              failure_reason: 'corrupt_source',
+              failure_sequence: 0,
+            },
           );
         } finally {
           failed.close();
@@ -3451,8 +3714,25 @@ function resetProjection(root: string, sessionId: string): void {
     database
       .prepare(`UPDATE session_turn_index_state SET indexed_through_sequence = -1,
         source_records = 0, source_bytes = 0,
-        failure_reason = NULL, failure_sequence = NULL WHERE session_id = ?`)
+        failure_origin = NULL, failure_reason = NULL, failure_sequence = NULL
+        WHERE session_id = ?`)
       .run(sessionId);
+  } finally {
+    database.close();
+  }
+}
+
+function readTurnIndexFailure(root: string, sessionId: string): Record<string, unknown> {
+  const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+    readOnly: true,
+  });
+  try {
+    return {
+      ...(database
+        .prepare(`SELECT failure_origin, failure_reason, failure_sequence
+          FROM session_turn_index_state WHERE session_id = ?`)
+        .get(sessionId) as Record<string, unknown>),
+    };
   } finally {
     database.close();
   }

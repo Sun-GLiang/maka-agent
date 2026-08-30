@@ -824,7 +824,8 @@ function validateHybridBoundary(
     if (hybrid) {
       db.prepare(`
         UPDATE session_turn_index_state
-        SET failure_reason = 'hybrid_missing_admission', failure_sequence = ?
+        SET failure_origin = 'admission', failure_reason = 'hybrid_missing_admission',
+          failure_sequence = ?
         WHERE session_id = ?
       `).run(hybrid.owner_first_sequence, sessionId);
       throw new SessionTurnPositionRecoveryError(
