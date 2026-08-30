@@ -240,7 +240,8 @@ export const Composer = forwardRef<
      * Send becomes Stop while the draft is empty. The ＋ menu and permission
      * control stay reachable (#1444); the model and thinking menus stay
      * mounted but lock with an explanatory tooltip, so the footer row never
-     * reflows mid-turn; import stays blocked mid-turn.
+     * reflows mid-turn. Attachment import stays available because the draft
+     * can be queued as the next follow-up while this turn is running.
      */
     streaming?: boolean;
     /**
@@ -1224,7 +1225,7 @@ export const Composer = forwardRef<
   }
 
   async function runImportAction(actionId: ComposerImportActionId, action: (() => void | Promise<void>) | undefined) {
-    if (!action || props.disabled || props.streaming) return;
+    if (!action || props.disabled) return;
     await importActionOwnerRef.current?.run(actionId, async () => {
       await action();
     });
@@ -1295,7 +1296,9 @@ export const Composer = forwardRef<
   }
 
   function canAcceptDroppedFiles(): boolean {
-    return Boolean(props.onAttachFilePaths && !props.disabled && !props.streaming && !importActionOwnerRef.current?.pending);
+    // A running turn does not lock the draft: text can already be queued as a
+    // follow-up, and its staged files belong to that same next submission.
+    return Boolean(props.onAttachFilePaths && !props.disabled && !importActionOwnerRef.current?.pending);
   }
 
   function hasDraggedFiles(event: DragEvent<HTMLFormElement>): boolean {
@@ -1809,7 +1812,7 @@ export const Composer = forwardRef<
                       <DropdownMenuItem
                         label={pendingImportAction === 'pick' ? copy.addingAttachment : copy.addFileOrDirectory}
                         icon={<Upload size={ICON_SIZE.control} aria-hidden="true" />}
-                        isDisabled={props.disabled || props.streaming === true || importActionBusy}
+                        isDisabled={props.disabled || importActionBusy}
                         onClick={() => {
                           void runImportAction('pick', props.onPickAttachments);
                         }}
