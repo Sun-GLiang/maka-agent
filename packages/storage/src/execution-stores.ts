@@ -137,13 +137,17 @@ export type {
   SessionTranscriptRecordScanRequest,
   SessionTranscriptStoragePage,
   SessionTranscriptStorageFragment,
-  SessionTranscriptRecordsByTurnIdsSnapshotRequest,
-  SessionTranscriptRecordsByTurnIdsSnapshotResult,
+  SessionTranscriptBodyPositionKey,
+  SessionTranscriptPositionKey,
+  SessionTranscriptProjection,
+  SessionTranscriptRecordsByPositionKeysSnapshotRequest,
+  SessionTranscriptRecordsByPositionKeysSnapshotResult,
   SessionTurnPosition,
   SessionTurnPositionAnchor,
   SessionTurnPositionPageSnapshotRequest,
   SessionTurnPositionReadResult,
   SessionTurnPositionSnapshotKey,
+  SessionTurnPositionSnapshotReleaseRequest,
 } from './session-store.js';
 
 export type ExecutionSessionWriter = SessionAuthorityStore;
@@ -425,12 +429,10 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
         run(() => sessionStore.readTurnLandmarksSnapshot(sessionId, maxLandmarks)),
       readTurnPositionPageSnapshot: (request) =>
         run(() => sessionStore.readTurnPositionPageSnapshot(request)),
-      readTranscriptRecordsByTurnIdsSnapshot: (request) =>
-        run(() => sessionStore.readTranscriptRecordsByTurnIdsSnapshot(request)),
-      releaseTurnPositionSnapshot: (sessionId, snapshotLeaseId, snapshotKey) =>
-        run(() =>
-          sessionStore.releaseTurnPositionSnapshot(sessionId, snapshotLeaseId, snapshotKey),
-        ),
+      readTranscriptRecordsByPositionKeysSnapshot: (request) =>
+        run(() => sessionStore.readTranscriptRecordsByPositionKeysSnapshot(request)),
+      releaseTurnPositionSnapshot: (request) =>
+        run(() => sessionStore.releaseTurnPositionSnapshot(request)),
       readMessagesForRecovery: (sessionId) =>
         run(() => sessionStore.readMessagesForRecovery(sessionId)),
       listTurnsSnapshot: (sessionId) => run(() => sessionStore.listTurnsSnapshot(sessionId)),

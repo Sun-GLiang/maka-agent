@@ -33,6 +33,171 @@ import { createSessionStore } from '../session-store.js';
 import { advanceSessionTurnIdentityRecovery } from '../session-turn-identity-recovery.js';
 
 describe('Session Turn position snapshots', () => {
+  test('materializes owner and shared tagged positions in one exact generation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-dual-turn-position-'));
+    const store = createSessionStore(root);
+    try {
+      const session = await store.create(makeInput());
+      await store.appendMessages(session.id, [
+        {
+          type: 'permission_decision',
+          id: 'hidden-first',
+          turnId: 'same-id',
+          ts: 1,
+          toolUseId: 'tool-use',
+          toolName: 'Bash',
+          decision: 'deny',
+        },
+        { type: 'user', id: 'visible-second', turnId: 'same-id', ts: 2, text: 'visible' },
+        { type: 'system_note', id: 'same-id', ts: 3, kind: 'step_limit' },
+      ]);
+
+      const owner = await readyPage(store, session.id, 'owner-lease', 'owner');
+      const shared = await readyPage(store, session.id, 'shared-lease', 'shared');
+      assert.equal(owner.snapshotKey.snapshotGeneration, shared.snapshotKey.snapshotGeneration);
+      assert.equal(owner.totalPositions, 2);
+      assert.equal(shared.totalPositions, 2);
+      assert.deepEqual(owner.positions, [
+        { ordinal: 0, key: { kind: 'turn', id: 'same-id' }, firstSequence: 0 },
+        { ordinal: 1, key: { kind: 'note', id: 'same-id' }, firstSequence: 2 },
+      ]);
+      assert.deepEqual(shared.positions, [
+        { ordinal: 0, key: { kind: 'turn', id: 'same-id' }, firstSequence: 1 },
+        { ordinal: 1, key: { kind: 'note', id: 'same-id' }, firstSequence: 2 },
+      ]);
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('makes empty and all-hidden shared projections observably identical', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-shared-empty-position-'));
+    const store = createSessionStore(root);
+    try {
+      const emptySession = await store.create(makeInput({ name: 'Empty' }));
+      const hiddenSession = await store.create(makeInput({ name: 'Hidden' }));
+      await store.appendMessages(hiddenSession.id, [
+        hiddenPermission('hidden-turn', 0),
+        {
+          type: 'system_note',
+          id: 'hidden-note',
+          ts: 1,
+          kind: 'mode_change',
+        },
+      ]);
+      const empty = await readyPage(store, emptySession.id, 'empty-shared', 'shared');
+      const hidden = await readyPage(store, hiddenSession.id, 'hidden-shared', 'shared');
+      assert.equal(empty.totalPositions, 1);
+      assert.equal(hidden.totalPositions, 1);
+      assert.deepEqual(empty.positions, [
+        { ordinal: 0, key: { kind: 'empty' }, firstSequence: null },
+      ]);
+      assert.deepEqual(hidden.positions, empty.positions);
+      const owner = await readyPage(store, hiddenSession.id, 'hidden-owner', 'owner');
+      assert.deepEqual(owner.positions, [
+        { ordinal: 0, key: { kind: 'turn', id: 'hidden-turn' }, firstSequence: 0 },
+      ]);
+      assert.equal(owner.snapshotKey.snapshotGeneration, hidden.snapshotKey.snapshotGeneration);
+      await assert.rejects(
+        store.readTranscriptRecordsByPositionKeysSnapshot({
+          sessionId: hiddenSession.id,
+          projection: 'shared',
+          snapshotLeaseId: 'hidden-shared',
+          snapshotKey: hidden.snapshotKey,
+          positionKeys: bodyKeys('hidden-turn'),
+          maxRecords: 1,
+          maxBytes: 64 * 1024,
+        }),
+        (error: unknown) =>
+          (error as { code?: unknown }).code === 'session_turn_position_snapshot_mismatch',
+      );
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('binds leases to a projection while sharing one retained generation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-projection-lease-'));
+    const store = createSessionStore(root);
+    try {
+      const session = await store.create(makeInput());
+      await store.appendMessage(session.id, user('turn-a', 0));
+      const owner = await readyPage(store, session.id, 'owner-only', 'owner');
+      await assert.rejects(
+        store.readTurnPositionPageSnapshot({
+          sessionId: session.id,
+          projection: 'shared',
+          snapshotLeaseId: 'owner-only',
+          snapshotKey: owner.snapshotKey,
+          anchor: { kind: 'tail' },
+          maxPositions: 8,
+        }),
+        (error: unknown) =>
+          (error as { code?: unknown }).code === 'session_turn_position_snapshot_mismatch',
+      );
+      const shared = await readyPage(store, session.id, 'shared-only', 'shared');
+      assert.deepEqual(shared.snapshotKey, owner.snapshotKey);
+      await store.releaseTurnPositionSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'owner-only',
+        snapshotKey: owner.snapshotKey,
+      });
+      const retained = await store.readTurnPositionPageSnapshot({
+        sessionId: session.id,
+        projection: 'shared',
+        snapshotLeaseId: 'shared-only',
+        snapshotKey: shared.snapshotKey,
+        anchor: { kind: 'tail' },
+        maxPositions: 8,
+      });
+      assert.equal(retained.kind, 'page');
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('fails closed and lazily rebuilds when persisted shared policy version drifts', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-shared-policy-version-'));
+    const store = createSessionStore(root);
+    try {
+      const session = await store.create(makeInput());
+      await store.appendMessage(session.id, user('turn-a', 0));
+      const before = await readyPage(store, session.id, 'policy-before', 'shared');
+      const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+      try {
+        database
+          .prepare(`UPDATE session_turn_authority_revisions
+          SET visibility_policy_version = 999 WHERE session_id = ?`)
+          .run(session.id);
+      } finally {
+        database.close();
+      }
+      await assert.rejects(
+        store.readTurnPositionPageSnapshot({
+          sessionId: session.id,
+          projection: 'shared',
+          snapshotLeaseId: 'policy-before',
+          snapshotKey: before.snapshotKey,
+          anchor: { kind: 'tail' },
+          maxPositions: 8,
+        }),
+        (error: unknown) =>
+          (error as { code?: unknown }).code === 'session_turn_position_snapshot_mismatch',
+      );
+      const after = await readyPage(store, session.id, 'policy-after', 'shared');
+      assert.equal(after.snapshotKey.authorityRevision, before.snapshotKey.authorityRevision + 1);
+      assert.ok(after.snapshotKey.snapshotGeneration > before.snapshotKey.snapshotGeneration);
+      assert.deepEqual(after.positions, before.positions);
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('publishes one stable synthetic position for an empty Session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-empty-turn-position-'));
     const store = createSessionStore(root);
@@ -48,11 +213,11 @@ describe('Session Turn position snapshots', () => {
         snapshotGeneration: 1,
       });
       assert.equal(page.startOrdinal, 0);
-      assert.equal(page.totalTurns, 1);
+      assert.equal(page.totalPositions, 1);
       assert.deepEqual(page.positions, [
         {
           ordinal: 0,
-          turnId: `session:${session.id}`,
+          key: { kind: 'empty' },
           firstSequence: null,
         },
       ]);
@@ -94,6 +259,7 @@ describe('Session Turn position snapshots', () => {
       const ready = await readyPage(store, session.id);
       const first = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         snapshotKey: ready.snapshotKey,
         anchor: { kind: 'ordinal', ordinal: 1 },
@@ -102,8 +268,8 @@ describe('Session Turn position snapshots', () => {
       assert.equal(first.kind, 'page');
       if (first.kind !== 'page') assert.fail('expected a ready legacy page');
       assert.deepEqual(first.positions, [
-        { ordinal: 1, turnId: 'turn-b', firstSequence: 2 },
-        { ordinal: 2, turnId: 'session-note:note', firstSequence: 4 },
+        { ordinal: 1, key: { kind: 'turn', id: 'turn-b' }, firstSequence: 2 },
+        { ordinal: 2, key: { kind: 'note', id: 'note' }, firstSequence: 4 },
       ]);
 
       for (const anchor of [
@@ -112,6 +278,7 @@ describe('Session Turn position snapshots', () => {
       ]) {
         const anchored = await store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           snapshotKey: first.snapshotKey,
           anchor,
@@ -124,6 +291,7 @@ describe('Session Turn position snapshots', () => {
       }
       const clamped = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         snapshotKey: ready.snapshotKey,
         anchor: { kind: 'ordinal', ordinal: 999 },
@@ -132,11 +300,12 @@ describe('Session Turn position snapshots', () => {
       assert.equal(clamped.kind, 'page');
       if (clamped.kind !== 'page') assert.fail('expected a clamped inclusive ordinal');
       assert.deepEqual(clamped.positions, [
-        { ordinal: 2, turnId: 'session-note:note', firstSequence: 4 },
+        { ordinal: 2, key: { kind: 'note', id: 'note' }, firstSequence: 4 },
       ]);
       await assert.rejects(
         store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           snapshotKey: ready.snapshotKey,
           anchor: { kind: 'turn', turnId: 'missing-turn' },
@@ -148,6 +317,7 @@ describe('Session Turn position snapshots', () => {
       await assert.rejects(
         store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           snapshotKey: ready.snapshotKey,
           anchor: { kind: 'turn', turnId: '' },
@@ -188,9 +358,9 @@ describe('Session Turn position snapshots', () => {
       assert.equal(page.kind, 'page');
       if (page.kind !== 'page') assert.fail('expected modern positions');
       assert.deepEqual(page.positions, [
-        { ordinal: 0, turnId: 'turn-c', firstSequence: 2 },
-        { ordinal: 1, turnId: 'turn-a', firstSequence: 1 },
-        { ordinal: 2, turnId: 'turn-b', firstSequence: 0 },
+        { ordinal: 0, key: { kind: 'turn', id: 'turn-c' }, firstSequence: 2 },
+        { ordinal: 1, key: { kind: 'turn', id: 'turn-a' }, firstSequence: 1 },
+        { ordinal: 2, key: { kind: 'turn', id: 'turn-b' }, firstSequence: 0 },
       ]);
     } finally {
       runs.close?.();
@@ -208,7 +378,26 @@ describe('Session Turn position snapshots', () => {
       await runs.admitRootTurn(rootAdmission(session.id, 'turn-bodyless', 'future-user', 10));
       const bodyless = await readyPage(store, session.id, 'lease-bodyless');
       assert.deepEqual(bodyless.positions, [
-        { ordinal: 0, turnId: 'turn-bodyless', firstSequence: null },
+        { ordinal: 0, key: { kind: 'turn', id: 'turn-bodyless' }, firstSequence: null },
+      ]);
+      const bodylessRecords = await store.readTranscriptRecordsByPositionKeysSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'lease-bodyless',
+        snapshotKey: bodyless.snapshotKey,
+        positionKeys: bodyKeys('turn-bodyless'),
+        maxRecords: 1,
+        maxBytes: 1,
+      });
+      assert.deepEqual(bodylessRecords.records, []);
+      assert.equal(bodylessRecords.rawBytes, 0);
+      const sharedBodyless = await readyPage(store, session.id, 'lease-bodyless-shared', 'shared');
+      assert.equal(
+        sharedBodyless.snapshotKey.snapshotGeneration,
+        bodyless.snapshotKey.snapshotGeneration,
+      );
+      assert.deepEqual(sharedBodyless.positions, [
+        { ordinal: 0, key: { kind: 'empty' }, firstSequence: null },
       ]);
 
       await store.appendMessages(session.id, [
@@ -225,8 +414,18 @@ describe('Session Turn position snapshots', () => {
       ]);
       const materialized = await readyPage(store, session.id, 'lease-materialized');
       assert.deepEqual(materialized.positions, [
-        { ordinal: 0, turnId: 'turn-bodyless', firstSequence: 1 },
-        { ordinal: 1, turnId: 'session-note:visible-note', firstSequence: 3 },
+        { ordinal: 0, key: { kind: 'turn', id: 'turn-bodyless' }, firstSequence: 1 },
+        { ordinal: 1, key: { kind: 'note', id: 'visible-note' }, firstSequence: 3 },
+      ]);
+      const sharedMaterialized = await readyPage(
+        store,
+        session.id,
+        'lease-materialized-shared',
+        'shared',
+      );
+      assert.deepEqual(sharedMaterialized.positions, [
+        { ordinal: 0, key: { kind: 'turn', id: 'turn-bodyless' }, firstSequence: 2 },
+        { ordinal: 1, key: { kind: 'note', id: 'visible-note' }, firstSequence: 3 },
       ]);
     } finally {
       runs.close?.();
@@ -260,66 +459,70 @@ describe('Session Turn position snapshots', () => {
     }
   });
 
-  test('fails closed when a generated note identity collides with a real Turn identity', async () => {
+  test('keeps equal note and Turn strings distinct through composite identity', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-note-turn-identity-collision-'));
     let store = createSessionStore(root);
     const session = await store.create(makeInput());
     try {
       await store.appendMessage(session.id, {
         type: 'system_note',
-        id: 'collision',
+        id: 'session-note:collision',
         ts: 1,
         kind: 'step_limit',
       });
-      await assert.rejects(
-        store.appendMessage(session.id, {
-          type: 'user',
-          id: 'colliding-turn',
-          turnId: 'session-note:collision',
-          ts: 2,
-          text: 'must not fold into the note',
-        }),
-        (error: unknown) => (error as { reason?: unknown }).reason === 'incompatible_identity',
-      );
-      assert.equal(await store.readTranscriptHighWaterSnapshot(session.id), 0);
-
-      await store.appendMessage(session.id, user('turn-other', 1));
-      await store.close?.();
-      resetProjection(root, session.id);
-      const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
-      try {
-        database
-          .prepare(`UPDATE session_messages SET record_json = ?
-            WHERE session_id = ? AND sequence = 1`)
-          .run(
-            JSON.stringify({
-              ...user('session-note:collision', 1),
-              id: 'user-1',
-            }),
-            session.id,
-          );
-      } finally {
-        database.close();
-      }
-      store = createSessionStore(root);
-      await assert.rejects(readyPage(store, session.id, 'lease-collision'), (error: unknown) => {
-        assert.equal((error as { reason?: unknown }).reason, 'incompatible_identity');
-        assert.equal((error as { sequence?: unknown }).sequence, 1);
-        return true;
+      await store.appendMessage(session.id, {
+        type: 'user',
+        id: 'colliding-turn',
+        turnId: 'session-note:collision',
+        ts: 2,
+        text: 'separate Turn namespace',
       });
-
-      const reverse = await store.create(makeInput({ name: 'Reverse collision' }));
-      await store.appendMessage(reverse.id, user('session-note:reverse', 2));
-      await assert.rejects(
-        store.appendMessage(reverse.id, {
-          type: 'system_note',
-          id: 'reverse',
-          ts: 3,
-          kind: 'step_limit',
-        }),
-        (error: unknown) => (error as { reason?: unknown }).reason === 'incompatible_identity',
+      await store.appendMessage(session.id, {
+        type: 'user',
+        id: 'prefixed-turn',
+        turnId: 'session:real-turn',
+        ts: 3,
+        text: 'prefix is opaque',
+      });
+      const page = await readyPage(store, session.id, 'lease-collision');
+      assert.deepEqual(
+        page.positions.map(({ key }) => key),
+        [
+          { kind: 'note', id: 'session-note:collision' },
+          { kind: 'turn', id: 'session-note:collision' },
+          { kind: 'turn', id: 'session:real-turn' },
+        ],
       );
-      assert.equal(await store.readTranscriptHighWaterSnapshot(reverse.id), 0);
+      const turnAnchor = await store.readTurnPositionPageSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'lease-collision',
+        snapshotKey: page.snapshotKey,
+        anchor: { kind: 'turn', turnId: 'session-note:collision' },
+        maxPositions: 1,
+      });
+      assert.equal(turnAnchor.kind, 'page');
+      if (turnAnchor.kind !== 'page') assert.fail('expected exact Turn anchor');
+      assert.equal(turnAnchor.startOrdinal, 1);
+      const bodies = await store.readTranscriptRecordsByPositionKeysSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'lease-collision',
+        snapshotKey: page.snapshotKey,
+        positionKeys: [
+          { kind: 'turn', id: 'session-note:collision' },
+          { kind: 'note', id: 'session-note:collision' },
+        ],
+        maxRecords: 2,
+        maxBytes: 64 * 1024,
+      });
+      assert.deepEqual(
+        bodies.records.map(({ positionKey, message }) => [positionKey, message.id]),
+        [
+          [{ kind: 'note', id: 'session-note:collision' }, 'session-note:collision'],
+          [{ kind: 'turn', id: 'session-note:collision' }, 'colliding-turn'],
+        ],
+      );
     } finally {
       await store.close?.();
       await rm(root, { recursive: true, force: true });
@@ -344,7 +547,7 @@ describe('Session Turn position snapshots', () => {
       });
       const admitted = await readyPage(store, session.id, 'lease-admitted');
       assert.deepEqual(
-        admitted.positions.map(({ turnId }) => turnId),
+        admitted.positions.map(({ key }) => (key.kind === 'empty' ? '' : key.id)),
         ['turn-bodyless', 'turn-body'],
       );
 
@@ -354,7 +557,9 @@ describe('Session Turn position snapshots', () => {
         legacy.snapshotKey.authorityRevision,
         admitted.snapshotKey.authorityRevision + 1,
       );
-      assert.deepEqual(legacy.positions, [{ ordinal: 0, turnId: 'turn-body', firstSequence: 0 }]);
+      assert.deepEqual(legacy.positions, [
+        { ordinal: 0, key: { kind: 'turn', id: 'turn-body' }, firstSequence: 0 },
+      ]);
       await store.remove(session.id);
       await conversation.purge(session.id);
     } finally {
@@ -375,6 +580,7 @@ describe('Session Turn position snapshots', () => {
       const secondFacade = createSessionStore(root);
       const shared = await secondFacade.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-two',
         anchor: { kind: 'tail' },
         maxPositions: 8,
@@ -384,19 +590,31 @@ describe('Session Turn position snapshots', () => {
       assert.deepEqual(shared.snapshotKey, first.snapshotKey);
       await secondFacade.close?.();
 
-      await store.releaseTurnPositionSnapshot(session.id, 'lease-one', first.snapshotKey);
+      await store.releaseTurnPositionSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'lease-one',
+        snapshotKey: first.snapshotKey,
+      });
       const retained = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-two',
         snapshotKey: first.snapshotKey,
         anchor: { kind: 'tail' },
         maxPositions: 8,
       });
       assert.equal(retained.kind, 'page');
-      await store.releaseTurnPositionSnapshot(session.id, 'lease-two', first.snapshotKey);
+      await store.releaseTurnPositionSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'lease-two',
+        snapshotKey: first.snapshotKey,
+      });
       await assert.rejects(
         store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-two',
           snapshotKey: first.snapshotKey,
           anchor: { kind: 'tail' },
@@ -430,10 +648,10 @@ describe('Session Turn position snapshots', () => {
 
       const page = await readyPage(store, session.id);
       assert.deepEqual(page.positions, [
-        { ordinal: 0, turnId: 'turn-legacy', firstSequence: 0 },
-        { ordinal: 1, turnId: 'turn-a', firstSequence: 2 },
-        { ordinal: 2, turnId: 'turn-b', firstSequence: 1 },
-        { ordinal: 3, turnId: 'session-note:modern-note', firstSequence: 3 },
+        { ordinal: 0, key: { kind: 'turn', id: 'turn-legacy' }, firstSequence: 0 },
+        { ordinal: 1, key: { kind: 'turn', id: 'turn-a' }, firstSequence: 2 },
+        { ordinal: 2, key: { kind: 'turn', id: 'turn-b' }, firstSequence: 1 },
+        { ordinal: 3, key: { kind: 'note', id: 'modern-note' }, firstSequence: 3 },
       ]);
     } finally {
       runs.close?.();
@@ -475,7 +693,7 @@ describe('Session Turn position snapshots', () => {
       await store.appendMessages(session.id, [user('turn-a', 0), user('turn-b', 1)]);
       const legacy = await readyPage(store, session.id);
       assert.deepEqual(
-        legacy.positions.map(({ turnId }) => turnId),
+        legacy.positions.map(({ key }) => (key.kind === 'empty' ? '' : key.id)),
         ['turn-a', 'turn-b'],
       );
 
@@ -489,12 +707,13 @@ describe('Session Turn position snapshots', () => {
         snapshotGeneration: legacy.snapshotKey.snapshotGeneration + 1,
       });
       assert.deepEqual(
-        modern.positions.map(({ turnId }) => turnId),
+        modern.positions.map(({ key }) => (key.kind === 'empty' ? '' : key.id)),
         ['turn-b', 'turn-a'],
       );
 
       const stableLegacy = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         snapshotKey: legacy.snapshotKey,
         anchor: { kind: 'tail' },
@@ -503,7 +722,7 @@ describe('Session Turn position snapshots', () => {
       assert.equal(stableLegacy.kind, 'page');
       if (stableLegacy.kind !== 'page') assert.fail('expected retained exact snapshot');
       assert.deepEqual(
-        stableLegacy.positions.map(({ turnId }) => turnId),
+        stableLegacy.positions.map(({ key }) => (key.kind === 'empty' ? '' : key.id)),
         ['turn-a', 'turn-b'],
       );
     } finally {
@@ -525,6 +744,7 @@ describe('Session Turn position snapshots', () => {
       );
       const building = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         anchor: { kind: 'tail' },
         maxPositions: 8,
@@ -537,6 +757,7 @@ describe('Session Turn position snapshots', () => {
       await assert.rejects(
         store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           snapshotKey: building.snapshotKey,
           anchor: { kind: 'tail' },
@@ -560,17 +781,19 @@ describe('Session Turn position snapshots', () => {
       await store.appendMessage(session.id, user('turn-a', 0));
       const first = await readyPage(store, session.id, 'lease-first');
       await store.appendMessage(session.id, user('turn-b', 1));
-      const second = await readyPage(store, session.id, 'lease-second');
+      const second = await readyPage(store, session.id, 'lease-second', 'shared');
       await store.appendMessage(session.id, user('turn-c', 2));
 
       const capacity = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-third',
         anchor: { kind: 'tail' },
         maxPositions: 8,
       });
       assert.deepEqual(capacity, {
         kind: 'capacity',
+        projection: 'owner',
         throughSequence: 2,
         authorityRevision: 0,
         retainedSnapshots: 2,
@@ -578,6 +801,7 @@ describe('Session Turn position snapshots', () => {
 
       const stableFirst = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-first',
         snapshotKey: first.snapshotKey,
         anchor: { kind: 'tail' },
@@ -585,13 +809,18 @@ describe('Session Turn position snapshots', () => {
       });
       assert.equal(stableFirst.kind, 'page');
       if (stableFirst.kind !== 'page') assert.fail('expected retained first snapshot');
-      assert.equal(stableFirst.totalTurns, 1);
+      assert.equal(stableFirst.totalPositions, 1);
       assert.deepEqual(
-        stableFirst.positions.map(({ turnId }) => turnId),
+        stableFirst.positions.map(({ key }) => (key.kind === 'empty' ? '' : key.id)),
         ['turn-a'],
       );
 
-      await store.releaseTurnPositionSnapshot(session.id, 'lease-first', first.snapshotKey);
+      await store.releaseTurnPositionSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'lease-first',
+        snapshotKey: first.snapshotKey,
+      });
       const third = await readyPage(store, session.id, 'lease-third');
       assert.equal(first.snapshotKey.snapshotGeneration, 1);
       assert.equal(second.snapshotKey.snapshotGeneration, 2);
@@ -599,6 +828,7 @@ describe('Session Turn position snapshots', () => {
       await assert.rejects(
         store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-first',
           snapshotKey: first.snapshotKey,
           anchor: { kind: 'tail' },
@@ -642,6 +872,7 @@ describe('Session Turn position snapshots', () => {
       store = createSessionStore(root);
       const building = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         anchor: { kind: 'tail' },
         maxPositions: 8,
@@ -656,6 +887,7 @@ describe('Session Turn position snapshots', () => {
       await assert.rejects(
         store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           snapshotKey: building.snapshotKey,
           anchor: { kind: 'tail' },
@@ -665,7 +897,7 @@ describe('Session Turn position snapshots', () => {
           (error as { code?: unknown }).code === 'session_turn_position_snapshot_mismatch',
       );
       const ready = await readyPage(store, session.id, 'lease-resumed');
-      assert.equal(ready.totalTurns, 1_025);
+      assert.equal(ready.totalPositions, 1_025);
       assert.ok(ready.snapshotKey.snapshotGeneration > building.snapshotKey.snapshotGeneration);
     } finally {
       await store.close?.();
@@ -691,6 +923,7 @@ describe('Session Turn position snapshots', () => {
 
       const building = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         anchor: { kind: 'tail' },
         maxPositions: 8,
@@ -721,6 +954,7 @@ describe('Session Turn position snapshots', () => {
 
       const first = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         anchor: { kind: 'tail' },
         maxPositions: 8,
@@ -731,8 +965,11 @@ describe('Session Turn position snapshots', () => {
       assert.equal(first.progress.lastStepRecords, 0);
       assert.equal(first.progress.currentByteOffset, 4 * 1024 * 1024);
       const ready = await readyPage(store, session.id);
-      assert.equal(ready.totalTurns, 1);
-      assert.equal(ready.positions[0]?.turnId, 'turn-oversized');
+      assert.equal(ready.totalPositions, 1);
+      assert.equal(
+        ready.positions[0] ? positionId(ready.positions[0]) : undefined,
+        'turn-oversized',
+      );
     } finally {
       await store.close?.();
       await rm(root, { recursive: true, force: true });
@@ -770,6 +1007,7 @@ describe('Session Turn position snapshots', () => {
 
       const first = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-legacy-inline',
         anchor: { kind: 'tail' },
         maxPositions: 8,
@@ -781,7 +1019,10 @@ describe('Session Turn position snapshots', () => {
       assert.equal(first.progress.currentByteOffset, 4 * 1024 * 1024);
 
       const ready = await readyPage(store, session.id, 'lease-legacy-inline');
-      assert.equal(ready.positions[0]?.turnId, 'turn-legacy-inline');
+      assert.equal(
+        ready.positions[0] ? positionId(ready.positions[0]) : undefined,
+        'turn-legacy-inline',
+      );
     } finally {
       await store.close?.();
       await rm(root, { recursive: true, force: true });
@@ -804,6 +1045,7 @@ describe('Session Turn position snapshots', () => {
 
         let result = await store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: `lease-exact-${index}`,
           anchor: { kind: 'tail' },
           maxPositions: 8,
@@ -817,6 +1059,7 @@ describe('Session Turn position snapshots', () => {
           }
           result = await store.readTurnPositionPageSnapshot({
             sessionId: session.id,
+            projection: 'owner',
             snapshotLeaseId: `lease-exact-${index}`,
             snapshotKey: result.snapshotKey,
             anchor: { kind: 'tail' },
@@ -825,7 +1068,10 @@ describe('Session Turn position snapshots', () => {
         }
         assert.equal(result.kind, 'page');
         if (result.kind !== 'page') assert.fail('expected exact-size recovered page');
-        assert.equal(result.positions[0]?.turnId, `exact-turn-${index}`);
+        assert.equal(
+          result.positions[0] ? positionId(result.positions[0]) : undefined,
+          `exact-turn-${index}`,
+        );
         assert.equal(
           recoveryBytes.reduce((total, bytes) => total + bytes, 0),
           targetBytes,
@@ -852,6 +1098,7 @@ describe('Session Turn position snapshots', () => {
       store = createSessionStore(root);
       const partial = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-derived-before',
         anchor: { kind: 'tail' },
         maxPositions: 8,
@@ -881,6 +1128,7 @@ describe('Session Turn position snapshots', () => {
       store = createSessionStore(root);
       const restarted = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-derived-after',
         anchor: { kind: 'tail' },
         maxPositions: 8,
@@ -891,7 +1139,10 @@ describe('Session Turn position snapshots', () => {
       assert.equal(restarted.progress.lastStepBytes, 4 * 1024 * 1024);
       assert.equal(restarted.progress.sourceBytes, 8 * 1024 * 1024);
       const ready = await readyPage(store, session.id, 'lease-derived-after');
-      assert.equal(ready.positions[0]?.turnId, 'turn-derived-reset');
+      assert.equal(
+        ready.positions[0] ? positionId(ready.positions[0]) : undefined,
+        'turn-derived-reset',
+      );
     } finally {
       await store.close?.();
       await rm(root, { recursive: true, force: true });
@@ -956,7 +1207,7 @@ describe('Session Turn position snapshots', () => {
       }
       store = createSessionStore(root);
       const ready = await readyPage(store, session.id, 'lease-atomic');
-      assert.equal(ready.positions[0]?.turnId, 'turn-atomic');
+      assert.equal(ready.positions[0] ? positionId(ready.positions[0]) : undefined, 'turn-atomic');
     } finally {
       await store.close?.();
       await rm(root, { recursive: true, force: true });
@@ -977,6 +1228,7 @@ describe('Session Turn position snapshots', () => {
       store = createSessionStore(root);
       const partial = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-source-before',
         anchor: { kind: 'tail' },
         maxPositions: 8,
@@ -998,6 +1250,7 @@ describe('Session Turn position snapshots', () => {
         await assert.rejects(
           store.readTurnPositionPageSnapshot({
             sessionId: session.id,
+            projection: 'owner',
             snapshotLeaseId: lease,
             anchor: { kind: 'tail' },
             maxPositions: 8,
@@ -1034,7 +1287,7 @@ describe('Session Turn position snapshots', () => {
     try {
       const session = await store.create(makeInput());
       await store.appendMessages(session.id, [
-        user('turn-a', 0),
+        hiddenPermission('turn-a', 0),
         {
           type: 'assistant',
           id: 'assistant-a',
@@ -1046,33 +1299,73 @@ describe('Session Turn position snapshots', () => {
         user('turn-b', 1),
       ]);
       const page = await readyPage(store, session.id);
+      const sharedPage = await readyPage(store, session.id, 'lease-shared-records', 'shared');
+      assert.equal(sharedPage.positions[0]?.firstSequence, 1);
 
-      const records = await store.readTranscriptRecordsByTurnIdsSnapshot({
+      const records = await store.readTranscriptRecordsByPositionKeysSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         snapshotKey: page.snapshotKey,
-        turnIds: ['turn-a'],
+        positionKeys: bodyKeys('turn-a'),
         maxBytes: 64 * 1024,
         maxRecords: 8,
       });
       assert.deepEqual(records.snapshotKey, page.snapshotKey);
       assert.deepEqual(
-        records.records.map(({ sequence, message }) => [sequence, message.id]),
+        records.records.map(({ positionKey, sequence, message }) => [
+          positionKey,
+          sequence,
+          message.id,
+        ]),
         [
-          [0, 'user-0'],
-          [1, 'assistant-a'],
+          [{ kind: 'turn', id: 'turn-a' }, 0, 'permission-0'],
+          [{ kind: 'turn', id: 'turn-a' }, 1, 'assistant-a'],
         ],
+      );
+      const sharedRecords = await store.readTranscriptRecordsByPositionKeysSnapshot({
+        sessionId: session.id,
+        projection: 'shared',
+        snapshotLeaseId: 'lease-shared-records',
+        snapshotKey: sharedPage.snapshotKey,
+        positionKeys: bodyKeys('turn-a'),
+        maxBytes: 64 * 1024,
+        maxRecords: 8,
+      });
+      assert.deepEqual(
+        sharedRecords.records.map(({ positionKey, sequence, message }) => [
+          positionKey,
+          sequence,
+          message.id,
+        ]),
+        [
+          [{ kind: 'turn', id: 'turn-a' }, 0, 'permission-0'],
+          [{ kind: 'turn', id: 'turn-a' }, 1, 'assistant-a'],
+        ],
+      );
+      await assert.rejects(
+        store.readTranscriptRecordsByPositionKeysSnapshot({
+          sessionId: session.id,
+          projection: 'shared',
+          snapshotLeaseId: 'lease-shared-records',
+          snapshotKey: sharedPage.snapshotKey,
+          positionKeys: bodyKeys('turn-a'),
+          maxBytes: 64 * 1024,
+          maxRecords: 1,
+        }),
+        (error: unknown) => (error as { reason?: unknown }).reason === 'transcript_record_count',
       );
       for (const [limits, reason] of [
         [{ maxBytes: 64 * 1024, maxRecords: 1 }, 'transcript_record_count'],
         [{ maxBytes: 1, maxRecords: 8 }, 'transcript_record_bytes'],
       ] as const) {
         await assert.rejects(
-          store.readTranscriptRecordsByTurnIdsSnapshot({
+          store.readTranscriptRecordsByPositionKeysSnapshot({
             sessionId: session.id,
+            projection: 'owner',
             snapshotLeaseId: 'lease-default',
             snapshotKey: page.snapshotKey,
-            turnIds: ['turn-a'],
+            positionKeys: bodyKeys('turn-a'),
             ...limits,
           }),
           (error: unknown) => {
@@ -1090,11 +1383,12 @@ describe('Session Turn position snapshots', () => {
         { ...page.snapshotKey, snapshotGeneration: 999 },
       ]) {
         await assert.rejects(
-          store.readTranscriptRecordsByTurnIdsSnapshot({
+          store.readTranscriptRecordsByPositionKeysSnapshot({
             sessionId: session.id,
+            projection: 'owner',
             snapshotLeaseId: 'lease-default',
             snapshotKey,
-            turnIds: ['turn-a'],
+            positionKeys: bodyKeys('turn-a'),
             maxBytes: 64 * 1024,
             maxRecords: 8,
           }),
@@ -1103,33 +1397,43 @@ describe('Session Turn position snapshots', () => {
         );
       }
       for (const request of [
-        { turnIds: ['turn-a', 'turn-a'], maxRecords: 8, maxBytes: 64 * 1024 },
-        { turnIds: [''], maxRecords: 8, maxBytes: 64 * 1024 },
+        { positionKeys: bodyKeys('turn-a', 'turn-a'), maxRecords: 8, maxBytes: 64 * 1024 },
+        { positionKeys: bodyKeys(''), maxRecords: 8, maxBytes: 64 * 1024 },
         {
-          turnIds: Array.from({ length: 129 }, (_, index) => `turn-${index}`),
+          positionKeys: Array.from({ length: 129 }, (_, index) => `turn-${index}`).map((id) => ({
+            kind: 'turn' as const,
+            id,
+          })),
           maxRecords: 8,
           maxBytes: 64 * 1024,
         },
-        { turnIds: ['turn-a'], maxRecords: 257, maxBytes: 64 * 1024 },
-        { turnIds: ['turn-a'], maxRecords: 8, maxBytes: 16 * 1024 * 1024 + 1 },
+        { positionKeys: bodyKeys('turn-a'), maxRecords: 257, maxBytes: 64 * 1024 },
+        { positionKeys: bodyKeys('turn-a'), maxRecords: 8, maxBytes: 16 * 1024 * 1024 + 1 },
+        { positionKeys: [{ kind: 'empty' }] as never, maxRecords: 8, maxBytes: 64 * 1024 },
       ]) {
         await assert.rejects(
-          store.readTranscriptRecordsByTurnIdsSnapshot({
+          store.readTranscriptRecordsByPositionKeysSnapshot({
             sessionId: session.id,
+            projection: 'owner',
             snapshotLeaseId: 'lease-default',
             snapshotKey: page.snapshotKey,
             ...request,
           }),
-          /invalid|unique/iu,
+          /invalid|unique|stale|mismatched/iu,
         );
       }
       for (const request of [
-        { snapshotLeaseId: 'lease-unknown', turnIds: ['turn-a'] },
-        { snapshotLeaseId: 'lease-default', turnIds: ['turn-unknown'] },
+        { snapshotLeaseId: 'lease-unknown', positionKeys: bodyKeys('turn-a') },
+        { snapshotLeaseId: 'lease-default', positionKeys: bodyKeys('turn-unknown') },
+        {
+          snapshotLeaseId: 'lease-default',
+          positionKeys: [{ kind: 'note' as const, id: 'turn-a' }],
+        },
       ]) {
         await assert.rejects(
-          store.readTranscriptRecordsByTurnIdsSnapshot({
+          store.readTranscriptRecordsByPositionKeysSnapshot({
             sessionId: session.id,
+            projection: 'owner',
             snapshotKey: page.snapshotKey,
             maxRecords: 8,
             maxBytes: 64 * 1024,
@@ -1150,22 +1454,24 @@ describe('Session Turn position snapshots', () => {
         database.close();
       }
       await assert.rejects(
-        store.readTranscriptRecordsByTurnIdsSnapshot({
+        store.readTranscriptRecordsByPositionKeysSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           snapshotKey: page.snapshotKey,
-          turnIds: ['turn-a'],
+          positionKeys: bodyKeys('turn-a'),
           maxRecords: 1,
           maxBytes: 64 * 1024,
         }),
         (error: unknown) => (error as { reason?: unknown }).reason === 'transcript_record_count',
       );
       await assert.rejects(
-        store.readTranscriptRecordsByTurnIdsSnapshot({
+        store.readTranscriptRecordsByPositionKeysSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           snapshotKey: page.snapshotKey,
-          turnIds: ['turn-a'],
+          positionKeys: bodyKeys('turn-a'),
           maxRecords: 2,
           maxBytes: 64 * 1024,
         }),
@@ -1201,6 +1507,7 @@ describe('Session Turn position snapshots', () => {
       await assert.rejects(
         store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           anchor: { kind: 'tail' },
           maxPositions: 8,
@@ -1230,11 +1537,122 @@ describe('Session Turn position snapshots', () => {
       await assert.rejects(
         store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-retry-failed-source',
           anchor: { kind: 'tail' },
           maxPositions: 8,
         }),
         (error: unknown) => (error as { reason?: unknown }).reason === 'corrupt_source',
+      );
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('fails closed when a valid stored body no longer resolves to its exact position key', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-body-identity-drift-'));
+    const store = createSessionStore(root);
+    try {
+      const session = await store.create(makeInput());
+      const original = user('turn-before', 0);
+      await store.appendMessage(session.id, original);
+      const page = await readyPage(store, session.id);
+      const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+      try {
+        database
+          .prepare(`UPDATE session_messages SET record_json = ?
+            WHERE session_id = ? AND sequence = 0`)
+          .run(JSON.stringify({ ...original, turnId: 'turn-after' }), session.id);
+      } finally {
+        database.close();
+      }
+
+      await assert.rejects(
+        store.readTranscriptRecordsByPositionKeysSnapshot({
+          sessionId: session.id,
+          projection: 'owner',
+          snapshotLeaseId: 'lease-default',
+          snapshotKey: page.snapshotKey,
+          positionKeys: bodyKeys('turn-before'),
+          maxRecords: 1,
+          maxBytes: 64 * 1024,
+        }),
+        (error: unknown) =>
+          (error as { code?: unknown }).code === 'stored_session_message_incompatible',
+      );
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('enforces exact shared raw record-count and stored-byte boundaries', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-shared-position-body-limits-'));
+    const store = createSessionStore(root);
+    try {
+      const countSession = await store.create(makeInput({ name: 'Count boundary' }));
+      await store.appendMessages(countSession.id, [
+        user('turn-count-boundary', 0),
+        ...Array.from({ length: 255 }, (_, index) =>
+          hiddenPermission('turn-count-boundary', index + 1),
+        ),
+      ]);
+      const countAtLimit = await readyPage(store, countSession.id, 'count-at-limit', 'shared');
+      const exactCount = await store.readTranscriptRecordsByPositionKeysSnapshot({
+        sessionId: countSession.id,
+        projection: 'shared',
+        snapshotLeaseId: 'count-at-limit',
+        snapshotKey: countAtLimit.snapshotKey,
+        positionKeys: bodyKeys('turn-count-boundary'),
+        maxRecords: 256,
+        maxBytes: 16 * 1024 * 1024,
+      });
+      assert.equal(exactCount.records.length, 256);
+      await store.appendMessage(countSession.id, hiddenPermission('turn-count-boundary', 256));
+      const countOverLimit = await readyPage(store, countSession.id, 'count-over-limit', 'shared');
+      await assert.rejects(
+        store.readTranscriptRecordsByPositionKeysSnapshot({
+          sessionId: countSession.id,
+          projection: 'shared',
+          snapshotLeaseId: 'count-over-limit',
+          snapshotKey: countOverLimit.snapshotKey,
+          positionKeys: bodyKeys('turn-count-boundary'),
+          maxRecords: 256,
+          maxBytes: 16 * 1024 * 1024,
+        }),
+        (error: unknown) => (error as { reason?: unknown }).reason === 'transcript_record_count',
+      );
+
+      const byteSession = await store.create(makeInput({ name: 'Byte boundary' }));
+      await store.appendMessage(
+        byteSession.id,
+        exactSizeUserMessage(16 * 1024 * 1024, 'turn-byte-boundary', false),
+      );
+      const bytesAtLimit = await readyPage(store, byteSession.id, 'bytes-at-limit', 'shared');
+      const exactBytes = await store.readTranscriptRecordsByPositionKeysSnapshot({
+        sessionId: byteSession.id,
+        projection: 'shared',
+        snapshotLeaseId: 'bytes-at-limit',
+        snapshotKey: bytesAtLimit.snapshotKey,
+        positionKeys: bodyKeys('turn-byte-boundary'),
+        maxRecords: 256,
+        maxBytes: 16 * 1024 * 1024,
+      });
+      assert.equal(exactBytes.rawBytes, 16 * 1024 * 1024);
+      await store.appendMessage(byteSession.id, hiddenPermission('turn-byte-boundary', 1));
+      const bytesOverLimit = await readyPage(store, byteSession.id, 'bytes-over-limit', 'shared');
+      await assert.rejects(
+        store.readTranscriptRecordsByPositionKeysSnapshot({
+          sessionId: byteSession.id,
+          projection: 'shared',
+          snapshotLeaseId: 'bytes-over-limit',
+          snapshotKey: bytesOverLimit.snapshotKey,
+          positionKeys: bodyKeys('turn-byte-boundary'),
+          maxRecords: 256,
+          maxBytes: 16 * 1024 * 1024,
+        }),
+        (error: unknown) => (error as { reason?: unknown }).reason === 'transcript_record_bytes',
       );
     } finally {
       await store.close?.();
@@ -1291,7 +1709,10 @@ describe('Session Turn position snapshots', () => {
       resetProjection(root, session.id);
       store = createSessionStore(root);
       const recovered = await readyPage(store, session.id, 'lease-after-reset');
-      assert.equal(recovered.positions[0]?.turnId, 'turn-chunk-corrupt');
+      assert.equal(
+        recovered.positions[0] ? positionId(recovered.positions[0]) : undefined,
+        'turn-chunk-corrupt',
+      );
     } finally {
       await store.close?.();
       await rm(root, { recursive: true, force: true });
@@ -1342,11 +1763,12 @@ describe('Session Turn position snapshots', () => {
       }
 
       await assert.rejects(
-        store.readTranscriptRecordsByTurnIdsSnapshot({
+        store.readTranscriptRecordsByPositionKeysSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           snapshotKey: page.snapshotKey,
-          turnIds: ['turn-chunk-shape'],
+          positionKeys: bodyKeys('turn-chunk-shape'),
           maxRecords: 1,
           maxBytes: 2 * 1024 * 1024,
         }),
@@ -1371,8 +1793,9 @@ describe('Session Turn position snapshots', () => {
       try {
         database
           .prepare(`INSERT INTO session_turn_metadata(
-            session_id, turn_id, identity_kind, order_source, first_sequence
-          ) VALUES (?, 'turn-conflict', 'turn', 'legacy', 0)`)
+            session_id, position_kind, position_id, order_source,
+            owner_first_sequence, shared_first_sequence
+          ) VALUES (?, 'turn', 'turn-conflict', 'legacy', 0, 0)`)
           .run(session.id);
       } finally {
         database.close();
@@ -1382,6 +1805,7 @@ describe('Session Turn position snapshots', () => {
       await assert.rejects(
         store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           anchor: { kind: 'tail' },
           maxPositions: 8,
@@ -1410,6 +1834,7 @@ describe('Session Turn position snapshots', () => {
       const ready = await readyPage(store, session.id);
       const page = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         snapshotKey: ready.snapshotKey,
         anchor: { kind: 'ordinal', ordinal: 0 },
@@ -1423,6 +1848,7 @@ describe('Session Turn position snapshots', () => {
 
       const tail = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         snapshotKey: page.snapshotKey,
         anchor: { kind: 'tail' },
@@ -1461,17 +1887,44 @@ describe('Session Turn position snapshots', () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-imported-'));
     const store = createSessionStore(root);
     try {
-      const session = await store.createImportedSession(
-        makeInput(),
-        [{ ...user('turn-imported', 0), text: 'x'.repeat(20 * 1024) }, user('turn-second', 1)],
-        { adapterId: 'test-adapter', sourceSessionId: 'source-session' },
-      );
+      const messages = [
+        { ...user('turn-imported', 0), text: 'x'.repeat(20 * 1024) },
+        user('turn-second', 1),
+      ];
+      const session = await store.createImportedSession(makeInput(), messages, {
+        adapterId: 'test-adapter',
+        sourceSessionId: 'source-session',
+      });
       const page = await readyPage(store, session.id);
       assert.deepEqual(page.positions, [
-        { ordinal: 0, turnId: 'turn-imported', firstSequence: 0 },
-        { ordinal: 1, turnId: 'turn-second', firstSequence: 1 },
+        { ordinal: 0, key: { kind: 'turn', id: 'turn-imported' }, firstSequence: 0 },
+        { ordinal: 1, key: { kind: 'turn', id: 'turn-second' }, firstSequence: 1 },
       ]);
       assert.ok(Buffer.byteLength(JSON.stringify(page), 'utf8') < 4 * 1024);
+      const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+        readOnly: true,
+      });
+      try {
+        const state = database
+          .prepare(`SELECT indexed_through_sequence, source_records, source_bytes
+            FROM session_turn_index_state WHERE session_id = ?`)
+          .get(session.id) as {
+          indexed_through_sequence: number;
+          source_records: number;
+          source_bytes: number;
+        };
+        assert.equal(state.indexed_through_sequence, 1);
+        assert.equal(state.source_records, 2);
+        assert.equal(
+          state.source_bytes,
+          messages.reduce(
+            (total, message) => total + Buffer.byteLength(JSON.stringify(message), 'utf8'),
+            0,
+          ),
+        );
+      } finally {
+        database.close();
+      }
     } finally {
       await store.close?.();
       await rm(root, { recursive: true, force: true });
@@ -1490,6 +1943,7 @@ describe('Session Turn position snapshots', () => {
       await assert.rejects(
         store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           snapshotKey: before.snapshotKey,
           anchor: { kind: 'tail' },
@@ -1519,6 +1973,7 @@ describe('Session Turn position snapshots', () => {
       second = createSessionStore(root);
       const shared = await second.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-second',
         anchor: { kind: 'tail' },
         maxPositions: 8,
@@ -1527,9 +1982,15 @@ describe('Session Turn position snapshots', () => {
       if (shared.kind !== 'page') assert.fail('expected a shared ready generation');
       assert.deepEqual(shared.snapshotKey, original.snapshotKey);
 
-      await first.releaseTurnPositionSnapshot(session.id, 'lease-first', original.snapshotKey);
+      await first.releaseTurnPositionSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'lease-first',
+        snapshotKey: original.snapshotKey,
+      });
       const retained = await second.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-second',
         snapshotKey: shared.snapshotKey,
         anchor: { kind: 'tail' },
@@ -1560,22 +2021,23 @@ describe('Session Turn position snapshots', () => {
           () =>
             database
               .prepare(`INSERT INTO session_turn_snapshot_positions(
-                session_id, snapshot_generation, ordinal, turn_id, first_sequence
-              ) VALUES (?, ?, 3, 'turn-extra', 3)`)
+                session_id, snapshot_generation, position_kind, position_id,
+                owner_ordinal, shared_ordinal, owner_first_sequence, shared_first_sequence
+              ) VALUES (?, ?, 'turn', 'turn-extra', 3, 3, 3, 3)`)
               .run(session.id, ready.snapshotKey.snapshotGeneration),
           () =>
             database
-              .prepare(`UPDATE session_turn_snapshot_positions SET turn_id = 'mutated'
-                WHERE session_id = ? AND snapshot_generation = ? AND ordinal = 2`)
+              .prepare(`UPDATE session_turn_snapshot_positions SET position_id = 'mutated'
+                WHERE session_id = ? AND snapshot_generation = ? AND owner_ordinal = 2`)
               .run(session.id, ready.snapshotKey.snapshotGeneration),
           () =>
             database
               .prepare(`DELETE FROM session_turn_snapshot_positions
-                WHERE session_id = ? AND snapshot_generation = ? AND ordinal = 2`)
+                WHERE session_id = ? AND snapshot_generation = ? AND owner_ordinal = 2`)
               .run(session.id, ready.snapshotKey.snapshotGeneration),
           () =>
             database
-              .prepare(`UPDATE session_turn_position_snapshots SET ready_total = 2
+              .prepare(`UPDATE session_turn_position_snapshots SET ready_owner_total = 2
                 WHERE session_id = ? AND snapshot_generation = ?`)
               .run(session.id, ready.snapshotKey.snapshotGeneration),
         ]) {
@@ -1586,6 +2048,7 @@ describe('Session Turn position snapshots', () => {
       }
       const stable = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         snapshotKey: ready.snapshotKey,
         anchor: { kind: 'tail' },
@@ -1636,6 +2099,7 @@ describe('Session Turn position snapshots', () => {
       await assert.rejects(
         store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           snapshotKey: before.snapshotKey,
           anchor: { kind: 'tail' },
@@ -1647,7 +2111,7 @@ describe('Session Turn position snapshots', () => {
       const after = await readyPage(store, session.id);
       assert.ok(after.snapshotKey.snapshotGeneration > before.snapshotKey.snapshotGeneration);
       assert.deepEqual(
-        after.positions.map(({ turnId, firstSequence }) => [turnId, firstSequence]),
+        after.positions.map((position) => [positionId(position), position.firstSequence]),
         [
           ['turn-prior', 0],
           ['turn-target', 1],
@@ -1703,8 +2167,8 @@ describe('Session Turn position snapshots', () => {
       }
       const page = await readyPage(store, session.id);
       assert.deepEqual(page.positions, [
-        { ordinal: 0, turnId: 'turn-a', firstSequence: 0 },
-        { ordinal: 1, turnId: 'turn-b', firstSequence: 1 },
+        { ordinal: 0, key: { kind: 'turn', id: 'turn-a' }, firstSequence: 0 },
+        { ordinal: 1, key: { kind: 'turn', id: 'turn-b' }, firstSequence: 1 },
       ]);
       const migrated = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
         readOnly: true,
@@ -1720,6 +2184,29 @@ describe('Session Turn position snapshots', () => {
           ).version,
           35,
         );
+        const metadataColumns = new Set(
+          (
+            migrated.prepare(`PRAGMA table_info(session_turn_metadata)`).all() as Array<{
+              name: string;
+            }>
+          ).map(({ name }) => name),
+        );
+        assert.deepEqual(
+          ['position_kind', 'position_id', 'owner_first_sequence', 'shared_first_sequence'].map(
+            (name) => metadataColumns.has(name),
+          ),
+          [true, true, true, true],
+        );
+        assert.equal(metadataColumns.has('turn_id'), false);
+        const snapshotColumns = new Set(
+          (
+            migrated.prepare(`PRAGMA table_info(session_turn_position_snapshots)`).all() as Array<{
+              name: string;
+            }>
+          ).map(({ name }) => name),
+        );
+        assert.equal(snapshotColumns.has('ready_owner_total'), true);
+        assert.equal(snapshotColumns.has('ready_shared_total'), true);
       } finally {
         migrated.close();
       }
@@ -1729,17 +2216,20 @@ describe('Session Turn position snapshots', () => {
     }
   });
 
-  test('uses indexed keyset plans for 10,000-Turn steady pages and every anchor', async () => {
+  test('uses indexed owner/shared keyset plans for 10,000 alternating-visibility Turns', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-plan-'));
     const store = createSessionStore(root);
     try {
       const session = await store.create(makeInput());
       await store.appendMessages(
         session.id,
-        Array.from({ length: 10_000 }, (_, index) => user(`turn-${index}`, index)),
+        Array.from({ length: 10_000 }, (_, index) =>
+          index % 2 === 0 ? user(`turn-${index}`, index) : hiddenPermission(`turn-${index}`, index),
+        ),
       );
       const firstStep = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         anchor: { kind: 'tail' },
         maxPositions: 8,
@@ -1747,11 +2237,13 @@ describe('Session Turn position snapshots', () => {
       assert.equal(firstStep.kind, 'building');
       if (firstStep.kind !== 'building') assert.fail('expected bounded position publication');
       assert.equal(firstStep.progress.phase, 'recovering');
-      assert.equal(firstStep.progress.sourceRecords, 0);
+      assert.equal(firstStep.progress.sourceRecords, 10_000);
+      assert.ok(firstStep.progress.sourceBytes > 0);
       assert.equal(firstStep.progress.builtPositions, 0);
       assert.equal(firstStep.progress.lastStepPositions, 0);
       const secondStep = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         snapshotKey: firstStep.snapshotKey,
         anchor: { kind: 'tail' },
@@ -1761,6 +2253,18 @@ describe('Session Turn position snapshots', () => {
       if (secondStep.kind !== 'building') assert.fail('expected legacy ordinal build');
       assert.equal(secondStep.progress.phase, 'legacy');
       assert.equal(secondStep.progress.builtPositions, 1_024);
+      const sharedProgress = await store.readTurnPositionPageSnapshot({
+        sessionId: session.id,
+        projection: 'shared',
+        snapshotLeaseId: 'lease-shared-progress',
+        throughSequence: secondStep.snapshotKey.throughSequence,
+        anchor: { kind: 'tail' },
+        maxPositions: 8,
+      });
+      assert.equal(sharedProgress.kind, 'building');
+      if (sharedProgress.kind !== 'building') assert.fail('expected shared ordinal progress');
+      assert.equal(sharedProgress.progress.builtPositions, 1_024);
+      assert.equal(sharedProgress.progress.lastStepPositions, 512);
       const bounded = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
         readOnly: true,
       });
@@ -1772,20 +2276,21 @@ describe('Session Turn position snapshots', () => {
                 WHERE session_id = ? AND snapshot_generation = ?`)
               .get(session.id, secondStep.snapshotKey.snapshotGeneration) as { count: number }
           ).count,
-          1_024,
+          2_048,
         );
         const recoveryPlans = [
           bounded
-            .prepare(`EXPLAIN QUERY PLAN SELECT MIN(first_sequence) AS boundary
+            .prepare(`EXPLAIN QUERY PLAN SELECT MIN(owner_first_sequence) AS boundary
               FROM session_turn_metadata
-              WHERE session_id = ? AND order_source = 'admission' AND first_sequence <= ?`)
+              WHERE session_id = ? AND order_source = 'admission' AND owner_first_sequence <= ?`)
             .all(session.id, 9_999),
           bounded
-            .prepare(`EXPLAIN QUERY PLAN SELECT turn_id, first_sequence, NULL AS admitted_at
+            .prepare(`EXPLAIN QUERY PLAN SELECT position_kind, position_id,
+                owner_first_sequence, NULL AS admitted_at
               FROM session_turn_metadata
-              WHERE session_id = ? AND first_sequence <= ? AND order_source = 'legacy'
-                AND (? IS NULL OR first_sequence < ?) AND first_sequence > ?
-              ORDER BY first_sequence, turn_id LIMIT ?`)
+              WHERE session_id = ? AND owner_first_sequence <= ? AND order_source = 'legacy'
+                AND (? IS NULL OR owner_first_sequence < ?) AND owner_first_sequence > ?
+              ORDER BY owner_first_sequence, position_kind, position_id LIMIT ?`)
             .all(session.id, 9_999, null, null, -1, 1_025),
         ].flat() as Array<{ detail: string }>;
         assert.equal(
@@ -1801,6 +2306,7 @@ describe('Session Turn position snapshots', () => {
       }
       let tail = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         snapshotKey: secondStep.snapshotKey,
         anchor: { kind: 'tail' },
@@ -1809,6 +2315,7 @@ describe('Session Turn position snapshots', () => {
       while (tail.kind === 'building') {
         tail = await store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           snapshotKey: tail.snapshotKey,
           anchor: { kind: 'tail' },
@@ -1817,14 +2324,30 @@ describe('Session Turn position snapshots', () => {
       }
       assert.equal(tail.kind, 'page');
       if (tail.kind !== 'page') assert.fail('expected steady page');
-      assert.equal(tail.totalTurns, 10_000);
+      assert.equal(tail.totalPositions, 10_000);
       assert.equal(tail.positions.length, 8);
-
-      const sparseRecords = await store.readTranscriptRecordsByTurnIdsSnapshot({
+      const sharedTail = await readyPage(store, session.id, 'lease-shared-10k', 'shared');
+      assert.equal(sharedTail.snapshotKey.snapshotGeneration, tail.snapshotKey.snapshotGeneration);
+      assert.equal(sharedTail.totalPositions, 5_000);
+      assert.equal(sharedTail.positions.length, 8);
+      const sharedMiddle = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'shared',
+        snapshotLeaseId: 'lease-shared-10k',
+        snapshotKey: sharedTail.snapshotKey,
+        anchor: { kind: 'ordinal', ordinal: 2_500 },
+        maxPositions: 8,
+      });
+      assert.equal(sharedMiddle.kind, 'page');
+      if (sharedMiddle.kind !== 'page') assert.fail('expected indexed shared page');
+      assert.deepEqual(sharedMiddle.positions[0]?.key, { kind: 'turn', id: 'turn-5000' });
+
+      const sparseRecords = await store.readTranscriptRecordsByPositionKeysSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         snapshotKey: tail.snapshotKey,
-        turnIds: ['turn-9999', 'turn-0'],
+        positionKeys: bodyKeys('turn-9999', 'turn-0'),
         maxRecords: 2,
         maxBytes: 64 * 1024,
       });
@@ -1839,20 +2362,32 @@ describe('Session Turn position snapshots', () => {
       try {
         const plans = [
           database
-            .prepare(`EXPLAIN QUERY PLAN SELECT ordinal FROM session_turn_snapshot_positions
-              WHERE session_id = ? AND snapshot_generation = ? AND first_sequence <= ?
-              ORDER BY first_sequence DESC LIMIT 1`)
+            .prepare(`EXPLAIN QUERY PLAN SELECT owner_ordinal FROM session_turn_snapshot_positions
+              WHERE session_id = ? AND snapshot_generation = ?
+                AND owner_ordinal IS NOT NULL AND owner_first_sequence <= ?
+              ORDER BY owner_first_sequence DESC LIMIT 1`)
             .all(session.id, tail.snapshotKey.snapshotGeneration, 5_000),
           database
-            .prepare(`EXPLAIN QUERY PLAN SELECT ordinal FROM session_turn_snapshot_positions
-              WHERE session_id = ? AND snapshot_generation = ? AND turn_id = ?`)
+            .prepare(`EXPLAIN QUERY PLAN SELECT owner_ordinal FROM session_turn_snapshot_positions
+              WHERE session_id = ? AND snapshot_generation = ?
+                AND position_kind = 'turn' AND position_id = ? AND owner_ordinal IS NOT NULL`)
             .all(session.id, tail.snapshotKey.snapshotGeneration, 'turn-5000'),
           database
-            .prepare(`EXPLAIN QUERY PLAN SELECT ordinal, turn_id, first_sequence
+            .prepare(`EXPLAIN QUERY PLAN SELECT owner_ordinal, position_kind, position_id,
+                owner_first_sequence
               FROM session_turn_snapshot_positions
-              WHERE session_id = ? AND snapshot_generation = ? AND ordinal >= ?
-              ORDER BY ordinal LIMIT ?`)
+              WHERE session_id = ? AND snapshot_generation = ?
+                AND owner_ordinal IS NOT NULL AND owner_ordinal >= ?
+              ORDER BY owner_ordinal LIMIT ?`)
             .all(session.id, tail.snapshotKey.snapshotGeneration, 5_000, 8),
+          database
+            .prepare(`EXPLAIN QUERY PLAN SELECT shared_ordinal, position_kind, position_id,
+                shared_first_sequence
+              FROM session_turn_snapshot_positions
+              WHERE session_id = ? AND snapshot_generation = ?
+                AND shared_ordinal IS NOT NULL AND shared_ordinal >= ?
+              ORDER BY shared_ordinal LIMIT ?`)
+            .all(session.id, tail.snapshotKey.snapshotGeneration, 2_500, 8),
         ].flat() as Array<{ detail: string }>;
         assert.equal(
           plans.some(({ detail }) => /\bSCAN\b|USE TEMP B-TREE/.test(detail)),
@@ -1872,7 +2407,8 @@ describe('Session Turn position snapshots', () => {
               AND message.sequence = membership.sequence
             LEFT JOIN session_message_payloads AS payload
               ON payload.session_id = message.session_id AND payload.sequence = message.sequence
-            WHERE membership.session_id = ? AND membership.turn_id = ?
+            WHERE membership.session_id = ? AND membership.position_kind = 'turn'
+              AND membership.position_id = ?
               AND membership.sequence <= ?
             ORDER BY membership.sequence LIMIT ?`)
           .all(session.id, 'turn-9999', 9_999, 2) as Array<{ detail: string }>;
@@ -1881,7 +2417,9 @@ describe('Session Turn position snapshots', () => {
           false,
         );
         assert.equal(
-          membershipPlan.some(({ detail }) => detail.includes('session_turn_memberships_by_turn')),
+          membershipPlan.some(({ detail }) =>
+            detail.includes('session_turn_memberships_by_position'),
+          ),
           true,
         );
       } finally {
@@ -1895,6 +2433,7 @@ describe('Session Turn position snapshots', () => {
       ]) {
         const page = await store.readTurnPositionPageSnapshot({
           sessionId: session.id,
+          projection: 'owner',
           snapshotLeaseId: 'lease-default',
           snapshotKey: tail.snapshotKey,
           anchor,
@@ -1907,6 +2446,7 @@ describe('Session Turn position snapshots', () => {
       }
       const adjacent = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         snapshotKey: tail.snapshotKey,
         anchor: { kind: 'ordinal', ordinal: 5_008 },
@@ -1918,9 +2458,13 @@ describe('Session Turn position snapshots', () => {
         adjacent.positions.map(({ ordinal }) => ordinal),
         Array.from({ length: 8 }, (_, index) => 5_008 + index),
       );
-      assert.equal(new Set(adjacent.positions.map(({ turnId }) => turnId)).size, 8);
+      assert.equal(
+        new Set(adjacent.positions.map(({ key }) => (key.kind === 'empty' ? '' : key.id))).size,
+        8,
+      );
       const prior = await store.readTurnPositionPageSnapshot({
         sessionId: session.id,
+        projection: 'owner',
         snapshotLeaseId: 'lease-default',
         snapshotKey: tail.snapshotKey,
         anchor: { kind: 'ordinal', ordinal: 5_000 },
@@ -1929,8 +2473,8 @@ describe('Session Turn position snapshots', () => {
       assert.equal(prior.kind, 'page');
       if (prior.kind !== 'page') assert.fail('expected prior keyset page');
       assert.equal(
-        prior.positions.some(({ turnId }) =>
-          adjacent.positions.some((position) => position.turnId === turnId),
+        prior.positions.some((position) =>
+          adjacent.positions.some((candidate) => positionId(candidate) === positionId(position)),
         ),
         false,
       );
@@ -1943,9 +2487,15 @@ describe('Session Turn position snapshots', () => {
 
 type TestStore = ReturnType<typeof createSessionStore>;
 
-async function readyPage(store: TestStore, sessionId: string, snapshotLeaseId = 'lease-default') {
+async function readyPage(
+  store: TestStore,
+  sessionId: string,
+  snapshotLeaseId = 'lease-default',
+  projection: 'owner' | 'shared' = 'owner',
+) {
   let result = await store.readTurnPositionPageSnapshot({
     sessionId,
+    projection,
     snapshotLeaseId,
     anchor: { kind: 'tail' },
     maxPositions: 8,
@@ -1953,6 +2503,7 @@ async function readyPage(store: TestStore, sessionId: string, snapshotLeaseId = 
   while (result.kind === 'building') {
     result = await store.readTurnPositionPageSnapshot({
       sessionId,
+      projection,
       snapshotLeaseId,
       snapshotKey: result.snapshotKey,
       anchor: { kind: 'tail' },
@@ -1972,6 +2523,26 @@ function user(turnId: string, index: number) {
     ts: index,
     text: turnId,
   };
+}
+
+function hiddenPermission(turnId: string, index: number) {
+  return {
+    type: 'permission_decision' as const,
+    id: `permission-${index}`,
+    turnId,
+    ts: index,
+    toolUseId: `tool-${index}`,
+    toolName: 'Read',
+    decision: 'deny' as const,
+  };
+}
+
+function bodyKeys(...ids: string[]) {
+  return ids.map((id) => ({ kind: 'turn' as const, id }));
+}
+
+function positionId(position: { key: { kind: 'turn' | 'note'; id: string } | { kind: 'empty' } }) {
+  return position.key.kind === 'empty' ? '' : position.key.id;
 }
 
 function exactSizeUserMessage(targetBytes: number, turnId: string, turnIdAfterBody: boolean) {

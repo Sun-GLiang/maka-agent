@@ -307,6 +307,18 @@ export interface SessionTurnPositionSnapshotKey {
   readonly snapshotGeneration: number;
 }
 
+export type SessionTranscriptProjection = 'owner' | 'shared';
+
+export type SessionTranscriptPositionKey =
+  | { readonly kind: 'turn'; readonly id: string }
+  | { readonly kind: 'note'; readonly id: string }
+  | { readonly kind: 'empty' };
+
+export type SessionTranscriptBodyPositionKey = Exclude<
+  SessionTranscriptPositionKey,
+  { readonly kind: 'empty' }
+>;
+
 export type SessionTurnPositionAnchor =
   /** The final position, returned as the inclusive end of a tail-sized page. */
   | { readonly kind: 'tail' }
@@ -319,12 +331,13 @@ export type SessionTurnPositionAnchor =
 
 export interface SessionTurnPosition {
   readonly ordinal: number;
-  readonly turnId: string;
+  readonly key: SessionTranscriptPositionKey;
   readonly firstSequence: number | null;
 }
 
 export interface SessionTurnPositionPageSnapshotRequest {
   readonly sessionId: string;
+  readonly projection: SessionTranscriptProjection;
   readonly snapshotLeaseId: string;
   /** Exact continuation identity. Omit only when allocating a new snapshot. */
   readonly snapshotKey?: SessionTurnPositionSnapshotKey;
@@ -338,6 +351,7 @@ export type SessionTurnPositionReadResult =
   | {
       readonly kind: 'building';
       readonly snapshotKey: SessionTurnPositionSnapshotKey;
+      readonly projection: SessionTranscriptProjection;
       readonly progress: {
         readonly phase: 'recovering' | 'legacy' | 'admission' | 'notes';
         readonly nextSequence: number;
@@ -352,6 +366,7 @@ export type SessionTurnPositionReadResult =
     }
   | {
       readonly kind: 'capacity';
+      readonly projection: SessionTranscriptProjection;
       readonly throughSequence: number | null;
       readonly authorityRevision: number;
       readonly retainedSnapshots: 2;
@@ -359,26 +374,40 @@ export type SessionTurnPositionReadResult =
   | {
       readonly kind: 'page';
       readonly snapshotKey: SessionTurnPositionSnapshotKey;
+      readonly projection: SessionTranscriptProjection;
       readonly startOrdinal: number;
-      readonly totalTurns: number;
+      readonly totalPositions: number;
       readonly positions: readonly SessionTurnPosition[];
       readonly hasOlder: boolean;
       readonly hasNewer: boolean;
     };
 
-export interface SessionTranscriptRecordsByTurnIdsSnapshotRequest {
+export interface SessionTranscriptRecordsByPositionKeysSnapshotRequest {
   readonly sessionId: string;
+  readonly projection: SessionTranscriptProjection;
   readonly snapshotLeaseId: string;
   readonly snapshotKey: SessionTurnPositionSnapshotKey;
-  readonly turnIds: readonly string[];
+  readonly positionKeys: readonly SessionTranscriptBodyPositionKey[];
   readonly maxBytes: number;
   readonly maxRecords: number;
 }
 
-export interface SessionTranscriptRecordsByTurnIdsSnapshotResult {
+export interface SessionTranscriptRecordsByPositionKeysSnapshotResult {
   readonly snapshotKey: SessionTurnPositionSnapshotKey;
-  readonly records: readonly { readonly sequence: number; readonly message: StoredMessage }[];
+  readonly projection: SessionTranscriptProjection;
+  readonly records: readonly {
+    readonly positionKey: SessionTranscriptBodyPositionKey;
+    readonly sequence: number;
+    readonly message: StoredMessage;
+  }[];
   readonly rawBytes: number;
+}
+
+export interface SessionTurnPositionSnapshotReleaseRequest {
+  readonly sessionId: string;
+  readonly projection: SessionTranscriptProjection;
+  readonly snapshotLeaseId: string;
+  readonly snapshotKey: SessionTurnPositionSnapshotKey;
 }
 
 export class SessionTurnPositionSnapshotMismatchError extends Error {
@@ -457,14 +486,10 @@ export interface SessionStore {
   readTurnPositionPageSnapshot(
     request: SessionTurnPositionPageSnapshotRequest,
   ): Promise<SessionTurnPositionReadResult>;
-  readTranscriptRecordsByTurnIdsSnapshot(
-    request: SessionTranscriptRecordsByTurnIdsSnapshotRequest,
-  ): Promise<SessionTranscriptRecordsByTurnIdsSnapshotResult>;
-  releaseTurnPositionSnapshot(
-    sessionId: string,
-    snapshotLeaseId: string,
-    snapshotKey: SessionTurnPositionSnapshotKey,
-  ): Promise<void>;
+  readTranscriptRecordsByPositionKeysSnapshot(
+    request: SessionTranscriptRecordsByPositionKeysSnapshotRequest,
+  ): Promise<SessionTranscriptRecordsByPositionKeysSnapshotResult>;
+  releaseTurnPositionSnapshot(request: SessionTurnPositionSnapshotReleaseRequest): Promise<void>;
   /** Read durable messages for startup recovery. */
   readMessagesForRecovery(sessionId: string): Promise<StoredMessage[]>;
   /** Derive durable turns without triggering connection-lock self-healing. */
@@ -1091,20 +1116,18 @@ class SqliteSessionStore implements SessionAuthorityStore {
     return this.metadata.readTurnPositionPage(request);
   }
 
-  async readTranscriptRecordsByTurnIdsSnapshot(
-    request: SessionTranscriptRecordsByTurnIdsSnapshotRequest,
-  ): Promise<SessionTranscriptRecordsByTurnIdsSnapshotResult> {
+  async readTranscriptRecordsByPositionKeysSnapshot(
+    request: SessionTranscriptRecordsByPositionKeysSnapshotRequest,
+  ): Promise<SessionTranscriptRecordsByPositionKeysSnapshotResult> {
     await this.ensureReady();
-    return this.metadata.readTranscriptRecordsByTurnIds(request);
+    return this.metadata.readTranscriptRecordsByPositionKeys(request);
   }
 
   async releaseTurnPositionSnapshot(
-    sessionId: string,
-    snapshotLeaseId: string,
-    snapshotKey: SessionTurnPositionSnapshotKey,
+    request: SessionTurnPositionSnapshotReleaseRequest,
   ): Promise<void> {
     await this.ensureReady();
-    await this.metadata.releaseTurnPositionSnapshot(sessionId, snapshotLeaseId, snapshotKey);
+    await this.metadata.releaseTurnPositionSnapshot(request);
   }
 
   async readMessagesForRecovery(sessionId: string): Promise<StoredMessage[]> {

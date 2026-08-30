@@ -20,7 +20,7 @@
 import type { AttachmentRef, MessageContent } from '@maka/core/events';
 import { projectToolActivityArgs } from '@maka/core/tool-activity-args';
 import {
-  isUserVisibleSessionSystemNote,
+  classifySharedSessionTranscriptVisibility,
   type AssistantThinking,
   type StoredMessage,
   userFacingText,
@@ -49,6 +49,12 @@ export function projectSharedSessionTranscriptMessage(
   message: StoredMessage,
   sessionId: string,
 ): StoredMessage | null {
+  const visibility = classifySharedSessionTranscriptVisibility(
+    message.type === 'system_note'
+      ? { type: message.type, kind: message.kind }
+      : { type: message.type },
+  );
+  if (visibility === 'hidden') return null;
   switch (message.type) {
     case 'user': {
       return {
@@ -153,15 +159,13 @@ export function projectSharedSessionTranscriptMessage(
         ...(message.costUsd === undefined ? {} : { costUsd: message.costUsd }),
       };
     case 'system_note':
-      return isUserVisibleSessionSystemNote(message.kind)
-        ? {
-            type: message.type,
-            id: message.id,
-            ...(message.turnId === undefined ? {} : { turnId: message.turnId }),
-            ts: message.ts,
-            kind: message.kind,
-          }
-        : null;
+      return {
+        type: message.type,
+        id: message.id,
+        ...(message.turnId === undefined ? {} : { turnId: message.turnId }),
+        ts: message.ts,
+        kind: message.kind,
+      };
     case 'permission_decision':
     case 'workhub_coordination':
       return null;

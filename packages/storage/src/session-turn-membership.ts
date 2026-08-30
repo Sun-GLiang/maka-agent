@@ -18,12 +18,20 @@
  */
 
 import type { DatabaseSync } from 'node:sqlite';
-import { isUserVisibleSessionSystemNote, type StoredMessage } from '@maka/core/session';
+import {
+  classifySharedSessionTranscriptVisibility,
+  isSessionSystemNoteKind,
+  isStoredMessageType,
+  type StoredMessage,
+} from '@maka/core/session';
 import { sqliteTableExists } from './sqlite-schema-introspection.js';
 
 export type SessionTurnIdentity =
-  | { readonly kind: 'turn'; readonly turnId: string }
-  | { readonly kind: 'note'; readonly turnId: string }
+  | {
+      readonly kind: 'turn' | 'note';
+      readonly positionId: string;
+      readonly sharedVisibility: boolean;
+    }
   | { readonly kind: 'ignored' };
 
 export class SessionTurnIdentityClassificationError extends Error {
@@ -51,20 +59,36 @@ export function classifySessionTurnIdentity(input: {
   readonly kindPresent: boolean;
   readonly kind?: string;
 }): SessionTurnIdentity {
+  if (input.id.length === 0) {
+    throw new SessionTurnIdentityClassificationError('message id must be a non-empty string');
+  }
+  if (!isStoredMessageType(input.type)) {
+    throw new SessionTurnIdentityClassificationError('message type is unknown');
+  }
+  const visibility = (() => {
+    if (input.type !== 'system_note') {
+      return classifySharedSessionTranscriptVisibility({ type: input.type });
+    }
+    if (!input.kindPresent || !isSessionSystemNoteKind(input.kind)) {
+      throw new SessionTurnIdentityClassificationError('system note kind is unknown or missing');
+    }
+    return classifySharedSessionTranscriptVisibility({ type: input.type, kind: input.kind });
+  })();
   if (input.turnIdPresent) {
     if (typeof input.turnId !== 'string' || input.turnId.length === 0) {
       throw new SessionTurnIdentityClassificationError('turnId must be a non-empty string');
     }
-    return { kind: 'turn', turnId: input.turnId };
+    return {
+      kind: 'turn',
+      positionId: input.turnId,
+      sharedVisibility: visibility === 'visible',
+    };
   }
   if (input.type !== 'system_note') {
     throw new SessionTurnIdentityClassificationError('non-system message is missing turnId');
   }
-  if (!input.kindPresent || typeof input.kind !== 'string' || input.kind.length === 0) {
-    throw new SessionTurnIdentityClassificationError('turnless system note is missing kind');
-  }
-  return input.id.length > 0 && isUserVisibleSessionSystemNote(input.kind)
-    ? { kind: 'note', turnId: `session-note:${input.id}` }
+  return visibility === 'visible'
+    ? { kind: 'note', positionId: input.id, sharedVisibility: true }
     : { kind: 'ignored' };
 }
 
@@ -94,49 +118,60 @@ export function publishSessionTurnMembership(
             SELECT admitted_at FROM core_root_turn_admissions
             WHERE session_id = ? AND turn_id = ?
           `)
-          .get(sessionId, identity.turnId) as { admitted_at: number } | undefined)
+          .get(sessionId, identity.positionId) as { admitted_at: number } | undefined)
       : undefined;
-  const existingIdentity = db
-    .prepare(`
-      SELECT identity_kind FROM session_turn_metadata
-      WHERE session_id = ? AND turn_id = ?
-    `)
-    .get(sessionId, identity.turnId) as { identity_kind: string } | undefined;
-  if (existingIdentity && existingIdentity.identity_kind !== identity.kind) {
-    throw new SessionTurnMembershipPublicationError('incompatible_identity', sequence);
-  }
   db.prepare(`
     INSERT INTO session_turn_metadata(
-      session_id, turn_id, identity_kind, order_source, admitted_at, first_sequence
-    ) VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(session_id, turn_id) DO UPDATE SET
+      session_id, position_kind, position_id, order_source, admitted_at,
+      owner_first_sequence, shared_first_sequence
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id, position_kind, position_id) DO UPDATE SET
       order_source = CASE WHEN excluded.order_source = 'admission' THEN 'admission'
         ELSE session_turn_metadata.order_source END,
       admitted_at = COALESCE(excluded.admitted_at, session_turn_metadata.admitted_at),
-      first_sequence = CASE WHEN session_turn_metadata.first_sequence IS NULL
-        THEN excluded.first_sequence
-        ELSE MIN(session_turn_metadata.first_sequence, excluded.first_sequence) END
+      owner_first_sequence = CASE WHEN session_turn_metadata.owner_first_sequence IS NULL
+        THEN excluded.owner_first_sequence
+        ELSE MIN(session_turn_metadata.owner_first_sequence, excluded.owner_first_sequence) END,
+      shared_first_sequence = CASE
+        WHEN excluded.shared_first_sequence IS NULL THEN session_turn_metadata.shared_first_sequence
+        WHEN session_turn_metadata.shared_first_sequence IS NULL THEN excluded.shared_first_sequence
+        ELSE MIN(session_turn_metadata.shared_first_sequence, excluded.shared_first_sequence) END
   `).run(
     sessionId,
-    identity.turnId,
     identity.kind,
+    identity.positionId,
     admission ? 'admission' : 'legacy',
     admission?.admitted_at ?? null,
     sequence,
+    identity.sharedVisibility ? sequence : null,
   );
   const inserted = db
     .prepare(`
-      INSERT INTO session_turn_memberships(session_id, sequence, turn_id)
-      VALUES (?, ?, ?) ON CONFLICT(session_id, sequence) DO NOTHING
+      INSERT INTO session_turn_memberships(
+        session_id, sequence, position_kind, position_id, shared_visibility
+      ) VALUES (?, ?, ?, ?, ?) ON CONFLICT(session_id, sequence) DO NOTHING
     `)
-    .run(sessionId, sequence, identity.turnId);
+    .run(
+      sessionId,
+      sequence,
+      identity.kind,
+      identity.positionId,
+      identity.sharedVisibility ? 1 : 0,
+    );
   if (inserted.changes === 1) return;
   const existing = db
     .prepare(`
-      SELECT turn_id FROM session_turn_memberships WHERE session_id = ? AND sequence = ?
+      SELECT position_kind, position_id, shared_visibility
+      FROM session_turn_memberships WHERE session_id = ? AND sequence = ?
     `)
-    .get(sessionId, sequence) as { turn_id: string } | undefined;
-  if (existing?.turn_id !== identity.turnId) {
+    .get(sessionId, sequence) as
+    | { position_kind: string; position_id: string; shared_visibility: number }
+    | undefined;
+  if (
+    existing?.position_kind !== identity.kind ||
+    existing.position_id !== identity.positionId ||
+    existing.shared_visibility !== (identity.sharedVisibility ? 1 : 0)
+  ) {
     throw new SessionTurnMembershipPublicationError('corrupt_source', sequence);
   }
 }

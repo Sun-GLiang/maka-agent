@@ -20,6 +20,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  classifySharedSessionTranscriptVisibility,
   decodeStoredMessage as decodePersistedStoredMessage,
   type StoredMessage,
 } from '@maka/core/session';
@@ -220,6 +221,82 @@ test('projects durable and active transcript records before sharing them', async
   assert.equal(projectedInput?.type, 'tool_call');
   if (projectedInput?.type === 'tool_call') {
     assert.equal(JSON.stringify(projectedInput.args).includes('sk-example-value'), false);
+  }
+});
+
+test('shares the Core visibility decision while retaining Host-only body sanitization', () => {
+  const messages: StoredMessage[] = [
+    userMessage(0),
+    assistantMessage(1),
+    {
+      type: 'tool_call',
+      id: 'call',
+      turnId: 'turn-0',
+      ts: 2,
+      toolName: 'Read',
+      args: {},
+      modelVisibility: 'hidden',
+    },
+    {
+      type: 'tool_result',
+      id: 'result',
+      turnId: 'turn-0',
+      ts: 3,
+      toolUseId: 'call',
+      isError: false,
+      content: { kind: 'text', text: 'ok' },
+      modelVisibility: 'hidden',
+    },
+    {
+      type: 'permission_decision',
+      id: 'permission',
+      turnId: 'turn-0',
+      ts: 4,
+      toolUseId: 'call',
+      toolName: 'Read',
+      decision: 'allow',
+    },
+    { type: 'token_usage', id: 'usage', turnId: 'turn-0', ts: 5, input: 1, output: 1 },
+    {
+      type: 'turn_state',
+      id: 'state',
+      turnId: 'turn-0',
+      ts: 6,
+      status: 'completed',
+      partialOutputRetained: false,
+    },
+    {
+      type: 'workhub_coordination',
+      id: 'coordination',
+      turnId: 'turn-0',
+      ts: 7,
+      schemaVersion: 1,
+      kind: 'delegation_assigned',
+      actionId: 'action',
+      actionFingerprint: `sha256:${'0'.repeat(64)}`,
+      coordinationTurnId: 'turn-0',
+      targetSessionId: 'target',
+      disposition: 'delegate_existing',
+      userText: 'work',
+      delegationId: 'delegation',
+      targetTurnId: 'target-turn',
+      targetMessageId: 'target-message',
+      targetSessionName: 'target',
+    },
+    { type: 'system_note', id: 'visible-note', ts: 8, kind: 'step_limit' },
+    { type: 'system_note', id: 'hidden-note', ts: 9, kind: 'mode_change' },
+  ];
+  for (const message of messages) {
+    const visibility = classifySharedSessionTranscriptVisibility(
+      message.type === 'system_note'
+        ? { type: message.type, kind: message.kind }
+        : { type: message.type },
+    );
+    assert.equal(
+      projectSharedSessionTranscriptMessage(message, 'session-1') === null,
+      visibility === 'hidden',
+      message.type,
+    );
   }
 });
 
