@@ -32,6 +32,10 @@ import {
   type SessionTurnPositionSnapshotReleaseRequest,
 } from './session-store.js';
 import { ensureTurnIndexRows } from './session-turn-position-authority.js';
+import {
+  advanceSessionTurnAdmissionRecovery,
+  SESSION_TURN_ADMISSION_RECOVERY_MAX_ROWS,
+} from './session-turn-admission-recovery.js';
 import { sqliteTableExists } from './sqlite-schema-introspection.js';
 
 export const SESSION_TURN_POSITION_MAX_PAGE_POSITIONS = 128;
@@ -72,6 +76,11 @@ export type SessionTurnPositionAllocation =
 export interface SessionTurnPositionBuildStep {
   readonly snapshot: SessionTurnPositionSnapshotRow;
   readonly executedPhase: Exclude<SessionTurnPositionBuildPhase, 'ready'>;
+}
+
+export interface SessionTurnAdmissionRecoveryStep {
+  readonly snapshot: SessionTurnPositionSnapshotRow;
+  readonly lastStepAdmissions: number;
 }
 
 export interface SessionTurnMembershipPreflight {
@@ -191,6 +200,42 @@ export function markSessionTurnRecoveryComplete(
     .run(sessionId, snapshot.slot);
   if (updated.changes !== 1) throw new SessionTurnPositionSnapshotMismatchError(sessionId);
   return requireSnapshot(db, sessionId, snapshotKeyFromRow(snapshot));
+}
+
+export function advanceSessionTurnAdmissionRecoveryForSnapshot(
+  db: DatabaseSync,
+  sessionId: string,
+  snapshot: SessionTurnPositionSnapshotRow,
+): SessionTurnAdmissionRecoveryStep {
+  if (snapshot.state !== 'building' || snapshot.build_phase !== 'recovering') {
+    throw new SessionTurnPositionSnapshotMismatchError(sessionId);
+  }
+  const recovery = advanceSessionTurnAdmissionRecovery(db, {
+    sessionId,
+    cursorAdmittedAt: snapshot.build_cursor_admitted_at,
+    cursorTurnId: snapshot.build_cursor_position_id,
+    maxAdmissions: SESSION_TURN_ADMISSION_RECOVERY_MAX_ROWS,
+  });
+  const updated = db
+    .prepare(`
+      UPDATE session_turn_position_snapshots
+      SET build_cursor_admitted_at = ?, build_cursor_position_kind = ?,
+        build_cursor_position_id = ?
+      WHERE session_id = ? AND slot = ? AND state = 'building' AND build_phase = 'recovering'
+    `)
+    .run(
+      recovery.cursorAdmittedAt,
+      recovery.cursorTurnId === null ? null : 'turn',
+      recovery.cursorTurnId,
+      sessionId,
+      snapshot.slot,
+    );
+  if (updated.changes !== 1) throw new SessionTurnPositionSnapshotMismatchError(sessionId);
+  const current = requireSnapshot(db, sessionId, snapshotKeyFromRow(snapshot));
+  return {
+    snapshot: recovery.complete ? markSessionTurnRecoveryComplete(db, sessionId, current) : current,
+    lastStepAdmissions: recovery.lastStepAdmissions,
+  };
 }
 
 export function advanceSessionTurnPositionOrdinalBuild(
