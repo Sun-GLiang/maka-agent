@@ -244,6 +244,7 @@ if (runtimeHostPeerConfiguration) {
     runtimeHostPeerOwner = await openRuntimeHostPeerMeshOwner({
       ...runtimeHostPeerConfiguration,
       dataRoot: join(userDataDir, 'peer-mesh'),
+      endpointKind: 'client',
     });
     runtimeHostPeerClient = runtimeHostPeerOwner.client;
     runtimeHostPeerMesh = runtimeHostPeerOwner.mesh;
@@ -253,7 +254,9 @@ if (runtimeHostPeerConfiguration) {
     });
   } catch (error) {
     console.error('[runtime-host] Peer Mesh is unavailable; continuing with Direct peer:', error);
-    runtimeHostPeerClient = createRuntimeHostPeerClientFromEnvironment();
+    runtimeHostPeerClient = createRuntimeHostPeerClientFromEnvironment(process.env, {
+      automaticRelayDiscovery: runtimeHostPeerConfiguration.automaticRelayDiscovery,
+    });
   }
 }
 const runtimeHostDirectPeerAvailable = runtimeHostPeerClient !== undefined;
@@ -591,6 +594,8 @@ const runtimeHostManagement = createDesktopRuntimeHostManagement({
 const runtimeHostPeerMeshManagement = createDesktopRuntimeHostPeerMeshManagement({
   ipcMain,
   localMesh: () => runtimeHostPeerMesh,
+  localHost: localRuntimeHostRemoteAccess,
+  runLocal: localRuntimeHostOperator.runPeerMesh,
   profiles: runtimeHostProfileService,
   runRemote: runtimeHostSshTerminal.runPeerMeshManagement,
 });
@@ -928,6 +933,10 @@ runtimeHostManager = await startRuntimeHostDesktopManager(
     registerClientIpc: registerHostClientIpc,
     openSshTunnel: runtimeHostSshTerminal.openSshTunnel,
     activateSshOperator: runtimeHostSshTerminal.activateSshOperator,
+    resolveLocalCollaborationConnectionTarget: () =>
+      localRuntimeHostRemoteAccess.createCollaborationConnectionTarget(),
+    resolveProfileCollaborationConnectionTarget: (profile) =>
+      runtimeHostProfileService.resolveCollaborationConnectionTarget(profile),
   },
   {
     upgradePrompts: createRuntimeHostUpgradePrompts(
@@ -1012,6 +1021,8 @@ runtimeHostManager = await startRuntimeHostDesktopManager(
       });
     },
     recoverLocalHost: (signal) => localRuntimeHostRemoteAccess.recoverBeforeLocalHostStart(signal),
+    resolveLocalHostReplacement: (registration, signal) =>
+      localRuntimeHostRemoteAccess.resolveConflictingHostReplacement(registration, signal),
     onFatalError: (error, target) => {
       if (error instanceof RuntimeHostUpgradeCancelledError) {
         if (target.profile.kind === "local") app.quit();

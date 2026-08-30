@@ -39,6 +39,12 @@ export type RuntimeHostUpdateSelector =
   | { readonly kind: 'channel'; readonly channel: 'latest' | 'next' }
   | { readonly kind: 'exact'; readonly version: string };
 
+export interface RuntimeHostExpectedHost {
+  /** Freshness fence for admitting a canonical supervised-deployment mutation. */
+  readonly hostEpoch: string;
+  readonly pid: number;
+}
+
 export type RuntimeHostCliCommand =
   | {
       kind: 'runtime-host-managed-activate';
@@ -181,7 +187,9 @@ export type RuntimeHostCliCommand =
         | 'leave'
         | 'close'
         | 'reconcile'
-        | 'transit';
+        | 'transit'
+        | 'rename'
+        | 'rename-mesh';
       json: boolean;
       framed?: true;
       managedRootId: string;
@@ -189,6 +197,7 @@ export type RuntimeHostCliCommand =
       expectedTarget: RuntimeHostManagedServiceTarget;
       meshId?: string | null;
       peerId?: string;
+      displayName?: string | null;
     }
   | {
       kind: 'runtime-host-service-check-update';
@@ -208,6 +217,7 @@ export type RuntimeHostCliCommand =
       managedRootId?: string;
       operatorDeploymentId?: string;
       expectedTarget: RuntimeHostManagedServiceTarget;
+      expectedHost?: RuntimeHostExpectedHost;
       selector?: RuntimeHostUpdateSelector;
       allowInterruptActiveTasks?: true;
     }
@@ -247,6 +257,7 @@ export type RuntimeHostCliCommand =
       operationGrants: string[];
       canPublishClientCapabilities: boolean;
       canUseHostPaths: boolean;
+      capabilityOwnerCredentialId?: string;
       preset?: 'desktop-client' | 'terminal-client';
     }
   | {
@@ -725,6 +736,7 @@ function parseServiceManagementCommand(argv: string[]): RuntimeHostCliCommand {
   let allowInterruptActiveTasks = false;
   let clientDataRoot: string | undefined;
   let updateTarget: string | undefined;
+  let expectedHost: RuntimeHostExpectedHost | undefined;
   let expectedConfigFingerprint: string | undefined;
   const flagOptions: Readonly<Record<string, () => void | RuntimeHostCliError>> =
     action === 'uninstall'
@@ -764,6 +776,16 @@ function parseServiceManagementCommand(argv: string[]): RuntimeHostCliCommand {
             '--target': (value: string) => {
               if (updateTarget !== undefined) return error('Duplicate --target');
               updateTarget = value;
+            },
+          }
+        : {}),
+      ...(action === 'update'
+        ? {
+            '--expected-host-json': (value: string) => {
+              if (expectedHost !== undefined) return error('Duplicate --expected-host-json');
+              const parsed = parseExpectedHost(value);
+              if ('kind' in parsed) return parsed;
+              expectedHost = parsed;
             },
           }
         : {}),
@@ -850,6 +872,9 @@ function parseServiceManagementCommand(argv: string[]): RuntimeHostCliCommand {
     };
   }
   if (action === 'update') {
+    if (expectedHost && !options.managedRootId) {
+      return error('--expected-host-json requires --managed-root-id');
+    }
     const selector =
       updateTarget === undefined ? undefined : parseUpdateSelector(updateTarget, 'update');
     if (selector && 'kind' in selector && selector.kind === 'error') return selector;
@@ -863,6 +888,7 @@ function parseServiceManagementCommand(argv: string[]): RuntimeHostCliCommand {
         ? { operatorDeploymentId: options.operatorDeploymentId }
         : {}),
       expectedTarget: options.expectedTarget!,
+      ...(expectedHost ? { expectedHost } : {}),
       ...(selector ? { selector } : {}),
       ...(allowInterruptActiveTasks ? { allowInterruptActiveTasks: true } : {}),
     };
@@ -1020,20 +1046,29 @@ function parseServicePeerMeshCommand(argv: string[]): RuntimeHostCliCommand {
     action !== 'leave' &&
     action !== 'close' &&
     action !== 'reconcile' &&
-    action !== 'transit'
+    action !== 'transit' &&
+    action !== 'rename' &&
+    action !== 'rename-mesh'
   ) {
     return error(
       action
         ? `Unexpected runtime-host service mesh command: ${action}`
-        : 'runtime-host service mesh requires status, create, invite, join, remove, leave, close, reconcile, or transit',
+        : 'runtime-host service mesh requires status, create, invite, join, remove, leave, close, reconcile, transit, rename, or rename-mesh',
     );
   }
   let meshId: string | null | undefined;
   let peerId: string | undefined;
+  let displayName: string | null | undefined;
+  let clientDataRoot: string | undefined;
   const options = parseManagedServiceOptions(argv.slice(1), {
     allowConfiguration: false,
     allowFramed: true,
     valueOptions: {
+      '--client-data-root': (value) => {
+        if (clientDataRoot !== undefined) return error('Duplicate --client-data-root');
+        if (!isSafeAbsolutePath(value)) return error('--client-data-root must be an absolute path');
+        clientDataRoot = value;
+      },
       '--mesh': (value) => {
         if (meshId !== undefined) return error('Duplicate --mesh');
         if (!value || value.length > 128) return error('--mesh requires a valid Mesh ID');
@@ -1044,11 +1079,22 @@ function parseServicePeerMeshCommand(argv: string[]): RuntimeHostCliCommand {
         if (!value || value.length > 256) return error('--peer requires a valid Peer ID');
         peerId = value;
       },
+      '--name': (value) => {
+        if (displayName !== undefined) return error('Duplicate --name');
+        if (!value.trim() || value.trim().length > 80) {
+          return error('--name requires a display name of at most 80 characters');
+        }
+        displayName = value.trim();
+      },
     },
     flagOptions: {
       '--off': () => {
         if (meshId !== undefined) return error('mesh transit accepts either --mesh or --off');
         meshId = null;
+      },
+      '--clear-name': () => {
+        if (displayName !== undefined) return error('mesh rename accepts --name or --clear-name');
+        displayName = null;
       },
     },
   });
@@ -1059,7 +1105,11 @@ function parseServicePeerMeshCommand(argv: string[]): RuntimeHostCliCommand {
     );
   }
   const needsMesh =
-    action === 'invite' || action === 'remove' || action === 'leave' || action === 'close';
+    action === 'invite' ||
+    action === 'remove' ||
+    action === 'leave' ||
+    action === 'close' ||
+    action === 'rename-mesh';
   if (needsMesh && typeof meshId !== 'string') {
     return error(`runtime-host service mesh ${action} requires --mesh`);
   }
@@ -1079,6 +1129,13 @@ function parseServicePeerMeshCommand(argv: string[]): RuntimeHostCliCommand {
   if (action === 'transit' && meshId === undefined) {
     return error('runtime-host service mesh transit requires --mesh or --off');
   }
+  if ((action === 'rename' || action === 'rename-mesh') !== (displayName !== undefined)) {
+    return error(
+      action === 'rename'
+        ? 'runtime-host service mesh rename requires --name or --clear-name'
+        : '--name and --clear-name are only valid with mesh rename or rename-mesh',
+    );
+  }
   return {
     kind: 'runtime-host-service-peer-mesh',
     action,
@@ -1089,6 +1146,7 @@ function parseServicePeerMeshCommand(argv: string[]): RuntimeHostCliCommand {
     expectedTarget: options.expectedTarget,
     ...(meshId !== undefined ? { meshId } : {}),
     ...(peerId ? { peerId } : {}),
+    ...(displayName !== undefined ? { displayName } : {}),
   };
 }
 
@@ -1111,6 +1169,33 @@ function parseUpdateSelector(
     return error('--target must be latest, next, or an exact Maka version');
   }
   return { kind: 'exact', version: value };
+}
+
+function parseExpectedHost(value: string): RuntimeHostExpectedHost | RuntimeHostCliError {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    return error('--expected-host-json must be valid JSON');
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    Object.keys(parsed).length !== 2 ||
+    typeof (parsed as { hostEpoch?: unknown }).hostEpoch !== 'string' ||
+    (parsed as { hostEpoch: string }).hostEpoch.length === 0 ||
+    Buffer.byteLength((parsed as { hostEpoch: string }).hostEpoch, 'utf8') > 128 ||
+    /[\u0000-\u001f\u007f]/u.test((parsed as { hostEpoch: string }).hostEpoch) ||
+    !Number.isSafeInteger((parsed as { pid?: unknown }).pid) ||
+    (parsed as { pid: number }).pid <= 0
+  ) {
+    return error('--expected-host-json must contain one valid hostEpoch and pid');
+  }
+  return {
+    hostEpoch: (parsed as { hostEpoch: string }).hostEpoch,
+    pid: (parsed as { pid: number }).pid,
+  };
 }
 
 interface ManagedServiceOptions {
@@ -1945,6 +2030,7 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
   let principalKind: 'remote_owner' | 'capability_provider' = 'remote_owner';
   let principalKindSpecified = false;
   let credentialId: string | undefined;
+  let capabilityOwnerCredentialId: string | undefined;
   let currentCredentialFingerprint: string | undefined;
   const operationGrants: string[] = [];
   let canPublishClientCapabilities = false;
@@ -1973,6 +2059,7 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
       argument === '--principal' ||
       argument === '--grant' ||
       argument === '--credential' ||
+      argument === '--capability-owner-credential' ||
       argument === '--current-fingerprint'
     ) {
       const parsed = optionValue(argv, index, argument);
@@ -1995,6 +2082,7 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
       if (argument === '--principal') principalId = parsed;
       if (argument === '--grant') operationGrants.push(parsed);
       if (argument === '--credential') credentialId = parsed;
+      if (argument === '--capability-owner-credential') capabilityOwnerCredentialId = parsed;
       if (argument === '--current-fingerprint') currentCredentialFingerprint = parsed;
       index += 1;
       continue;
@@ -2013,6 +2101,7 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
       canUseHostPaths ||
       preset ||
       credentialId ||
+      capabilityOwnerCredentialId ||
       currentCredentialFingerprint
     ) {
       return error('Credential mutation options are not valid for access list');
@@ -2037,7 +2126,8 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
       canPublishClientCapabilities ||
       canUseHostPaths ||
       preset ||
-      credentialId
+      credentialId ||
+      capabilityOwnerCredentialId
     ) {
       return error('Credential issue options are not valid for access prepare');
     }
@@ -2064,6 +2154,9 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
       return error('--preset cannot be combined with --kind, --grant, or authority flags');
     }
     if (preset) {
+      if (capabilityOwnerCredentialId) {
+        return error('--capability-owner-credential requires --kind capability-provider');
+      }
       return {
         kind: 'runtime-host-access-issue',
         ...(rootPath ? { rootPath } : {}),
@@ -2087,8 +2180,11 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
         return error('A capability provider may grant only Client Capability publication');
       }
       canPublishClientCapabilities = true;
-    } else if (operationGrants.length === 0) {
-      return error('At least one --grant is required');
+    } else {
+      if (capabilityOwnerCredentialId) {
+        return error('--capability-owner-credential requires --kind capability-provider');
+      }
+      if (operationGrants.length === 0) return error('At least one --grant is required');
     }
     return {
       kind: 'runtime-host-access-issue',
@@ -2099,7 +2195,11 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
       operationGrants,
       canPublishClientCapabilities,
       canUseHostPaths,
+      ...(capabilityOwnerCredentialId ? { capabilityOwnerCredentialId } : {}),
     };
+  }
+  if (capabilityOwnerCredentialId) {
+    return error('--capability-owner-credential is only valid for access issue');
   }
   if (!credentialId) return error('--credential is required');
   if (framed && !currentCredentialFingerprint) {

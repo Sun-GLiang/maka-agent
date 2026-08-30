@@ -11302,7 +11302,7 @@ describe('AiSdkBackend tool execution', () => {
     assert.equal(completion?.type === 'complete' ? completion.stopReason : undefined, 'end_turn');
   });
 
-  test('caps concurrent read-only subagent tools in one turn', async () => {
+  test('caps concurrent subagent tools in one turn', async () => {
     const messages: unknown[] = [];
     const events: SessionEvent[] = [];
     const backend = createTestAiSdkBackend({
@@ -11322,7 +11322,7 @@ describe('AiSdkBackend tool execution', () => {
     let implStarted = 0;
     const release: Array<() => void> = [];
     const tool: MakaTool = {
-      name: 'ExploreAgent',
+      name: 'agent_spawn',
       description: 'read-only worker',
       parameters: {},
       categoryHint: 'subagent',
@@ -11351,7 +11351,7 @@ describe('AiSdkBackend tool execution', () => {
       { toolCallId: 'tool-overflow', abortSignal: new AbortController().signal },
     );
     assert.deepEqual(rejected, {
-      error: '只读探索并发过多：同一轮最多 5 个子代理。请等待已有探索完成后再继续。',
+      error: '子代理并发过多：同一轮最多 5 个子代理。请等待已有任务完成后再继续。',
     });
     assert.equal(implStarted, MAX_ACTIVE_SUBAGENT_TOOLS_PER_TURN);
     assert.equal(
@@ -11365,96 +11365,6 @@ describe('AiSdkBackend tool execution', () => {
 
     release.forEach((resume) => resume());
     await Promise.all(pending);
-  });
-
-  test('maps structured subagent terminal states to persisted tool status', async () => {
-    const messages: unknown[] = [];
-    const events: SessionEvent[] = [];
-    const telemetry: Array<{ status: string; toolCallId?: string }> = [];
-    const backend = createTestAiSdkBackend({
-      sessionId: 'session-1',
-      header: header('explore'),
-      appendMessage: async (message) => {
-        messages.push(message);
-      },
-      connection: connection(),
-      apiKey: 'sk-test',
-      modelId: 'claude-sonnet-4-5-20250929',
-      modelFactory: () => ({}),
-      tools: [],
-      newId: idGenerator(),
-      now: () => 1,
-      recordToolInvocation: (record) => {
-        telemetry.push({ status: record.status, toolCallId: record.toolCallId });
-      },
-    });
-    const tool: MakaTool = {
-      name: 'ExploreAgent',
-      description: 'read-only worker',
-      parameters: {},
-      categoryHint: 'subagent',
-      impl: async (args: unknown) => {
-        const input = args as { reason?: string };
-        return {
-          kind: 'explore_agent',
-          ok: false,
-          mode: 'read_only',
-          objective: 'bad scope',
-          roots: [],
-          queries: [],
-          filesInspected: 0,
-          filesSkipped: 0,
-          bytesRead: 0,
-          progress: [],
-          candidateFiles: [],
-          matches: [],
-          notes: [],
-          reason: input.reason === 'aborted' ? 'aborted' : 'invalid_root',
-          message: input.reason === 'aborted' ? '只读探索已取消。' : '范围无效。',
-        };
-      },
-    };
-    const execute = runtimeExecute(backend, tool, 'turn-1', {
-      push: (event) => events.push(event),
-    });
-
-    await execute(
-      { objective: 'bad scope' },
-      {
-        toolCallId: 'tool-failed',
-        abortSignal: new AbortController().signal,
-      },
-    );
-    await execute(
-      { objective: 'cancelled', reason: 'aborted' },
-      {
-        toolCallId: 'tool-aborted',
-        abortSignal: new AbortController().signal,
-      },
-    );
-
-    assert.equal(
-      (
-        messages.find(
-          (message) =>
-            (message as { type?: string; toolUseId?: string }).type === 'tool_result' &&
-            (message as { toolUseId?: string }).toolUseId === 'tool-failed',
-        ) as { isError?: boolean } | undefined
-      )?.isError,
-      true,
-    );
-    assert.equal(
-      (
-        events.find(
-          (event) => event.type === 'tool_result' && event.toolUseId === 'tool-aborted',
-        ) as { isError?: boolean } | undefined
-      )?.isError,
-      true,
-    );
-    assert.deepEqual(telemetry, [
-      { status: 'error', toolCallId: 'tool-failed' },
-      { status: 'aborted', toolCallId: 'tool-aborted' },
-    ]);
   });
 
   test('maps foreground subagent terminal states to persisted tool status', async () => {
@@ -12692,6 +12602,852 @@ describe('AiSdkBackend thinking persistence', () => {
     assert.equal(reasoning.text, 'reasoning about the tool');
     assert.ok(
       assistant.content.some((part) => part.type === 'tool-call' && part.toolCallId === 'tool-1'),
+    );
+  });
+
+  test('Alibaba Responses keeps multiple streamed reasoning items distinct through replay', async () => {
+    const tokenPlanConnection = {
+      slug: 'alibaba-token-plan-cn',
+      providerType: 'alibaba-token-plan-cn',
+      defaultModel: 'qwen3.8-max',
+    } as const;
+    let sequenceNumber = 0;
+    const responseEvents: Array<Record<string, unknown>> = [
+      { type: 'response.created', sequence_number: sequenceNumber++, response: { id: 'r' } },
+    ];
+    for (const [outputIndex, item] of [
+      { id: 'reasoning-item-1', deltas: ['first ', 'summary'] },
+      { id: 'reasoning-item-2', deltas: ['second summary'] },
+      { id: 'reasoning-item-empty', deltas: [] },
+    ].entries()) {
+      responseEvents.push({
+        type: 'response.output_item.added',
+        sequence_number: sequenceNumber++,
+        output_index: outputIndex,
+        item: { type: 'reasoning', id: item.id, status: 'in_progress', content: [], summary: [] },
+      });
+      for (const delta of item.deltas) {
+        responseEvents.push({
+          type: 'response.reasoning_summary_text.delta',
+          sequence_number: sequenceNumber++,
+          item_id: item.id,
+          output_index: outputIndex,
+          summary_index: 0,
+          delta,
+        });
+      }
+      if (item.deltas.length > 0) {
+        responseEvents.push({
+          type: 'response.reasoning_summary_text.done',
+          sequence_number: sequenceNumber++,
+          item_id: item.id,
+          output_index: outputIndex,
+          summary_index: 0,
+          text: item.deltas.join(''),
+        });
+      }
+      responseEvents.push({
+        type: 'response.output_item.done',
+        sequence_number: sequenceNumber++,
+        output_index: outputIndex,
+        item: {
+          type: 'reasoning',
+          id: item.id,
+          status: 'completed',
+          content: [],
+          summary:
+            item.deltas.length > 0 ? [{ type: 'summary_text', text: item.deltas.join('') }] : [],
+        },
+      });
+    }
+    responseEvents.push(
+      {
+        type: 'response.output_item.added',
+        sequence_number: sequenceNumber++,
+        output_index: 3,
+        item: {
+          type: 'message',
+          id: 'message-item',
+          status: 'in_progress',
+          role: 'assistant',
+          content: [],
+        },
+      },
+      {
+        type: 'response.output_text.delta',
+        sequence_number: sequenceNumber++,
+        item_id: 'message-item',
+        output_index: 3,
+        content_index: 0,
+        delta: 'answer',
+      },
+      {
+        type: 'response.output_item.done',
+        sequence_number: sequenceNumber++,
+        output_index: 3,
+        item: {
+          type: 'message',
+          id: 'message-item',
+          status: 'completed',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'answer', annotations: [] }],
+        },
+      },
+      {
+        type: 'response.completed',
+        sequence_number: sequenceNumber++,
+        response: {
+          id: 'r',
+          object: 'response',
+          created_at: 0,
+          model: 'qwen3.8-max',
+          status: 'completed',
+          output: [],
+          usage: { input_tokens: 1, output_tokens: 3, total_tokens: 4 },
+        },
+      },
+    );
+    const rawSse = `${responseEvents
+      .map((event) => `data: ${JSON.stringify(event)}`)
+      .join('\n\n')}\n\ndata: [DONE]\n\n`;
+    const fetch = (async () =>
+      new Response(rawSse, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })) as unknown as typeof globalThis.fetch;
+    const firstBackend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: tokenPlanConnection,
+      apiKey: 'alibaba-token',
+      modelId: 'qwen3.8-max',
+      modelFactory: (input) => getAIModel({ ...input, fetch }),
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+    const firstEvents: SessionEvent[] = [];
+    for await (const event of firstBackend.send({
+      turnId: 'turn-prev',
+      text: 'question',
+      context: [],
+    })) {
+      firstEvents.push(event);
+    }
+    const thinkingCompletes = firstEvents.filter(
+      (event): event is Extract<SessionEvent, { type: 'thinking_complete' }> =>
+        event.type === 'thinking_complete',
+    );
+    assert.deepEqual(
+      thinkingCompletes.map((event) => [
+        event.text,
+        (event.providerOptions?.makaResponses as { itemId?: unknown } | undefined)?.itemId,
+      ]),
+      [
+        ['first summary', 'reasoning-item-1'],
+        ['second summary', 'reasoning-item-2'],
+        ['', 'reasoning-item-empty'],
+      ],
+    );
+
+    const ctx = {
+      sessionId: 'session-1',
+      invocationId: 'inv-1',
+      runId: 'run-prev',
+      turnId: 'turn-prev',
+      now: () => 7,
+      newId: idGenerator(),
+    } as unknown as RuntimeEventMapContext;
+    const memory = createSessionEventMapMemory();
+    const runtimeContext = firstEvents.map((event) =>
+      mapSessionEventToRuntimeEvent(event, ctx, memory),
+    );
+    let replayRequestBody: Record<string, unknown> | undefined;
+    const replayFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      replayRequestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const completed = {
+        type: 'response.completed',
+        response: {
+          id: 'response-replay',
+          object: 'response',
+          created_at: 1,
+          model: 'qwen3.8-max',
+          status: 'completed',
+          output: [],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      };
+      return new Response(`data: ${JSON.stringify(completed)}\n\ndata: [DONE]\n\n`, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const secondBackend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: tokenPlanConnection,
+      apiKey: 'alibaba-token',
+      modelId: 'qwen3.8-max',
+      modelFactory: (input) => getAIModel({ ...input, fetch: replayFetch }),
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drain(
+      secondBackend.send({
+        turnId: 'turn-current',
+        text: 'follow up',
+        context: [],
+        runtimeContext,
+      }),
+    );
+
+    const replayInput = replayRequestBody?.input;
+    assert.ok(Array.isArray(replayInput));
+    assert.deepEqual(
+      replayInput.filter((item) => item?.type === 'reasoning'),
+      [
+        {
+          type: 'reasoning',
+          id: 'reasoning-item-1',
+          summary: [{ type: 'summary_text', text: 'first summary' }],
+        },
+        {
+          type: 'reasoning',
+          id: 'reasoning-item-2',
+          summary: [{ type: 'summary_text', text: 'second summary' }],
+        },
+        { type: 'reasoning', id: 'reasoning-item-empty', summary: [] },
+      ],
+    );
+  });
+
+  test('Alibaba Responses fails when streamed reasoning differs from the final summary', async (t) => {
+    // The early stop tears down the SDK stream while its settlement promises
+    // are still in flight; when those rejections land is scheduler-owned (on
+    // Windows they were observed after the test boundary). Trap unhandled
+    // rejections for the lifetime of this turn and assert the mismatch path
+    // leaves none behind, on every event loop, not just the one that raced.
+    const leakedRejections: unknown[] = [];
+    const trapUnhandledRejection = (reason: unknown): void => {
+      leakedRejections.push(reason);
+    };
+    process.on('unhandledRejection', trapUnhandledRejection);
+    t.after(() => {
+      process.off('unhandledRejection', trapUnhandledRejection);
+    });
+    const appended: AssistantMessage[] = [];
+    const mismatchEvents = [
+      { type: 'response.created', response: { id: 'r' } },
+      {
+        type: 'response.output_item.added',
+        item: { type: 'reasoning', id: 'reasoning-item', summary: [] },
+      },
+      {
+        type: 'response.reasoning_summary_text.delta',
+        item_id: 'reasoning-item',
+        summary_index: 0,
+        delta: 'streamed text',
+      },
+      {
+        type: 'response.reasoning_summary_text.done',
+        item_id: 'reasoning-item',
+        summary_index: 0,
+        text: 'streamed text',
+      },
+      {
+        type: 'response.output_item.done',
+        item: {
+          type: 'reasoning',
+          id: 'reasoning-item',
+          summary: [{ type: 'summary_text', text: 'different final summary' }],
+        },
+      },
+    ];
+    const mismatchSse = `${mismatchEvents
+      .map((event) => `data: ${JSON.stringify(event)}`)
+      .join('\n\n')}\n\ndata: [DONE]\n\n`;
+    const mismatchFetch = (async () =>
+      new Response(mismatchSse, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })) as unknown as typeof globalThis.fetch;
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async (message) => {
+        if (message.type === 'assistant') appended.push(message);
+      },
+      connection: {
+        slug: 'alibaba-token-plan-cn',
+        providerType: 'alibaba-token-plan-cn',
+        defaultModel: 'qwen3.8-max',
+      },
+      apiKey: 'alibaba-token',
+      modelId: 'qwen3.8-max',
+      modelFactory: (input) => getAIModel({ ...input, fetch: mismatchFetch }),
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    const events: SessionEvent[] = [];
+    for await (const event of backend.send({ turnId: 'turn-1', text: 'question', context: [] })) {
+      events.push(event);
+    }
+
+    assert.equal(
+      events.some((event) => event.type === 'error'),
+      true,
+    );
+    assert.equal(events.find((event) => event.type === 'complete')?.stopReason, 'error');
+    assert.equal(JSON.stringify(appended).includes('makaResponses'), false);
+
+    const ctx = {
+      sessionId: 'session-1',
+      invocationId: 'inv-1',
+      runId: 'run-1',
+      turnId: 'turn-1',
+      now: () => 7,
+      newId: idGenerator(),
+    } as unknown as RuntimeEventMapContext;
+    const memory = createSessionEventMapMemory();
+    const runtimeContext = events.map((event) => mapSessionEventToRuntimeEvent(event, ctx, memory));
+    const recoveryModel = completionModel();
+    const recoveryBackend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: {
+        slug: 'alibaba-token-plan-cn',
+        providerType: 'alibaba-token-plan-cn',
+        defaultModel: 'qwen3.8-max',
+      },
+      apiKey: 'alibaba-token',
+      modelId: 'qwen3.8-max',
+      modelFactory: () => recoveryModel,
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drain(
+      recoveryBackend.send({
+        turnId: 'turn-2',
+        text: 'recover',
+        context: [],
+        runtimeContext,
+      }),
+    );
+    assert.ok(compactPrompt(recoveryModel));
+    // Let SDK teardown settle across macrotask cycles so a leaked rejection
+    // is caught before the trap comes off.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(
+      leakedRejections,
+      [],
+      'reasoning-mismatch teardown must not leak unhandled rejections',
+    );
+  });
+
+  test('Alibaba Responses preserves live compatibility reasoning across abrupt transport failure', async () => {
+    const partialEvents = [
+      { type: 'response.created', response: { id: 'r' } },
+      {
+        type: 'response.output_item.added',
+        item: { type: 'reasoning', id: 'reasoning-partial', summary: [] },
+      },
+      {
+        type: 'response.reasoning_text.delta',
+        item_id: 'reasoning-partial',
+        content_index: 0,
+        delta: 'partial compatibility reasoning',
+      },
+    ];
+    const bytes = new TextEncoder().encode(
+      `${partialEvents.map((event) => `data: ${JSON.stringify(event)}`).join('\n\n')}\n\n`,
+    );
+    const fetch = (async () => {
+      let emitted = false;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            if (!emitted) {
+              emitted = true;
+              controller.enqueue(bytes);
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            controller.error(new Error('transport boom'));
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      );
+    }) as unknown as typeof globalThis.fetch;
+    const appended: AssistantMessage[] = [];
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async (message) => {
+        if (message.type === 'assistant') appended.push(message);
+      },
+      connection: {
+        slug: 'alibaba-token-plan-cn',
+        providerType: 'alibaba-token-plan-cn',
+        defaultModel: 'qwen3.8-max',
+      },
+      apiKey: 'alibaba-token',
+      modelId: 'qwen3.8-max',
+      modelFactory: (input) => getAIModel({ ...input, fetch }),
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    const events: SessionEvent[] = [];
+    for await (const event of backend.send({ turnId: 'turn-1', text: 'question', context: [] })) {
+      events.push(event);
+    }
+
+    assert.equal(
+      events.some(
+        (event) =>
+          event.type === 'thinking_delta' && event.text === 'partial compatibility reasoning',
+      ),
+      true,
+    );
+    assert.equal(events.find((event) => event.type === 'complete')?.stopReason, 'error');
+    assert.equal(JSON.stringify(appended).includes('makaResponses'), false);
+  });
+
+  test('Alibaba Responses keeps a finalized item valid when the next item id is unsafe', async () => {
+    const invalidItemId = 'invalid\nreasoning-item';
+    const rawEvents = [
+      { type: 'response.created', response: { id: 'r' } },
+      {
+        type: 'response.output_item.added',
+        item: { type: 'reasoning', id: 'reasoning-item-a', summary: [] },
+      },
+      {
+        type: 'response.reasoning_text.delta',
+        item_id: 'reasoning-item-a',
+        content_index: 0,
+        delta: 'valid summary',
+      },
+      {
+        type: 'response.reasoning_text.done',
+        item_id: 'reasoning-item-a',
+        content_index: 0,
+        text: 'valid summary',
+      },
+      {
+        type: 'response.output_item.done',
+        item: {
+          type: 'reasoning',
+          id: 'reasoning-item-a',
+          summary: [{ type: 'summary_text', text: 'valid summary' }],
+        },
+      },
+      {
+        type: 'response.output_item.added',
+        item: { type: 'reasoning', id: invalidItemId, summary: [] },
+      },
+      {
+        type: 'response.reasoning_text.delta',
+        item_id: invalidItemId,
+        content_index: 0,
+        delta: 'unsafe item summary',
+      },
+      {
+        type: 'response.output_item.done',
+        item: {
+          type: 'reasoning',
+          id: invalidItemId,
+          summary: [{ type: 'summary_text', text: 'unsafe item summary' }],
+        },
+      },
+    ];
+    const rawSse = `${rawEvents
+      .map((event) => `data: ${JSON.stringify(event)}`)
+      .join('\n\n')}\n\ndata: [DONE]\n\n`;
+    const fetch = (async () =>
+      new Response(rawSse, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })) as unknown as typeof globalThis.fetch;
+    const appended: AssistantMessage[] = [];
+    const connection = {
+      slug: 'alibaba-token-plan-cn',
+      providerType: 'alibaba-token-plan-cn',
+      defaultModel: 'qwen3.8-max',
+    } as const;
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async (message) => {
+        if (message.type === 'assistant') appended.push(message);
+      },
+      connection,
+      apiKey: 'alibaba-token',
+      modelId: 'qwen3.8-max',
+      modelFactory: (input) => getAIModel({ ...input, fetch }),
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+    const events: SessionEvent[] = [];
+    for await (const event of backend.send({ turnId: 'turn-1', text: 'question', context: [] })) {
+      events.push(event);
+    }
+
+    assert.equal(events.find((event) => event.type === 'complete')?.stopReason, 'error');
+    const parts = appended[0]?.thinking?.parts;
+    assert.deepEqual(
+      parts?.map((part) => [
+        part.text,
+        (part.providerOptions?.makaResponses as { itemId?: unknown } | undefined)?.itemId,
+      ]),
+      [
+        ['valid summary', 'reasoning-item-a'],
+        ['unsafe item summary', undefined],
+      ],
+    );
+
+    const ctx = {
+      sessionId: 'session-1',
+      invocationId: 'inv-1',
+      runId: 'run-1',
+      turnId: 'turn-1',
+      now: () => 7,
+      newId: idGenerator(),
+    } as unknown as RuntimeEventMapContext;
+    const memory = createSessionEventMapMemory();
+    const runtimeContext = events.map((event) => mapSessionEventToRuntimeEvent(event, ctx, memory));
+    const recoveryModel = completionModel();
+    const recoveryBackend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection,
+      apiKey: 'alibaba-token',
+      modelId: 'qwen3.8-max',
+      modelFactory: () => recoveryModel,
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drain(
+      recoveryBackend.send({
+        turnId: 'turn-2',
+        text: 'recover',
+        context: [],
+        runtimeContext,
+      }),
+    );
+
+    const prompt = compactPrompt(recoveryModel) as ModelMessage[];
+    const assistant = prompt.find(
+      (message) => message.role === 'assistant' && Array.isArray(message.content),
+    );
+    assert.ok(assistant && Array.isArray(assistant.content));
+    assert.deepEqual(
+      assistant.content
+        .filter((part) => part.type === 'reasoning')
+        .map((part) => [
+          part.text,
+          (part.providerOptions?.['alibaba-token-plan-cn'] as { itemId?: unknown } | undefined)
+            ?.itemId,
+        ]),
+      [['valid summary', 'reasoning-item-a']],
+    );
+  });
+
+  test('Alibaba Responses isolates a same-id delta that arrives after item completion', async () => {
+    const connection = {
+      slug: 'alibaba-token-plan-cn',
+      providerType: 'alibaba-token-plan-cn',
+      defaultModel: 'qwen3.8-max',
+    } as const;
+    const rawEvents = [
+      { type: 'response.created', response: { id: 'r' } },
+      {
+        type: 'response.output_item.added',
+        item: { type: 'reasoning', id: 'reasoning-item-a', summary: [] },
+      },
+      {
+        type: 'response.reasoning_text.delta',
+        item_id: 'reasoning-item-a',
+        content_index: 0,
+        delta: 'valid summary',
+      },
+      {
+        type: 'response.reasoning_text.done',
+        item_id: 'reasoning-item-a',
+        content_index: 0,
+        text: 'valid summary',
+      },
+      {
+        type: 'response.output_item.done',
+        item: {
+          type: 'reasoning',
+          id: 'reasoning-item-a',
+          summary: [{ type: 'summary_text', text: 'valid summary' }],
+        },
+      },
+      {
+        type: 'response.reasoning_text.delta',
+        item_id: 'reasoning-item-a',
+        content_index: 0,
+        delta: 'late duplicate',
+      },
+      {
+        type: 'response.completed',
+        response: {
+          id: 'r',
+          object: 'response',
+          created_at: 0,
+          model: 'qwen3.8-max',
+          status: 'completed',
+          output: [],
+          usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+        },
+      },
+    ];
+    const rawSse = `${rawEvents
+      .map((event) => `data: ${JSON.stringify(event)}`)
+      .join('\n\n')}\n\ndata: [DONE]\n\n`;
+    const fetch = (async () =>
+      new Response(rawSse, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })) as unknown as typeof globalThis.fetch;
+    const appended: AssistantMessage[] = [];
+    const firstBackend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async (message) => {
+        if (message.type === 'assistant') appended.push(message);
+      },
+      connection,
+      apiKey: 'alibaba-token',
+      modelId: 'qwen3.8-max',
+      modelFactory: (input) => getAIModel({ ...input, fetch }),
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+    const events: SessionEvent[] = [];
+    for await (const event of firstBackend.send({
+      turnId: 'turn-1',
+      text: 'question',
+      context: [],
+    })) {
+      events.push(event);
+    }
+
+    assert.deepEqual(
+      appended[0]?.thinking?.parts?.map((part) => [
+        part.text,
+        (part.providerOptions?.makaResponses as { itemId?: unknown } | undefined)?.itemId,
+      ]),
+      [
+        ['valid summary', 'reasoning-item-a'],
+        ['late duplicate', undefined],
+      ],
+    );
+
+    const ctx = {
+      sessionId: 'session-1',
+      invocationId: 'inv-1',
+      runId: 'run-1',
+      turnId: 'turn-1',
+      now: () => 7,
+      newId: idGenerator(),
+    } as unknown as RuntimeEventMapContext;
+    const memory = createSessionEventMapMemory();
+    const runtimeContext = events.map((event) => mapSessionEventToRuntimeEvent(event, ctx, memory));
+    const recoveryModel = completionModel();
+    const recoveryBackend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection,
+      apiKey: 'alibaba-token',
+      modelId: 'qwen3.8-max',
+      modelFactory: () => recoveryModel,
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drain(
+      recoveryBackend.send({
+        turnId: 'turn-2',
+        text: 'follow up',
+        context: [],
+        runtimeContext,
+      }),
+    );
+    const prompt = compactPrompt(recoveryModel) as ModelMessage[];
+    assert.equal(
+      prompt.some(
+        (message) =>
+          message.role === 'assistant' &&
+          Array.isArray(message.content) &&
+          message.content.some(
+            (part) => part.type === 'reasoning' && part.text === 'valid summary',
+          ),
+      ),
+      true,
+    );
+  });
+
+  test('Alibaba Responses skips reasoning it cannot safely replay', async () => {
+    const foreignSummary = 'summary issued by a different provider profile';
+    const futureSummary = 'summary issued by a future durable state version';
+    const model = completionModel();
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: {
+        slug: 'alibaba-token-plan-cn',
+        providerType: 'alibaba-token-plan-cn',
+        defaultModel: 'qwen3.8-max',
+      },
+      apiKey: 'alibaba-token',
+      modelId: 'qwen3.8-max',
+      modelFactory: () => model,
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+    const runtimeContext: RuntimeEvent[] = [
+      runtimeEvent({
+        id: 'e1',
+        turnId: 'turn-prev',
+        role: 'model',
+        author: 'agent',
+        content: {
+          kind: 'thinking',
+          text: 'summary without a provider item identity',
+        },
+        refs: { providerEventId: 'm1' },
+      }),
+      runtimeEvent({
+        id: 'e2',
+        turnId: 'turn-prev',
+        role: 'model',
+        author: 'agent',
+        content: {
+          kind: 'thinking',
+          text: foreignSummary,
+          providerOptions: {
+            makaResponses: {
+              version: 1,
+              profile: 'alibaba-token-plan',
+              itemId: 'foreign-reasoning-item',
+              summaryPartLengths: [foreignSummary.length],
+            },
+          },
+        },
+        refs: { providerEventId: 'm2' },
+      }),
+      runtimeEvent({
+        id: 'e3',
+        turnId: 'turn-prev',
+        role: 'model',
+        author: 'agent',
+        content: {
+          kind: 'thinking',
+          text: futureSummary,
+          providerOptions: {
+            makaResponses: {
+              version: 2,
+              profile: 'alibaba-token-plan-cn',
+              itemId: 'future-reasoning-item',
+              summaryPartLengths: [futureSummary.length],
+            },
+          },
+        },
+        refs: { providerEventId: 'm3' },
+      }),
+    ];
+
+    await drain(
+      backend.send({
+        turnId: 'turn-current',
+        text: 'follow up',
+        context: [],
+        runtimeContext,
+      }),
+    );
+
+    const prompt = compactPrompt(model) as ModelMessage[];
+    assert.equal(
+      prompt.some(
+        (message) =>
+          message.role === 'assistant' &&
+          Array.isArray(message.content) &&
+          message.content.some((part) => part.type === 'reasoning'),
+      ),
+      false,
+    );
+  });
+
+  test('Alibaba Responses rejects malformed state owned by its profile', async () => {
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: {
+        slug: 'alibaba-token-plan-cn',
+        providerType: 'alibaba-token-plan-cn',
+        defaultModel: 'qwen3.8-max',
+      },
+      apiKey: 'alibaba-token',
+      modelId: 'qwen3.8-max',
+      modelFactory: () => completionModel(),
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+    const runtimeContext: RuntimeEvent[] = [
+      runtimeEvent({
+        id: 'e1',
+        turnId: 'turn-prev',
+        role: 'model',
+        author: 'agent',
+        content: {
+          kind: 'thinking',
+          text: 'current-profile reasoning with a widened state',
+          providerOptions: {
+            makaResponses: {
+              version: 1,
+              profile: 'alibaba-token-plan-cn',
+              itemId: 'reasoning-item',
+              raw: 'must not persist',
+            },
+          },
+        },
+        refs: { providerEventId: 'm1' },
+      }),
+    ];
+
+    await assert.rejects(
+      drain(
+        backend.send({
+          turnId: 'turn-current',
+          text: 'follow up',
+          context: [],
+          runtimeContext,
+        }),
+      ),
+      /Malformed durable plaintext Responses reasoning state/,
     );
   });
 

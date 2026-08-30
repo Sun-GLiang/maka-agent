@@ -562,6 +562,29 @@ test('keeps Local and remote Hosts active and routes work by owning Host', async
   await manager.close();
 });
 
+test('keeps independent shared-session credentials active for the same Host', async () => {
+  const candidates = [
+    candidateHarness({ hostId: 'host-local' }).candidate,
+    candidateHarness({ hostId: 'a'.repeat(64), ownership: 'external' }).candidate,
+    candidateHarness({ hostId: 'a'.repeat(64), ownership: 'external' }).candidate,
+  ];
+  const manager = await startRuntimeHostDesktopManager(
+    {} as DesktopRuntimeHostCandidateStartInput,
+    { startCandidate: async () => ready(candidates.shift()!) },
+  );
+
+  await manager.enable(remoteTarget('shared-one', 'shared', 'session_guest'));
+  await manager.enable(remoteTarget('shared-two', 'shared', 'session_guest'));
+
+  assert.deepEqual(manager.entries().map(({ target }) => target.profile.id), [
+    'local',
+    'shared-one',
+    'shared-two',
+  ]);
+  assert.notEqual(manager.current('shared-one')?.epoch, manager.current('shared-two')?.epoch);
+  await manager.close();
+});
+
 test('replays pairing finalization after an unknown commit and reconnect', async () => {
   const local = candidateHarness({ hostId: 'host-a' });
   const remoteHostId = 'a'.repeat(64);
@@ -1056,7 +1079,7 @@ test('restarts an idle generation-aware Host without prompting', async () => {
     },
     upgradePrompts: {
       restartable: async () => assert.fail('idle Host must not prompt before restart'),
-      waitOnly: async () => assert.fail('restartable conflict used wait-only prompt'),
+      nonRestartable: async () => assert.fail('restartable conflict used non-restartable prompt'),
     },
   });
 
@@ -1077,7 +1100,7 @@ test('prompts before restarting a generation-aware Host with active work', async
         prompts += 1;
         return 'restart';
       },
-      waitOnly: async () => assert.fail('restartable conflict used wait-only prompt'),
+      nonRestartable: async () => assert.fail('restartable conflict used non-restartable prompt'),
     },
   });
 
@@ -1097,7 +1120,7 @@ test('prompts before restarting a generation-aware Host with a residency', async
         prompts += 1;
         return 'restart';
       },
-      waitOnly: async () => assert.fail('restartable conflict used wait-only prompt'),
+      nonRestartable: async () => assert.fail('restartable conflict used non-restartable prompt'),
     },
   });
 
@@ -1117,7 +1140,7 @@ test('prompts before restarting a generation-aware Host with connections', async
         prompts += 1;
         return 'restart';
       },
-      waitOnly: async () => assert.fail('restartable conflict used wait-only prompt'),
+      nonRestartable: async () => assert.fail('restartable conflict used non-restartable prompt'),
     },
   });
 
@@ -1137,7 +1160,7 @@ test('prompts when a restartable Host has no activity snapshot', async () => {
         prompts += 1;
         return 'restart';
       },
-      waitOnly: async () => assert.fail('restartable conflict used wait-only prompt'),
+      nonRestartable: async () => assert.fail('restartable conflict used non-restartable prompt'),
     },
   });
 
@@ -1160,7 +1183,7 @@ test('waits passively for a Host that cannot be taken over', async () => {
     },
     upgradePrompts: {
       restartable: async () => assert.fail('wait-only conflict used restart prompt'),
-      waitOnly: async () => 'wait',
+      nonRestartable: async () => 'wait',
     },
     waitForHostRetirement: async (registration) => {
       assert.equal(registration.hostEpoch, conflict.registration.hostEpoch);
@@ -1175,6 +1198,41 @@ test('waits passively for a Host that cannot be taken over', async () => {
   await owner.close();
 });
 
+test('replaces a non-restartable Local Host through the supplied authority and retries', async () => {
+  const observed = upgradeRequired(false);
+  const conflict = {
+    ...observed,
+    registration: { ...observed.registration, lifecycleMode: 'service' as const },
+  };
+  const replacement = candidateHarness();
+  let starts = 0;
+  let replaced: typeof observed.registration | undefined;
+  const owner = await startRuntimeHostDesktopManager(
+    {} as DesktopRuntimeHostCandidateStartInput,
+    {
+      startCandidate: async () => {
+        starts += 1;
+        return starts === 1 ? conflict : ready(replacement.candidate);
+      },
+      upgradePrompts: {
+        restartable: async () => assert.fail('non-restartable conflict used restart prompt'),
+        nonRestartable: async (_conflict, actions) => {
+          assert.deepEqual(actions, { canReplace: true, canWait: false });
+          return 'replace';
+        },
+      },
+      resolveLocalHostReplacement: async (registration) => ({
+        replace: async () => {
+          replaced = registration;
+        },
+      }),
+    },
+  );
+  assert.equal(starts, 2);
+  assert.equal(replaced?.hostEpoch, conflict.registration.hostEpoch);
+  await owner.close();
+});
+
 test('lets the user cancel startup when an incompatible Host owns the root', async () => {
   const conflict = incompatibleHost('blocked_by_residency');
   let presented: DesktopRuntimeHostCandidateStartResult | undefined;
@@ -1183,8 +1241,9 @@ test('lets the user cancel startup when an incompatible Host owns the root', asy
       startCandidate: async () => conflict,
       upgradePrompts: {
         restartable: async () => assert.fail('incompatible Host used restart prompt'),
-        waitOnly: async (actual) => {
+        nonRestartable: async (actual, actions) => {
           presented = actual;
+          assert.deepEqual(actions, { canReplace: false, canWait: true });
           return 'cancel';
         },
       },
@@ -1406,6 +1465,7 @@ function ready(candidate: DesktopRuntimeHostCandidate): DesktopRuntimeHostCandid
 function remoteTarget(
   id: string,
   target = 'default',
+  access?: 'session_guest',
 ): NonNullable<DesktopRuntimeHostCandidateStartInput['profileTarget']> {
   return {
     profile: {
@@ -1414,6 +1474,7 @@ function remoteTarget(
       kind: 'remote',
       transport: { kind: 'tls', url: `wss://${target}.example.com/` },
       rootId: 'a'.repeat(64),
+      ...(access ? { access } : {}),
     },
     credential: `credential-${target}`,
   };
