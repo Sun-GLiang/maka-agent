@@ -17,9 +17,19 @@
  * under the License.
  */
 
-export { NetworkProxyPasswordDraft } from "./ui/network-proxy-password-draft.js";
+import type { ReactNode } from "react";
+import { useProxyPasswordDraft } from "./controller/use-proxy-password-draft.js";
+import type { ProxyPasswordDraft } from "./model/proxy-password-draft.js";
+
 export {
   runAfterProxyPasswordCommit,
   type ProxyPasswordDraft,
 } from "./model/proxy-password-draft.js";
 export type { TestProxyInput } from "@maka/core/settings/network-settings";
+
+export function NetworkProxyPasswordDraft(props: {
+  save(secret: string): Promise<void>;
+  children(draft: ProxyPasswordDraft): ReactNode;
+}) {
+  return props.children(useProxyPasswordDraft(props.save));
+}
