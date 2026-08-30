@@ -553,6 +553,17 @@ describe('Session Turn position snapshots', () => {
       );
 
       await conversation.purge(session.id);
+      const retained = await store.readTurnPositionPageSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'lease-admitted',
+        snapshotKey: admitted.snapshotKey,
+        anchor: { kind: 'tail' },
+        maxPositions: 8,
+      });
+      assert.equal(retained.kind, 'page');
+      if (retained.kind !== 'page') assert.fail('expected leased ready snapshot to survive purge');
+      assert.deepEqual(retained.positions, admitted.positions);
       const legacy = await readyPage(store, session.id, 'lease-purged');
       assert.equal(
         legacy.snapshotKey.authorityRevision,
@@ -566,6 +577,287 @@ describe('Session Turn position snapshots', () => {
     } finally {
       conversation.close();
       runs.close?.();
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('invalidates v34 transcript recovery when purge deletes an unreconciled admission', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-admission-purge-v34-building-'));
+    let store = createSessionStore(root);
+    let conversation: ReturnType<typeof createConversationOperationalStateStore> | undefined;
+    const runs = createSqliteAgentRunStore(root);
+    const session = await store.create(makeInput());
+    try {
+      await store.appendMessages(
+        session.id,
+        Array.from({ length: 1_025 }, (_, index) => user(`turn-${index}`, index)),
+      );
+      await runs.admitRootTurn(
+        rootAdmission(session.id, 'turn-bodyless-purged', 'future-user-purged', 2_000),
+      );
+      runs.close?.();
+      await store.close?.();
+      downgradeTurnProjectionToV34(root);
+
+      store = createSessionStore(root);
+      conversation = createConversationOperationalStateStore(root);
+      const first = await store.readTurnPositionPageSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'purge-v34-building-old',
+        anchor: { kind: 'tail' },
+        maxPositions: 8,
+      });
+      assert.equal(first.kind, 'building');
+      if (first.kind !== 'building') assert.fail('expected bounded transcript recovery');
+      assert.equal(first.progress.lastStepRecords, 1_024);
+      const beforePurge = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+        readOnly: true,
+      });
+      try {
+        assert.equal(
+          (
+            beforePurge
+              .prepare(`SELECT COUNT(*) AS count FROM session_turn_metadata
+                WHERE session_id = ? AND order_source = 'admission'`)
+              .get(session.id) as { count: number }
+          ).count,
+          0,
+        );
+        assert.equal(
+          (
+            beforePurge
+              .prepare(`SELECT COUNT(*) AS count FROM session_turn_snapshot_positions
+                WHERE session_id = ? AND snapshot_generation = ?`)
+              .get(session.id, first.snapshotKey.snapshotGeneration) as { count: number }
+          ).count,
+          0,
+        );
+      } finally {
+        beforePurge.close();
+      }
+
+      await conversation.purge(session.id);
+      await assert.rejects(
+        store.readTurnPositionPageSnapshot({
+          sessionId: session.id,
+          projection: 'owner',
+          snapshotLeaseId: 'purge-v34-building-old',
+          snapshotKey: first.snapshotKey,
+          anchor: { kind: 'tail' },
+          maxPositions: 8,
+        }),
+        (error: unknown) =>
+          (error as { code?: unknown }).code === 'session_turn_position_snapshot_mismatch',
+      );
+      const afterPurge = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+        readOnly: true,
+      });
+      try {
+        assert.equal(
+          (
+            afterPurge
+              .prepare(`SELECT authority_revision FROM session_turn_authority_revisions
+                WHERE session_id = ?`)
+              .get(session.id) as { authority_revision: number }
+          ).authority_revision,
+          first.snapshotKey.authorityRevision + 1,
+        );
+        assert.equal(
+          afterPurge
+            .prepare(`SELECT 1 FROM session_turn_position_snapshots
+              WHERE session_id = ? AND snapshot_generation = ?`)
+            .get(session.id, first.snapshotKey.snapshotGeneration),
+          undefined,
+        );
+      } finally {
+        afterPurge.close();
+      }
+
+      let next = await store.readTurnPositionPageSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'purge-v34-building-new',
+        anchor: { kind: 'tail' },
+        maxPositions: 8,
+      });
+      assert.equal(next.kind, 'building');
+      if (next.kind !== 'building') assert.fail('expected post-purge rebuild');
+      const noPartial = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+        readOnly: true,
+      });
+      try {
+        assert.equal(
+          (
+            noPartial
+              .prepare(`SELECT COUNT(*) AS count FROM session_turn_snapshot_positions
+                WHERE session_id = ? AND snapshot_generation = ?`)
+              .get(session.id, next.snapshotKey.snapshotGeneration) as { count: number }
+          ).count,
+          0,
+        );
+      } finally {
+        noPartial.close();
+      }
+      while (next.kind === 'building') {
+        next = await store.readTurnPositionPageSnapshot({
+          sessionId: session.id,
+          projection: 'owner',
+          snapshotLeaseId: 'purge-v34-building-new',
+          snapshotKey: next.snapshotKey,
+          anchor: { kind: 'tail' },
+          maxPositions: 8,
+        });
+      }
+      assert.equal(next.kind, 'page');
+      if (next.kind !== 'page') assert.fail('expected post-purge ready page');
+      assert.equal(next.totalPositions, 1_025);
+      assert.equal(
+        next.positions.some(({ key }) => key.kind === 'turn' && key.id === 'turn-bodyless-purged'),
+        false,
+      );
+    } finally {
+      conversation?.close();
+      runs.close?.();
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('resets partial admission recovery when purge deletes canonical authority', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-admission-purge-partial-recovery-'));
+    let store = createSessionStore(root);
+    let conversation: ReturnType<typeof createConversationOperationalStateStore> | undefined;
+    const session = await store.create(makeInput());
+    try {
+      await store.close?.();
+      const seeded = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+      try {
+        const insert = seeded.prepare(`INSERT INTO core_root_turn_admissions(
+          session_id, turn_id, admitted_at, record_json
+        ) VALUES (?, ?, ?, '{}')`);
+        seeded.exec('BEGIN IMMEDIATE');
+        for (let index = 0; index < 1_025; index += 1) {
+          insert.run(session.id, `turn-${index.toString().padStart(4, '0')}`, index);
+        }
+        seeded.exec('COMMIT');
+      } finally {
+        seeded.close();
+      }
+      downgradeTurnProjectionToV34(root);
+
+      store = createSessionStore(root);
+      conversation = createConversationOperationalStateStore(root);
+      const first = await store.readTurnPositionPageSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'purge-partial-old',
+        anchor: { kind: 'tail' },
+        maxPositions: 8,
+      });
+      assert.equal(first.kind, 'building');
+      if (first.kind !== 'building') assert.fail('expected partial admission recovery');
+      const partial = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+        readOnly: true,
+      });
+      try {
+        assert.deepEqual(
+          {
+            ...(partial
+              .prepare(`SELECT admission_cursor_admitted_at, admission_cursor_turn_id,
+                admission_recovery_complete FROM session_turn_index_state WHERE session_id = ?`)
+              .get(session.id) as Record<string, unknown>),
+          },
+          {
+            admission_cursor_admitted_at: 1_023,
+            admission_cursor_turn_id: 'turn-1023',
+            admission_recovery_complete: 0,
+          },
+        );
+      } finally {
+        partial.close();
+      }
+
+      await conversation.purge(session.id);
+      const purged = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+        readOnly: true,
+      });
+      try {
+        assert.deepEqual(
+          {
+            ...(purged
+              .prepare(`SELECT admission_cursor_admitted_at, admission_cursor_turn_id,
+                admission_recovery_complete FROM session_turn_index_state WHERE session_id = ?`)
+              .get(session.id) as Record<string, unknown>),
+          },
+          {
+            admission_cursor_admitted_at: null,
+            admission_cursor_turn_id: null,
+            admission_recovery_complete: 0,
+          },
+        );
+        assert.equal(
+          (
+            purged
+              .prepare(`SELECT authority_revision FROM session_turn_authority_revisions
+                WHERE session_id = ?`)
+              .get(session.id) as { authority_revision: number }
+          ).authority_revision,
+          first.snapshotKey.authorityRevision + 1,
+        );
+      } finally {
+        purged.close();
+      }
+      await assert.rejects(
+        store.readTurnPositionPageSnapshot({
+          sessionId: session.id,
+          projection: 'owner',
+          snapshotLeaseId: 'purge-partial-old',
+          snapshotKey: first.snapshotKey,
+          anchor: { kind: 'tail' },
+          maxPositions: 8,
+        }),
+        (error: unknown) =>
+          (error as { code?: unknown }).code === 'session_turn_position_snapshot_mismatch',
+      );
+      const rebuilt = await readyPage(store, session.id, 'purge-partial-new', 'owner');
+      assert.deepEqual(rebuilt.positions, [
+        { ordinal: 0, key: { kind: 'empty' }, firstSequence: null },
+      ]);
+    } finally {
+      conversation?.close();
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps admission authority revision stable for an idempotent empty purge', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-admission-purge-idempotent-'));
+    const store = createSessionStore(root);
+    const conversation = createConversationOperationalStateStore(root);
+    try {
+      const session = await store.create(makeInput());
+      const before = await readyPage(store, session.id, 'purge-idempotent-ready', 'owner');
+      await conversation.purge(session.id);
+      const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+        readOnly: true,
+      });
+      try {
+        assert.equal(
+          (
+            database
+              .prepare(`SELECT authority_revision FROM session_turn_authority_revisions
+                WHERE session_id = ?`)
+              .get(session.id) as { authority_revision: number }
+          ).authority_revision,
+          before.snapshotKey.authorityRevision,
+        );
+      } finally {
+        database.close();
+      }
+    } finally {
+      conversation.close();
       await store.close?.();
       await rm(root, { recursive: true, force: true });
     }
