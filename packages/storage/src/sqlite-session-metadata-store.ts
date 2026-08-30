@@ -169,11 +169,11 @@ import {
   SQLITE_SESSION_MESSAGE_CHUNK_MARKER,
 } from './sqlite-session-metadata-schema.js';
 import {
+  advanceSessionTurnAdmissionRecoveryForSnapshot,
   advanceSessionTurnPositionOrdinalBuild,
   allocateOrRequireSessionTurnPositionSnapshot,
   ensureTurnIndexRows,
   invalidateSessionTurnPositionIndex,
-  markSessionTurnRecoveryComplete,
   pageReadySessionTurnPositionSnapshot,
   readSessionTurnMembershipPreflight,
   recordAppendedSessionTurnMetadata,
@@ -2752,6 +2752,7 @@ export class SqliteSessionMetadataStore {
       }
       if (snapshot.build_phase === 'recovering') {
         let recovery: ReturnType<typeof advanceSessionTurnIdentityRecovery> | undefined;
+        let transcriptRecoveryAdvanced = false;
         if (snapshot.through_sequence !== null) {
           const indexed = this.db
             .prepare(`
@@ -2759,6 +2760,7 @@ export class SqliteSessionMetadataStore {
             `)
             .get(request.sessionId) as { indexed_through_sequence: number };
           if (indexed.indexed_through_sequence < snapshot.through_sequence) {
+            transcriptRecoveryAdvanced = true;
             recovery = advanceSessionTurnIdentityRecovery(this.db, {
               sessionId: request.sessionId,
               throughSequence: snapshot.through_sequence,
@@ -2775,7 +2777,28 @@ export class SqliteSessionMetadataStore {
             }
           }
         }
-        snapshot = markSessionTurnRecoveryComplete(this.db, request.sessionId, snapshot);
+        if (!transcriptRecoveryAdvanced) {
+          try {
+            snapshot = advanceSessionTurnAdmissionRecoveryForSnapshot(
+              this.db,
+              request.sessionId,
+              snapshot,
+            ).snapshot;
+          } catch (error) {
+            if (error instanceof SessionTurnPositionRecoveryError) {
+              this.db
+                .prepare(`DELETE FROM session_turn_position_snapshots
+                  WHERE session_id = ? AND slot = ? AND state = 'building'`)
+                .run(request.sessionId, snapshot.slot);
+              return {
+                complete: false as const,
+                failure: error.reason,
+                failureSequence: error.sequence ?? 0,
+              };
+            }
+            throw error;
+          }
+        }
         const state = this.db
           .prepare(`
             SELECT indexed_through_sequence, source_records, source_bytes

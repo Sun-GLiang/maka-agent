@@ -2216,6 +2216,391 @@ describe('Session Turn position snapshots', () => {
     }
   });
 
+  test('recovers a v34 bodyless root admission before publishing owner and shared snapshots', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-v34-bodyless-admission-'));
+    let store = createSessionStore(root);
+    const runs = createSqliteAgentRunStore(root);
+    const session = await store.create(makeInput());
+    try {
+      await runs.admitRootTurn(
+        rootAdmission(session.id, 'turn-bodyless-v34', 'future-user-v34', 42),
+      );
+      runs.close?.();
+      await store.close?.();
+      downgradeTurnProjectionToV34(root);
+
+      store = createSessionStore(root);
+      const owner = await readyPage(store, session.id, 'v34-bodyless-owner', 'owner');
+      const shared = await readyPage(store, session.id, 'v34-bodyless-shared', 'shared');
+      assert.deepEqual(owner.positions, [
+        {
+          ordinal: 0,
+          key: { kind: 'turn', id: 'turn-bodyless-v34' },
+          firstSequence: null,
+        },
+      ]);
+      assert.deepEqual(shared.positions, [
+        { ordinal: 0, key: { kind: 'empty' }, firstSequence: null },
+      ]);
+      const migrated = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+        readOnly: true,
+      });
+      try {
+        assert.deepEqual(
+          (
+            migrated
+              .prepare(`SELECT position_kind, position_id, order_source, admitted_at,
+              owner_first_sequence, shared_first_sequence
+              FROM session_turn_metadata WHERE session_id = ?`)
+              .all(session.id) as Array<Record<string, unknown>>
+          ).map((row) => ({ ...row })),
+          [
+            {
+              position_kind: 'turn',
+              position_id: 'turn-bodyless-v34',
+              order_source: 'admission',
+              admitted_at: 42,
+              owner_first_sequence: null,
+              shared_first_sequence: null,
+            },
+          ],
+        );
+      } finally {
+        migrated.close();
+      }
+
+      await store.close?.();
+      store = createSessionStore(root);
+      const reopenedOwner = await readyPage(store, session.id, 'v34-bodyless-reopen', 'owner');
+      assert.deepEqual(reopenedOwner.positions, owner.positions);
+    } finally {
+      runs.close?.();
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('recovers v34 admission order while preserving owner and shared body anchors', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-v34-admission-bodies-'));
+    let store = createSessionStore(root);
+    const runs = createSqliteAgentRunStore(root);
+    const session = await store.create(makeInput());
+    try {
+      await runs.admitRootTurn(rootAdmission(session.id, 'turn-late', 'late-user', 20));
+      await runs.admitRootTurn(rootAdmission(session.id, 'turn-early', 'early-user', 10));
+      await store.appendMessages(session.id, [
+        hiddenPermission('turn-late', 0),
+        { ...user('turn-early', 1), id: 'early-user' },
+        { ...user('turn-late', 2), id: 'late-user' },
+      ]);
+      runs.close?.();
+      await store.close?.();
+      downgradeTurnProjectionToV34(root);
+
+      store = createSessionStore(root);
+      const owner = await readyPage(store, session.id, 'v34-bodies-owner', 'owner');
+      const shared = await readyPage(store, session.id, 'v34-bodies-shared', 'shared');
+      assert.deepEqual(owner.positions, [
+        { ordinal: 0, key: { kind: 'turn', id: 'turn-early' }, firstSequence: 1 },
+        { ordinal: 1, key: { kind: 'turn', id: 'turn-late' }, firstSequence: 0 },
+      ]);
+      assert.deepEqual(shared.positions, [
+        { ordinal: 0, key: { kind: 'turn', id: 'turn-early' }, firstSequence: 1 },
+        { ordinal: 1, key: { kind: 'turn', id: 'turn-late' }, firstSequence: 2 },
+      ]);
+    } finally {
+      runs.close?.();
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('bounds legacy admission reconciliation and atomically rebuilds after owner reopen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-admission-recovery-bound-'));
+    let store = createSessionStore(root);
+    const session = await store.create(makeInput());
+    try {
+      await store.close?.();
+      const seeded = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+      try {
+        const insert = seeded.prepare(`INSERT INTO core_root_turn_admissions(
+          session_id, turn_id, admitted_at, record_json
+        ) VALUES (?, ?, ?, '{}')`);
+        seeded.exec('BEGIN IMMEDIATE');
+        for (let index = 0; index < 1_025; index += 1) {
+          insert.run(session.id, `turn-${index.toString().padStart(4, '0')}`, index);
+        }
+        seeded.exec('COMMIT');
+      } finally {
+        seeded.close();
+      }
+      downgradeTurnProjectionToV34(root);
+
+      store = createSessionStore(root);
+      const first = await store.readTurnPositionPageSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'admission-bound-first',
+        anchor: { kind: 'tail' },
+        maxPositions: 8,
+      });
+      assert.equal(first.kind, 'building');
+      if (first.kind !== 'building') assert.fail('expected bounded admission reconciliation');
+      const bounded = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+        readOnly: true,
+      });
+      try {
+        assert.equal(
+          (
+            bounded
+              .prepare(`SELECT COUNT(*) AS count FROM session_turn_metadata
+                WHERE session_id = ? AND order_source = 'admission'`)
+              .get(session.id) as { count: number }
+          ).count,
+          1_024,
+        );
+        const snapshotState = bounded
+          .prepare(`SELECT state, build_phase, build_cursor_admitted_at,
+            build_cursor_position_id FROM session_turn_position_snapshots
+            WHERE session_id = ? AND snapshot_generation = ?`)
+          .get(session.id, first.snapshotKey.snapshotGeneration) as {
+          state: string;
+          build_phase: string;
+          build_cursor_admitted_at: number;
+          build_cursor_position_id: string;
+        };
+        assert.deepEqual(
+          { ...snapshotState },
+          {
+            state: 'building',
+            build_phase: 'recovering',
+            build_cursor_admitted_at: 1_023,
+            build_cursor_position_id: 'turn-1023',
+          },
+        );
+        assert.equal(
+          (
+            bounded
+              .prepare(`SELECT COUNT(*) AS count FROM session_turn_snapshot_positions
+                WHERE session_id = ? AND snapshot_generation = ?`)
+              .get(session.id, first.snapshotKey.snapshotGeneration) as { count: number }
+          ).count,
+          0,
+        );
+        const plan = bounded
+          .prepare(`EXPLAIN QUERY PLAN SELECT turn_id, admitted_at
+            FROM core_root_turn_admissions
+            WHERE session_id = ? AND (admitted_at, turn_id) > (?, ?)
+            ORDER BY admitted_at, turn_id LIMIT ?`)
+          .all(session.id, 1_023, 'turn-1023', 1_024)
+          .map((row) => String((row as { detail?: unknown }).detail ?? ''))
+          .join('\n');
+        assert.match(plan, /core_root_turn_admissions_order/u);
+        assert.match(plan, /\(admitted_at,turn_id\)>\(\?,\?\)/u);
+        assert.doesNotMatch(plan, /TEMP B-TREE|OFFSET|ROW_NUMBER|COUNT DISTINCT/iu);
+      } finally {
+        bounded.close();
+      }
+
+      await store.close?.();
+      store = createSessionStore(root);
+      await assert.rejects(
+        store.readTurnPositionPageSnapshot({
+          sessionId: session.id,
+          projection: 'owner',
+          snapshotLeaseId: 'admission-bound-first',
+          snapshotKey: first.snapshotKey,
+          anchor: { kind: 'tail' },
+          maxPositions: 8,
+        }),
+        (error: unknown) =>
+          (error as { code?: unknown }).code === 'session_turn_position_snapshot_mismatch',
+      );
+      const ready = await readyPage(store, session.id, 'admission-bound-reopen', 'owner');
+      assert.equal(ready.totalPositions, 1_025);
+      assert.ok(ready.snapshotKey.snapshotGeneration > first.snapshotKey.snapshotGeneration);
+      const completed = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+        readOnly: true,
+      });
+      try {
+        const positions = completed
+          .prepare(`SELECT owner_ordinal, position_id FROM session_turn_snapshot_positions
+            WHERE session_id = ? AND snapshot_generation = ? AND owner_ordinal IS NOT NULL
+            ORDER BY owner_ordinal`)
+          .all(session.id, ready.snapshotKey.snapshotGeneration) as Array<{
+          owner_ordinal: number;
+          position_id: string;
+        }>;
+        assert.equal(positions.length, 1_025);
+        for (let index = 0; index < positions.length; index += 1) {
+          assert.deepEqual(
+            { ...positions[index] },
+            {
+              owner_ordinal: index,
+              position_id: `turn-${index.toString().padStart(4, '0')}`,
+            },
+          );
+        }
+      } finally {
+        completed.close();
+      }
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('rehydrates a bodyless admission after shared visibility policy reset', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-bodyless-policy-reset-'));
+    const store = createSessionStore(root);
+    const runs = createSqliteAgentRunStore(root);
+    try {
+      const session = await store.create(makeInput());
+      await runs.admitRootTurn(
+        rootAdmission(session.id, 'turn-bodyless-policy', 'future-policy-user', 7),
+      );
+      const before = await readyPage(store, session.id, 'bodyless-policy-before', 'owner');
+      const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+      try {
+        database
+          .prepare(`UPDATE session_turn_authority_revisions
+            SET visibility_policy_version = 999 WHERE session_id = ?`)
+          .run(session.id);
+      } finally {
+        database.close();
+      }
+
+      const owner = await readyPage(store, session.id, 'bodyless-policy-after', 'owner');
+      const shared = await readyPage(store, session.id, 'bodyless-policy-shared', 'shared');
+      assert.ok(owner.snapshotKey.snapshotGeneration > before.snapshotKey.snapshotGeneration);
+      assert.deepEqual(owner.positions, [
+        {
+          ordinal: 0,
+          key: { kind: 'turn', id: 'turn-bodyless-policy' },
+          firstSequence: null,
+        },
+      ]);
+      assert.deepEqual(shared.positions, [
+        { ordinal: 0, key: { kind: 'empty' }, firstSequence: null },
+      ]);
+    } finally {
+      runs.close?.();
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('fails closed on invalid or contradictory canonical admission scalars', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-invalid-admission-source-'));
+    let store = createSessionStore(root);
+    try {
+      const invalidIdentity = await store.create(makeInput({ name: 'Invalid identity' }));
+      const invalidTime = await store.create(makeInput({ name: 'Invalid time' }));
+      const contradiction = await store.create(makeInput({ name: 'Contradiction' }));
+      const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+      try {
+        const insert = database.prepare(`INSERT INTO core_root_turn_admissions(
+          session_id, turn_id, admitted_at, record_json
+        ) VALUES (?, ?, ?, '{}')`);
+        insert.run(invalidIdentity.id, '', 1);
+        insert.run(invalidTime.id, 'turn-negative-time', -1);
+        insert.run(contradiction.id, 'turn-contradiction', 1);
+        database
+          .prepare(`INSERT INTO session_turn_metadata(
+            session_id, position_kind, position_id, order_source, admitted_at,
+            owner_first_sequence, shared_first_sequence
+          ) VALUES (?, 'turn', 'turn-contradiction', 'admission', 2, NULL, NULL)`)
+          .run(contradiction.id);
+      } finally {
+        database.close();
+      }
+
+      for (const sessionId of [invalidIdentity.id, invalidTime.id, contradiction.id]) {
+        await assert.rejects(
+          store.readTurnPositionPageSnapshot({
+            sessionId,
+            projection: 'owner',
+            snapshotLeaseId: 'invalid-admission',
+            anchor: { kind: 'tail' },
+            maxPositions: 8,
+          }),
+          (error: unknown) => {
+            assert.equal(
+              (error as { code?: unknown }).code,
+              'session_turn_position_recovery_failed',
+            );
+            assert.equal((error as { reason?: unknown }).reason, 'corrupt_source');
+            return true;
+          },
+        );
+        const failed = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+          readOnly: true,
+        });
+        try {
+          assert.deepEqual(
+            {
+              ...(failed
+                .prepare(`SELECT failure_reason, failure_sequence
+                  FROM session_turn_index_state WHERE session_id = ?`)
+                .get(sessionId) as Record<string, unknown>),
+            },
+            { failure_reason: 'corrupt_source', failure_sequence: 0 },
+          );
+        } finally {
+          failed.close();
+        }
+      }
+
+      await store.close?.();
+      const repaired = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+      try {
+        repaired
+          .prepare(`UPDATE core_root_turn_admissions SET turn_id = 'turn-repaired'
+            WHERE session_id = ? AND turn_id = ''`)
+          .run(invalidIdentity.id);
+      } finally {
+        repaired.close();
+      }
+      store = createSessionStore(root);
+      await assert.rejects(
+        store.readTurnPositionPageSnapshot({
+          sessionId: invalidIdentity.id,
+          projection: 'owner',
+          snapshotLeaseId: 'invalid-admission-reopen',
+          anchor: { kind: 'tail' },
+          maxPositions: 8,
+        }),
+        (error: unknown) => (error as { reason?: unknown }).reason === 'corrupt_source',
+      );
+
+      const reset = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+      try {
+        reset
+          .prepare(`UPDATE session_turn_authority_revisions
+            SET visibility_policy_version = 999 WHERE session_id = ?`)
+          .run(invalidIdentity.id);
+      } finally {
+        reset.close();
+      }
+      const recovered = await readyPage(
+        store,
+        invalidIdentity.id,
+        'invalid-admission-policy-reset',
+        'owner',
+      );
+      assert.deepEqual(recovered.positions, [
+        {
+          ordinal: 0,
+          key: { kind: 'turn', id: 'turn-repaired' },
+          firstSequence: null,
+        },
+      ]);
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('uses indexed owner/shared keyset plans for 10,000 alternating-visibility Turns', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-plan-'));
     const store = createSessionStore(root);
@@ -2587,6 +2972,26 @@ function resetProjection(root: string, sessionId: string): void {
         source_records = 0, source_bytes = 0,
         failure_reason = NULL, failure_sequence = NULL WHERE session_id = ?`)
       .run(sessionId);
+  } finally {
+    database.close();
+  }
+}
+
+function downgradeTurnProjectionToV34(root: string): void {
+  const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+  try {
+    database.exec(`
+      PRAGMA foreign_keys = OFF;
+      DROP TABLE session_turn_snapshot_leases;
+      DROP TABLE session_turn_snapshot_positions;
+      DROP TABLE session_turn_position_snapshots;
+      DROP TABLE session_turn_identity_recovery;
+      DROP TABLE session_turn_memberships;
+      DROP TABLE session_turn_metadata;
+      DROP TABLE session_turn_index_state;
+      DROP TABLE session_turn_authority_revisions;
+      UPDATE session_metadata_schema SET version = 34 WHERE scope = 'session_metadata';
+    `);
   } finally {
     database.close();
   }

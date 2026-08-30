@@ -33,6 +33,7 @@ export {
   SESSION_TURN_POSITION_BUILD_MAX_POSITIONS,
   SESSION_TURN_POSITION_MAX_PAGE_BYTES,
   SESSION_TURN_POSITION_MAX_PAGE_POSITIONS,
+  advanceSessionTurnAdmissionRecoveryForSnapshot,
   advanceSessionTurnPositionOrdinalBuild,
   allocateOrRequireSessionTurnPositionSnapshot,
   markSessionTurnRecoveryComplete,
