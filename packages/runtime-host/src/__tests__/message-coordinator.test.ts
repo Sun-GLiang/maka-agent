@@ -805,12 +805,12 @@ test('a retry of a recovered exact-Turn Message is not a conflict', async () => 
   const retried = await resubmitRecoveredExact(fixture, 'graph');
 
   // The intent survived the crash cut whole, so the unchanged retry reads as
-  // the same submit. The recovered source keeps the queued disposition the
-  // pending record can express, so the Host answers `outcome_unknown` — the
-  // client keeps its row and reconciles from canonical transcript — instead of
-  // rejecting a request it is already executing.
-  assert.equal(retried.ok, false);
-  if (!retried.ok) assert.equal(retried.error.code, 'outcome_unknown');
+  // the same submit. The durable source retains the queued disposition and
+  // Skill outcome even though its previous Host Epoch's revision is gone.
+  assert.deepEqual(retried, {
+    ok: true,
+    result: { disposition: 'steering', skillInvocation: EMPTY_SKILL_INVOCATION },
+  });
   assert.equal(fixture.startCalls(), 0);
 });
 
@@ -2401,8 +2401,10 @@ test('submit retries use keyed Host-Epoch outcomes and durable proof while old-E
     'next_turn',
     'old-epoch',
   );
-  assert.equal(oldFollow.ok, false);
-  if (!oldFollow.ok) assert.equal(oldFollow.error.code, 'outcome_unknown');
+  assert.deepEqual(oldFollow, {
+    ok: true,
+    result: { disposition: 'followup', skillInvocation: EMPTY_SKILL_INVOCATION },
+  });
 
   fixture.events.push(
     steeringEvent('old-steer', {
@@ -2436,8 +2438,10 @@ test('submit retries use keyed Host-Epoch outcomes and durable proof while old-E
     'durable current follow-up',
     'next_turn',
   );
-  assert.equal(currentFollow.ok, false);
-  if (!currentFollow.ok) assert.equal(currentFollow.error.code, 'outcome_unknown');
+  assert.deepEqual(currentFollow, {
+    ok: true,
+    result: { disposition: 'followup', skillInvocation: EMPTY_SKILL_INVOCATION },
+  });
   const displayConflict = await submitContent(
     fixture,
     'old-follow',
@@ -2501,6 +2505,60 @@ test('submit retries use keyed Host-Epoch outcomes and durable proof while old-E
   const reclaimedConflict = await submit(fixture, 'same-1', 'changed after idle', 'current_turn');
   assert.equal(reclaimedConflict.ok, false);
   if (!reclaimedConflict.ok) assert.equal(reclaimedConflict.error.code, 'operation_conflict');
+});
+
+test('old-Epoch durable receipts replay queued Skill outcomes without a queue revision', async () => {
+  const fixture = createFixture();
+  const skillInvocation = {
+    loaded: [{ id: 'writer', name: 'Writer' }],
+    failed: [{ request: 'typo', reason: 'not_found' as const }],
+    receipts: [],
+  };
+  fixture.setMessagePreparation(async (input) => ({
+    kind: 'ready',
+    content: {
+      text: `<invoked-skill>Writer</invoked-skill>\n\n${input.content.text}`,
+      displayText: input.content.text,
+    },
+    skillInvocation,
+  }));
+  fixture.coordinator.reserveRootTurn(ROOT);
+  fixture.coordinator.bindRun(ROOT);
+
+  for (const [messageId, placement, disposition, turnId] of [
+    ['durable-skill-steering', 'current_turn', 'steering', ROOT.turnId],
+    ['durable-skill-followup', 'next_turn', 'followup', 'successor-turn'],
+  ] as const) {
+    const submittedContent = { text: `/skill:writer /skill:typo ${disposition}` };
+    const submitted = await submitContent(fixture, messageId, submittedContent, placement);
+    assert.equal(submitted.ok, true);
+    const admission = fixture.readMessageAdmission(messageId);
+    assert.ok(admission);
+    const receipt = sourceReceipt(
+      messageId,
+      admission.content,
+      placement,
+      disposition,
+      turnId,
+      submittedContent,
+      skillInvocation,
+    );
+    fixture.receipts.set(messageId, receipt);
+    await fixture.coordinator.handoffRootSources({
+      sessionId: ROOT.sessionId,
+      turnId: receipt.admission.turnId,
+      runId: receipt.admission.runId,
+      messageIds: [messageId],
+    });
+
+    assert.deepEqual(
+      await submitContent(fixture, messageId, submittedContent, placement, 'old-epoch'),
+      {
+        ok: true,
+        result: { disposition, skillInvocation },
+      },
+    );
+  }
 });
 
 test('old-Epoch durable proof ignores structured content key order', async () => {
@@ -2624,8 +2682,10 @@ test('old-Epoch prepared Skill proofs retain the exact submitted message identit
     'next_turn',
     'old-epoch',
   );
-  assert.equal(exactFollowup.ok, false);
-  if (!exactFollowup.ok) assert.equal(exactFollowup.error.code, 'outcome_unknown');
+  assert.deepEqual(exactFollowup, {
+    ok: true,
+    result: { disposition: 'followup', skillInvocation: EMPTY_SKILL_INVOCATION },
+  });
   const conflictingFollowup = await submitContent(
     fixture,
     'prepared-followup',
@@ -2715,8 +2775,10 @@ test('old-Epoch retries prove each submitted message in a prepared follow-up bat
       'next_turn',
       'old-epoch',
     );
-    assert.equal(exact.ok, false);
-    if (!exact.ok) assert.equal(exact.error.code, 'outcome_unknown');
+    assert.deepEqual(exact, {
+      ok: true,
+      result: { disposition: 'followup', skillInvocation: EMPTY_SKILL_INVOCATION },
+    });
   }
   const conflict = await submitContent(
     fixture,

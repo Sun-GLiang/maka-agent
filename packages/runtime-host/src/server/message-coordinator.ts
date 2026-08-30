@@ -1868,18 +1868,19 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       if (!sameSourcePayload(receipt, payload)) {
         return failure('operation_conflict', 'Durable message receipt has a different payload');
       }
+      const skillInvocation =
+        source.skillInvocation ?? receipt.admission.skillInvocation ?? EMPTY_SKILL_INVOCATION;
       if (source.disposition === 'turn_started') {
         return success({
           disposition: 'turn_started',
           turnId: receipt.admission.turnId,
-          skillInvocation:
-            source.skillInvocation ?? receipt.admission.skillInvocation ?? EMPTY_SKILL_INVOCATION,
+          skillInvocation,
         });
       }
-      return failure(
-        'outcome_unknown',
-        'Durable message proof does not include the original queue revision',
-      );
+      return success({
+        disposition: source.disposition,
+        skillInvocation,
+      });
     }
     const steeringProof = await this.#durableProof.readImmutableSteeringMessageProof(
       input.sessionId,

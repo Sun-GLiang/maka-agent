@@ -1637,6 +1637,8 @@ describe('Runtime Host bootstrap protocol', () => {
     for (const result of [
       { disposition: 'steering', queueRevision: 2, skillInvocation },
       { disposition: 'followup', queueRevision: 3, skillInvocation },
+      { disposition: 'steering', skillInvocation },
+      { disposition: 'followup', skillInvocation },
       { disposition: 'turn_started', turnId: 'turn-2', skillInvocation },
       {
         disposition: 'blocked',

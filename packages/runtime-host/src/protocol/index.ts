@@ -96,7 +96,8 @@ export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // interoperability. Mismatches are rejected before domain commands are admitted.
 export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 68 as const;
 // 68: Every `turn.message.submit` disposition carries the exact Skill
-// invocation outcome. Older strict peers either omit or reject the new field.
+// invocation outcome. Durable queued replays may omit the previous Host
+// Epoch's transient queue revision; older strict peers reject either shape.
 // 67: Message lifecycle queries expose durable execution ownership and
 // cancellation. Older peers cannot decode or provide the closed proof list.
 // 66: Peer Mesh queries expose one canonical transit selection and runtime metrics.

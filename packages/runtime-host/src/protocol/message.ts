@@ -102,7 +102,11 @@ export interface TurnMessageSubmitInput {
 export type TurnMessageSubmitResult = {
   readonly skillInvocation: SkillInvocationResult;
 } & (
-  | { readonly disposition: 'steering' | 'followup'; readonly queueRevision: number }
+  | {
+      readonly disposition: 'steering' | 'followup';
+      /** Absent when an older Host Epoch can prove admission but not its transient revision. */
+      readonly queueRevision?: number;
+    }
   | { readonly disposition: 'turn_started'; readonly turnId: string }
   | { readonly disposition: 'blocked' }
 );
@@ -444,15 +448,18 @@ function decodeTurnMessageSubmitResult(value: unknown): TurnMessageSubmitResult 
     return { disposition: 'blocked', skillInvocation };
   }
   if (record.disposition === 'steering' || record.disposition === 'followup') {
-    assertExactKeys(record, 'turn.message.submit queued result', [
-      'disposition',
-      'queueRevision',
-      'skillInvocation',
-    ]);
+    const shaped = requireShapedRecord(
+      record,
+      'turn.message.submit queued result',
+      ['disposition', 'skillInvocation'],
+      ['queueRevision'],
+    );
     return {
       disposition: record.disposition,
-      queueRevision: requireCount(record.queueRevision, 'queueRevision'),
-      skillInvocation: decodeSubmitSkillInvocation(record.skillInvocation),
+      ...(shaped.queueRevision !== undefined
+        ? { queueRevision: requireCount(shaped.queueRevision, 'queueRevision') }
+        : {}),
+      skillInvocation: decodeSubmitSkillInvocation(shaped.skillInvocation),
     };
   }
   throw invalidProtocolFrame('Invalid turn.message.submit disposition');
