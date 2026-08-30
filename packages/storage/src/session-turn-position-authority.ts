@@ -113,6 +113,13 @@ export function recordRootTurnAdmissionForPositionIndex(
       order_source = 'admission', admitted_at = excluded.admitted_at
   `).run(sessionId, turnId, admittedAt);
   db.prepare(`
+    UPDATE session_turn_index_state
+    SET admission_cursor_admitted_at = ?, admission_cursor_turn_id = ?
+    WHERE session_id = ? AND admission_recovery_complete = 1
+      AND (admission_cursor_admitted_at IS NULL
+        OR (admission_cursor_admitted_at, admission_cursor_turn_id) < (?, ?))
+  `).run(admittedAt, turnId, sessionId, admittedAt, turnId);
+  db.prepare(`
     UPDATE session_turn_index_state SET failure_reason = NULL, failure_sequence = NULL
     WHERE session_id = ? AND failure_reason = 'hybrid_missing_admission'
   `).run(sessionId);
@@ -159,6 +166,8 @@ export function invalidateSessionTurnPositionIndex(db: DatabaseSync, sessionId: 
   db.prepare(`
     UPDATE session_turn_index_state
     SET indexed_through_sequence = -1, source_records = 0, source_bytes = 0,
+      admission_cursor_admitted_at = NULL, admission_cursor_turn_id = NULL,
+      admission_recovery_complete = 0,
       failure_reason = NULL, failure_sequence = NULL
     WHERE session_id = ?
   `).run(sessionId);
@@ -189,6 +198,8 @@ export function ensureTurnIndexRows(db: DatabaseSync, sessionId: string): void {
   db.prepare(`
     UPDATE session_turn_index_state
     SET indexed_through_sequence = -1, source_records = 0, source_bytes = 0,
+      admission_cursor_admitted_at = NULL, admission_cursor_turn_id = NULL,
+      admission_recovery_complete = 0,
       failure_reason = NULL, failure_sequence = NULL
     WHERE session_id = ?
   `).run(sessionId);

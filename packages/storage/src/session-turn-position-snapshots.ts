@@ -78,11 +78,6 @@ export interface SessionTurnPositionBuildStep {
   readonly executedPhase: Exclude<SessionTurnPositionBuildPhase, 'ready'>;
 }
 
-export interface SessionTurnAdmissionRecoveryStep {
-  readonly snapshot: SessionTurnPositionSnapshotRow;
-  readonly lastStepAdmissions: number;
-}
-
 export interface SessionTurnMembershipPreflight {
   readonly records: readonly {
     readonly positionKey: SessionTranscriptBodyPositionKey;
@@ -186,12 +181,20 @@ export function markSessionTurnRecoveryComplete(
   snapshot: SessionTurnPositionSnapshotRow,
 ): SessionTurnPositionSnapshotRow {
   if (snapshot.state !== 'building' || snapshot.build_phase !== 'recovering') return snapshot;
-  const indexed = (
-    db
-      .prepare('SELECT indexed_through_sequence FROM session_turn_index_state WHERE session_id = ?')
-      .get(sessionId) as { indexed_through_sequence: number }
-  ).indexed_through_sequence;
-  if (snapshot.through_sequence !== null && indexed < snapshot.through_sequence) return snapshot;
+  const indexState = db
+    .prepare(`SELECT indexed_through_sequence, admission_recovery_complete
+      FROM session_turn_index_state WHERE session_id = ?`)
+    .get(sessionId) as {
+    indexed_through_sequence: number;
+    admission_recovery_complete: number;
+  };
+  if (
+    indexState.admission_recovery_complete !== 1 ||
+    (snapshot.through_sequence !== null &&
+      indexState.indexed_through_sequence < snapshot.through_sequence)
+  ) {
+    return snapshot;
+  }
   const updated = db
     .prepare(`
       UPDATE session_turn_position_snapshots SET build_phase = 'legacy'
@@ -206,36 +209,15 @@ export function advanceSessionTurnAdmissionRecoveryForSnapshot(
   db: DatabaseSync,
   sessionId: string,
   snapshot: SessionTurnPositionSnapshotRow,
-): SessionTurnAdmissionRecoveryStep {
+): SessionTurnPositionSnapshotRow {
   if (snapshot.state !== 'building' || snapshot.build_phase !== 'recovering') {
     throw new SessionTurnPositionSnapshotMismatchError(sessionId);
   }
   const recovery = advanceSessionTurnAdmissionRecovery(db, {
     sessionId,
-    cursorAdmittedAt: snapshot.build_cursor_admitted_at,
-    cursorTurnId: snapshot.build_cursor_position_id,
     maxAdmissions: SESSION_TURN_ADMISSION_RECOVERY_MAX_ROWS,
   });
-  const updated = db
-    .prepare(`
-      UPDATE session_turn_position_snapshots
-      SET build_cursor_admitted_at = ?, build_cursor_position_kind = ?,
-        build_cursor_position_id = ?
-      WHERE session_id = ? AND slot = ? AND state = 'building' AND build_phase = 'recovering'
-    `)
-    .run(
-      recovery.cursorAdmittedAt,
-      recovery.cursorTurnId === null ? null : 'turn',
-      recovery.cursorTurnId,
-      sessionId,
-      snapshot.slot,
-    );
-  if (updated.changes !== 1) throw new SessionTurnPositionSnapshotMismatchError(sessionId);
-  const current = requireSnapshot(db, sessionId, snapshotKeyFromRow(snapshot));
-  return {
-    snapshot: recovery.complete ? markSessionTurnRecoveryComplete(db, sessionId, current) : current,
-    lastStepAdmissions: recovery.lastStepAdmissions,
-  };
+  return recovery.complete ? markSessionTurnRecoveryComplete(db, sessionId, snapshot) : snapshot;
 }
 
 export function advanceSessionTurnPositionOrdinalBuild(
