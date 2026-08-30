@@ -22,7 +22,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { constants as sqliteConstants, DatabaseSync } from 'node:sqlite';
 import { describe, test } from 'node:test';
 import { createSHA256 } from 'hash-wasm';
 import type { CreateSessionInput } from '@maka/core/runtime-inputs';
@@ -31,6 +31,7 @@ import { createConversationOperationalStateStore } from '../conversation-operati
 import { OPERATIONAL_STATE_DATABASE_NAME } from '../operational-state-store.js';
 import { createSessionStore } from '../session-store.js';
 import { advanceSessionTurnIdentityRecovery } from '../session-turn-identity-recovery.js';
+import { invalidateSessionTurnPositionIndex } from '../session-turn-position-index.js';
 
 describe('Session Turn position snapshots', () => {
   test('materializes owner and shared tagged positions in one exact generation', async () => {
@@ -2315,6 +2316,134 @@ describe('Session Turn position snapshots', () => {
     }
   });
 
+  test('reuses normalized admission authority across later exact snapshots', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-admission-fixed-point-'));
+    const store = createSessionStore(root);
+    const runs = createSqliteAgentRunStore(root);
+    try {
+      const session = await store.create(makeInput());
+      await runs.admitRootTurn(rootAdmission(session.id, 'turn-a', 'user-a', 1));
+      await runs.admitRootTurn(rootAdmission(session.id, 'turn-b', 'user-b', 2));
+      const first = await readyPage(store, session.id, 'admission-fixed-first', 'owner');
+      assert.deepEqual(
+        first.positions.map((position) => position.key),
+        [
+          { kind: 'turn', id: 'turn-a' },
+          { kind: 'turn', id: 'turn-b' },
+        ],
+      );
+
+      await runs.admitRootTurn(rootAdmission(session.id, 'turn-c', 'user-c', 3));
+      const database = (store as unknown as { metadata: { db: DatabaseSync } }).metadata.db;
+      let admissionReads = 0;
+      database.setAuthorizer((action, table) => {
+        if (action === sqliteConstants.SQLITE_READ && table === 'core_root_turn_admissions') {
+          admissionReads += 1;
+        }
+        return sqliteConstants.SQLITE_OK;
+      });
+      try {
+        const next = await readyPage(store, session.id, 'admission-fixed-next', 'owner');
+        assert.ok(next.snapshotKey.authorityRevision > first.snapshotKey.authorityRevision);
+        assert.deepEqual(
+          next.positions.map((position) => position.key),
+          [
+            { kind: 'turn', id: 'turn-a' },
+            { kind: 'turn', id: 'turn-b' },
+            { kind: 'turn', id: 'turn-c' },
+          ],
+        );
+      } finally {
+        database.setAuthorizer(null);
+      }
+      assert.equal(admissionReads, 0);
+      assert.deepEqual(
+        {
+          ...(database
+            .prepare(`SELECT admission_cursor_admitted_at, admission_cursor_turn_id,
+              admission_recovery_complete FROM session_turn_index_state WHERE session_id = ?`)
+            .get(session.id) as Record<string, unknown>),
+        },
+        {
+          admission_cursor_admitted_at: 3,
+          admission_cursor_turn_id: 'turn-c',
+          admission_recovery_complete: 1,
+        },
+      );
+    } finally {
+      runs.close?.();
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('explicit invalidation resets and rebuilds persisted admission recovery state', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-admission-reset-'));
+    const store = createSessionStore(root);
+    const runs = createSqliteAgentRunStore(root);
+    try {
+      const session = await store.create(makeInput());
+      await runs.admitRootTurn(rootAdmission(session.id, 'turn-reset', 'user-reset', 9));
+      await readyPage(store, session.id, 'admission-reset-before', 'owner');
+      const database = (store as unknown as { metadata: { db: DatabaseSync } }).metadata.db;
+      database.exec('BEGIN IMMEDIATE');
+      try {
+        invalidateSessionTurnPositionIndex(database, session.id);
+        database.exec('COMMIT');
+      } catch (error) {
+        database.exec('ROLLBACK');
+        throw error;
+      }
+      assert.deepEqual(
+        {
+          ...(database
+            .prepare(`SELECT admission_cursor_admitted_at, admission_cursor_turn_id,
+              admission_recovery_complete FROM session_turn_index_state WHERE session_id = ?`)
+            .get(session.id) as Record<string, unknown>),
+        },
+        {
+          admission_cursor_admitted_at: null,
+          admission_cursor_turn_id: null,
+          admission_recovery_complete: 0,
+        },
+      );
+      assert.equal(
+        (
+          database
+            .prepare(`SELECT COUNT(*) AS count FROM session_turn_metadata WHERE session_id = ?`)
+            .get(session.id) as { count: number }
+        ).count,
+        0,
+      );
+
+      const rebuilt = await readyPage(store, session.id, 'admission-reset-after', 'owner');
+      assert.deepEqual(rebuilt.positions, [
+        {
+          ordinal: 0,
+          key: { kind: 'turn', id: 'turn-reset' },
+          firstSequence: null,
+        },
+      ]);
+      assert.deepEqual(
+        {
+          ...(database
+            .prepare(`SELECT admission_cursor_admitted_at, admission_cursor_turn_id,
+              admission_recovery_complete FROM session_turn_index_state WHERE session_id = ?`)
+            .get(session.id) as Record<string, unknown>),
+        },
+        {
+          admission_cursor_admitted_at: 9,
+          admission_cursor_turn_id: 'turn-reset',
+          admission_recovery_complete: 1,
+        },
+      );
+    } finally {
+      runs.close?.();
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('bounds legacy admission reconciliation and atomically rebuilds after owner reopen', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-turn-position-admission-recovery-bound-'));
     let store = createSessionStore(root);
@@ -2360,22 +2489,31 @@ describe('Session Turn position snapshots', () => {
           1_024,
         );
         const snapshotState = bounded
-          .prepare(`SELECT state, build_phase, build_cursor_admitted_at,
-            build_cursor_position_id FROM session_turn_position_snapshots
+          .prepare(`SELECT state, build_phase FROM session_turn_position_snapshots
             WHERE session_id = ? AND snapshot_generation = ?`)
           .get(session.id, first.snapshotKey.snapshotGeneration) as {
           state: string;
           build_phase: string;
-          build_cursor_admitted_at: number;
-          build_cursor_position_id: string;
         };
         assert.deepEqual(
           { ...snapshotState },
           {
             state: 'building',
             build_phase: 'recovering',
-            build_cursor_admitted_at: 1_023,
-            build_cursor_position_id: 'turn-1023',
+          },
+        );
+        assert.deepEqual(
+          {
+            ...(bounded
+              .prepare(`SELECT admission_cursor_admitted_at, admission_cursor_turn_id,
+                admission_recovery_complete FROM session_turn_index_state
+                WHERE session_id = ?`)
+              .get(session.id) as Record<string, unknown>),
+          },
+          {
+            admission_cursor_admitted_at: 1_023,
+            admission_cursor_turn_id: 'turn-1023',
+            admission_recovery_complete: 0,
           },
         );
         assert.equal(
@@ -2416,7 +2554,58 @@ describe('Session Turn position snapshots', () => {
         (error: unknown) =>
           (error as { code?: unknown }).code === 'session_turn_position_snapshot_mismatch',
       );
-      const ready = await readyPage(store, session.id, 'admission-bound-reopen', 'owner');
+      let resumed = await store.readTurnPositionPageSnapshot({
+        sessionId: session.id,
+        projection: 'owner',
+        snapshotLeaseId: 'admission-bound-reopen',
+        anchor: { kind: 'tail' },
+        maxPositions: 8,
+      });
+      assert.equal(resumed.kind, 'building');
+      if (resumed.kind !== 'building') assert.fail('expected resumed admission reconciliation');
+      const resumedState = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+        readOnly: true,
+      });
+      try {
+        assert.deepEqual(
+          {
+            ...(resumedState
+              .prepare(`SELECT admission_cursor_admitted_at, admission_cursor_turn_id,
+                admission_recovery_complete FROM session_turn_index_state
+                WHERE session_id = ?`)
+              .get(session.id) as Record<string, unknown>),
+          },
+          {
+            admission_cursor_admitted_at: 1_024,
+            admission_cursor_turn_id: 'turn-1024',
+            admission_recovery_complete: 1,
+          },
+        );
+        assert.equal(
+          (
+            resumedState
+              .prepare(`SELECT COUNT(*) AS count FROM session_turn_snapshot_positions
+                WHERE session_id = ? AND snapshot_generation = ?`)
+              .get(session.id, resumed.snapshotKey.snapshotGeneration) as { count: number }
+          ).count,
+          0,
+        );
+      } finally {
+        resumedState.close();
+      }
+      while (resumed.kind === 'building') {
+        resumed = await store.readTurnPositionPageSnapshot({
+          sessionId: session.id,
+          projection: 'owner',
+          snapshotLeaseId: 'admission-bound-reopen',
+          snapshotKey: resumed.snapshotKey,
+          anchor: { kind: 'tail' },
+          maxPositions: 8,
+        });
+      }
+      assert.equal(resumed.kind, 'page');
+      if (resumed.kind !== 'page') assert.fail('expected ready page after resumed recovery');
+      const ready = resumed;
       assert.equal(ready.totalPositions, 1_025);
       assert.ok(ready.snapshotKey.snapshotGeneration > first.snapshotKey.snapshotGeneration);
       const completed = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
