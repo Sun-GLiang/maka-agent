@@ -21,6 +21,10 @@ import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { IHasher } from 'hash-wasm';
 import {
+  publishSessionTurnMembership,
+  SessionTurnMembershipPublicationError,
+} from './session-turn-membership.js';
+import {
   advanceSessionTurnIdentityScanner,
   completeSessionTurnIdentityScanner,
   createSessionTurnIdentityScannerState,
@@ -31,9 +35,10 @@ import {
   type SessionTurnRecoveredIdentity,
 } from './session-turn-identity-scanner.js';
 import {
+  planForwardTranscriptSlice,
   readTranscriptSlices,
-  StoredSessionMessageIncompatibleError,
 } from './sqlite-session-transcript-slices.js';
+import { SQLITE_SESSION_MESSAGE_CHUNK_BYTES } from './sqlite-session-metadata-schema.js';
 
 export const SESSION_TURN_IDENTITY_HASH_STATE_VERSION = 1;
 export const SESSION_TURN_IDENTITY_HASH_ALGORITHM = 'sha256';
@@ -96,20 +101,6 @@ interface SourceMetadata {
   readonly record_bytes: number;
   readonly chunked: number;
   readonly expected_digest: string | null;
-}
-
-export class SessionTurnIdentityRecoveryFailure extends Error {
-  readonly code = 'session_turn_identity_recovery_failed';
-
-  constructor(
-    readonly sessionId: string,
-    readonly reason: SessionTurnIdentityRecoveryFailureReason,
-    readonly sequence: number,
-    options?: ErrorOptions,
-  ) {
-    super(`Session Turn identity recovery failed (${reason}) at ${sessionId}/${sequence}`, options);
-    this.name = 'SessionTurnIdentityRecoveryFailure';
-  }
 }
 
 /**
@@ -176,7 +167,12 @@ export function advanceSessionTurnIdentityRecovery(
     }
 
     const available = maxSourceBytes - stepBytes;
-    const byteLength = boundedSliceLength(source, byteOffset, available);
+    const byteLength = planForwardTranscriptSlice(
+      source.record_bytes,
+      byteOffset,
+      available,
+      source.chunked === 1 ? SQLITE_SESSION_MESSAGE_CHUNK_BYTES : 1,
+    );
     if (byteLength === 0) break;
     let data: Buffer;
     try {
@@ -236,15 +232,12 @@ export function advanceSessionTurnIdentityRecovery(
       );
     }
     try {
-      publishRecoveredMembership(db, sessionId, source.sequence, identity);
+      publishSessionTurnMembership(db, sessionId, source.sequence, identity);
     } catch (error) {
       return fail(
         db,
         sessionId,
-        error instanceof SessionTurnIdentityRecoveryFailure &&
-          error.reason === 'incompatible_identity'
-          ? 'incompatible_identity'
-          : 'corrupt_source',
+        error instanceof SessionTurnMembershipPublicationError ? error.reason : 'corrupt_source',
         source.sequence,
         error,
       );
@@ -319,14 +312,6 @@ function readSourceMetadata(
     return undefined;
   }
   return row as SourceMetadata;
-}
-
-function boundedSliceLength(source: SourceMetadata, byteOffset: number, available: number): number {
-  const remaining = source.record_bytes - byteOffset;
-  if (remaining <= available) return remaining;
-  if (source.chunked === 0) return 0;
-  const chunkBytes = 64 * 1024;
-  return Math.floor(available / chunkBytes) * chunkBytes;
 }
 
 function sameSource(partial: PartialRow, source: SourceMetadata): boolean {
@@ -412,68 +397,6 @@ function derivedStateDigest(hashState: Uint8Array, scannerState: string): string
     .digest('hex');
 }
 
-function publishRecoveredMembership(
-  db: DatabaseSync,
-  sessionId: string,
-  sequence: number,
-  identity: SessionTurnRecoveredIdentity,
-): void {
-  if (identity.kind === 'ignored') return;
-  const admission =
-    identity.kind === 'turn' && tableExists(db, 'core_root_turn_admissions')
-      ? (db
-          .prepare(`
-            SELECT admitted_at FROM core_root_turn_admissions
-            WHERE session_id = ? AND turn_id = ?
-          `)
-          .get(sessionId, identity.turnId) as { admitted_at: number } | undefined)
-      : undefined;
-  const existingIdentity = db
-    .prepare(`
-      SELECT identity_kind FROM session_turn_metadata
-      WHERE session_id = ? AND turn_id = ?
-    `)
-    .get(sessionId, identity.turnId) as { identity_kind: string } | undefined;
-  if (existingIdentity && existingIdentity.identity_kind !== identity.kind) {
-    throw new SessionTurnIdentityRecoveryFailure(sessionId, 'incompatible_identity', sequence);
-  }
-  db.prepare(`
-    INSERT INTO session_turn_metadata(
-      session_id, turn_id, identity_kind, order_source, admitted_at, first_sequence
-    ) VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(session_id, turn_id) DO UPDATE SET
-      order_source = CASE WHEN excluded.order_source = 'admission' THEN 'admission'
-        ELSE session_turn_metadata.order_source END,
-      admitted_at = COALESCE(excluded.admitted_at, session_turn_metadata.admitted_at),
-      first_sequence = CASE WHEN session_turn_metadata.first_sequence IS NULL
-        THEN excluded.first_sequence
-        ELSE MIN(session_turn_metadata.first_sequence, excluded.first_sequence) END
-  `).run(
-    sessionId,
-    identity.turnId,
-    identity.kind,
-    admission ? 'admission' : 'legacy',
-    admission?.admitted_at ?? null,
-    sequence,
-  );
-  const inserted = db
-    .prepare(`
-      INSERT INTO session_turn_memberships(session_id, sequence, turn_id)
-      VALUES (?, ?, ?) ON CONFLICT(session_id, sequence) DO NOTHING
-    `)
-    .run(sessionId, sequence, identity.turnId);
-  if (inserted.changes !== 1) {
-    const existing = db
-      .prepare(`
-        SELECT turn_id FROM session_turn_memberships WHERE session_id = ? AND sequence = ?
-      `)
-      .get(sessionId, sequence) as { turn_id: string };
-    if (existing.turn_id !== identity.turnId) {
-      throw new SessionTurnIdentityRecoveryFailure(sessionId, 'corrupt_source', sequence);
-    }
-  }
-}
-
 function fail(
   db: DatabaseSync,
   sessionId: string,
@@ -488,10 +411,4 @@ function fail(
   db.prepare('DELETE FROM session_turn_identity_recovery WHERE session_id = ?').run(sessionId);
   void cause;
   return { complete: false, failure: reason, failureSequence: sequence };
-}
-
-function tableExists(db: DatabaseSync, table: string): boolean {
-  return Boolean(
-    db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(table),
-  );
 }

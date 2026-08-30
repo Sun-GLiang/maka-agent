@@ -29,6 +29,7 @@ import {
   type SessionTurnPositionSnapshotKey,
 } from './session-store.js';
 import { ensureTurnIndexRows } from './session-turn-position-authority.js';
+import { sqliteTableExists } from './sqlite-schema-introspection.js';
 
 export const SESSION_TURN_POSITION_MAX_PAGE_POSITIONS = 128;
 export const SESSION_TURN_POSITION_MAX_PAGE_BYTES = 64 * 1024;
@@ -462,7 +463,7 @@ export function releaseSessionTurnPositionSnapshot(
 }
 
 export function reclaimSessionTurnPositionSnapshotsForNewOwner(db: DatabaseSync): void {
-  if (!tableExists(db, 'session_turn_position_snapshots')) return;
+  if (!sqliteTableExists(db, 'session_turn_position_snapshots')) return;
   db.prepare('DELETE FROM session_turn_position_snapshots').run();
 }
 
@@ -776,10 +777,4 @@ function ensureSessionExists(db: DatabaseSync, sessionId: string): void {
   if (!db.prepare('SELECT 1 FROM session_metadata WHERE session_id = ?').get(sessionId)) {
     throw new SessionTurnPositionSnapshotMismatchError(sessionId);
   }
-}
-
-function tableExists(db: DatabaseSync, table: string): boolean {
-  return Boolean(
-    db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(table),
-  );
 }
