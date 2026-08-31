@@ -194,6 +194,15 @@ function subscription(
     loadTranscriptPage: async () => {
       throw new Error('Fake subscription does not expose transcript pages');
     },
+    queryTranscriptPositions: async () => {
+      throw new Error('Fake subscription does not expose semantic transcript positions');
+    },
+    loadTranscriptTurnWindow: async () => {
+      throw new Error('Fake subscription does not expose semantic transcript windows');
+    },
+    decodeTranscriptTurnWindowPage: async () => {
+      throw new Error('Fake subscription does not expose semantic transcript windows');
+    },
     close: async () => {
       lifecycle.push(`${sessionId}:close`);
     },

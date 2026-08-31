@@ -1,0 +1,8 @@
+{
+  "epoch": 73,
+  "files": [
+    "packages/runtime-host/src/protocol/operations.ts",
+    "packages/runtime-host/src/protocol/session-transcript.ts"
+  ],
+  "reason": "Adds dormant subscription-scoped semantic transcript query operations without changing existing operation or subscription frame shapes; rollout remains disabled until the planned compatibility activation"
+}

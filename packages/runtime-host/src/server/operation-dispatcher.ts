@@ -45,6 +45,7 @@ export interface ConnectionContext {
   principal: string;
   principalKind?: RuntimeHostConnectionAuthority['principalKind'];
   credentialId?: string;
+  credentialClientInstanceId?: string;
   clientInstanceId?: string;
   turnAdmissionAuthorization?: RootTurnAdmissionAuthorization;
   acquireResidency(): OperationResidency;
@@ -117,6 +118,8 @@ export type SessionContinuityOperationKey = Extract<
   | 'subscription.close'
   | 'session.transcript.page'
   | 'session.transcript.overlay.release'
+  | 'session.transcript.positions.query'
+  | 'session.transcript.turn_window.page'
 >;
 export type SessionRevisionOperationKey = Extract<
   OperationKey,

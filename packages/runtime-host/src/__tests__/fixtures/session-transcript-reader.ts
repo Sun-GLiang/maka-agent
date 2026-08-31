@@ -142,6 +142,13 @@ export function transcriptReader(
             (message, sequence) =>
               sequence <= request.throughSequence! && request.messageIds.includes(message.id),
           ),
+    readPositionPage: async () => {
+      throw new Error('Semantic transcript fixture is not configured');
+    },
+    readPositionRecords: async () => {
+      throw new Error('Semantic transcript fixture is not configured');
+    },
+    releasePositionSnapshot: async () => undefined,
     readActiveOverlay: async () => overlay,
   };
 }

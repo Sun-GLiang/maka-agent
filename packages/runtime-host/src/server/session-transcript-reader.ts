@@ -34,7 +34,12 @@ import type {
   SessionTranscriptPageRequest,
   SessionTranscriptRecordScanPage,
   SessionTranscriptRecordScanRequest,
+  SessionTranscriptRecordsByPositionKeysSnapshotRequest,
+  SessionTranscriptRecordsByPositionKeysSnapshotResult,
   SessionTranscriptStoragePage,
+  SessionTurnPositionPageSnapshotRequest,
+  SessionTurnPositionReadResult,
+  SessionTurnPositionSnapshotReleaseRequest,
 } from '@maka/storage/execution-stores';
 import { SESSION_TRANSCRIPT_OVERLAY_MAX_MESSAGES, type TurnSnapshot } from '../protocol/index.js';
 
@@ -57,6 +62,11 @@ export function createSessionTranscriptReader(input: {
       input.stores.sessionStore.readTranscriptRecordsSnapshot(sessionId, request),
     readDurableMessagesById: (sessionId, request) =>
       input.stores.sessionStore.readTranscriptMessagesSnapshot(sessionId, request),
+    readPositionPage: (request) => input.stores.sessionStore.readTurnPositionPageSnapshot(request),
+    readPositionRecords: (request) =>
+      input.stores.sessionStore.readTranscriptRecordsByPositionKeysSnapshot(request),
+    releasePositionSnapshot: (request) =>
+      input.stores.sessionStore.releaseTurnPositionSnapshot(request),
     readActiveOverlay: async (sessionId, rootTurn) => {
       if (!rootTurn || isTerminalTurn(rootTurn)) return [];
 
@@ -93,6 +103,13 @@ export interface SessionTranscriptReader {
     sessionId: string,
     request: SessionTranscriptMessageLookupRequest,
   ): Promise<readonly StoredMessage[]>;
+  readPositionPage(
+    request: SessionTurnPositionPageSnapshotRequest,
+  ): Promise<SessionTurnPositionReadResult>;
+  readPositionRecords(
+    request: SessionTranscriptRecordsByPositionKeysSnapshotRequest,
+  ): Promise<SessionTranscriptRecordsByPositionKeysSnapshotResult>;
+  releasePositionSnapshot(request: SessionTurnPositionSnapshotReleaseRequest): Promise<void>;
   readActiveOverlay(
     sessionId: string,
     rootTurn: TurnSnapshot | null,

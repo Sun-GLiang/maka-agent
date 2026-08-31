@@ -18,8 +18,9 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse } from '@babel/parser';
@@ -38,12 +39,6 @@ const STATEFUL_HOOKS = new Set([
   'useState',
   'useSyncExternalStore',
   'useTransition',
-]);
-const HOOK_TRANSITION_SECTIONS = new Set([
-  'legacyAppShell',
-  'legacyAppShellClosure',
-  'rootDebt',
-  'rootDebtClosure',
 ]);
 const REACT_LIFECYCLE_METHODS = new Set([
   'UNSAFE_componentWillMount',
@@ -200,7 +195,6 @@ function validateArchitectureConfig(config, label, violations) {
   for (const field of ['legacyFeatureImports', 'legacyPlatformImports']) {
     if (!isSortedUniqueStrings(config[field])) reject(`${field} must be sorted unique strings`);
   }
-  if (!Array.isArray(config.hookTransitions)) reject('hookTransitions must be an array');
   if (
     !isRecord(config.legacyAppShell) ||
     !isRecord(config.legacyAppShell.files) ||
@@ -259,49 +253,6 @@ function validateArchitectureConfig(config, label, violations) {
     }
     if (!isSortedUniqueStrings(owner.legacyPaths)) {
       reject(`${owner.capability}: legacyPaths must be sorted unique strings`);
-    }
-  }
-  const transitionIds = new Set();
-  let previousTransitionId = '';
-  for (const transition of config.hookTransitions) {
-    if (!isRecord(transition)) {
-      reject('hookTransitions entries must be objects');
-      continue;
-    }
-    if (
-      typeof transition.id !== 'string' ||
-      !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(transition.id)
-    ) {
-      reject('hookTransitions id must be lowercase kebab-case');
-    } else {
-      if (transitionIds.has(transition.id)) reject(`duplicate hook transition ${transition.id}`);
-      if (transition.id.localeCompare(previousTransitionId) < 0) {
-        reject('hookTransitions must be sorted by id');
-      }
-      transitionIds.add(transition.id);
-      previousTransitionId = transition.id;
-    }
-    if (!HOOK_TRANSITION_SECTIONS.has(transition.section)) {
-      reject(`${String(transition.id)}: unsupported hook transition section ${String(transition.section)}`);
-    }
-    if (
-      typeof transition.path !== 'string' ||
-      !transition.path.startsWith('src/') ||
-      transition.path.includes('..') ||
-      transition.path.includes('\\')
-    ) {
-      reject(`${String(transition.id)}: hook transition path must be a normalized Desktop source path`);
-    }
-    for (const field of ['from', 'to']) {
-      if (!isTrackedHookName(transition[field])) {
-        reject(`${String(transition.id)}: hook transition ${field} must be a tracked Hook name`);
-      }
-    }
-    if (transition.from === transition.to) {
-      reject(`${String(transition.id)}: hook transition must change the Hook name`);
-    }
-    if (!Number.isInteger(transition.count) || transition.count <= 0) {
-      reject(`${String(transition.id)}: hook transition count must be a positive integer`);
     }
   }
   return valid;
@@ -421,10 +372,6 @@ function addHookNames(aliases, key, names) {
     changed = true;
   }
   return changed;
-}
-
-function isTrackedHookName(name) {
-  return typeof name === 'string' && (name === 'use' || /^use[A-Z0-9]/u.test(name));
 }
 
 function staticString(node) {
@@ -2304,7 +2251,6 @@ export function generateArchitectureConfig(desktopRoot, config) {
     legacyGrowthDirectories: config.legacyGrowthDirectories ?? DEFAULT_LEGACY_GROWTH_DIRECTORIES,
     legacyFeatureImports: imports.feature,
     legacyPlatformImports: imports.platform,
-    hookTransitions: config.hookTransitions ?? [],
     legacyAppShell: {
       files: Object.fromEntries(appShellFiles.map((path) => [path, debtForPath(desktopRoot, path)])),
       closure: Object.fromEntries(closureFiles.map((path) => [path, capabilityDebtForPath(desktopRoot, path)])),
@@ -2319,21 +2265,6 @@ export function generateArchitectureConfig(desktopRoot, config) {
 
 function validateMonotonicDebt(config, baseConfig, desktopRoot, violations) {
   if (!baseConfig) return;
-  const baseTransitions = new Map(
-    baseConfig.hookTransitions.map((transition) => [transition.id, transition]),
-  );
-  const newTransitions = config.hookTransitions.filter(
-    (transition) => !baseTransitions.has(transition.id),
-  );
-  for (const [id, baseTransition] of baseTransitions) {
-    const currentTransition = config.hookTransitions.find((transition) => transition.id === id);
-    if (!currentTransition) {
-      violations.push(`${id}: historical hook transition entries cannot be removed`);
-    } else if (JSON.stringify(currentTransition) !== JSON.stringify(baseTransition)) {
-      violations.push(`${id}: historical hook transition entries cannot be changed`);
-    }
-  }
-  const consumedTransitions = new Set();
   for (const section of ['legacyAppShell', 'legacyAppShellClosure', 'rootDebt', 'rootDebtClosure']) {
     const currentFiles =
       section === 'legacyAppShell'
@@ -2381,31 +2312,6 @@ function validateMonotonicDebt(config, baseConfig, desktopRoot, violations) {
               .map(([key, count]) => [key, Math.max(0, count - (base[metric][key] ?? 0))])
               .filter(([, count]) => count > 0),
           );
-          if (metric === 'hookCalls') {
-            const decreases = Object.fromEntries(
-              Object.entries(base.hookCalls)
-                .map(([key, count]) => [key, Math.max(0, count - (current.hookCalls[key] ?? 0))])
-                .filter(([, count]) => count > 0),
-            );
-            for (const transition of newTransitions) {
-              if (transition.section !== section || transition.path !== path) continue;
-              const availableFrom = Object.hasOwn(decreases, transition.from)
-                ? decreases[transition.from]
-                : 0;
-              const requiredTo = Object.hasOwn(increases, transition.to)
-                ? increases[transition.to]
-                : 0;
-              if (availableFrom < transition.count || requiredTo < transition.count) {
-                violations.push(
-                  `${transition.id}: hook transition must be paid by ${transition.count} removed ${transition.from} and ${transition.count} added ${transition.to}`,
-                );
-                continue;
-              }
-              decreases[transition.from] = availableFrom - transition.count;
-              increases[transition.to] = requiredTo - transition.count;
-              consumedTransitions.add(transition.id);
-            }
-          }
           for (const [key, count] of Object.entries(increases)) {
             if (count > 0) {
               violations.push(`${path}: new or increased ${metric} debt ${key}`);
@@ -2430,12 +2336,6 @@ function validateMonotonicDebt(config, baseConfig, desktopRoot, violations) {
       }
     }
   }
-  for (const transition of newTransitions) {
-    if (!consumedTransitions.has(transition.id)) {
-      violations.push(`${transition.id}: new hook transition was not consumed by this change`);
-    }
-  }
-
   const baseLegacyFiles = new Set(baseConfig.legacyRendererFiles);
   for (const path of config.legacyRendererFiles) {
     if (!baseLegacyFiles.has(path) && !isAllowedLegacyGrowthPath(config, path)) {
@@ -2516,6 +2416,46 @@ export function checkRendererArchitecture({
   return violations.sort();
 }
 
+// The monotonic-debt ratchet must measure debt against what the base commit's
+// source tree *actually* contained, not against the numbers its ledger happened
+// to record. A ledger that under-reports its own tree (for example, one
+// generated on a branch that predated files already merged into main) would
+// otherwise make a faithful baseline correction look like brand-new debt and
+// wedge the ledger permanently. We materialize the base tree and re-derive its
+// debt, keeping the base ledger only as the source of policy fields (hook
+// transitions, growth directories, root-debt key set, ownership).
+function deriveBaseTreeConfig(repoRoot, desktopRoot, base, baseCommittedConfig) {
+  const scratch = mkdtempSync(join(tmpdir(), 'renderer-arch-base-'));
+  const worktreePath = join(scratch, 'tree');
+  try {
+    execFileSync('git', ['worktree', 'add', '--detach', worktreePath, base], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const baseDesktopRoot = resolve(worktreePath, relative(repoRoot, desktopRoot));
+    return generateArchitectureConfig(baseDesktopRoot, baseCommittedConfig);
+  } finally {
+    try {
+      execFileSync('git', ['worktree', 'remove', '--force', worktreePath], {
+        cwd: repoRoot,
+        stdio: 'ignore',
+      });
+    } catch {
+      try {
+        execFileSync('git', ['worktree', 'prune'], { cwd: repoRoot, stdio: 'ignore' });
+      } catch {
+        // Ignore prune failures; the scratch removal below is the real cleanup.
+      }
+    }
+    try {
+      rmSync(scratch, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup of the scratch directory.
+    }
+  }
+}
+
 function loadBaseConfig(repoRoot, desktopRoot, base) {
   if (!base) return { baseConfig: undefined, introducedLedger: false };
   const relativeConfig = normalizePath(relative(repoRoot, join(desktopRoot, 'renderer-architecture.json')));
@@ -2557,12 +2497,29 @@ function loadBaseConfig(repoRoot, desktopRoot, base) {
     throw new Error(`base ledger is missing at ${base}:${relativeConfig}`);
   }
 
+  let baseCommittedConfig;
   try {
-    return { baseConfig: JSON.parse(source), introducedLedger: false };
+    baseCommittedConfig = JSON.parse(source);
   } catch (error) {
     throw new Error(
       `base ledger is invalid JSON at ${base}:${relativeConfig}: ${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+
+  try {
+    return {
+      baseConfig: deriveBaseTreeConfig(repoRoot, desktopRoot, base, baseCommittedConfig),
+      introducedLedger: false,
+    };
+  } catch (error) {
+    // If the base tree cannot be materialized or analyzed (e.g. git worktree is
+    // unavailable), fall back to the committed base ledger so the ratchet still
+    // runs. This restores the pre-fix behavior rather than crashing the check.
+    console.warn(
+      `Renderer architecture check: could not derive base tree debt at ${base}; ` +
+        `falling back to the committed base ledger. (${error instanceof Error ? error.message : String(error)})`,
+    );
+    return { baseConfig: baseCommittedConfig, introducedLedger: false };
   }
 }
 

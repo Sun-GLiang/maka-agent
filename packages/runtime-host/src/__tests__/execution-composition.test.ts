@@ -30,6 +30,8 @@ import type {
   AgentGraphIntentClaimRequest,
 } from '@maka/core/agent-graph-control';
 import type { ShellRunRecord } from '@maka/core/shell-run';
+import { decodeStoredMessage } from '@maka/core/session';
+import { markPersisted } from '@maka/core/persisted-value';
 import { FAKE_ASK_USER_QUESTION_PROMPT, FakeBackend } from '@maka/runtime/test-only/fake-backend';
 import { LOCAL_READ_AGENT_DEFINITION } from '@maka/runtime/agent-catalog';
 import { SessionManager } from '@maka/runtime/session-manager';
@@ -41,6 +43,8 @@ import {
   LONG_TERM_MEMORY_DATABASE_NAME,
   openInteractiveLongTermMemoryStoreForWrite,
 } from '@maka/storage/long-term-memory-store';
+import { OPERATIONAL_STATE_DATABASE_NAME } from '@maka/storage/operational-state-store';
+import { createSessionStore } from '@maka/storage/session-store';
 import {
   resolveStorageRoot,
   tryAcquireInteractiveRootOwner,
@@ -50,6 +54,7 @@ import { openInteractiveUsageStoresForWrite } from '@maka/storage/usage-stores';
 import { openInteractiveShellRunStoreForWrite } from '@maka/storage/shell-run-authority';
 import { openInteractiveRuntimePolicyStoresForWrite } from '@maka/storage/runtime-policy-stores';
 import { HostResidencyRegistry } from '../server/host-residency-registry.js';
+import { ClientSessionSubscription } from '../client/session-subscription.js';
 import {
   createExecutionRuntimeHostComposition,
   runtimeHostFilesystemWorkerRuntime,
@@ -157,6 +162,281 @@ test('production composition closes long-term memory after a later startup failu
       await recoveredOwner.close();
     }
   });
+});
+
+test('real SQLite semantic positions reach the production subscription client', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const session = await stores.sessionStore.create({
+      cwd: root,
+      llmConnectionId: FAKE_CONNECTION_ID,
+      llmConnectionSlug: 'fake',
+      model: 'fake-model',
+      permissionMode: 'ask',
+    });
+    await stores.sessionStore.appendMessage(session.id, {
+      type: 'user',
+      id: 'semantic-user-1',
+      turnId: 'semantic-turn-1',
+      ts: 1,
+      text: 'semantic transcript',
+    });
+    const composition = await createExecutionRuntimeHostComposition(compositionContext(owner));
+    try {
+      await composition.recover();
+      const continuity = composition.continuity;
+      assert.ok(continuity);
+      if (!continuity) return;
+      const connectionId = 'semantic-composition-client';
+      let client: ClientSessionSubscription | undefined;
+      const attached = continuity.attachConnection(connectionId, {
+        send: async (frame) => client?.accept(frame),
+      });
+      const context = {
+        hostEpoch: 'execution-composition-test',
+        connectionId,
+        principal: 'local_os_user' as const,
+        principalKind: 'local_owner' as const,
+        acquireResidency: () => ({ release() {} }),
+      };
+      const opened = await composition.handlers['subscription.open'](
+        {
+          sessionId: session.id,
+          transcript: { kind: 'tail', maxBytes: 16 * 1024 },
+        },
+        context,
+      );
+      assert.equal(opened.ok, true);
+      if (!opened.ok) return;
+      client = new ClientSessionSubscription(
+        opened.result,
+        async () => {
+          await composition.handlers['subscription.close'](
+            { subscriptionId: opened.result.subscriptionId },
+            context,
+          );
+        },
+        async (input) => {
+          const outcome = await composition.handlers['session.transcript.page'](input, context);
+          if (!outcome.ok) throw new Error(outcome.error.message);
+          return outcome.result;
+        },
+        async () => undefined,
+        {
+          queryPositions: async (input) => {
+            const outcome = await composition.handlers['session.transcript.positions.query'](
+              input,
+              context,
+            );
+            if (!outcome.ok) throw new Error(outcome.error.message);
+            return outcome.result;
+          },
+          readTurnWindow: async (input) => {
+            const outcome = await composition.handlers['session.transcript.turn_window.page'](
+              input,
+              context,
+            );
+            if (!outcome.ok) throw new Error(outcome.error.message);
+            return outcome.result;
+          },
+        },
+      );
+      attached.activate(opened.result.subscriptionId);
+
+      let positions = await client.queryTranscriptPositions({
+        kind: 'acquire',
+        anchor: { kind: 'tail' },
+        maxPositions: 8,
+      });
+      for (let step = 0; positions.kind === 'building' && step < 16; step += 1) {
+        positions = await client.queryTranscriptPositions({
+          kind: 'page',
+          snapshotToken: positions.snapshotToken,
+          anchor: { kind: 'tail' },
+          maxPositions: 8,
+        });
+      }
+      assert.equal(positions.kind, 'page');
+      if (positions.kind !== 'page') assert.fail('semantic snapshot did not become ready');
+      assert.deepEqual(positions.positions, [
+        { ordinal: 0, key: { kind: 'turn', id: 'semantic-turn-1' } },
+      ]);
+      const window = await client.loadTranscriptTurnWindow(
+        {
+          snapshotToken: positions.snapshotToken,
+          startOrdinal: 0,
+          maxPositions: 1,
+          replaceCursor: null,
+        },
+        (value) => decodeStoredMessage(markPersisted(value)),
+      );
+      assert.ok(!('kind' in window));
+      if ('kind' in window) return;
+      assert.deepEqual(window.positions[0]?.messages, [
+        {
+          type: 'user',
+          id: 'semantic-user-1',
+          turnId: 'semantic-turn-1',
+          ts: 1,
+          text: 'semantic transcript',
+        },
+      ]);
+      const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+        readOnly: true,
+      });
+      try {
+        const leaseCount = () =>
+          Number(
+            database
+              .prepare(
+                'SELECT COUNT(*) AS count FROM session_turn_snapshot_leases WHERE session_id = ?',
+              )
+              .get(session.id)?.count,
+          );
+        assert.equal(leaseCount(), 1);
+        await client.close();
+        await attached.close();
+        assert.equal(leaseCount(), 0);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
+test('production semantic positions resume persisted v34 chunk recovery after Host reopen', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'maka-semantic-v34-composition-'));
+  const root = join(base, 'interactive');
+  const setupStore = createSessionStore(root);
+  const recovery = await setupStore.create({
+    cwd: root,
+    llmConnectionId: FAKE_CONNECTION_ID,
+    llmConnectionSlug: 'fake',
+    model: 'fake-model',
+    permissionMode: 'ask',
+  });
+  await setupStore.appendMessages(recovery.id, [
+    {
+      type: 'user',
+      id: 'legacy-large-user',
+      turnId: 'legacy-large-turn',
+      ts: 1,
+      text: 'x'.repeat(4 * 1024 * 1024 + 1_024),
+    },
+    {
+      type: 'system_note',
+      id: 'legacy-visible-note',
+      ts: 2,
+      kind: 'context_compacted',
+    },
+    { type: 'system_note', id: 'legacy-hidden-note', ts: 3, kind: 'session_start' },
+  ]);
+  await setupStore.close?.();
+  downgradeSemanticProjectionToV34(root);
+  const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  let owner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(owner);
+  if (!owner) throw new Error('Unable to acquire semantic recovery root');
+  let composition: Awaited<ReturnType<typeof createExecutionRuntimeHostComposition>> | undefined;
+  try {
+    composition = await createExecutionRuntimeHostComposition(compositionContext(owner));
+    await composition.recover();
+    const first = await openCompositionSemanticClient(
+      composition,
+      recovery.id,
+      'semantic-v34-before-reopen',
+    );
+    let positions = await first.client.queryTranscriptPositions({
+      kind: 'acquire',
+      anchor: { kind: 'tail' },
+      maxPositions: 8,
+    });
+    let partial = readSemanticRecoveryPartial(root, recovery.id);
+    for (let step = 0; positions.kind === 'building' && !partial && step < 4; step += 1) {
+      positions = await first.client.queryTranscriptPositions({
+        kind: 'page',
+        snapshotToken: positions.snapshotToken,
+        anchor: { kind: 'tail' },
+        maxPositions: 8,
+      });
+      partial = readSemanticRecoveryPartial(root, recovery.id);
+    }
+    assert.equal(positions.kind, 'building');
+    assert.ok(partial);
+    if (!partial) assert.fail('expected persisted partial scalar recovery');
+    assert.ok(partial.byte_offset > 0 && partial.byte_offset <= 4 * 1024 * 1024);
+    assert.ok(partial.byte_offset < partial.record_bytes);
+    assert.equal(partial.hash_implementation, 'hash-wasm@4.12.0');
+    assert.ok(partial.hash_state_bytes > 0 && partial.scanner_state_bytes > 0);
+    const generationBeforeReopen = readNextSemanticGeneration(root, recovery.id);
+
+    await first.client.close();
+    await first.attached.close();
+    await composition.close();
+    composition = undefined;
+    await owner.close();
+    owner = undefined;
+    assert.deepEqual(readSemanticRecoveryPartial(root, recovery.id), partial);
+
+    owner = await tryAcquireInteractiveRootOwner(capability);
+    assert.ok(owner);
+    if (!owner) throw new Error('Unable to reopen semantic recovery root');
+    composition = await createExecutionRuntimeHostComposition(compositionContext(owner));
+    await composition.recover();
+    const reopened = await openCompositionSemanticClient(
+      composition,
+      recovery.id,
+      'semantic-v34-after-reopen',
+    );
+    let ready = await reopened.client.queryTranscriptPositions({
+      kind: 'acquire',
+      anchor: { kind: 'tail' },
+      maxPositions: 8,
+    });
+    for (let step = 0; ready.kind === 'building' && step < 32; step += 1) {
+      ready = await reopened.client.queryTranscriptPositions({
+        kind: 'page',
+        snapshotToken: ready.snapshotToken,
+        anchor: { kind: 'tail' },
+        maxPositions: 8,
+      });
+    }
+    assert.equal(ready.kind, 'page');
+    if (ready.kind !== 'page') assert.fail('expected resumed semantic recovery to finish');
+    assert.deepEqual(ready.positions, [
+      { ordinal: 0, key: { kind: 'turn', id: 'legacy-large-turn' } },
+      { ordinal: 1, key: { kind: 'note', id: 'legacy-visible-note' } },
+    ]);
+    assert.equal(readSemanticRecoveryPartial(root, recovery.id), undefined);
+    assert.ok(readNextSemanticGeneration(root, recovery.id) > generationBeforeReopen);
+    const visibleNoteWindow = await reopened.client.loadTranscriptTurnWindow(
+      {
+        snapshotToken: ready.snapshotToken,
+        startOrdinal: 1,
+        maxPositions: 1,
+      },
+      (value) => decodeStoredMessage(markPersisted(value)),
+    );
+    assert.ok(!('kind' in visibleNoteWindow));
+    if ('kind' in visibleNoteWindow) assert.fail('expected a complete visible-note window');
+    assert.deepEqual(visibleNoteWindow.positions[0]?.messages, [
+      {
+        type: 'system_note',
+        id: 'legacy-visible-note',
+        ts: 2,
+        kind: 'context_compacted',
+      },
+    ]);
+
+    await reopened.client.close();
+    await reopened.attached.close();
+  } finally {
+    await composition?.close();
+    await owner?.close();
+    await rm(base, { recursive: true, force: true });
+  }
 });
 
 test('production recovery preserves legacy Automation history and closes an orphaned admission', async () => {
@@ -994,6 +1274,133 @@ function compositionContext(owner: InteractiveRootOwner) {
     retainUntilProcessExit: () => undefined,
     requestDrain: () => undefined,
   };
+}
+
+async function openCompositionSemanticClient(
+  composition: Awaited<ReturnType<typeof createExecutionRuntimeHostComposition>>,
+  sessionId: string,
+  connectionId: string,
+) {
+  const continuity = composition.continuity;
+  assert.ok(continuity);
+  if (!continuity) throw new Error('Semantic composition has no continuity coordinator');
+  let client: ClientSessionSubscription | undefined;
+  const attached = continuity.attachConnection(connectionId, {
+    send: async (frame) => client?.accept(frame),
+  });
+  const context = {
+    hostEpoch: 'execution-composition-test',
+    connectionId,
+    principal: 'local_os_user' as const,
+    principalKind: 'local_owner' as const,
+    acquireResidency: () => ({ release() {} }),
+  };
+  const opened = await composition.handlers['subscription.open'](
+    { sessionId, transcript: { kind: 'tail', maxBytes: 16 * 1024 } },
+    context,
+  );
+  if (!opened.ok) throw new Error(opened.error.message);
+  assert.equal(opened.ok, true);
+  client = new ClientSessionSubscription(
+    opened.result,
+    async () => {
+      await composition.handlers['subscription.close'](
+        { subscriptionId: opened.result.subscriptionId },
+        context,
+      );
+    },
+    async (input) => {
+      const outcome = await composition.handlers['session.transcript.page'](input, context);
+      if (!outcome.ok) throw new Error(outcome.error.message);
+      return outcome.result;
+    },
+    async () => undefined,
+    {
+      queryPositions: async (input) => {
+        const outcome = await composition.handlers['session.transcript.positions.query'](
+          input,
+          context,
+        );
+        if (!outcome.ok) throw new Error(`${outcome.error.code}: ${outcome.error.message}`);
+        return outcome.result;
+      },
+      readTurnWindow: async (input) => {
+        const outcome = await composition.handlers['session.transcript.turn_window.page'](
+          input,
+          context,
+        );
+        if (!outcome.ok) throw new Error(`${outcome.error.code}: ${outcome.error.message}`);
+        return outcome.result;
+      },
+    },
+  );
+  attached.activate(opened.result.subscriptionId);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  return { client, attached };
+}
+
+function downgradeSemanticProjectionToV34(root: string): void {
+  const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME));
+  try {
+    database.exec(`
+      PRAGMA foreign_keys = OFF;
+      DROP TABLE session_turn_snapshot_leases;
+      DROP TABLE session_turn_snapshot_positions;
+      DROP TABLE session_turn_position_snapshots;
+      DROP TABLE session_turn_identity_recovery;
+      DROP TABLE session_turn_memberships;
+      DROP TABLE session_turn_metadata;
+      DROP TABLE session_turn_index_state;
+      DROP TABLE session_turn_authority_revisions;
+      UPDATE session_metadata_schema SET version = 34 WHERE scope = 'session_metadata';
+    `);
+  } finally {
+    database.close();
+  }
+}
+
+function readSemanticRecoveryPartial(
+  root: string,
+  sessionId: string,
+):
+  | {
+      readonly byte_offset: number;
+      readonly record_bytes: number;
+      readonly hash_implementation: string;
+      readonly hash_state_bytes: number;
+      readonly scanner_state_bytes: number;
+    }
+  | undefined {
+  const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+    readOnly: true,
+  });
+  try {
+    const row = database
+      .prepare(`SELECT byte_offset, record_bytes, hash_implementation,
+        length(hash_state) AS hash_state_bytes,
+        length(CAST(scanner_state AS BLOB)) AS scanner_state_bytes
+        FROM session_turn_identity_recovery WHERE session_id = ?`)
+      .get(sessionId);
+    return row ? ({ ...row } as ReturnType<typeof readSemanticRecoveryPartial>) : undefined;
+  } finally {
+    database.close();
+  }
+}
+
+function readNextSemanticGeneration(root: string, sessionId: string): number {
+  const database = new DatabaseSync(join(root, OPERATIONAL_STATE_DATABASE_NAME), {
+    readOnly: true,
+  });
+  try {
+    return Number(
+      database
+        .prepare(`SELECT next_snapshot_generation FROM session_turn_authority_revisions
+          WHERE session_id = ?`)
+        .get(sessionId)?.next_snapshot_generation,
+    );
+  } finally {
+    database.close();
+  }
 }
 
 function shellRunRecord(
