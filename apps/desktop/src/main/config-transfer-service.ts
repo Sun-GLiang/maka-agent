@@ -83,8 +83,9 @@ export async function applyConfigImport(
   // overwritten by this import. Credentials-only bundles instead require an
   // existing slug whose provider and effective endpoint match the export.
   const credentialTargets = new Map<string, LlmConnection>();
+  const hasConnectionSnapshot = Array.isArray(bundle.data.connections);
 
-  if (Array.isArray(bundle.data.connections)) {
+  if (hasConnectionSnapshot) {
     const incoming = bundle.data.connections as LlmConnection[];
     const existing = await deps.connectionStore.list();
     const plan = planConnectionMerge(existing, incoming, strategy);
@@ -147,7 +148,9 @@ export async function applyConfigImport(
         skipped += 1;
         continue;
       }
-      const binding = entry.connection ?? credentialConnectionBinding(target);
+      const binding =
+        entry.connection ??
+        (hasConnectionSnapshot ? credentialConnectionBinding(target) : undefined);
       if (!matchesCredentialConnection(binding, target)) {
         skipped += 1;
         continue;

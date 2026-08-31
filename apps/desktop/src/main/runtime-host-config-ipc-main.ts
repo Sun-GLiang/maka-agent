@@ -575,6 +575,14 @@ export function adaptRuntimeHostConfigImport(bundle: ConfigBundle): ConfigBundle
       'Cannot import a proxy password while proxy authentication is disabled.',
     );
   }
+  if (
+    includesCredentials &&
+    typeof password === 'string' &&
+    password.length > 0 &&
+    credentialTarget === undefined
+  ) {
+    throw new Error('Proxy password import requires a target binding.');
+  }
 
   const {
     password: _password,

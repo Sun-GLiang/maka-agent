@@ -416,14 +416,28 @@ test('Runtime Host config export writes an empty v1 proxy password when none is 
 });
 
 test('Runtime Host config import adapts v1 proxy passwords only with credential consent', () => {
-  const replace = adaptRuntimeHostConfigImport(
-    importBundle(['settings', 'credentials'], 'complete-secret'),
-  );
+  const replaceBundle = importBundle(['settings', 'credentials'], 'complete-secret');
+  (replaceBundle.data.settings as Record<string, any>).network.proxy.credentialTarget = {
+    protocol: 'https',
+    host: 'Source.Proxy.Example',
+    port: 8443,
+    username: 'source-user',
+  };
+  const replace = adaptRuntimeHostConfigImport(replaceBundle);
   assert.deepEqual(
     (replace.data.settings as Record<string, any>).network.proxy,
     {
       host: '10.0.0.2',
-      credential: { kind: 'replace', secret: 'complete-secret' },
+      credential: {
+        kind: 'replace',
+        secret: 'complete-secret',
+        expectedTarget: {
+          protocol: 'https',
+          host: 'source.proxy.example',
+          port: 8443,
+          username: 'source-user',
+        },
+      },
     },
   );
 
@@ -449,6 +463,16 @@ test('Runtime Host config import adapts v1 proxy passwords only with credential 
   assert.deepEqual(
     (ignored.data.settings as Record<string, any>).network.proxy,
     { host: '10.0.0.2' },
+  );
+});
+
+test('Runtime Host config import rejects an unbound legacy proxy password', () => {
+  assert.throws(
+    () =>
+      adaptRuntimeHostConfigImport(
+        importBundle(['settings', 'credentials'], 'legacy-secret'),
+      ),
+    /proxy.*target.*binding/i,
   );
 });
 

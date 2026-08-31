@@ -241,6 +241,30 @@ describe('config-transfer-service', () => {
     assert.deepEqual(result.credentials, { applied: 1, skipped: 0 });
   });
 
+  it('skips a credentials-only entry without a source connection binding', async () => {
+    const { deps, setCreds } = makeDeps();
+    const bundle = {
+      schemaVersion: 1,
+      exportedAt: '',
+      appVersion: '0.1.0',
+      includedData: ['credentials'] as const,
+      data: {
+        credentials: [
+          {
+            slug: 'deepseek-main',
+            kind: 'api_key',
+            value: 'sk-unbound-source',
+          },
+        ],
+      },
+    };
+
+    const result = await applyConfigImport(bundle as any, 'skip', deps);
+
+    assert.deepEqual(setCreds, []);
+    assert.deepEqual(result.credentials, { applied: 0, skipped: 1 });
+  });
+
   it('skips a credentials-only entry when the target slug belongs to another provider', async () => {
     const { deps, setCreds } = makeDeps();
     const bundle = {
