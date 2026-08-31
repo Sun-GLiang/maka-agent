@@ -32,6 +32,7 @@ import { OPERATIONAL_STATE_DATABASE_NAME } from '../operational-state-store.js';
 import { createSessionStore } from '../session-store.js';
 import { advanceSessionTurnIdentityRecovery } from '../session-turn-identity-recovery.js';
 import { invalidateSessionTurnPositionIndex } from '../session-turn-position-index.js';
+import { SQLITE_SESSION_METADATA_SCHEMA_VERSION } from '../sqlite-session-metadata-schema.js';
 
 describe('Session Turn position snapshots', () => {
   test('materializes owner and shared tagged positions in one exact generation', async () => {
@@ -2755,7 +2756,7 @@ describe('Session Turn position snapshots', () => {
               )
               .get() as { version: number }
           ).version,
-          35,
+          SQLITE_SESSION_METADATA_SCHEMA_VERSION,
         );
         const metadataColumns = new Set(
           (
