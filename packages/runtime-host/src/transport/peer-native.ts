@@ -31,6 +31,7 @@ export type RuntimeHostPeerErrorCode =
   | 'direct_path_unavailable'
   | 'mesh_control_unavailable'
   | 'coordination_unavailable'
+  | 'transit_unavailable'
   | 'peer_native_unavailable'
   | 'peer_native_failed'
   | 'peer_connect_in_progress';
@@ -63,11 +64,13 @@ export interface RuntimeHostPeerNativeEndpoint {
   readonly peerId: string;
   readonly listenAddresses: readonly string[];
   readonly activeCoordinationRelays: readonly string[];
+  readonly transitSnapshot: RuntimeHostPeerTransitSnapshot;
   connect(options: {
     readonly requestId: number;
     readonly peerId: string;
     readonly routeHints: readonly string[];
     readonly coordinationRelays?: readonly string[];
+    readonly transitRelayPeerIds?: readonly string[];
     readonly directDeadlineMs: number;
   }): Promise<RuntimeHostPeerNativeStream>;
   connectMeshControl(options: {
@@ -75,12 +78,34 @@ export interface RuntimeHostPeerNativeEndpoint {
     readonly peerId: string;
     readonly routeHints: readonly string[];
     readonly coordinationRelays?: readonly string[];
+    readonly transitRelayPeerIds?: readonly string[];
     readonly directDeadlineMs: number;
   }): Promise<RuntimeHostPeerNativeStream>;
+  configureTransit(options: {
+    readonly allowedPeerIds: readonly string[];
+    readonly relayCandidates: readonly RuntimeHostPeerTransitRelayCandidate[];
+  }): Promise<void>;
   cancelConnect(requestId: number): Promise<boolean>;
   accept(): Promise<RuntimeHostPeerNativeStream | null>;
   acceptMeshControl(): Promise<RuntimeHostPeerNativeStream | null>;
   close(): Promise<void>;
+}
+
+export interface RuntimeHostPeerTransitSnapshot {
+  readonly allowedPeerCount: number;
+  readonly activeReservationCount: number;
+  readonly activeCircuitCount: number;
+  readonly maxReservationCount: number;
+  readonly maxCircuitCount: number;
+  readonly maxCircuitsPerPeer: number;
+  readonly maxCircuitDurationSeconds: number;
+  readonly maxCircuitBytes: number;
+}
+
+export interface RuntimeHostPeerTransitRelayCandidate {
+  readonly peerId: string;
+  readonly addresses: readonly string[];
+  readonly coordinationRelays: readonly string[];
 }
 
 interface RuntimeHostPeerNativeModule {
@@ -400,7 +425,7 @@ export function normalizePeerError(error: unknown): RuntimeHostPeerError {
   if (error instanceof RuntimeHostPeerError) return error;
   const cause = asError(error);
   const match =
-    /^(peer_[a-z_]+|direct_path_unavailable|mesh_control_unavailable|coordination_unavailable):\s*(.*)$/su.exec(
+    /^(peer_[a-z_]+|direct_path_unavailable|mesh_control_unavailable|coordination_unavailable|transit_unavailable):\s*(.*)$/su.exec(
       cause.message,
     );
   if (match && isPeerErrorCode(match[1])) {
@@ -451,10 +476,14 @@ function isPeerNativeEndpoint(value: unknown): value is RuntimeHostPeerNativeEnd
     'activeCoordinationRelays' in value &&
     Array.isArray(value.activeCoordinationRelays) &&
     value.activeCoordinationRelays.every((address) => typeof address === 'string') &&
+    'transitSnapshot' in value &&
+    isPeerTransitSnapshot(value.transitSnapshot) &&
     'connect' in value &&
     typeof value.connect === 'function' &&
     'connectMeshControl' in value &&
     typeof value.connectMeshControl === 'function' &&
+    'configureTransit' in value &&
+    typeof value.configureTransit === 'function' &&
     'cancelConnect' in value &&
     typeof value.cancelConnect === 'function' &&
     'accept' in value &&
@@ -464,6 +493,33 @@ function isPeerNativeEndpoint(value: unknown): value is RuntimeHostPeerNativeEnd
     'close' in value &&
     typeof value.close === 'function'
   );
+}
+
+function isPeerTransitSnapshot(value: unknown): value is RuntimeHostPeerTransitSnapshot {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'allowedPeerCount' in value &&
+    isCount(value.allowedPeerCount) &&
+    'activeReservationCount' in value &&
+    isCount(value.activeReservationCount) &&
+    'activeCircuitCount' in value &&
+    isCount(value.activeCircuitCount) &&
+    'maxReservationCount' in value &&
+    isCount(value.maxReservationCount) &&
+    'maxCircuitCount' in value &&
+    isCount(value.maxCircuitCount) &&
+    'maxCircuitsPerPeer' in value &&
+    isCount(value.maxCircuitsPerPeer) &&
+    'maxCircuitDurationSeconds' in value &&
+    isCount(value.maxCircuitDurationSeconds) &&
+    'maxCircuitBytes' in value &&
+    isCount(value.maxCircuitBytes)
+  );
+}
+
+function isCount(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
 function isAuthenticationPreface(value: unknown): value is { v: 1; credential: string } {
@@ -522,6 +578,7 @@ function isPeerErrorCode(value: string | undefined): value is RuntimeHostPeerErr
     value === 'direct_path_unavailable' ||
     value === 'mesh_control_unavailable' ||
     value === 'coordination_unavailable' ||
+    value === 'transit_unavailable' ||
     value === 'peer_native_unavailable' ||
     value === 'peer_native_failed' ||
     value === 'peer_connect_in_progress'

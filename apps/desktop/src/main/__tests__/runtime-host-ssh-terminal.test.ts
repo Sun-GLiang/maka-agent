@@ -170,9 +170,11 @@ test('keeps setup credentials out of the interactive terminal projection', async
   assert.deepEqual(progress, ['installing_service']);
   assert.doesNotMatch(JSON.stringify(harness.events), /secret-access-token|MAKA_RUNTIME/u);
   assert.match(JSON.stringify(harness.events), /Password/u);
-  assert.match(harness.launchArgs.at(-1)?.at(-1) ?? '', /mktemp -d/u);
-  assert.match(harness.launchArgs.at(-1)?.at(-1) ?? '', /--prefix/u);
-  assert.match(harness.launchArgs.at(-1)?.at(-1) ?? '', /trap.*HUP.*trap.*INT.*trap.*TERM/u);
+  const remoteCommand = harness.launchArgs.at(-1)?.at(-1) ?? '';
+  assert.match(remoteCommand, /mktemp -d/u);
+  assert.match(remoteCommand, /--prefix/u);
+  assert.match(remoteCommand, /trap.*HUP.*trap.*INT.*trap.*TERM/u);
+  assert.doesNotMatch(remoteCommand, /--update-existing/u);
   await harness.terminal.close();
 });
 
@@ -461,11 +463,9 @@ test('runs an exact update package and reports progress before an active-work re
   const remoteCommand = harness.launchArgs.at(-1)?.at(-1) ?? '';
   assert.match(remoteCommand, /--package.*maka-agent@1\.3\.0/u);
   assert.match(remoteCommand, /runtime-host.*service.*update/u);
+  assert.match(remoteCommand, /--target.*1\.3\.0/u);
   assert.match(remoteCommand, /--managed-root-id.*a{64}/u);
-  assert.match(
-    remoteCommand,
-    /--operator-deployment-id.*00000000-0000-4000-8000-000000000001/u,
-  );
+  assert.doesNotMatch(remoteCommand, /--operator-deployment-id/u);
   assert.match(remoteCommand, /MAKA_RUNTIME_HOST_OPERATOR_CAPABILITY_REQUEST/u);
   harness.pty.emitData('Password: ');
   harness.pty.emitData(
@@ -711,6 +711,17 @@ test('sends a Mesh invitation only after the authenticated remote operator reque
       result: {
         localPeerId: 'peer-b',
         available: true,
+        transit: {
+          meshId: null,
+          allowedMemberCount: 0,
+          activeReservationCount: 0,
+          activeCircuitCount: 0,
+          maxReservationCount: 32,
+          maxCircuitCount: 8,
+          maxCircuitsPerPeer: 2,
+          maxCircuitDurationSeconds: 7_200,
+          maxCircuitBytes: 256 * 1024 * 1024,
+        },
         meshes: [
           {
             meshId: 'mesh-id',
@@ -905,6 +916,7 @@ test('uploads a development release archive before running the same remote setup
   assert.match(remoteCommand, /MAKA_RUNTIME_HOST_SETUP_SOURCE_PACKAGE_INTEGRITY=/u);
   assert.ok(remoteCommand.includes(integrity));
   assert.match(remoteCommand, /--defer-pairing-commit/u);
+  assert.match(remoteCommand, /--update-existing/u);
   assert.match(remoteCommand, /cd.*\$HOME/u);
   assert.match(remoteCommand, /rm -f/u);
   assert.match(remoteCommand, /exec \/bin\/sh -c/u);

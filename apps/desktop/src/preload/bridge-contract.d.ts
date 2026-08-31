@@ -109,6 +109,16 @@ import type {
   OperationOutcome,
   OperationOutput,
 } from '@maka/runtime-host/protocol';
+import type {
+  CollaborationAccessQueryResult,
+  CollaborationGrantRevokeResult,
+  CollaborationInvitationPrepareResult,
+  CollaborationPrincipalRevokeResult,
+  CollaborationTurnRequestAcknowledgeResult,
+  CollaborationTurnRequestDecideResult,
+  CollaborationTurnRequestQueryResult,
+  SessionTurnAccessRequest,
+} from '@maka/runtime-host/protocol';
 import type { AgentGraphEpochDirectory } from '@maka/runtime-host/client';
 import type {
   RuntimeHostServiceManagementFrame,
@@ -300,6 +310,7 @@ export type AppUpdateInstallResult =
 export interface DesktopRuntimeHostProfileEntry {
   readonly profile: RuntimeHostProfile;
   readonly managedService?: true;
+  readonly pairingPending?: true;
   readonly enabled: boolean;
   readonly isDefault: boolean;
   readonly readiness: 'disabled' | 'connecting' | 'ready' | 'reconnecting' | 'unavailable';
@@ -313,6 +324,26 @@ export interface DesktopRuntimeHostProfileSnapshot {
   readonly pairingRecoveryBlocked?: true;
   readonly pairingRecoveryPending?: true;
 }
+
+export type DesktopSessionCollaborationImportResult =
+  | { readonly kind: 'connected' }
+  | { readonly kind: 'pairing_pending'; readonly profileId: string }
+  | {
+      readonly kind: 'error';
+      readonly reason:
+        | 'invalid_code'
+        | 'insecure_confirmation_required'
+        | 'peer_path_unavailable'
+        | 'connection_failed';
+      readonly message?: string;
+    };
+
+export type DesktopSessionCollaborationPrepareResult =
+  | {
+      readonly kind: 'prepared';
+      readonly invitation: CollaborationInvitationPrepareResult;
+    }
+  | { readonly kind: 'insecure_confirmation_required' };
 
 export interface DesktopRuntimeHostRef {
   readonly profileId: string;
@@ -385,10 +416,15 @@ export interface DesktopRuntimeHostProfileChangedEvent {
 }
 
 export type DesktopLocalRuntimeHostRemoteAccessSnapshot =
-  | { readonly state: 'unsupported'; readonly message: string }
+  | { readonly state: 'unsupported'; readonly message: string; readonly managedService?: true }
   | { readonly state: 'off'; readonly managedService?: true; readonly sharedAccess?: true }
-  | { readonly state: 'on'; readonly sharedAccess?: true }
-  | { readonly state: 'unavailable'; readonly message: string; readonly sharedAccess?: true };
+  | { readonly state: 'on'; readonly managedService: true; readonly sharedAccess?: true }
+  | {
+      readonly state: 'unavailable';
+      readonly message: string;
+      readonly managedService?: true;
+      readonly sharedAccess?: true;
+    };
 
 export type DesktopRuntimeHostConnectionCodeImportResult =
   | { readonly kind: 'connected'; readonly profileId: string }
@@ -523,6 +559,7 @@ export interface DesktopRuntimeHostDirectPeerSnapshot {
 
 export type DesktopRuntimeHostPeerMeshTarget =
   | { readonly kind: 'desktop' }
+  | { readonly kind: 'local_host' }
   | { readonly kind: 'managed_host'; readonly profileId: string };
 
 export type DesktopRuntimeHostPeerMeshAction =
@@ -645,6 +682,41 @@ export interface DesktopSessionUsageSummary extends UsageSummaryV2 {
 }
 
 export interface MakaBridge {
+  sessionCollaboration: {
+    prepareInvitation(
+      sessionId: string,
+      preset: 'observe' | 'request_turn',
+      allowInsecure?: boolean,
+    ): Promise<DesktopSessionCollaborationPrepareResult>;
+    getAccess(sessionId: string): Promise<CollaborationAccessQueryResult>;
+    revokeGrant(
+      sessionId: string,
+      grantId: string,
+    ): Promise<CollaborationGrantRevokeResult>;
+    revokePrincipal(
+      sessionId: string,
+      principalId: string,
+    ): Promise<CollaborationPrincipalRevokeResult>;
+    importInvitation(input: {
+      readonly code: string;
+      readonly allowInsecure?: boolean;
+    }): Promise<DesktopSessionCollaborationImportResult>;
+    requestTurn(
+      sessionId: string,
+      input: { readonly turnId: string; readonly text: string },
+    ): Promise<SessionTurnAccessRequest>;
+    getTurnRequests(sessionId: string): Promise<CollaborationTurnRequestQueryResult>;
+    acknowledgeTurnRequest(
+      sessionId: string,
+      requestId: string,
+    ): Promise<CollaborationTurnRequestAcknowledgeResult>;
+    decideTurnRequest(
+      sessionId: string,
+      requestId: string,
+      decision: 'approve' | 'reject',
+    ): Promise<CollaborationTurnRequestDecideResult>;
+  };
+
   runtimeHost: {
     query<K extends RendererRuntimeHostQueryOperation>(
       operation: K,
@@ -664,9 +736,10 @@ export interface MakaBridge {
     ): Promise<DesktopRuntimeHostProfileAddResult>;
     importConnectionCode(code: string): Promise<DesktopRuntimeHostConnectionCodeImportResult>;
     remove(profileId: string): Promise<DesktopRuntimeHostProfileSnapshot>;
+    discardPairing(profileId: string): Promise<DesktopRuntimeHostProfileSnapshot>;
     setEnabled(profileId: string, enabled: boolean): Promise<DesktopRuntimeHostProfileSnapshot>;
     setDefault(profileId: string): Promise<DesktopRuntimeHostProfileSnapshot>;
-    resolvePairingRecovery(): Promise<DesktopRuntimeHostProfileSnapshot>;
+    resolvePairingRecovery(profileId?: string): Promise<DesktopRuntimeHostProfileSnapshot>;
     subscribeChanges(
       handler: (event: DesktopRuntimeHostProfileChangedEvent) => void,
     ): () => void;
@@ -681,9 +754,6 @@ export interface MakaBridge {
     createConnectionCode(): Promise<string>;
     revokeSharedAccess(): Promise<DesktopLocalRuntimeHostRemoteAccessSnapshot>;
     disable(): Promise<DesktopLocalRuntimeHostRemoteAccessSnapshot>;
-    uninstall(input: {
-      readonly allowInterruptActiveTasks: boolean;
-    }): Promise<{ readonly kind: 'active_tasks' | 'uninstalled' }>;
   };
 
   runtimeHostSshTerminal: {
@@ -707,6 +777,7 @@ export interface MakaBridge {
     run(
       profileId: string,
       action: DesktopRuntimeHostManagementAction,
+      allowInterruptActiveTasks?: boolean,
     ): Promise<DesktopRuntimeHostManagementResponse>;
     update(
       profileId: string,
@@ -746,8 +817,15 @@ export interface MakaBridge {
     execute(
       target: DesktopRuntimeHostPeerMeshTarget,
       action: DesktopRuntimeHostPeerMeshAction,
-      input?: { readonly meshId?: string; readonly peerId?: string; readonly invitation?: string },
+      input?: {
+        readonly meshId?: string | null;
+        readonly peerId?: string;
+        readonly invitation?: string;
+        readonly displayName?: string | null;
+        readonly operationId?: string;
+      },
     ): Promise<DesktopRuntimeHostPeerMeshResult>;
+    cancel(operationId: string): Promise<void>;
   };
 
   newTasks: {
@@ -1011,6 +1089,10 @@ export interface MakaBridge {
       sessionId: string,
       messageIds: readonly string[],
     ): Promise<import('@maka/runtime-host/protocol').TurnMessageQueryResult>;
+    queryMessageExecutions(
+      sessionId: string,
+      messageIds: readonly string[],
+    ): Promise<import('@maka/runtime-host/protocol').TurnMessageExecutionQueryResult>;
     retractQueueEntry(sessionId: string, entryId: string): Promise<void>;
     promoteQueueEntry(sessionId: string, entryId: string): Promise<void>;
     updateQueueEntry(

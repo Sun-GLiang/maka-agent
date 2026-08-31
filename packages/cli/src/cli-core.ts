@@ -228,6 +228,7 @@ function helpText(cliCommand: string): string {
     '  --preset <name>               Grant the desktop-client or terminal-client operation set',
     '  --publish-client-capabilities Allow Client Capability publication',
     '  --allow-host-paths            Allow operations that submit Host paths',
+    '  --capability-owner-credential <id>  Bind a provider to one Client-bound owner credential',
     '',
     'Runtime Host capability provider options:',
     '  --url <ws-url>                Connect to an authenticated Runtime Host WebSocket',
@@ -503,13 +504,18 @@ export async function runMakaCli(
         operatorDeploymentId: command.operatorDeploymentId,
         cliPath: process.argv[1] ?? '',
         expectedTarget: command.expectedTarget,
-        ...(command.meshId ? { meshId: command.meshId } : {}),
+        ...(command.meshId !== undefined ? { meshId: command.meshId } : {}),
         ...(command.peerId ? { peerId: command.peerId } : {}),
+        ...(command.displayName !== undefined ? { displayName: command.displayName } : {}),
       });
     }
     case 'runtime-host-service-update': {
       const { runManagedRuntimeHostSelectedUpdateCli, runManagedRuntimeHostUpdateCli } =
         await import('./runtime-host-update-command.js');
+      const { RUNTIME_HOST_SETUP_SOURCE_PACKAGE_INTEGRITY_ENV } = await import(
+        '@maka/runtime-host/operator'
+      );
+      const sourcePackageIntegrity = process.env[RUNTIME_HOST_SETUP_SOURCE_PACKAGE_INTEGRITY_ENV];
       const serviceDataRoots = command.clientDataRoot
         ? deriveMakaDataRoots(command.clientDataRoot)
         : dataRoots;
@@ -521,6 +527,7 @@ export async function runMakaCli(
           defaultRootPath: serviceDataRoots.workspaceRoot,
           selector: command.selector,
           expectedTarget: command.expectedTarget,
+          ...(command.expectedHost ? { expectedHost: command.expectedHost } : {}),
           ...(command.managedRootId ? { managedRootId: command.managedRootId } : {}),
           ...(command.operatorDeploymentId
             ? { operatorDeploymentId: command.operatorDeploymentId }
@@ -534,8 +541,10 @@ export async function runMakaCli(
         clientDataRoot: serviceDataRoots.clientDataRoot,
         defaultRootPath: serviceDataRoots.workspaceRoot,
         sourcePackageRoot: fileURLToPath(new URL('..', import.meta.url)),
+        ...(sourcePackageIntegrity ? { sourcePackageIntegrity } : {}),
         version,
         expectedTarget: command.expectedTarget,
+        ...(command.expectedHost ? { expectedHost: command.expectedHost } : {}),
         ...(command.managedRootId ? { managedRootId: command.managedRootId } : {}),
         ...(command.operatorDeploymentId
           ? { operatorDeploymentId: command.operatorDeploymentId }
@@ -624,6 +633,9 @@ export async function runMakaCli(
         operationGrants: command.operationGrants,
         canPublishClientCapabilities: command.canPublishClientCapabilities,
         canUseHostPaths: command.canUseHostPaths,
+        ...(command.capabilityOwnerCredentialId
+          ? { capabilityOwnerCredentialId: command.capabilityOwnerCredentialId }
+          : {}),
         ...(command.preset ? { preset: command.preset } : {}),
       });
     }

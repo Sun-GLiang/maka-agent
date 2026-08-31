@@ -26,12 +26,19 @@ import { test } from 'node:test';
 import { createRuntimeHostPeerClient } from '../client/peer-client.js';
 import {
   ensureRuntimeHostPeerIdentity,
+  normalizePeerError,
   readRuntimeHostPeerAuthentication,
   readRuntimeHostPeerAuthenticationResult,
   RuntimeHostPeerError,
   startRuntimeHostPeerEndpoint,
   type RuntimeHostPeerNativeStream,
 } from '../transport/peer-native.js';
+
+test('preserves transit route failures from the native boundary', () => {
+  const error = normalizePeerError(new Error('transit_unavailable: no approved route'));
+  assert.equal(error.code, 'transit_unavailable');
+  assert.equal(error.message, 'no approved route');
+});
 
 test('shares one peer endpoint, serializes same-peer connects, and cancels independently', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'maka-peer-abort-'));
@@ -61,16 +68,19 @@ module.exports = {
       peerId: 'client',
       listenAddresses: [],
       activeCoordinationRelays: [],
-      connect: ({ requestId, peerId, routeHints, coordinationRelays }) => {
-        stats.requests.push({ requestId, peerId, routeHints, coordinationRelays });
+      transitSnapshot: { allowedPeerCount: 0, activeReservationCount: 0, activeCircuitCount: 0, maxReservationCount: 32, maxCircuitCount: 8, maxCircuitsPerPeer: 2, maxCircuitDurationSeconds: 7_200, maxCircuitBytes: 256 * 1024 * 1024 },
+      connect: ({ requestId, peerId, routeHints, coordinationRelays, transitRelayPeerIds }) => {
+        stats.requests.push({ requestId, peerId, routeHints, coordinationRelays, transitRelayPeerIds });
+        if (peerId === 'unreachable') return Promise.reject(Object.assign(new Error('transit_unavailable: no approved route'), { code: 'GenericFailure' }));
+        if (peerId === 'ready' || peerId === 'fallback') return Promise.resolve(stream);
+        return new Promise((resolve, reject) => pending.set(requestId, { resolve, reject }));
+      },
+      connectMeshControl: ({ requestId, peerId, routeHints, coordinationRelays, transitRelayPeerIds }) => {
+        stats.requests.push({ requestId, peerId, routeHints, coordinationRelays, transitRelayPeerIds });
         if (peerId === 'ready') return Promise.resolve(stream);
         return new Promise((resolve, reject) => pending.set(requestId, { resolve, reject }));
       },
-      connectMeshControl: ({ requestId, peerId, routeHints, coordinationRelays }) => {
-        stats.requests.push({ requestId, peerId, routeHints, coordinationRelays });
-        if (peerId === 'ready') return Promise.resolve(stream);
-        return new Promise((resolve, reject) => pending.set(requestId, { resolve, reject }));
-      },
+      configureTransit: async () => {},
       cancelConnect: async (requestId) => {
         stats.cancellations.push(requestId);
         if (missFirstCancellation) {
@@ -89,20 +99,30 @@ module.exports = {
 };
 `,
     );
+    let routesPrepared = false;
     const client = createRuntimeHostPeerClient({
       nativePath,
       keyPath: join(directory, 'peer.key'),
       routeResolver: {
-        resolveRoutes: () => ({
-          routeHints: ['/memory/discovered'],
-          coordinationRelays: ['/memory/relay'],
-        }),
+        prepareRoutes: async (peerId) => {
+          routesPrepared = true;
+          if (peerId === 'fallback') throw new Error('Mesh refresh failed');
+        },
+        resolveRoutes: () =>
+          routesPrepared
+            ? {
+                routeHints: ['/memory/discovered'],
+                coordinationRelays: ['/memory/relay'],
+                transitRelayPeerIds: ['transit-peer'],
+              }
+            : undefined,
       },
     });
     const native = await import(nativePath);
     const abort = new AbortController();
     const pending = client.connect(peerConnectInput('pending'), abort.signal);
     await waitForRequestCount(native.default.stats, 1);
+    assert.equal(routesPrepared, true);
     abort.abort();
     await assert.rejects(pending, /aborted/u);
 
@@ -123,6 +143,10 @@ module.exports = {
     await control;
 
     await client.connect(peerConnectInput('ready'));
+    await client.connect(peerConnectInput('fallback'));
+    await assert.rejects(client.connect(peerConnectInput('unreachable')), (failure: unknown) => {
+      return failure instanceof RuntimeHostPeerError && failure.code === 'transit_unavailable';
+    });
     assert.deepEqual(native.default.stats, {
       starts: 1,
       closes: 0,
@@ -132,24 +156,42 @@ module.exports = {
           peerId: 'pending',
           routeHints: ['/memory/discovered', '/memory/1'],
           coordinationRelays: ['/memory/relay'],
+          transitRelayPeerIds: ['transit-peer'],
         },
         {
           requestId: 2,
           peerId: 'shared',
           routeHints: ['/memory/discovered', '/memory/1'],
           coordinationRelays: ['/memory/relay'],
+          transitRelayPeerIds: ['transit-peer'],
         },
         {
           requestId: 3,
           peerId: 'shared',
           routeHints: ['/memory/1'],
           coordinationRelays: [],
+          transitRelayPeerIds: [],
         },
         {
           requestId: 4,
           peerId: 'ready',
           routeHints: ['/memory/discovered', '/memory/1'],
           coordinationRelays: ['/memory/relay'],
+          transitRelayPeerIds: ['transit-peer'],
+        },
+        {
+          requestId: 5,
+          peerId: 'fallback',
+          routeHints: ['/memory/discovered', '/memory/1'],
+          coordinationRelays: ['/memory/relay'],
+          transitRelayPeerIds: ['transit-peer'],
+        },
+        {
+          requestId: 6,
+          peerId: 'unreachable',
+          routeHints: ['/memory/discovered', '/memory/1'],
+          coordinationRelays: ['/memory/relay'],
+          transitRelayPeerIds: ['transit-peer'],
         },
       ],
       cancellations: [1, 1],
@@ -200,8 +242,10 @@ module.exports = {
     peerId: 'peer',
     listenAddresses: [],
     activeCoordinationRelays: [],
+    transitSnapshot: { allowedPeerCount: 0, activeReservationCount: 0, activeCircuitCount: 0, maxReservationCount: 32, maxCircuitCount: 8, maxCircuitsPerPeer: 2, maxCircuitDurationSeconds: 7_200, maxCircuitBytes: 256 * 1024 * 1024 },
     connect: async () => stream,
     connectMeshControl: async () => stream,
+    configureTransit: async () => {},
     cancelConnect: async () => true,
     accept: async () => null,
     acceptMeshControl: async () => null,

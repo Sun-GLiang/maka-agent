@@ -85,7 +85,11 @@ import {
   type UserMessage,
   type WorkHubDelegationAssignedMessage,
 } from '@maka/core/session';
-import type { MessageAdmissionStore, PendingMessageAdmission } from './message-admission-store.js';
+import type {
+  MarkMessagesHandedOffInput,
+  MessageAdmissionStore,
+  PendingMessageAdmission,
+} from './message-admission-store.js';
 import {
   isVisibleSessionMessage,
   lastMessagePreviewForMessages,
@@ -251,6 +255,20 @@ export interface SessionTranscriptStoragePage {
   } | null;
 }
 
+export interface SessionTranscriptRecordScanRequest {
+  readonly direction: 'older' | 'newer';
+  readonly throughSequence?: number | null;
+  readonly position?: number;
+  readonly maxStoredBytes: number;
+  readonly maxMessages: number;
+}
+
+export interface SessionTranscriptRecordScanPage {
+  readonly throughSequence: number | null;
+  readonly records: readonly { readonly sequence: number; readonly message: StoredMessage }[];
+  readonly nextPosition: number | null;
+}
+
 export interface SessionTurnContribution {
   readonly turnId: string;
   readonly firstSequence: number;
@@ -327,6 +345,11 @@ export interface SessionStore {
 }
 
 export interface SessionAuthorityStore extends SessionStore, MessageAdmissionStore {
+  /** Decode a bounded ledger range for an authority-owned wire projection. */
+  readTranscriptRecordsSnapshot(
+    sessionId: string,
+    request: SessionTranscriptRecordScanRequest,
+  ): Promise<SessionTranscriptRecordScanPage>;
   /** Read a bounded set of durable messages at an inclusive transcript watermark. */
   readTranscriptMessagesSnapshot(
     sessionId: string,
@@ -887,6 +910,14 @@ class SqliteSessionStore implements SessionAuthorityStore {
     return this.metadata.readTranscriptMessages(sessionId, request);
   }
 
+  async readTranscriptRecordsSnapshot(
+    sessionId: string,
+    request: SessionTranscriptRecordScanRequest,
+  ): Promise<SessionTranscriptRecordScanPage> {
+    await this.ensureReady();
+    return this.metadata.readTranscriptRecords(sessionId, request);
+  }
+
   async readTranscriptHighWaterSnapshot(sessionId: string): Promise<number | null> {
     await this.ensureReady();
     return this.metadata.readTranscriptHighWater(sessionId);
@@ -976,11 +1007,7 @@ class SqliteSessionStore implements SessionAuthorityStore {
     return this.metadata.listMessageAdmissions(sessionId);
   }
 
-  async markMessagesHandedOff(input: {
-    sessionId: string;
-    messageIds: readonly string[];
-    turnId: string;
-  }): Promise<void> {
+  async markMessagesHandedOff(input: MarkMessagesHandedOffInput): Promise<void> {
     await this.ensureReady();
     await this.metadata.markMessagesHandedOff(input);
     for (const listener of this.transcriptChangeListeners) listener(input.sessionId);

@@ -81,6 +81,7 @@ export * from './operations.js';
 export * from './runtime-resource.js';
 export * from './session-continuity.js';
 export * from './session-catalog-change.js';
+export * from './session-collaboration.js';
 export * from './scheduled-task-change.js';
 export * from './session-retirement.js';
 export * from './session-transcript.js';
@@ -94,10 +95,35 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 66 as const;
-// 66: `usage.query` adds opaque revision-pinned snapshot start, activity, and
-// pricing pages. Epoch-65 peers reject these exact new input/output variants,
-// so mixed peers must fail the handshake before Settings Usage is requested.
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 78 as const;
+// 78: `usage.query` adds connection-owned, revision-pinned snapshot start,
+// activity, and pricing pages plus explicit `usage.snapshot.release`. Epoch-77
+// peers reject these closed variants, so mixed peers must fail the handshake.
+// 77: LLM and tool usage-log projections carry an optional `sessionTitle` (the
+// Host-resolved session name for the usage Task column). Older Clients reject
+// the unknown field, so a newer Host's usage logs are unreadable to them.
+// 76: Peer Mesh endpoint and Mesh display names are signed, persisted facts
+// managed through Host operations rather than local-only Client labels.
+// 75: Peer Mesh routes identify whether a peer is a Client or Runtime Host so
+// management surfaces can present the endpoint authority boundary accurately.
+// 74: Capability-provider credentials may carry one Host-authenticated owner
+// identity. Older peers cannot preserve the association and could select an
+// unrelated provider for an interactive Session.
+// 73: Transcript pages carry a Host-owned Turn range boundary. Older peers
+// cannot preserve both the complete edge Turn and the bounded projection.
+// 71: Session Guests can submit durable exact Turn access requests and Owners
+// can decide them. Older peers do not understand this execution-authority flow.
+// 70: Session Guest connections receive resource-scoped shared catalog and
+// continuity projections. Older peers cannot enforce the Session grant fence.
+// 69: Runtime Host access authority recognizes restricted Session Guest
+// principals and typed Session collaboration grants. Older Hosts would either
+// reject the new operations or misclassify the authenticated principal.
+// 68: Connection onboarding replaces nullable canonical-slug targeting with
+// explicit create/existing identity and returns the committed Connection.
+// Older peers reject the closed target and saved-result shapes.
+// 67: Message lifecycle queries expose durable execution ownership and
+// cancellation. Older peers cannot decode or provide the closed proof list.
+// 66: Peer Mesh queries expose one canonical transit selection and runtime metrics.
 // 65: live `tool_start` frames may carry optional `intent` / `argsPreview`
 // keys. Older Clients decode the event with a strict allowed-key list and tear
 // the connection down on unknown keys, so the pair must be refused up front.

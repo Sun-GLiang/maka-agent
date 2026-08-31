@@ -206,7 +206,9 @@ function SessionListGroups(props: {
         worktree={rail.worktreeSessionIds?.has(session.id) ?? false}
         meta={rail.sessionMeta?.(session)}
         onSelectSession={rail.onSelectSession}
-        actions={rail.rowActions}
+        actions={(session as SessionSummary & { readonly shared?: true }).shared
+          ? undefined
+          : rail.rowActions}
         onStartRename={startRename}
       />
     ),
@@ -430,7 +432,11 @@ const SessionNavRow = memo(function SessionNavRow(props: {
           // the two on hover or keyboard focus. The span is rendered even with
           // no timestamp so the column exists on every row.
           <span className="maka-session-row-end">
-            {props.meta ? <Badge variant="neutral" label={props.meta} /> : null}
+            {props.meta ? (
+              <span className="maka-session-row-host-badge" title={props.meta}>
+                <Badge variant="neutral" label={props.meta} />
+              </span>
+            ) : null}
             <span className="maka-session-row-time">
               {props.session.lastMessageAt ? (
                 <RelativeTime

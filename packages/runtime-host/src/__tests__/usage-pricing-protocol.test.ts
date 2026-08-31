@@ -363,6 +363,28 @@ describe('Usage/Pricing protocol', () => {
         nextOffset: null,
       }),
     );
+    // The Host-resolved session title rides on both log kinds as bounded text.
+    assert.doesNotThrow(() =>
+      usageResponse({
+        kind: 'logs',
+        source: 'llm',
+        rows: [{ ...validLog(), sessionId: 'session-1', sessionTitle: '重构任务列' }],
+        offset: 0,
+        total: 1,
+        nextOffset: null,
+        provenance: validProvenance(),
+      }),
+    );
+    assert.doesNotThrow(() =>
+      usageResponse({
+        kind: 'logs',
+        source: 'tool',
+        rows: [{ ...validToolLog(), sessionId: 'session-1', sessionTitle: '重构任务列' }],
+        offset: 0,
+        total: 1,
+        nextOffset: null,
+      }),
+    );
 
     const tooMany = Array.from({ length: USAGE_PAGE_MAX_ITEMS + 1 }, () => validBucket());
     const byteHeavy = Array.from({ length: 50 }, (_, index) => ({
@@ -394,6 +416,15 @@ describe('Usage/Pricing protocol', () => {
         kind: 'logs',
         source: 'llm',
         rows: [{ ...validLog(), errorClass: 'x'.repeat(USAGE_PROJECTION_TEXT_MAX_BYTES + 1) }],
+        offset: 0,
+        total: 1,
+        nextOffset: null,
+        provenance: validProvenance(),
+      },
+      {
+        kind: 'logs',
+        source: 'llm',
+        rows: [{ ...validLog(), sessionTitle: 'x'.repeat(USAGE_PROJECTION_TEXT_MAX_BYTES + 1) }],
         offset: 0,
         total: 1,
         nextOffset: null,
@@ -616,6 +647,7 @@ describe('Usage/Pricing protocol', () => {
         () => {},
         new RuntimePolicyActivationGate(),
         () => {},
+        async (sessionId) => `Title ${sessionId}`,
         {
           now: () => now,
           createRevision: () => `snapshot-${++nextRevision}`,
@@ -660,10 +692,12 @@ describe('Usage/Pricing protocol', () => {
         oldLlm.rows.map((row) => row.id),
         ['old-llm'],
       );
+      assert.equal(oldLlm.rows[0]?.sessionTitle, 'Title old-llm');
       assert.deepEqual(
         oldTool.rows.map((row) => row.id),
         ['old-tool'],
       );
+      assert.equal(oldTool.rows[0]?.sessionTitle, 'Title old-tool');
       assert.equal(oldLlm.total, 1);
       assert.equal(oldLlm.truncated, false);
       assert.ok(oldPricing.entries.some((entry) => entry.pricing.modelKey === 'snapshot:old'));
@@ -735,6 +769,60 @@ describe('Usage/Pricing protocol', () => {
         { kind: 'revision_changed', expectedRevision: third.revision },
       );
       await expectUsageSnapshotStart(coordinator, connectionA);
+    } finally {
+      await stores.close().catch(() => undefined);
+      await owner.close();
+      await rm(join(resolveRootControlNamespace(), capability.rootId), {
+        recursive: true,
+        force: true,
+      });
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test('bounds concurrent Session title reads while retaining every snapshot title', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'maka-usage-snapshot-titles-'));
+    const capability = await resolveStorageRoot({
+      path: join(base, 'interactive-root'),
+      kind: 'interactive',
+    });
+    const owner = await tryAcquireInteractiveRootOwner(capability);
+    assert.ok(owner);
+    const stores = await openInteractiveUsageStoresForWrite(owner.lease);
+    const sessionIds = Array.from({ length: 20 }, (_, index) => `session-${index}`);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    try {
+      await Promise.all(
+        sessionIds.map((sessionId, index) =>
+          stores.telemetry.recordLlmCall(longUsageRecord(sessionId, index + 1)),
+        ),
+      );
+      const coordinator = new HostUsagePricingCoordinator(
+        stores,
+        () => {},
+        new RuntimePolicyActivationGate(),
+        () => {},
+        async (sessionId) => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await Promise.resolve();
+          inFlight -= 1;
+          return `Title ${sessionId}`;
+        },
+      );
+
+      const snapshot = await expectUsageSnapshotStart(coordinator);
+      const logs = await expectUsageSnapshotLogs(coordinator, snapshot.revision, 'llm');
+
+      assert.equal(logs.rows.length, sessionIds.length);
+      for (const row of logs.rows) {
+        assert.equal(row.sessionTitle, `Title ${row.sessionId}`);
+      }
+      assert.ok(
+        maxInFlight <= 16,
+        `Session title read concurrency ${maxInFlight} exceeded the limit`,
+      );
     } finally {
       await stores.close().catch(() => undefined);
       await owner.close();

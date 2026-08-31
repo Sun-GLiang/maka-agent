@@ -72,9 +72,10 @@ import type {
   DesktopRuntimeHostSshTerminalSnapshot,
 } from '../preload/bridge-contract.js';
 import { createRuntimeHostFramedOutputFilter } from './runtime-host-framed-output.js';
-import type {
-  DesktopRuntimeHostDevelopmentPeerTarget,
-  DesktopRuntimeHostSetupPackage,
+import {
+  runtimeHostSetupPackageVersion,
+  type DesktopRuntimeHostDevelopmentPeerTarget,
+  type DesktopRuntimeHostSetupPackage,
 } from './runtime-host-setup-package.js';
 
 interface ActiveTerminal {
@@ -188,8 +189,9 @@ export interface DesktopRuntimeHostSshPeerMeshManagementInput {
   readonly operatorPath: string;
   readonly action: RuntimeHostPeerMeshManagementAction;
   readonly expectedTarget: DesktopRuntimeHostSshManagementInput['expectedTarget'];
-  readonly meshId?: string;
+  readonly meshId?: string | null;
   readonly peerId?: string;
+  readonly displayName?: string | null;
   readonly invitation?: string;
   readonly signal?: AbortSignal;
 }
@@ -1178,6 +1180,10 @@ function runtimeHostSetupRemoteCommand(
     'desktop-client',
     '--lifecycle',
     input.lifecycle === 'on_demand' ? 'on-demand' : 'supervised',
+    // Development archives identify every source revision as a distinct exact
+    // package. Re-running Add computer is the explicit replacement gesture in
+    // that environment; released packages keep using the normal update UI.
+    ...(setupPackage.kind === 'development_archive' ? ['--update-existing'] : []),
     '--defer-pairing-commit',
     ...(input.projectDirectoryRoots === undefined
       ? []
@@ -1244,10 +1250,10 @@ function runtimeHostUpdateRemoteCommand(
   setupPackage: PreparedSetupPackage,
   input: DesktopRuntimeHostSshUpdateInput,
 ): string {
-  const deploymentId = input.expectedTarget.deploymentId;
-  if (!deploymentId) {
+  if (!input.expectedTarget.deploymentId) {
     throw new Error('Runtime Host update requires a deployment generation');
   }
+  const targetVersion = runtimeHostSetupPackageVersion(setupPackage);
   return runtimeHostPackageRemoteCommand(
     setupPackage,
     [
@@ -1255,10 +1261,9 @@ function runtimeHostUpdateRemoteCommand(
       'service',
       'update',
       '--framed',
+      ...(targetVersion ? ['--target', targetVersion] : []),
       '--managed-root-id',
       input.expectedTarget.rootId,
-      '--operator-deployment-id',
-      deploymentId,
       ...managedServiceTargetArgs(input.expectedTarget),
       ...(input.allowInterruptActiveTasks ? ['--allow-interrupt-active-tasks'] : []),
     ],
@@ -1365,8 +1370,17 @@ function runtimeHostPeerMeshManagementRemoteCommand(
     'mesh',
     input.action,
     '--framed',
-    ...(input.meshId ? ['--mesh', input.meshId] : []),
+    ...(typeof input.meshId === 'string'
+      ? ['--mesh', input.meshId]
+      : input.meshId === null
+        ? ['--off']
+        : []),
     ...(input.peerId ? ['--peer', input.peerId] : []),
+    ...(input.displayName === null
+      ? ['--clear-name']
+      : input.displayName
+        ? ['--name', input.displayName]
+        : []),
     ...managedServiceTargetArgs(input.expectedTarget),
   ].map(quotePosix).join(' ');
   return `exec "\${SHELL:-/bin/sh}" -lic ${quotePosix(`exec ${command}`)}`;

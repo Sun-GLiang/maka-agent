@@ -39,6 +39,8 @@ import { createRuntimeHostServiceReadyEvent } from '../runtime-host-service-comm
 
 const projectRootA = process.platform === 'win32' ? 'C:\\srv\\projects' : '/srv/projects';
 const projectRootB = process.platform === 'win32' ? 'D:\\data' : '/mnt/data';
+const operatorClientDataRoot =
+  process.platform === 'win32' ? 'C:\\maka-control' : '/srv/maka-control';
 
 describe('Runtime Host operator commands', () => {
   test('parses resident Peer Mesh management without accepting invitations in argv', () => {
@@ -49,6 +51,8 @@ describe('Runtime Host operator commands', () => {
       deploymentId: '00000000-0000-4000-8000-000000000001',
     };
     const base = [
+      '--client-data-root',
+      operatorClientDataRoot,
       '--managed-root-id',
       target.rootId,
       '--operator-deployment-id',
@@ -75,6 +79,15 @@ describe('Runtime Host operator commands', () => {
       parseRuntimeHostCommand(['service', 'mesh', 'join', '--invitation', 'secret', ...base]).kind,
       'error',
     );
+    assert.deepEqual(parseRuntimeHostCommand(['service', 'mesh', 'transit', '--off', ...base]), {
+      kind: 'runtime-host-service-peer-mesh',
+      action: 'transit',
+      json: false,
+      managedRootId: target.rootId,
+      operatorDeploymentId: target.deploymentId,
+      expectedTarget: target,
+      meshId: null,
+    });
   });
 
   test('parses and emits the stable framed managed activation contract', async () => {
@@ -311,6 +324,40 @@ describe('Runtime Host operator commands', () => {
     assert.deepEqual(
       parseRuntimeHostCommand([
         'access',
+        'issue',
+        '--kind',
+        'capability-provider',
+        '--principal',
+        'terminal-mcp-provider',
+        '--capability-owner-credential',
+        'terminal-owner-credential',
+      ]),
+      {
+        kind: 'runtime-host-access-issue',
+        principalKind: 'capability_provider',
+        principalId: 'terminal-mcp-provider',
+        operationGrants: ['client.capability.replace', 'client.capability.unregister'],
+        canPublishClientCapabilities: true,
+        canUseHostPaths: false,
+        capabilityOwnerCredentialId: 'terminal-owner-credential',
+      },
+    );
+    assert.equal(
+      parseRuntimeHostCommand([
+        'access',
+        'issue',
+        '--principal',
+        'terminal-owner',
+        '--grant',
+        'session.catalog.query',
+        '--capability-owner-credential',
+        'terminal-owner-credential',
+      ]).kind,
+      'error',
+    );
+    assert.deepEqual(
+      parseRuntimeHostCommand([
+        'access',
         'prepare',
         '--current-fingerprint',
         'a'.repeat(32),
@@ -369,17 +416,22 @@ describe('Runtime Host operator commands', () => {
         'access.credential.rotation.prepare',
         'access.credential.rotation.revoke',
         'access.principal.revoke',
+        'collaboration.turn-request.acknowledge',
+        'collaboration.turn-request.create',
         'host.upgrade.prepare',
         'hosted.execution.cancel',
         'hosted.execution.start',
         'peer.mesh.close',
         'peer.mesh.create',
+        'peer.mesh.display-name.set',
         'peer.mesh.invite',
         'peer.mesh.join',
         'peer.mesh.leave',
         'peer.mesh.query',
         'peer.mesh.reconcile',
         'peer.mesh.remove',
+        'peer.mesh.rename',
+        'peer.mesh.transit.set',
       ],
     );
   });

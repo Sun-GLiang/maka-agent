@@ -38,14 +38,22 @@ import { createAttachmentApprovalRegistry } from "../attachment-approval.js";
 import type { DesktopRuntimeHostSession } from "../runtime-host-client.js";
 import {
   registerRuntimeHostSessionExecutionIpc,
+  registerRuntimeHostSessionObservationIpc,
   type RuntimeHostSessionExecutionIpcDeps,
 } from "../runtime-host-session-execution-ipc-main.js";
+import { RuntimeHostSessionObservationRegistry } from '../runtime-host-session-observation-registry.js';
 import { RuntimeHostSessionObserver } from "../runtime-host-session-observer.js";
 import { runtimeHostSessionFixture } from "./runtime-host-session-test-fixture.js";
 
 test('registers Session observation as one reconnectable operation', () => {
   const ipc = ipcHarness();
-  registerExecutionIpc({ client: executionClient({}) }, ipc);
+  registerRuntimeHostSessionObservationIpc(
+    {
+      observations: new RuntimeHostSessionObservationRegistry(),
+      resolveSideConversation: async () => false,
+    },
+    ipc,
+  );
 
   assert.equal(ipc.reconnectableChannels.has('sessions:observe'), true);
 });
@@ -627,6 +635,45 @@ test('returns Host-owned cancellation proof to the renderer', async () => {
       'message-cancelled',
     ]),
     { cancelledMessageIds: ['message-cancelled'] },
+  );
+});
+
+test('returns Host-owned Message execution resolutions to the renderer', async () => {
+  const ipc = ipcHarness();
+  registerExecutionIpc(
+    {
+      client: executionClient({
+        queryMessageExecutions: async (input) => ({
+          resolutions: input.messageIds.map((messageId) => messageId === 'message-cancelled'
+            ? { messageId, state: 'cancelled' as const }
+            : {
+                messageId,
+                state: 'owned' as const,
+                turnId: 'successor-turn',
+                runId: 'successor-run',
+              }),
+        }),
+      }),
+    },
+    ipc,
+  );
+
+  assert.deepEqual(
+    await ipc.invoke('sessions:queryMessageExecutions', 'session-1', [
+      'message-delegated',
+      'message-cancelled',
+    ]),
+    {
+      resolutions: [
+        {
+          messageId: 'message-delegated',
+          state: 'owned',
+          turnId: 'successor-turn',
+          runId: 'successor-run',
+        },
+        { messageId: 'message-cancelled', state: 'cancelled' },
+      ],
+    },
   );
 });
 
@@ -1502,6 +1549,7 @@ function executionClient(overrides: Partial<ExecutionClient>): ExecutionClient {
     interruptTurn: unavailable,
     listSessionTurnLandmarks: unavailable,
     listSessionTurns: unavailable,
+    queryMessageExecutions: unavailable,
     queryMessages: unavailable,
     queryTurnResume: unavailable,
     readExecutionBoundary: unavailable,
@@ -1641,7 +1689,6 @@ function registerExecutionIpc(
       resizeImage: async (bytes) => bytes,
       beforeStop() {},
       ...deps,
-      observations: deps.observations ?? observer,
       sessionCopyCleanup: deps.sessionCopyCleanup ?? unusedSessionCopyCleanup(),
       onBackgroundError: deps.onBackgroundError ?? (() => undefined),
     },
