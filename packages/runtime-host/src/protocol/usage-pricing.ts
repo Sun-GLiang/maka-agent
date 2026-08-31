@@ -51,7 +51,7 @@ const QUERY_ERRORS = [
   'persistence_failed',
   'internal_failure',
 ] as const;
-const USAGE_QUERY_ERRORS = [...QUERY_ERRORS, 'invalid_request'] as const;
+const USAGE_QUERY_ERRORS = [...QUERY_ERRORS, 'invalid_request', 'operation_conflict'] as const;
 const PRICING_QUERY_ERRORS = [...QUERY_ERRORS, 'invalid_request'] as const;
 const MUTATION_ERRORS = [...QUERY_ERRORS, 'invalid_request', 'commit_outcome_unknown'] as const;
 const LLM_USAGE_QUERY_FIELDS = new Set([
@@ -354,6 +354,14 @@ export type PricingMutateResult =
       readonly actualRevision: number;
     };
 
+export interface UsageSnapshotReleaseInput {
+  readonly revision: string;
+}
+
+export interface UsageSnapshotReleaseResult {
+  readonly released: true;
+}
+
 export const USAGE_PRICING_OPERATION_SPECS = {
   'usage.query': defineOperation<
     UsageQueryInput,
@@ -366,6 +374,17 @@ export const USAGE_PRICING_OPERATION_SPECS = {
     decodeInput: decodeUsageQueryInput,
     decodeOutput: decodeUsageQueryResult,
     assertOutputForInput: assertUsageQueryOutputForInput,
+  }),
+  'usage.snapshot.release': defineOperation<
+    UsageSnapshotReleaseInput,
+    UsageSnapshotReleaseResult,
+    (typeof QUERY_ERRORS)[number]
+  >({
+    mode: 'control',
+    availability: 'ready',
+    errors: QUERY_ERRORS,
+    decodeInput: decodeUsageSnapshotReleaseInput,
+    decodeOutput: decodeUsageSnapshotReleaseResult,
   }),
   'pricing.query': defineOperation<
     PricingQueryInput,
@@ -392,6 +411,17 @@ export const USAGE_PRICING_OPERATION_SPECS = {
     assertOutputForInput: assertPricingMutateOutputForInput,
   }),
 } as const;
+
+export function decodeUsageSnapshotReleaseInput(value: unknown): UsageSnapshotReleaseInput {
+  const input = requireExactRecord(value, 'usage snapshot release input', ['revision']);
+  return { revision: requireId(input.revision, 'usage snapshot revision') };
+}
+
+export function decodeUsageSnapshotReleaseResult(value: unknown): UsageSnapshotReleaseResult {
+  const result = requireExactRecord(value, 'usage snapshot release result', ['released']);
+  if (result.released !== true) throw invalidProtocolFrame('Usage snapshot was not released');
+  return { released: true };
+}
 
 export function decodeUsageQueryInput(value: unknown): UsageQueryInput {
   const input = requireRecord(value, 'usage query input');

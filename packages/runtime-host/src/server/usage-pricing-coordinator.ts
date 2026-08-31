@@ -60,15 +60,23 @@ import {
   type UsageQueryInput,
   type UsageQueryResult,
 } from '../protocol/index.js';
-import type { UsagePricingOperationHandlerMap } from './operation-dispatcher.js';
+import type { ConnectionContext, UsagePricingOperationHandlerMap } from './operation-dispatcher.js';
 import { RuntimePolicyActivationGate } from './runtime-policy-activation-gate.js';
 import { readCanonicalUsage } from './canonical-usage-reader.js';
-import { UsageSnapshotCache, type UsageSnapshotCacheOptions } from './usage-snapshot-cache.js';
+import {
+  UsageSnapshotCache,
+  UsageSnapshotCapacityError,
+  type UsageSnapshotCacheOptions,
+} from './usage-snapshot-cache.js';
 
 /** Root-scoped projection over the authentic lease-bound usage stores. */
 export class HostUsagePricingCoordinator {
   readonly handlers: UsagePricingOperationHandlerMap = {
-    'usage.query': (input) => this.#queryUsage(input),
+    'usage.query': (input, context) => this.#queryUsage(input, context),
+    'usage.snapshot.release': async (input, context) => {
+      this.#usageSnapshots.release(context.connectionId, input.revision);
+      return { ok: true, result: { released: true } };
+    },
     'pricing.query': (input) => this.#queryPricing(input),
     'pricing.mutate': (input) => this.#mutatePricing(input),
   };
@@ -94,6 +102,10 @@ export class HostUsagePricingCoordinator {
     this.#usageSnapshots = new UsageSnapshotCache(usageSnapshotOptions);
   }
 
+  releaseConnection(connectionId: string): void {
+    this.#usageSnapshots.releaseConnection(connectionId);
+  }
+
   /**
    * Reads the canonical ledger for the window a query addresses (#1679). The
    * range is resolved once here so both sources answer the same window.
@@ -106,14 +118,20 @@ export class HostUsagePricingCoordinator {
     return readCanonicalUsage(this.#stores, query, now, repair);
   }
 
-  async #queryUsage(input: UsageQueryInput): Promise<OperationOutcome<'usage.query'>> {
+  async #queryUsage(
+    input: UsageQueryInput,
+    context: ConnectionContext,
+  ): Promise<OperationOutcome<'usage.query'>> {
     try {
       const now = Date.now();
       if (input.kind === 'snapshot_start') {
-        return { ok: true, result: await this.#startUsageSnapshot(input.range, now) };
+        return {
+          ok: true,
+          result: await this.#startUsageSnapshot(context.connectionId, input.range, now),
+        };
       }
       if (input.kind === 'snapshot_logs') {
-        const snapshot = this.#usageSnapshots.get(input.revision);
+        const snapshot = this.#usageSnapshots.get(context.connectionId, input.revision);
         if (!snapshot) return usageRevisionChanged(input.revision);
         const rows = input.source === 'llm' ? snapshot.llmRows : snapshot.toolRows;
         if ((input.offset ?? 0) > rows.length) return invalidUsageOffset();
@@ -130,7 +148,7 @@ export class HostUsagePricingCoordinator {
         };
       }
       if (input.kind === 'snapshot_pricing') {
-        const snapshot = this.#usageSnapshots.get(input.revision);
+        const snapshot = this.#usageSnapshots.get(context.connectionId, input.revision);
         if (!snapshot) return usageRevisionChanged(input.revision);
         if ((input.offset ?? 0) > snapshot.pricingEntries.length) return invalidUsageOffset();
         return {
@@ -227,11 +245,21 @@ export class HostUsagePricingCoordinator {
         ),
       };
     } catch (error) {
+      if (error instanceof UsageSnapshotCapacityError) {
+        return {
+          ok: false,
+          error: {
+            code: 'operation_conflict',
+            message: 'Usage snapshot capacity is occupied',
+          },
+        };
+      }
       return this.#mapReadFailure<'usage.query'>(error, 'Usage authority');
     }
   }
 
   async #startUsageSnapshot(
+    connectionId: string,
     range: UsageQuery['range'],
     now: number,
   ): Promise<Extract<UsageQueryResult, { kind: 'snapshot_started' }>> {
@@ -256,7 +284,7 @@ export class HostUsagePricingCoordinator {
       0,
       captureLimit,
     );
-    const retained = this.#usageSnapshots.retain({
+    const retained = this.#usageSnapshots.retain(connectionId, {
       summary,
       provenance,
       llmRows: mergedLogs.rows.slice(0, this.#usageSnapshots.activityLimit).map(projectUsageLog),

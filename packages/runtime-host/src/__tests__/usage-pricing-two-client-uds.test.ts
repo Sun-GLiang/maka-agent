@@ -38,7 +38,11 @@ import {
   type StorageRootLease,
   type InteractiveRootOwner,
 } from '@maka/storage/root-authority';
-import { connectRuntimeHost, type RuntimeHostConnection } from '../client/index.js';
+import {
+  connectRuntimeHost,
+  RuntimeHostOperationError,
+  type RuntimeHostConnection,
+} from '../client/index.js';
 import {
   RUNTIME_HOST_PROTOCOL_VERSION,
   type EffectivePricingEntry,
@@ -431,6 +435,92 @@ test('pricing query projects built-in and custom authority with reset effects', 
 });
 
 describe('production Usage/Pricing UDS', () => {
+  test('reclaims Usage snapshot capacity after a lease-owning client disconnects', {
+    skip: process.platform === 'win32',
+    timeout: 60_000,
+  }, async () => {
+    const base = await mkdtemp(join(tmpdir(), 'maka-usage-snapshot-disconnect-'));
+    const root = join(base, 'root');
+    const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+    let owner = await tryAcquireInteractiveRootOwner(capability);
+    let host: RuntimeHostKernel | undefined;
+    const clients: RuntimeHostConnection[] = [];
+
+    try {
+      assert.ok(owner, 'test must acquire the real Interactive write lease');
+      host = await RuntimeHostKernel.start({
+        owner,
+        idleGraceMs: 30_000,
+        composition: defineInteractiveRuntimeHostComposition(createExecutionRuntimeHostComposition),
+      });
+      owner = undefined;
+      clients.push(...(await Promise.all(Array.from({ length: 5 }, () => connectClient(root)))));
+
+      const revisions: string[] = [];
+      for (const client of clients.slice(0, 4)) {
+        const snapshot = await client.request(
+          'usage.query',
+          { kind: 'snapshot_start', range: 'all' },
+          REQUEST_TIMEOUT_MS,
+        );
+        assert.equal(snapshot.kind, 'snapshot_started');
+        if (snapshot.kind !== 'snapshot_started') throw new Error('Usage snapshot did not start');
+        revisions.push(snapshot.revision);
+      }
+      assert.equal(new Set(revisions).size, 4);
+
+      const contender = clients[4]!;
+      await assert.rejects(
+        contender.request(
+          'usage.query',
+          { kind: 'snapshot_start', range: 'all' },
+          REQUEST_TIMEOUT_MS,
+        ),
+        (error: unknown) =>
+          error instanceof RuntimeHostOperationError && error.code === 'operation_conflict',
+      );
+
+      const disconnectedOwner = clients.shift()!;
+      await disconnectedOwner.close();
+
+      const deadline = Date.now() + 1_000;
+      let replacement;
+      while (true) {
+        try {
+          replacement = await contender.request(
+            'usage.query',
+            { kind: 'snapshot_start', range: 'all' },
+            REQUEST_TIMEOUT_MS,
+          );
+          break;
+        } catch (error) {
+          if (
+            !(error instanceof RuntimeHostOperationError) ||
+            error.code !== 'operation_conflict' ||
+            Date.now() >= deadline
+          ) {
+            throw error;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      assert.equal(replacement.kind, 'snapshot_started');
+      if (replacement.kind !== 'snapshot_started') {
+        throw new Error('Replacement Usage snapshot did not start');
+      }
+      assert.equal(revisions.includes(replacement.revision), false);
+    } finally {
+      await Promise.allSettled(clients.map((client) => client.close()));
+      await host?.close().catch(() => undefined);
+      await owner?.close().catch(() => undefined);
+      await rm(join(resolveRootControlNamespace(), capability.rootId), {
+        recursive: true,
+        force: true,
+      });
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
   test('two clients share usage projection and one revision-CAS pricing authority', {
     skip: process.platform === 'win32',
     timeout: 60_000,
@@ -513,6 +603,29 @@ describe('production Usage/Pricing UDS', () => {
       assert.equal(pinnedUsage.kind, 'snapshot_started');
       if (pinnedUsage.kind !== 'snapshot_started') throw new Error('Usage snapshot did not start');
       firstHostSnapshotRevision = pinnedUsage.revision;
+
+      assert.deepEqual(
+        await tui.request(
+          'usage.query',
+          {
+            kind: 'snapshot_logs',
+            revision: pinnedUsage.revision,
+            source: 'llm',
+            offset: 0,
+            limit: 100,
+          },
+          REQUEST_TIMEOUT_MS,
+        ),
+        { kind: 'revision_changed', expectedRevision: pinnedUsage.revision },
+      );
+      assert.deepEqual(
+        await tui.request(
+          'usage.snapshot.release',
+          { revision: pinnedUsage.revision },
+          REQUEST_TIMEOUT_MS,
+        ),
+        { released: true },
+      );
 
       const initial = await readPricing(desktop);
       assert.equal(initial.revision, 0);

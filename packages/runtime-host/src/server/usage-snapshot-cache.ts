@@ -27,13 +27,22 @@ import type {
 } from '../protocol/index.js';
 
 export const USAGE_SNAPSHOT_TTL_MS = 5 * 60 * 1_000;
+export const USAGE_SNAPSHOT_HARD_TTL_MS = 30 * 60 * 1_000;
 export const USAGE_SNAPSHOT_CAPACITY = 4;
 export const USAGE_SNAPSHOT_ACTIVITY_LIMIT = 50_000;
+
+export class UsageSnapshotCapacityError extends Error {
+  constructor() {
+    super('Usage snapshot capacity is occupied');
+    this.name = 'UsageSnapshotCapacityError';
+  }
+}
 
 export interface UsageSnapshotCacheOptions {
   readonly now?: () => number;
   readonly createRevision?: () => string;
   readonly ttlMs?: number;
+  readonly hardTtlMs?: number;
   readonly capacity?: number;
   readonly activityLimit?: number;
 }
@@ -53,15 +62,18 @@ export interface RetainedUsageSnapshot extends UsageSnapshotContents {
 }
 
 interface CacheEntry extends RetainedUsageSnapshot {
-  readonly expiresAt: number;
+  readonly connectionId: string;
+  idleExpiresAt: number;
+  readonly hardExpiresAt: number;
 }
 
-/** Host-epoch-local, absolute-TTL cache for coherent Settings Usage reads. */
+/** Host-epoch-local, connection-owned lease cache for coherent Settings Usage reads. */
 export class UsageSnapshotCache {
   readonly activityLimit: number;
   readonly #now: () => number;
   readonly #createRevision: () => string;
   readonly #ttlMs: number;
+  readonly #hardTtlMs: number;
   readonly #capacity: number;
   readonly #entries = new Map<string, CacheEntry>();
 
@@ -69,11 +81,14 @@ export class UsageSnapshotCache {
     this.#now = options.now ?? Date.now;
     this.#createRevision = options.createRevision ?? randomUUID;
     this.#ttlMs = options.ttlMs ?? USAGE_SNAPSHOT_TTL_MS;
+    this.#hardTtlMs = options.hardTtlMs ?? USAGE_SNAPSHOT_HARD_TTL_MS;
     this.#capacity = options.capacity ?? USAGE_SNAPSHOT_CAPACITY;
     this.activityLimit = options.activityLimit ?? USAGE_SNAPSHOT_ACTIVITY_LIMIT;
     if (
       !Number.isSafeInteger(this.#ttlMs) ||
       this.#ttlMs <= 0 ||
+      !Number.isSafeInteger(this.#hardTtlMs) ||
+      this.#hardTtlMs <= 0 ||
       !Number.isSafeInteger(this.#capacity) ||
       this.#capacity <= 0 ||
       !Number.isSafeInteger(this.activityLimit) ||
@@ -83,42 +98,51 @@ export class UsageSnapshotCache {
     }
   }
 
-  retain(contents: UsageSnapshotContents): RetainedUsageSnapshot {
+  retain(connectionId: string, contents: UsageSnapshotContents): RetainedUsageSnapshot {
     const now = this.#now();
     this.#pruneExpired(now);
-    while (this.#entries.size >= this.#capacity) {
-      const oldestRevision = this.#entries.keys().next().value;
-      if (oldestRevision === undefined) break;
-      this.#entries.delete(oldestRevision);
-    }
+    if (this.#entries.size >= this.#capacity) throw new UsageSnapshotCapacityError();
     const revision = this.#createRevision();
     if (revision.length === 0 || revision.length > 128 || this.#entries.has(revision)) {
       throw new Error('Usage snapshot revision generator returned an invalid revision');
     }
+    const hardExpiresAt = now + this.#hardTtlMs;
     const entry: CacheEntry = {
       revision,
       ...contents,
-      expiresAt: now + this.#ttlMs,
+      connectionId,
+      idleExpiresAt: Math.min(now + this.#ttlMs, hardExpiresAt),
+      hardExpiresAt,
     };
     this.#entries.set(revision, entry);
     return entry;
   }
 
-  get(revision: string): RetainedUsageSnapshot | undefined {
+  get(connectionId: string, revision: string): RetainedUsageSnapshot | undefined {
     const now = this.#now();
     this.#pruneExpired(now);
     const entry = this.#entries.get(revision);
-    if (!entry) return undefined;
-    // Map insertion order is the LRU order. Reinsert without changing expiresAt:
-    // page access affects eviction priority, never the absolute lifetime.
-    this.#entries.delete(revision);
-    this.#entries.set(revision, entry);
+    if (!entry || entry.connectionId !== connectionId) return undefined;
+    entry.idleExpiresAt = Math.min(now + this.#ttlMs, entry.hardExpiresAt);
     return entry;
+  }
+
+  release(connectionId: string, revision: string): void {
+    const entry = this.#entries.get(revision);
+    if (entry?.connectionId === connectionId) this.#entries.delete(revision);
+  }
+
+  releaseConnection(connectionId: string): void {
+    for (const [revision, entry] of this.#entries) {
+      if (entry.connectionId === connectionId) this.#entries.delete(revision);
+    }
   }
 
   #pruneExpired(now: number): void {
     for (const [revision, entry] of this.#entries) {
-      if (entry.expiresAt <= now) this.#entries.delete(revision);
+      if (entry.idleExpiresAt <= now || entry.hardExpiresAt <= now) {
+        this.#entries.delete(revision);
+      }
     }
   }
 }

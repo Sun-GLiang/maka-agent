@@ -38,11 +38,14 @@ import { openInteractiveUsageStoresForWrite } from '@maka/storage/usage-stores';
 import {
   decodeClientFrame,
   decodeHostFrame,
+  decodeUsageSnapshotReleaseInput,
+  decodeUsageSnapshotReleaseResult,
   decodeUsageQueryInput,
   encodePricingQueryResult,
   encodeProtocolMessage,
   PRICING_PAGE_MAX_BYTES,
   PRICING_PAGE_MAX_ITEMS,
+  REMOTE_OWNER_OPERATION_GRANTS,
   RUNTIME_HOST_MAX_MESSAGE_BYTES,
   USAGE_PAGE_MAX_BYTES,
   USAGE_PAGE_MAX_ITEMS,
@@ -64,6 +67,33 @@ const CONNECTION_CONTEXT: ConnectionContext = {
 };
 
 describe('Usage/Pricing protocol', () => {
+  test('decodes the exact Usage snapshot release input and output', () => {
+    assert.equal(REMOTE_OWNER_OPERATION_GRANTS.includes('usage.snapshot.release'), true);
+    assert.deepEqual(decodeUsageSnapshotReleaseInput({ revision: 'snapshot-revision-1' }), {
+      revision: 'snapshot-revision-1',
+    });
+    assert.deepEqual(decodeUsageSnapshotReleaseResult({ released: true }), { released: true });
+    assert.deepEqual(
+      decodeClientFrame({
+        requestId: 'usage-release-request',
+        operation: 'usage.snapshot.release',
+        input: { revision: 'snapshot-revision-1' },
+      }),
+      {
+        requestId: 'usage-release-request',
+        operation: 'usage.snapshot.release',
+        input: { revision: 'snapshot-revision-1' },
+      },
+    );
+
+    for (const input of [{}, { revision: '' }, { revision: 'snapshot-revision-1', extra: true }]) {
+      assert.throws(() => decodeUsageSnapshotReleaseInput(input), invalidFrame);
+    }
+    for (const result of [{}, { released: false }, { released: true, extra: true }]) {
+      assert.throws(() => decodeUsageSnapshotReleaseResult(result), invalidFrame);
+    }
+  });
+
   test('decodes exact bounded usage queries', () => {
     assert.deepEqual(
       decodeUsageQueryInput({
@@ -566,7 +596,7 @@ describe('Usage/Pricing protocol', () => {
     }
   });
 
-  test('pins every Usage authority behind one expiring LRU snapshot revision', async () => {
+  test('leases Usage snapshots to connections with renewable idle and bounded hard lifetime', async () => {
     const base = await mkdtemp(join(tmpdir(), 'maka-usage-snapshot-'));
     const capability = await resolveStorageRoot({
       path: join(base, 'interactive-root'),
@@ -590,12 +620,16 @@ describe('Usage/Pricing protocol', () => {
           now: () => now,
           createRevision: () => `snapshot-${++nextRevision}`,
           ttlMs: 100,
+          hardTtlMs: 250,
           capacity: 2,
           activityLimit: 1,
         },
       );
 
-      const first = await expectUsageSnapshotStart(coordinator);
+      const connectionA = connectionContext('connection-a');
+      const connectionB = connectionContext('connection-b');
+      const connectionC = connectionContext('connection-c');
+      const first = await expectUsageSnapshotStart(coordinator, connectionA);
       assert.equal(first.revision, 'snapshot-1');
       assert.equal(first.summary.totalRequests, 1);
 
@@ -603,9 +637,25 @@ describe('Usage/Pricing protocol', () => {
       await stores.telemetry.recordToolInvocation(longToolRecord('new-tool', 2));
       await stores.pricing.upsert(1, pricing('snapshot:new'));
 
-      const oldLlm = await expectUsageSnapshotLogs(coordinator, first.revision, 'llm');
-      const oldTool = await expectUsageSnapshotLogs(coordinator, first.revision, 'tool');
-      const oldPricing = await expectUsageSnapshotPricing(coordinator, first.revision);
+      assert.deepEqual(
+        await queryUsageSnapshotLogs(coordinator, first.revision, 'llm', connectionB),
+        { kind: 'revision_changed', expectedRevision: first.revision },
+      );
+      assert.deepEqual(
+        await coordinator.handlers['usage.snapshot.release'](
+          { revision: first.revision },
+          connectionB,
+        ),
+        { ok: true, result: { released: true } },
+      );
+      const oldLlm = await expectUsageSnapshotLogs(coordinator, first.revision, 'llm', connectionA);
+      const oldTool = await expectUsageSnapshotLogs(
+        coordinator,
+        first.revision,
+        'tool',
+        connectionA,
+      );
+      const oldPricing = await expectUsageSnapshotPricing(coordinator, first.revision, connectionA);
       assert.deepEqual(
         oldLlm.rows.map((row) => row.id),
         ['old-llm'],
@@ -619,8 +669,13 @@ describe('Usage/Pricing protocol', () => {
       assert.ok(oldPricing.entries.some((entry) => entry.pricing.modelKey === 'snapshot:old'));
       assert.ok(!oldPricing.entries.some((entry) => entry.pricing.modelKey === 'snapshot:new'));
 
-      const second = await expectUsageSnapshotStart(coordinator);
-      const newLlm = await expectUsageSnapshotLogs(coordinator, second.revision, 'llm');
+      const second = await expectUsageSnapshotStart(coordinator, connectionB);
+      const newLlm = await expectUsageSnapshotLogs(
+        coordinator,
+        second.revision,
+        'llm',
+        connectionB,
+      );
       assert.deepEqual(
         newLlm.rows.map((row) => row.id),
         ['new-llm'],
@@ -628,17 +683,58 @@ describe('Usage/Pricing protocol', () => {
       assert.equal(newLlm.total, 1, 'total describes retained rows');
       assert.equal(newLlm.truncated, true, 'truncation describes discarded authority rows');
 
-      await expectUsageSnapshotLogs(coordinator, first.revision, 'llm');
-      await expectUsageSnapshotStart(coordinator);
+      assert.deepEqual(
+        await coordinator.handlers['usage.query'](
+          { kind: 'snapshot_start', range: 'all' },
+          connectionC,
+        ),
+        {
+          ok: false,
+          error: {
+            code: 'operation_conflict',
+            message: 'Usage snapshot capacity is occupied',
+          },
+        },
+      );
       assert.equal(
-        (await queryUsageSnapshotLogs(coordinator, second.revision, 'llm')).kind,
-        'revision_changed',
-        'the least recently used snapshot is evicted',
+        (await queryUsageSnapshotLogs(coordinator, second.revision, 'llm', connectionB)).kind,
+        'snapshot_logs',
+        'capacity pressure preserves every active lease',
       );
 
-      now += 101;
-      const expired = await queryUsageSnapshotLogs(coordinator, first.revision, 'llm');
-      assert.deepEqual(expired, { kind: 'revision_changed', expectedRevision: first.revision });
+      now = 1_090;
+      await expectUsageSnapshotLogs(coordinator, first.revision, 'llm', connectionA);
+      now = 1_180;
+      await expectUsageSnapshotLogs(coordinator, first.revision, 'llm', connectionA);
+      now = 1_249;
+      await expectUsageSnapshotLogs(coordinator, first.revision, 'llm', connectionA);
+      now = 1_250;
+      assert.deepEqual(
+        await queryUsageSnapshotLogs(coordinator, first.revision, 'llm', connectionA),
+        { kind: 'revision_changed', expectedRevision: first.revision },
+      );
+
+      assert.deepEqual(
+        await coordinator.handlers['usage.snapshot.release'](
+          { revision: first.revision },
+          connectionA,
+        ),
+        { ok: true, result: { released: true } },
+      );
+      assert.deepEqual(
+        await coordinator.handlers['usage.snapshot.release'](
+          { revision: first.revision },
+          connectionA,
+        ),
+        { ok: true, result: { released: true } },
+      );
+      const third = await expectUsageSnapshotStart(coordinator, connectionC);
+      coordinator.releaseConnection(connectionC.connectionId);
+      assert.deepEqual(
+        await queryUsageSnapshotLogs(coordinator, third.revision, 'llm', connectionC),
+        { kind: 'revision_changed', expectedRevision: third.revision },
+      );
+      await expectUsageSnapshotStart(coordinator, connectionA);
     } finally {
       await stores.close().catch(() => undefined);
       await owner.close();
@@ -1081,10 +1177,11 @@ async function queryUsageBuckets(
 
 async function expectUsageSnapshotStart(
   coordinator: HostUsagePricingCoordinator,
+  context: ConnectionContext = CONNECTION_CONTEXT,
 ): Promise<Extract<UsageQueryResult, { kind: 'snapshot_started' }>> {
   const outcome = await coordinator.handlers['usage.query'](
     { kind: 'snapshot_start', range: 'all' },
-    CONNECTION_CONTEXT,
+    context,
   );
   assert.equal(outcome.ok, true);
   if (!outcome.ok || outcome.result.kind !== 'snapshot_started') {
@@ -1097,10 +1194,11 @@ async function queryUsageSnapshotLogs(
   coordinator: HostUsagePricingCoordinator,
   revision: string,
   source: 'llm' | 'tool',
+  context: ConnectionContext = CONNECTION_CONTEXT,
 ): Promise<Extract<UsageQueryResult, { kind: 'snapshot_logs' | 'revision_changed' }>> {
   const outcome = await coordinator.handlers['usage.query'](
     { kind: 'snapshot_logs', revision, source, offset: 0, limit: USAGE_PAGE_MAX_ITEMS },
-    CONNECTION_CONTEXT,
+    context,
   );
   assert.equal(outcome.ok, true);
   if (
@@ -1116,8 +1214,9 @@ async function expectUsageSnapshotLogs(
   coordinator: HostUsagePricingCoordinator,
   revision: string,
   source: 'llm' | 'tool',
+  context: ConnectionContext = CONNECTION_CONTEXT,
 ): Promise<Extract<UsageQueryResult, { kind: 'snapshot_logs' }>> {
-  const result = await queryUsageSnapshotLogs(coordinator, revision, source);
+  const result = await queryUsageSnapshotLogs(coordinator, revision, source, context);
   if (result.kind !== 'snapshot_logs') throw new Error('Expected a retained Usage snapshot');
   assert.equal(result.source, source);
   return result;
@@ -1126,6 +1225,7 @@ async function expectUsageSnapshotLogs(
 async function expectUsageSnapshotPricing(
   coordinator: HostUsagePricingCoordinator,
   revision: string,
+  context: ConnectionContext = CONNECTION_CONTEXT,
 ): Promise<{ readonly entries: readonly EffectivePricingEntry[] }> {
   const entries: EffectivePricingEntry[] = [];
   let offset = 0;
@@ -1133,7 +1233,7 @@ async function expectUsageSnapshotPricing(
   do {
     const outcome = await coordinator.handlers['usage.query'](
       { kind: 'snapshot_pricing', revision, offset, limit: PRICING_PAGE_MAX_ITEMS },
-      CONNECTION_CONTEXT,
+      context,
     );
     assert.equal(outcome.ok, true);
     if (!outcome.ok || outcome.result.kind !== 'snapshot_pricing') {
@@ -1149,6 +1249,10 @@ async function expectUsageSnapshotPricing(
   } while (true);
   assert.equal(entries.length, total);
   return { entries };
+}
+
+function connectionContext(connectionId: string): ConnectionContext {
+  return { ...CONNECTION_CONTEXT, connectionId };
 }
 
 function assertDistinctBoundedIdentities(values: readonly (string | undefined)[]): void {

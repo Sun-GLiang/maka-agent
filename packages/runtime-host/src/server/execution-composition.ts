@@ -1564,7 +1564,10 @@ export async function createExecutionRuntimeHostComposition(
             unsubscribeTaskLedger?.();
           },
         ],
-        releaseConnection: [(connectionId) => artifacts.releaseConnection(connectionId)],
+        releaseConnection: [
+          (connectionId) => artifacts.releaseConnection(connectionId),
+          (connectionId) => usagePricing.releaseConnection(connectionId),
+        ],
       }),
       createRuntimeHostDomainModule({
         id: 'client-capability',

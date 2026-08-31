@@ -130,7 +130,10 @@ export type SessionCatalogOperationKey = Exclude<
 export type TaskLedgerOperationKey = Extract<OperationKey, 'task.ledger.query'>;
 export type ArtifactOperationKey = Extract<OperationKey, `artifact.${string}`>;
 export type SkillCatalogOperationKey = Extract<OperationKey, `skill.catalog.${string}`>;
-export type UsagePricingOperationKey = Extract<OperationKey, 'usage.query' | `pricing.${string}`>;
+export type UsagePricingOperationKey = Extract<
+  OperationKey,
+  'usage.query' | 'usage.snapshot.release' | `pricing.${string}`
+>;
 export type MemoryOperationKey = Extract<OperationKey, `memory.${string}`>;
 export type OAuthOperationKey = Extract<OperationKey, `oauth.${string}`>;
 export type RuntimeResourceOperationKey = Extract<OperationKey, `runtime.resource.${string}`>;
