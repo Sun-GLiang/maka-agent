@@ -27,6 +27,7 @@ import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { UiLocale } from '@maka/core/ui-locale';
 import {
   chatModelChoiceLabel,
+  composerModelSupportsVision,
   pickNewChatModel,
   type NewChatModel,
   type NewChatModelCandidate,
@@ -93,6 +94,7 @@ export function useShellChatModel(options: {
   newChatModelLabel: string | undefined;
   newChatThinkingLevels: readonly ThinkingLevel[];
   newChatThinkingLevel: ThinkingLevel | undefined;
+  composerSupportsVision: boolean | undefined;
   pendingNewChatModel: NewChatModelCandidate | null;
   setPendingNewChatModel: (next: NewChatModelCandidate | null) => void;
   pendingNewChatThinkingLevel: ThinkingLevel | null;
@@ -242,6 +244,17 @@ export function useShellChatModel(options: {
     newChatModel?.llmConnectionSlug,
     newChatModel?.model,
   );
+  const composerSupportsVision = composerModelSupportsVision({
+    active: activeSession
+      ? {
+          llmConnectionId: activeSession.llmConnectionId,
+          llmConnectionSlug: activeSession.llmConnectionSlug,
+          model: activeModel,
+        }
+      : undefined,
+    next: newChatModel,
+    choices: chatModelChoices,
+  });
 
   // Notice derivation is a pure function (see `session-health-notice.ts`); this
   // adapter routes configuration repair to Settings, catalog retries to the
@@ -304,6 +317,7 @@ export function useShellChatModel(options: {
     newChatModelLabel,
     newChatThinkingLevels,
     newChatThinkingLevel,
+    composerSupportsVision,
     pendingNewChatModel,
     setPendingNewChatModel,
     // Resolved, not raw: callers want the level the next chat would actually

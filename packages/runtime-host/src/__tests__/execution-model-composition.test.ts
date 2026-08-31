@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { deferred } from '@maka/core/test-only/async-primitives';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -1630,6 +1631,7 @@ test('production Host executes a canonical ai-sdk Session against a real provide
     assert.equal(webSearchEnabled.kind, 'committed');
 
     const execution = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const usageStores = await openInteractiveUsageStoresForWrite(owner.lease);
     const session = await execution.sessionStore.create({
       cwd: root,
       llmConnectionId: connection.connectionId,
@@ -1806,14 +1808,30 @@ test('production Host executes a canonical ai-sdk Session against a real provide
     assert.equal(compactUsage.inputTokens, 7);
     assert.equal(compactUsage.outputTokens, 3);
     const capturedRequestCount = mainRequests.length + compactRequests.length;
-    const evidence = await waitForProviderEvidence(execution, session.id, capturedRequestCount);
-    assert.equal(evidence.captures.length, capturedRequestCount);
-    assert.equal(evidence.attempts.length, capturedRequestCount);
+    const attempts = await waitForCanonicalAttempts(usageStores, session.id, capturedRequestCount);
+    assert.equal(attempts.length, capturedRequestCount);
+    assert.ok(attempts.every((attempt) => attempt.requestObservation));
+    const contextDiagnostics = await composition.handlers['context.diagnostics.query'](
+      { sessionId: session.id },
+      connectionContext,
+    );
+    assert.equal(contextDiagnostics.ok, true);
+    if (contextDiagnostics.ok) {
+      assert.equal(contextDiagnostics.result.status, 'available');
+      if (contextDiagnostics.result.status === 'available') {
+        assert.ok(
+          contextDiagnostics.result.composition?.segments.some(
+            (segment) => segment.kind === 'messages',
+          ),
+        );
+      }
+    }
 
     const artifacts = await openInteractiveArtifactStoreForWrite(owner.lease);
-    const artifactPage = await artifacts.listPage(session.id, { offset: 0, limit: 100 });
-    const captureArtifacts = artifactPage.records.filter(
-      (artifact) => artifact.source === 'provider_request_capture',
+    const captureArtifacts = await waitForCaptureArtifacts(
+      artifacts,
+      session.id,
+      capturedRequestCount,
     );
     assert.equal(captureArtifacts.length, capturedRequestCount);
     let summaryCaptureFound = false;
@@ -1843,9 +1861,9 @@ test('production Host executes a canonical ai-sdk Session against a real provide
       failedStart,
       connectionContext,
     );
-    assert.equal(failedTerminal.status, 'failed');
-    assert.equal(provider.requests.length, requestsBeforeArtifactFailure);
-    assert.equal(drainRequests, 1);
+    assert.equal(failedTerminal.status, 'completed');
+    assert.equal(provider.requests.length, requestsBeforeArtifactFailure + 1);
+    assert.equal(drainRequests, 0);
   } finally {
     try {
       await composition?.close();
@@ -3621,34 +3639,46 @@ async function waitForUsage(
   throw new Error('Hosted real-model usage attribution was not persisted');
 }
 
-async function waitForProviderEvidence(
-  execution: Awaited<ReturnType<typeof openInteractiveExecutionStoresForWrite>>,
+async function waitForCanonicalAttempts(
+  usage: InteractiveUsageStoresWriter,
   sessionId: string,
   expectedRequests: number,
-): Promise<{ captures: unknown[]; attempts: unknown[] }> {
+): Promise<readonly ModelCallAttempt[]> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const runs = await execution.agentRunStore.listSessionRuns(sessionId);
-    const events = (
-      await Promise.all(runs.map((run) => execution.agentRunStore.readEvents(sessionId, run.runId)))
-    ).flat();
-    const captures = events.filter((event) => event.type === 'provider_request_captured');
-    const attempts = events.filter((event) => event.type === 'provider_request_attempt_recorded');
-    if (captures.length >= expectedRequests && attempts.length >= expectedRequests) {
-      return { captures, attempts };
-    }
+    const page = await usage.modelCalls.modelCallAttempts(
+      { from: 0, to: Number.MAX_SAFE_INTEGER },
+      sessionId,
+    );
+    if (page.attempts.length >= expectedRequests) return page.attempts;
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
-  const runs = await execution.agentRunStore.listSessionRuns(sessionId);
-  const events = (
-    await Promise.all(runs.map((run) => execution.agentRunStore.readEvents(sessionId, run.runId)))
-  ).flat();
+  const page = await usage.modelCalls.modelCallAttempts(
+    { from: 0, to: Number.MAX_SAFE_INTEGER },
+    sessionId,
+  );
   throw new Error(
-    `Hosted provider request evidence was not persisted: ${JSON.stringify({
+    `Hosted canonical model-call attempts were not persisted: ${JSON.stringify({
       expectedRequests,
-      captures: events.filter((event) => event.type === 'provider_request_captured').length,
-      attempts: events.filter((event) => event.type === 'provider_request_attempt_recorded').length,
+      attempts: page.attempts.length,
+      unreadableRecords: page.unreadableRecords,
     })}`,
   );
+}
+
+async function waitForCaptureArtifacts(
+  artifacts: Awaited<ReturnType<typeof openInteractiveArtifactStoreForWrite>>,
+  sessionId: string,
+  expectedRequests: number,
+) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const page = await artifacts.listPage(sessionId, { offset: 0, limit: 100 });
+    const captures = page.records.filter(
+      (artifact) => artifact.source === 'provider_request_capture',
+    );
+    if (captures.length >= expectedRequests) return captures;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Hosted request artifacts did not reach ${expectedRequests}`);
 }
 
 async function waitForAutomaticMemoryRequestsToSettle(
@@ -3917,17 +3947,6 @@ async function settleWithin<T>(pending: Promise<T>): Promise<T> {
 }
 
 const SETTLE_TIMEOUT_MESSAGE = 'Operation did not settle within five seconds';
-
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((next, fail) => {
-    resolve = next;
-    reject = fail;
-  });
-  return { promise, resolve, reject };
-}
-
 function controlledOAuthTransports(): {
   readonly create: (proxy: ProxiedFetchProxy | null) => ProxiedFetchTransport;
   readonly refreshStarted: Promise<void>;
