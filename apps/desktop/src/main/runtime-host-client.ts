@@ -1622,29 +1622,39 @@ export class DesktopRuntimeHostClient {
   async #readUsageSnapshot(range: TimeRange): Promise<DesktopUsageSnapshot | undefined> {
     this.#assertOpen();
     const started = await this.request("usage.query", { kind: "snapshot_start", range });
-    if (
-      started.kind !== "snapshot_started" ||
-      (typeof range === "object" &&
-        (started.summary.range.from !== range.from || started.summary.range.to !== range.to))
-    ) {
+    if (started.kind !== "snapshot_started") {
       throw invalidProjection("Usage snapshot start");
     }
-    const [llm, tool, pricing] = await Promise.all([
-      this.#readUsageSnapshotLogs(started.revision, "llm"),
-      this.#readUsageSnapshotLogs(started.revision, "tool"),
-      this.#readUsageSnapshotPricing(started.revision),
-    ]);
-    if (!llm || !tool || !pricing) return undefined;
-    return {
-      revision: started.revision,
-      summary: started.summary,
-      provenance: started.provenance,
-      llmLogs: llm.rows,
-      toolLogs: tool.rows,
-      pricingEntries: pricing,
-      llmLogsTruncated: llm.truncated,
-      toolLogsTruncated: tool.truncated,
-    };
+    try {
+      if (
+        typeof range === "object" &&
+        (started.summary.range.from !== range.from || started.summary.range.to !== range.to)
+      ) {
+        throw invalidProjection("Usage snapshot start");
+      }
+      const [llm, tool, pricing] = await Promise.all([
+        this.#readUsageSnapshotLogs(started.revision, "llm"),
+        this.#readUsageSnapshotLogs(started.revision, "tool"),
+        this.#readUsageSnapshotPricing(started.revision),
+      ]);
+      if (!llm || !tool || !pricing) return undefined;
+      return {
+        revision: started.revision,
+        summary: started.summary,
+        provenance: started.provenance,
+        llmLogs: llm.rows,
+        toolLogs: tool.rows,
+        pricingEntries: pricing,
+        llmLogsTruncated: llm.truncated,
+        toolLogsTruncated: tool.truncated,
+      };
+    } finally {
+      try {
+        await this.request("usage.snapshot.release", { revision: started.revision });
+      } catch {
+        // Usage snapshot release is best-effort cleanup.
+      }
+    }
   }
 
   async #readUsageSnapshotLogs(

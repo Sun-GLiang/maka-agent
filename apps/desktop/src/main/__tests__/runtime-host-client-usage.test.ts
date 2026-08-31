@@ -30,6 +30,7 @@ test('loads all Usage snapshot pages behind one start revision', async () => {
   const requests: Array<{ operation: OperationKey; input: unknown }> = [];
   const client = usageClient(async (operation, input) => {
     requests.push({ operation, input });
+    if (operation === 'usage.snapshot.release') return { released: true };
     assert.equal(operation, 'usage.query');
     if (input.kind === 'snapshot_start') return started('revision-1', 2);
     assert.equal(input.revision, 'revision-1');
@@ -63,11 +64,67 @@ test('loads all Usage snapshot pages behind one start revision', async () => {
     requests.filter(({ input }) => (input as { kind?: string }).kind === 'snapshot_start').length,
     1,
   );
+  assert.deepEqual(requests.at(-1), {
+    operation: 'usage.snapshot.release',
+    input: { revision: 'revision-1' },
+  });
+  assert.equal(
+    requests.filter(({ operation }) => operation === 'usage.snapshot.release').length,
+    1,
+  );
+});
+
+test('releases an acquired Usage revision when its start range is invalid', async () => {
+  const released: string[] = [];
+  const client = usageClient(async (operation, input) => {
+    if (operation === 'usage.snapshot.release') {
+      released.push(input.revision);
+      return { released: true };
+    }
+    if (input.kind === 'snapshot_start') {
+      const response = started('revision-1', 1);
+      return { ...response, summary: { ...response.summary, range: { from: 1, to: 10 } } };
+    }
+    throw new Error('Unexpected Usage request');
+  });
+
+  await assert.rejects(
+    () => client.loadUsageSnapshot({ from: 0, to: 10 }),
+    (error: unknown) =>
+      error instanceof DesktopRuntimeHostClientError && error.code === 'projection_unstable',
+  );
+  assert.deepEqual(released, ['revision-1']);
+});
+
+test('does not release an invalid Usage snapshot start without an acquired revision', async () => {
+  const released: string[] = [];
+  const client = usageClient(async (operation, input) => {
+    if (operation === 'usage.snapshot.release') {
+      released.push(input.revision);
+      return { released: true };
+    }
+    if (input.kind === 'snapshot_start') {
+      return { kind: 'revision_changed', expectedRevision: 'revision-1' };
+    }
+    throw new Error('Unexpected Usage request');
+  });
+
+  await assert.rejects(
+    () => client.loadUsageSnapshot('all'),
+    (error: unknown) =>
+      error instanceof DesktopRuntimeHostClientError && error.code === 'projection_unstable',
+  );
+  assert.deepEqual(released, []);
 });
 
 test('discards every partial Usage result and restarts after revision_changed', async () => {
   let starts = 0;
+  const released: string[] = [];
   const client = usageClient(async (_operation, input) => {
+    if (_operation === 'usage.snapshot.release') {
+      released.push(input.revision);
+      return { released: true };
+    }
     if (input.kind === 'snapshot_start') {
       starts += 1;
       return started(`revision-${starts}`, starts);
@@ -90,6 +147,76 @@ test('discards every partial Usage result and restarts after revision_changed', 
   assert.equal(snapshot.revision, 'revision-2');
   assert.deepEqual(snapshot.llmLogs.map((row) => row.id), ['fresh-llm']);
   assert.deepEqual(snapshot.toolLogs.map((row) => row.id), ['fresh-tool']);
+  assert.deepEqual(released, ['revision-1', 'revision-2']);
+});
+
+test('releases an acquired Usage revision when a page reader throws without replacing its error', async () => {
+  const pageError = new Error('Usage page failed');
+  const released: string[] = [];
+  const client = usageClient(async (operation, input) => {
+    if (operation === 'usage.snapshot.release') {
+      released.push(input.revision);
+      return { released: true };
+    }
+    if (input.kind === 'snapshot_start') return started('revision-1', 1);
+    if (input.kind === 'snapshot_logs' && input.source === 'llm') throw pageError;
+    if (input.kind === 'snapshot_logs') {
+      return logPage('revision-1', 'tool', [toolLog('tool-1', 1)], 0, 1, null, false);
+    }
+    if (input.kind === 'snapshot_pricing') {
+      return pricingPage('revision-1', [pricing('model')], 0, 1, null);
+    }
+    throw new Error('Unexpected Usage request');
+  });
+
+  await assert.rejects(() => client.loadUsageSnapshot('all'), (error: unknown) => error === pageError);
+  assert.deepEqual(released, ['revision-1']);
+});
+
+test('keeps a successful Usage snapshot when its release fails', async () => {
+  const released: string[] = [];
+  const client = usageClient(async (operation, input) => {
+    if (operation === 'usage.snapshot.release') {
+      released.push(input.revision);
+      throw new Error('Usage release failed');
+    }
+    if (input.kind === 'snapshot_start') return started('revision-1', 1);
+    if (input.kind === 'snapshot_logs') {
+      const row = input.source === 'llm' ? llmLog('llm-1', 1) : toolLog('tool-1', 1);
+      return logPage('revision-1', input.source, [row], 0, 1, null, false);
+    }
+    if (input.kind === 'snapshot_pricing') {
+      return pricingPage('revision-1', [pricing('model')], 0, 1, null);
+    }
+    throw new Error('Unexpected Usage request');
+  });
+
+  const snapshot = await client.loadUsageSnapshot('all');
+  assert.equal(snapshot.revision, 'revision-1');
+  assert.deepEqual(released, ['revision-1']);
+});
+
+test('keeps a successful Usage snapshot when release throws synchronously', async () => {
+  const released: string[] = [];
+  const client = usageClient((operation, input) => {
+    if (operation === 'usage.snapshot.release') {
+      released.push(input.revision);
+      throw new Error('Usage release failed synchronously');
+    }
+    if (input.kind === 'snapshot_start') return started('revision-1', 1);
+    if (input.kind === 'snapshot_logs') {
+      const row = input.source === 'llm' ? llmLog('llm-1', 1) : toolLog('tool-1', 1);
+      return logPage('revision-1', input.source, [row], 0, 1, null, false);
+    }
+    if (input.kind === 'snapshot_pricing') {
+      return pricingPage('revision-1', [pricing('model')], 0, 1, null);
+    }
+    throw new Error('Unexpected Usage request');
+  });
+
+  const snapshot = await client.loadUsageSnapshot('all');
+  assert.equal(snapshot.revision, 'revision-1');
+  assert.deepEqual(released, ['revision-1']);
 });
 
 test('fails with usage_unstable after three complete Usage snapshot attempts', async () => {
@@ -130,7 +257,7 @@ test('rejects non-progressing or identity-changing Usage snapshot pages', async 
 });
 
 function usageClient(
-  respond: (operation: OperationKey, input: any) => Promise<any>,
+  respond: (operation: OperationKey, input: any) => Promise<any> | any,
 ): DesktopRuntimeHostClient {
   const connection = {
     hostEpoch: 'host-current',
