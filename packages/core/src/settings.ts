@@ -103,8 +103,30 @@ export interface NetworkProxySettings {
   autoBypassDomains: string[];
 }
 
+export interface NetworkProxyCredentialTarget {
+  readonly protocol: ProxyProtocol;
+  readonly host: string;
+  readonly port: number;
+  readonly username: string;
+}
+
+export function networkProxyCredentialTarget(
+  proxy: Pick<NetworkProxySettings, 'protocol' | 'host' | 'port' | 'username'>,
+): NetworkProxyCredentialTarget {
+  return {
+    protocol: proxy.protocol,
+    host: proxy.host.trim().toLowerCase(),
+    port: proxy.port,
+    username: proxy.username,
+  };
+}
+
 export type NetworkProxyCredentialOperation =
-  | { kind: 'replace'; secret: string }
+  | {
+      kind: 'replace';
+      secret: string;
+      expectedTarget?: NetworkProxyCredentialTarget;
+    }
   | { kind: 'delete' };
 
 /** A write-only proxy patch. Credential operations are never persisted. */

@@ -20,6 +20,8 @@
 import type {
   ConnectionCatalogEntry,
   ConnectionCatalogSnapshot,
+  ConnectionCredentialTarget,
+  ConnectionVersionBasis,
   ConnectionModelDiscoveryResult,
   ConnectionOnboardingTarget,
   ConnectionTestSummary,
@@ -29,6 +31,7 @@ import type {
   CredentialStatus,
   CredentialVersionBasis,
   RuntimePolicy,
+  NetworkProxyCredentialTarget,
   UpdateNetworkProxyInput,
   UpdateNetworkProxyResult,
   RequestHeaderUpdate,
@@ -48,7 +51,19 @@ export type UnavailableProviderActionAvailability = Exclude<
 
 export interface RuntimePolicyCredentialMaterial extends CredentialVersionBasis {
   readonly secret: string;
+  readonly proxyTarget?: NetworkProxyCredentialTarget;
 }
+
+export type BoundCredentialMaterialExportResult =
+  | {
+      readonly kind: 'exported';
+      readonly material: RuntimePolicyCredentialMaterial | null;
+    }
+  | {
+      readonly kind: 'connection_stale';
+      readonly expected: ConnectionVersionBasis;
+      readonly actual: ConnectionVersionBasis | null;
+    };
 
 export interface RuntimePolicyOperationSecretMaterial {
   readonly connection?: RuntimePolicyCredentialMaterial;
@@ -362,6 +377,10 @@ export interface RuntimePolicyOperationCoordinator {
   exportCredentialMaterial(
     locator: CredentialLocator,
   ): Promise<RuntimePolicyCredentialMaterial | null>;
+  exportCredentialMaterial(
+    locator: CredentialLocator,
+    expectedConnection: ConnectionCredentialTarget,
+  ): Promise<BoundCredentialMaterialExportResult>;
   getConnectionRequestHeaders(connectionId: string): Promise<SavedRequestHeaders | null>;
   replaceConnectionRequestHeaders(
     connectionId: string,

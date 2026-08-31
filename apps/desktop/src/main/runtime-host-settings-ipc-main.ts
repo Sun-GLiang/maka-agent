@@ -92,6 +92,14 @@ export interface RuntimeHostSettingsModule {
 export interface RuntimeHostSettingsExclusiveAccess {
   get(): Promise<RuntimeHostAppSettings>;
   update(patch: UpdateAppSettingsInput): Promise<RuntimeHostAppSettings>;
+  updateForConfigImport(
+    patch: UpdateAppSettingsInput,
+  ): Promise<RuntimeHostSettingsImportResult>;
+}
+
+export interface RuntimeHostSettingsImportResult {
+  readonly settings: RuntimeHostAppSettings;
+  readonly skippedCredentials: number;
 }
 
 type RuntimeHostSettingsExclusiveRunner = <T>(
@@ -125,7 +133,11 @@ export function createRuntimeHostSettingsModule(
   const module: RuntimeHostSettingsModule = {
     get: () => enqueue(() => loadRuntimeHostSettingsWithoutLane(deps)),
     update: (patch) =>
-      enqueue(() => updateRuntimeHostSettingsWithoutLane(deps, patch)),
+      enqueue(() =>
+        updateRuntimeHostSettingsForImportWithoutLane(deps, patch).then(
+          (result) => result.settings,
+        ),
+      ),
     testNetworkProxy: (input = {}) =>
       enqueue(() => testNetworkProxyWithoutLane(deps.client, input)),
   };
@@ -133,7 +145,12 @@ export function createRuntimeHostSettingsModule(
     enqueue(() =>
       operation({
         get: () => loadRuntimeHostSettingsWithoutLane(deps),
-        update: (patch) => updateRuntimeHostSettingsWithoutLane(deps, patch),
+        update: (patch) =>
+          updateRuntimeHostSettingsForImportWithoutLane(deps, patch).then(
+            (result) => result.settings,
+          ),
+        updateForConfigImport: (patch) =>
+          updateRuntimeHostSettingsForImportWithoutLane(deps, patch),
       }),
     ),
   );
@@ -277,18 +294,21 @@ async function loadRuntimeHostSettingsWithoutLane(
   };
 }
 
-async function updateRuntimeHostSettingsWithoutLane(
+async function updateRuntimeHostSettingsForImportWithoutLane(
   deps: RuntimeHostSettingsModuleDeps,
   patch: UpdateAppSettingsInput,
-): Promise<RuntimeHostAppSettings> {
+): Promise<RuntimeHostSettingsImportResult> {
   validateProxyPatch(patch.network?.proxy);
-  await applyHostPatchWithoutLane(deps.client, patch);
+  const skippedCredentials = await applyHostPatchWithoutLane(deps.client, patch);
   const clientPatch = clientOwnedSettingsPatch(patch);
   const local = hasSettingsPatch(clientPatch)
     ? await deps.settingsStore.update(clientPatch)
     : await deps.settingsStore.get();
   await deps.applyClientSettings(local);
-  return loadRuntimeHostSettingsWithoutLane(deps);
+  return {
+    settings: await loadRuntimeHostSettingsWithoutLane(deps),
+    skippedCredentials,
+  };
 }
 
 function projectWebSearchCredential(
@@ -316,9 +336,10 @@ function projectWebSearchCredential(
 async function applyHostPatchWithoutLane(
   client: RuntimeHostSettingsClient,
   patch: UpdateAppSettingsInput,
-): Promise<void> {
+): Promise<number> {
+  let skippedCredentials = 0;
   if (patch.network?.proxy) {
-    await updateNetworkProxy(client, patch.network.proxy);
+    skippedCredentials += await updateNetworkProxy(client, patch.network.proxy);
   }
   if (
     patch.personalization?.displayName !== undefined ||
@@ -389,12 +410,13 @@ async function applyHostPatchWithoutLane(
       value: patch.subagents!,
     }));
   }
+  return skippedCredentials;
 }
 
 async function updateNetworkProxy(
   client: RuntimeHostSettingsClient,
   patch: NonNullable<NonNullable<UpdateAppSettingsInput["network"]>["proxy"]>,
-): Promise<void> {
+): Promise<number> {
   const [policy, credential] = await Promise.all([
     client.queryRuntimePolicy(),
     client.queryCredential(PROXY_CREDENTIAL),
@@ -421,7 +443,8 @@ async function updateNetworkProxy(
     networkProxy,
     credential: operation,
   });
-  if (result.kind === "committed") return;
+  if (result.kind === "committed") return 0;
+  if (result.kind === "proxy_target_mismatch") return 1;
   if (result.kind === "revision_conflict") {
     throw new Error("Runtime Host proxy policy changed while Desktop updated it");
   }

@@ -40,6 +40,7 @@ import {
   normalizeRemoveCatalogConnectionInput,
   normalizeOptionalRequestBodyOverlay,
   normalizeNetworkProxyUpdate,
+  normalizeNetworkProxyCredentialTarget,
   normalizeRequestHeaderUpdates,
   normalizeRuntimePolicyMutation,
   normalizeSetCredentialInput,
@@ -58,6 +59,7 @@ import {
   type CredentialVersionBasis,
   type DeleteCredentialInput,
   type MutateRuntimePolicyInput,
+  type NetworkProxyCredentialTarget,
   type RemoveCatalogConnectionInput,
   type RequestHeaderUpdate,
   type RevisionConflict,
@@ -113,6 +115,11 @@ export type RuntimePolicyNetworkProxyUpdateResult =
       readonly credentialStatus: CredentialStatus;
     }
   | RevisionConflict
+  | {
+      readonly kind: 'proxy_target_mismatch';
+      readonly expected: NetworkProxyCredentialTarget;
+      readonly actual: NetworkProxyCredentialTarget;
+    }
   | CredentialStale;
 
 export type ConnectionCatalogCursor =
@@ -218,6 +225,7 @@ export type CredentialVaultQueryResult =
 export type SetCredentialResult =
   | CredentialCommitted
   | { readonly kind: 'connection_not_found' }
+  | ConnectionStale
   | CredentialStale;
 export type DeleteCredentialResult =
   | CredentialCommitted
@@ -464,6 +472,18 @@ function decodeRuntimePolicyNetworkProxyUpdateResult(
     };
   }
   if (item.kind === 'credential_stale') return credentialStale(item);
+  if (item.kind === 'proxy_target_mismatch') {
+    const mismatch = requireExactRecord(item, 'network proxy target mismatch', [
+      'kind',
+      'expected',
+      'actual',
+    ]);
+    return {
+      kind: 'proxy_target_mismatch',
+      expected: decodeDomain(() => normalizeNetworkProxyCredentialTarget(mismatch.expected)),
+      actual: decodeDomain(() => normalizeNetworkProxyCredentialTarget(mismatch.actual)),
+    };
+  }
   return revisionConflict(item, 'network proxy update result');
 }
 
@@ -884,6 +904,7 @@ function decodeSetCredentialResult(value: unknown): SetCredentialResult {
     requireExactRecord(item, 'credential connection not found result', ['kind']);
     return { kind: 'connection_not_found' };
   }
+  if (item.kind === 'connection_stale') return connectionStale(item);
   return credentialStale(item);
 }
 

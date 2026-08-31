@@ -268,7 +268,11 @@ export class HostRuntimePolicyCoordinator {
   ): Promise<OperationOutcome<'credential.vault.set'>> {
     return this.#storeMutation(async () => {
       const result = await this.#stores.credentialVault.set(input);
-      if (result.kind === 'connection_not_found' || result.kind === 'credential_stale') {
+      if (
+        result.kind === 'connection_not_found' ||
+        result.kind === 'connection_stale' ||
+        result.kind === 'credential_stale'
+      ) {
         return result;
       }
       const status = result.snapshot.entries.find((entry) =>
@@ -286,6 +290,9 @@ export class HostRuntimePolicyCoordinator {
   ): Promise<OperationOutcome<'credential.vault.delete'>> {
     return this.#storeMutation(async () => {
       const result = await this.#stores.credentialVault.delete(input);
+      if (result.kind === 'connection_stale') {
+        throw invariantFailure('Credential deletion returned an impossible connection conflict');
+      }
       if (result.kind === 'connection_not_found' || result.kind === 'credential_stale') {
         return result;
       }

@@ -249,6 +249,10 @@ describe('Runtime Host bootstrap protocol', () => {
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 66);
   });
 
+  test('publishes a new compatibility epoch for bound configuration credentials', () => {
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 79);
+  });
+
   test('publishes a new compatibility epoch for the removed execution.inspect.resolve operation', () => {
     // Epoch 63 peers still know execution.inspect.resolve and would send it
     // only to fail mid-connection now that it is gone, so its removal must
@@ -887,6 +891,96 @@ describe('Runtime Host bootstrap protocol', () => {
     );
   });
 
+  test('keeps connection credential transfer bound to an exact Host target', () => {
+    const locator = {
+      scope: 'connection',
+      connectionId: '00000000-0000-4000-8000-000000000001',
+      kind: 'api_key',
+    } as const;
+    const expectedConnection = {
+      connectionId: locator.connectionId,
+      revision: 4,
+      slug: 'deepseek-main',
+      providerType: 'deepseek' as const,
+      effectiveBaseUrl: 'https://api.deepseek.com/',
+    };
+    const setInput = {
+      locator,
+      expected: null,
+      expectedConnection,
+      secret: 'bound-secret',
+    };
+    assert.deepEqual(
+      RUNTIME_POLICY_OPERATION_SPECS['credential.vault.set'].decodeInput(setInput),
+      setInput,
+    );
+    const exportInput = { locator, expectedConnection };
+    assert.deepEqual(
+      HOST_OPERATION_SPECS['configuration.credentials.export'].decodeInput(exportInput),
+      exportInput,
+    );
+    assert.deepEqual(
+      HOST_OPERATION_SPECS['configuration.credentials.export'].decodeOutput({
+        credential: null,
+        connectionStale: {
+          expected: { connectionId: locator.connectionId, revision: 4 },
+          actual: { connectionId: locator.connectionId, revision: 5 },
+        },
+      }),
+      {
+        credential: null,
+        connectionStale: {
+          expected: { connectionId: locator.connectionId, revision: 4 },
+          actual: { connectionId: locator.connectionId, revision: 5 },
+        },
+      },
+    );
+    assert.throws(
+      () =>
+        HOST_OPERATION_SPECS['configuration.credentials.export'].decodeInput({
+          locator: { scope: 'network_proxy', kind: 'password' },
+          expectedConnection,
+        }),
+      isInvalidFrame,
+    );
+  });
+
+  test('exports a proxy credential with its Host-read target binding', () => {
+    const locator = { scope: 'network_proxy', kind: 'password' } as const;
+    const result = {
+      credential: {
+        locator,
+        secretBase64: Buffer.from('proxy-secret').toString('base64'),
+        proxyTarget: {
+          protocol: 'https' as const,
+          host: 'proxy.example',
+          port: 8443,
+          username: 'proxy-user',
+        },
+      },
+    };
+
+    assert.deepEqual(
+      HOST_OPERATION_SPECS['configuration.credentials.export'].decodeOutput(result),
+      result,
+    );
+    assert.throws(
+      () =>
+        HOST_OPERATION_SPECS['configuration.credentials.export'].decodeOutput({
+          credential: {
+            locator: {
+              scope: 'connection',
+              connectionId: '00000000-0000-4000-8000-000000000001',
+              kind: 'api_key',
+            },
+            secretBase64: Buffer.from('connection-secret').toString('base64'),
+            proxyTarget: result.credential.proxyTarget,
+          },
+        }),
+      isInvalidFrame,
+    );
+  });
+
   test('keeps the connection update model limit aligned with the catalog', () => {
     const updateConnection = RUNTIME_POLICY_OPERATION_SPECS['connection.catalog.update'];
     const enabledModelIds = Array.from(
@@ -995,7 +1089,16 @@ describe('Runtime Host bootstrap protocol', () => {
         bypassList: ['localhost'],
         autoBypassDomains: ['127.0.0.1'],
       },
-      credential: { kind: 'replace' as const, secret: 'write-only-secret' },
+      credential: {
+        kind: 'replace' as const,
+        secret: 'write-only-secret',
+        expectedTarget: {
+          protocol: 'http' as const,
+          host: '127.0.0.1',
+          port: 7897,
+          username: 'proxy-user',
+        },
+      },
     };
     assert.deepEqual(operation.decodeInput(input), input);
     assert.deepEqual(
@@ -1019,6 +1122,28 @@ describe('Runtime Host bootstrap protocol', () => {
           credentialId: '00000000-0000-4000-8000-000000000001',
           revision: 2,
           updatedAt: 1,
+        },
+      },
+    );
+    assert.deepEqual(
+      operation.decodeOutput({
+        kind: 'proxy_target_mismatch',
+        expected: input.credential.expectedTarget,
+        actual: {
+          protocol: 'https',
+          host: 'proxy.example',
+          port: 8443,
+          username: 'other-user',
+        },
+      }),
+      {
+        kind: 'proxy_target_mismatch',
+        expected: input.credential.expectedTarget,
+        actual: {
+          protocol: 'https',
+          host: 'proxy.example',
+          port: 8443,
+          username: 'other-user',
         },
       },
     );

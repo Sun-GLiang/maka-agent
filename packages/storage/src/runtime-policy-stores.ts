@@ -20,6 +20,7 @@
 import type {
   ConnectionCatalogMutationResult,
   ConnectionCatalogSnapshot,
+  ConnectionCredentialTarget,
   CreateCatalogConnectionInput,
   CredentialLocator,
   CredentialMutationResult,
@@ -238,7 +239,15 @@ function createWriterFacade(coordinator: RuntimePolicyCoordinator): RuntimePolic
     },
     operations: {
       updateNetworkProxy: (input) => coordinator.updateNetworkProxy(input),
-      exportCredentialMaterial: (locator) => coordinator.exportCredentialMaterial(locator),
+      exportCredentialMaterial: ((
+        locator: CredentialLocator,
+        expectedConnection?: ConnectionCredentialTarget,
+      ) =>
+        expectedConnection
+          ? coordinator.exportCredentialMaterial(locator, expectedConnection)
+          : coordinator.exportCredentialMaterial(
+              locator,
+            )) as OperationCoordinator['exportCredentialMaterial'],
       getConnectionRequestHeaders: (connectionId) =>
         coordinator.getConnectionRequestHeaders(connectionId),
       replaceConnectionRequestHeaders: (connectionId, updates) =>

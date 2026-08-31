@@ -2105,6 +2105,87 @@ describe('runtime policy stores', () => {
     });
   });
 
+  test('a bound connection credential write rejects revision, provider, and endpoint drift', async () => {
+    await withInteractiveOwner(async ({ stores }) => {
+      const connection = await createConnection(
+        stores,
+        0,
+        connectionDraft('bound-import', 'openai', 'Bound import'),
+      );
+      const locator = connectionCredential(connection, 'api_key');
+      const seeded = await stores.credentialVault.set({
+        locator,
+        expected: null,
+        secret: 'existing-target-secret',
+      });
+      assert.equal(seeded.kind, 'committed');
+      if (seeded.kind !== 'committed') return;
+      const status = await getCredentialStatus(stores.credentialVault, locator);
+      const sourceTarget = {
+        ...connectionBasis(connection),
+        slug: connection.slug,
+        providerType: connection.providerType,
+        effectiveBaseUrl: new URL(PROVIDER_DEFAULTS.openai.baseUrl).toString(),
+      };
+
+      const moved = await stores.connectionCatalog.update({
+        expected: connectionBasis(connection),
+        changes: {
+          name: connection.name,
+          baseUrl: 'https://target-relay.example/v1',
+          enabled: connection.enabled,
+          enabledModelIds: connection.enabledModelIds,
+        },
+      });
+      assert.equal(moved.kind, 'committed');
+      if (moved.kind !== 'committed') return;
+      const current = moved.snapshot.connections.find(
+        (item) => item.connectionId === connection.connectionId,
+      );
+      assert.ok(current);
+      if (!current) return;
+
+      const staleRevision = await stores.credentialVault.set({
+        locator,
+        expected: credentialExpectation(status),
+        expectedConnection: sourceTarget,
+        secret: 'must-not-cross-targets',
+      } as never);
+      assert.deepEqual(staleRevision, {
+        kind: 'connection_stale',
+        expected: connectionBasis(connection),
+        actual: connectionBasis(current),
+      });
+      assert.deepEqual(await stores.operations.exportCredentialMaterial(locator, sourceTarget), {
+        kind: 'connection_stale',
+        expected: connectionBasis(connection),
+        actual: connectionBasis(current),
+      });
+
+      for (const expectedConnection of [
+        { ...sourceTarget, ...connectionBasis(current) },
+        { ...sourceTarget, ...connectionBasis(current), providerType: 'deepseek' },
+      ]) {
+        const mismatch = await stores.credentialVault.set({
+          locator,
+          expected: credentialExpectation(status),
+          expectedConnection,
+          secret: 'must-not-cross-targets',
+        } as never);
+        assert.deepEqual(mismatch, {
+          kind: 'connection_stale',
+          expected: connectionBasis(current),
+          actual: connectionBasis(current),
+        });
+      }
+
+      assert.equal(
+        (await stores.operations.exportCredentialMaterial(locator))?.secret,
+        'existing-target-secret',
+      );
+    });
+  });
+
   test('reports unknown outcome when credential persistence fails after clearing verified state', {
     skip:
       process.platform === 'win32'
@@ -3086,6 +3167,80 @@ describe('runtime policy stores', () => {
       const finalCredential = await getCredentialStatus(stores.credentialVault, proxyCredential());
       assert.equal(finalPolicy.policy.networkProxy.authEnabled, false);
       assert.equal(finalCredential.configured, false);
+    });
+  });
+
+  test('a bound proxy credential import cannot replace the secret after the proxy target changes', async () => {
+    await withInteractiveOwner(async ({ stores }) => {
+      const initial = await stores.runtimePolicy.getSnapshot();
+      const source = await stores.operations.updateNetworkProxy({
+        expectedPolicyRevision: initial.revision,
+        expectedCredential: null,
+        networkProxy: {
+          ...initial.policy.networkProxy,
+          enabled: true,
+          host: 'proxy-a.example',
+          port: 8080,
+          authEnabled: true,
+          username: 'source-user',
+        },
+        credential: { kind: 'replace', secret: 'existing-secret' },
+      });
+      assert.equal(source.kind, 'committed');
+      if (source.kind !== 'committed' || !source.credentialStatus.configured) return;
+
+      const retargeted = await stores.operations.updateNetworkProxy({
+        expectedPolicyRevision: source.snapshot.revision,
+        expectedCredential: credentialBasis(source.credentialStatus),
+        networkProxy: {
+          ...source.snapshot.policy.networkProxy,
+          host: 'proxy-b.example',
+          username: 'target-user',
+        },
+        credential: { kind: 'keep' },
+      });
+      assert.equal(retargeted.kind, 'committed');
+      if (retargeted.kind !== 'committed') return;
+
+      const outcome = await stores.operations.updateNetworkProxy({
+        expectedPolicyRevision: retargeted.snapshot.revision,
+        expectedCredential: credentialBasis(source.credentialStatus),
+        networkProxy: retargeted.snapshot.policy.networkProxy,
+        credential: {
+          kind: 'replace',
+          secret: 'source-import-secret',
+          expectedTarget: {
+            protocol: 'http',
+            host: 'proxy-a.example',
+            port: 8080,
+            username: 'source-user',
+          },
+        },
+      } as never);
+
+      assert.deepEqual(outcome, {
+        kind: 'proxy_target_mismatch',
+        expected: {
+          protocol: 'http',
+          host: 'proxy-a.example',
+          port: 8080,
+          username: 'source-user',
+        },
+        actual: {
+          protocol: 'http',
+          host: 'proxy-b.example',
+          port: 8080,
+          username: 'target-user',
+        },
+      });
+      const exported = await stores.operations.exportCredentialMaterial(proxyCredential());
+      assert.equal(exported?.secret, 'existing-secret');
+      assert.deepEqual(exported?.proxyTarget, {
+        protocol: 'http',
+        host: 'proxy-b.example',
+        port: 8080,
+        username: 'target-user',
+      });
     });
   });
 

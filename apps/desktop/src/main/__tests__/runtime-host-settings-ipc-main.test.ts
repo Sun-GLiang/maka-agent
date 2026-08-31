@@ -112,6 +112,7 @@ function createModuleFixture(options: {
   configured?: boolean;
   beforeSetCredential?: () => Promise<void>;
   failFirstSet?: boolean;
+  proxyTargetMismatch?: boolean;
 } = {}) {
   let policy = createDefaultRuntimePolicy();
   if (options.configured) {
@@ -150,6 +151,18 @@ function createModuleFixture(options: {
           kind: "revision_conflict" as const,
           expectedRevision: input.expectedPolicyRevision,
           actualRevision: policyRevision,
+        };
+      }
+      if (options.proxyTargetMismatch && input.credential.kind === "replace") {
+        return {
+          kind: "proxy_target_mismatch" as const,
+          expected: input.credential.expectedTarget!,
+          actual: {
+            protocol: "http" as const,
+            host: "proxy-b.example",
+            port: 8080,
+            username: "target-user",
+          },
         };
       }
       if (input.credential.kind === "replace") {
@@ -331,6 +344,35 @@ test("keep, replace, and explicit delete preserve the derived credential contrac
   assert.equal(fixture.policy().networkProxy.authEnabled, true);
   assert.equal(fixture.secret(), undefined);
   assert.equal(deleted.network.proxy.passwordConfigured, false);
+});
+
+test("config import skips a proxy password whose bound target no longer matches", async () => {
+  const fixture = createModuleFixture({ configured: true, proxyTargetMismatch: true });
+
+  const imported = await runRuntimeHostSettingsExclusive(
+    fixture.module,
+    (settings) =>
+      settings.updateForConfigImport({
+        network: {
+          proxy: {
+            credential: {
+              kind: "replace",
+              secret: "source-import-secret",
+              expectedTarget: {
+                protocol: "http",
+                host: "proxy-a.example",
+                port: 8080,
+                username: "source-user",
+              },
+            },
+          },
+        },
+      }),
+  );
+
+  assert.equal(imported.skippedCredentials, 1);
+  assert.equal(fixture.secret(), "saved-secret");
+  assert.deepEqual(fixture.events, []);
 });
 
 test("a later authentication disable waits for an in-flight replacement and wins", async () => {

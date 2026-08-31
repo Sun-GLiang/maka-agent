@@ -22,6 +22,8 @@ import { isDeepStrictEqual } from 'node:util';
 import {
   CONNECTION_CATALOG_MAX_CONNECTIONS,
   decodeConnectionModelId,
+  connectionCredentialTarget,
+  decodeConnectionCredentialTarget,
   decodeConnectionSlug,
   decodeProviderType,
   decodeRuntimePolicyEntityId,
@@ -37,8 +39,10 @@ import {
   normalizeCredentialSecret,
   normalizeCatalogConnectionBaseUrl,
   normalizeNetworkProxyUpdate,
+  networkProxyCredentialTarget,
   type ConnectionCatalogEntry,
   type ConnectionCatalogSnapshot,
+  type ConnectionCredentialTarget,
   type ConnectionVersionBasis,
   type ConnectionModelDiscoveryResult,
   type ConnectionTestSummary,
@@ -103,6 +107,7 @@ import {
   connectionRequestHeadersLocator,
   type CredentialStatusQueryResult,
   type BeginConnectionTestResult,
+  type BoundCredentialMaterialExportResult,
   type BeginModelFetchResult,
   type BeginInteractiveOAuthLoginResult,
   type CompareAndSetOAuthCredentialInput,
@@ -347,6 +352,21 @@ export class RuntimePolicyCoordinator {
       });
       if (preparedPolicy.kind !== 'ready') return preparedPolicy;
 
+      if (
+        input.credential.kind === 'replace' &&
+        input.credential.expectedTarget &&
+        !isDeepStrictEqual(
+          networkProxyCredentialTarget(policy.policy.networkProxy),
+          input.credential.expectedTarget,
+        )
+      ) {
+        return deepFreeze({
+          kind: 'proxy_target_mismatch' as const,
+          expected: input.credential.expectedTarget,
+          actual: networkProxyCredentialTarget(policy.policy.networkProxy),
+        });
+      }
+
       const vault = await this.vault.read(root);
       const existing = findCredential(vault, networkProxyCredentialLocator());
       if (!matchesCredentialExpectation(existing, input.expectedCredential)) {
@@ -461,6 +481,19 @@ export class RuntimePolicyCoordinator {
         const connection = findConnection(catalog, locator);
         if (!connection) {
           return deepFreeze({ kind: 'connection_not_found' as const });
+        }
+        if (
+          input.expectedConnection &&
+          !isDeepStrictEqual(connectionCredentialTarget(connection), input.expectedConnection)
+        ) {
+          return deepFreeze({
+            kind: 'connection_stale' as const,
+            expected: {
+              connectionId: input.expectedConnection.connectionId,
+              revision: input.expectedConnection.revision,
+            },
+            actual: connectionBasis(connection),
+          });
         }
         assertConnectionIsWritable(connection);
         const required = connectionCredentialLocator(
@@ -821,15 +854,63 @@ export class RuntimePolicyCoordinator {
 
   exportCredentialMaterial(
     rawLocator: CredentialLocator,
-  ): Promise<RuntimePolicyCredentialMaterial | null> {
+  ): Promise<RuntimePolicyCredentialMaterial | null>;
+  exportCredentialMaterial(
+    rawLocator: CredentialLocator,
+    rawExpectedConnection: ConnectionCredentialTarget,
+  ): Promise<BoundCredentialMaterialExportResult>;
+  exportCredentialMaterial(
+    rawLocator: CredentialLocator,
+    rawExpectedConnection?: ConnectionCredentialTarget,
+  ): Promise<RuntimePolicyCredentialMaterial | null | BoundCredentialMaterialExportResult> {
     return this.inLane(async (root) => {
       const locator = decodeCredentialInput(() => decodeCredentialLocator(rawLocator));
+      const expectedConnection = rawExpectedConnection
+        ? decodeConnectionInput(() => decodeConnectionCredentialTarget(rawExpectedConnection))
+        : undefined;
+      if (expectedConnection && locator.scope !== 'connection') {
+        throw codecError(
+          'invalid_credential_input',
+          'Only connection credentials accept a connection target basis',
+        );
+      }
       if (locator.scope === 'connection') {
         const catalog = await this.catalog.read(root);
-        if (!this.validateConnectionCredentialLocator(catalog, locator)) return null;
+        const connection = findConnection(catalog, locator);
+        if (
+          expectedConnection &&
+          (!connection ||
+            !isDeepStrictEqual(connectionCredentialTarget(connection), expectedConnection))
+        ) {
+          return deepFreeze({
+            kind: 'connection_stale' as const,
+            expected: {
+              connectionId: expectedConnection.connectionId,
+              revision: expectedConnection.revision,
+            },
+            actual: connection ? connectionBasis(connection) : null,
+          });
+        }
+        if (!this.validateConnectionCredentialLocator(catalog, locator)) {
+          return expectedConnection
+            ? deepFreeze({ kind: 'exported' as const, material: null })
+            : null;
+        }
       }
       const credential = findCredential(await this.vault.read(root), locator);
-      return credential ? credentialMaterial(credential) : null;
+      const material = credential
+        ? {
+            ...credentialMaterial(credential),
+            ...(locator.scope === 'network_proxy'
+              ? {
+                  proxyTarget: networkProxyCredentialTarget(
+                    (await this.policy.read(root)).policy.networkProxy,
+                  ),
+                }
+              : {}),
+          }
+        : null;
+      return expectedConnection ? deepFreeze({ kind: 'exported' as const, material }) : material;
     });
   }
 

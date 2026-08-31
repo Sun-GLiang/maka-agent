@@ -19,6 +19,7 @@
 
 import {
   isRelayProviderType,
+  effectiveBaseUrl,
   PROVIDER_DEFAULTS,
   providerDefaultsOf,
   validateSlug,
@@ -32,6 +33,7 @@ import {
 } from '../model-thinking.js';
 import type {
   ConnectionCatalogEntry,
+  ConnectionCredentialTarget,
   ConnectionCatalogEntryDraft,
   ConnectionCatalogEntryUpdate,
   ConnectionModel,
@@ -450,6 +452,67 @@ export function decodeConnectionVersionBasis(value: unknown): ConnectionVersionB
   return {
     connectionId: entityIdValue(item.connectionId, 'connection id'),
     revision: positiveRevisionValue(item.revision, 'connection revision'),
+  };
+}
+
+export function canonicalConnectionEffectiveBaseUrl(
+  connection: Pick<ConnectionCatalogEntry, 'providerType' | 'baseUrl'>,
+): string {
+  const endpoint = effectiveBaseUrl(connection);
+  try {
+    return new URL(endpoint).toString();
+  } catch {
+    throw domainError('connection has an invalid effective base URL');
+  }
+}
+
+export function connectionCredentialTarget(
+  connection: Pick<
+    ConnectionCatalogEntry,
+    'connectionId' | 'revision' | 'slug' | 'providerType' | 'baseUrl'
+  >,
+): ConnectionCredentialTarget {
+  return {
+    connectionId: connection.connectionId,
+    revision: connection.revision,
+    slug: connection.slug,
+    providerType: connection.providerType,
+    effectiveBaseUrl: canonicalConnectionEffectiveBaseUrl(connection),
+  };
+}
+
+export function decodeConnectionCredentialTarget(value: unknown): ConnectionCredentialTarget {
+  const item = exactRecord(value, 'connection credential target', [
+    'connectionId',
+    'revision',
+    'slug',
+    'providerType',
+    'effectiveBaseUrl',
+  ]);
+  const version = decodeConnectionVersionBasis({
+    connectionId: item.connectionId,
+    revision: item.revision,
+  });
+  const providerType = decodeProviderType(item.providerType);
+  const effectiveBaseUrl = stringValue(
+    item.effectiveBaseUrl,
+    'connection credential target effective base URL',
+    2_048,
+  );
+  let canonical: string;
+  try {
+    canonical = new URL(effectiveBaseUrl).toString();
+  } catch {
+    throw domainError('connection credential target effective base URL must be valid');
+  }
+  if (canonical !== effectiveBaseUrl) {
+    throw domainError('connection credential target effective base URL must be canonical');
+  }
+  return {
+    ...version,
+    slug: decodeConnectionSlug(item.slug),
+    providerType,
+    effectiveBaseUrl,
   };
 }
 

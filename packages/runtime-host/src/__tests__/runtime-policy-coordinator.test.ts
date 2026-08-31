@@ -28,7 +28,10 @@ import type {
   ConnectionCatalogSnapshot,
   CredentialLocator,
 } from '@maka/core/runtime-policy';
-import { REQUEST_BODY_OVERLAY_MAX_BYTES } from '@maka/core/runtime-policy';
+import {
+  connectionCredentialTarget,
+  REQUEST_BODY_OVERLAY_MAX_BYTES,
+} from '@maka/core/runtime-policy';
 import { FAKE_ASK_USER_QUESTION_PROMPT, FakeBackend } from '@maka/runtime/test-only/fake-backend';
 import { type MakaToolContext } from '@maka/runtime/tool-runtime';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
@@ -879,6 +882,94 @@ test('returns connection_not_found when deleting a credential after its connecti
       context,
     );
     assert.deepEqual(deleted, { ok: true, result: { kind: 'connection_not_found' } });
+  });
+});
+
+test('two Host clients cannot write an imported credential after retargeting its Connection', async () => {
+  await withCoordinator(async ({ coordinator, stores }) => {
+    const created = await stores.connectionCatalog.create({
+      expectedCatalogRevision: 0,
+      connection: {
+        slug: 'bound-import',
+        name: 'Bound import',
+        providerType: 'openai',
+        enabled: true,
+        enabledModelIds: [],
+      },
+    });
+    assert.equal(created.kind, 'committed');
+    if (created.kind !== 'committed') return;
+    const connection = created.snapshot.connections[0];
+    assert.ok(connection);
+    if (!connection) return;
+    const locator: CredentialLocator = {
+      scope: 'connection',
+      connectionId: connection.connectionId,
+      kind: 'api_key',
+    };
+    const seeded = await stores.credentialVault.set({
+      locator,
+      expected: null,
+      secret: 'target-secret',
+    });
+    assert.equal(seeded.kind, 'committed');
+    if (seeded.kind !== 'committed') return;
+    const status = seeded.snapshot.entries.find((entry) => entry.locator.scope === 'connection');
+    assert.ok(status?.configured);
+    if (!status?.configured) return;
+
+    // Client A observed this exact target and credential generation.
+    const expectedConnection = connectionCredentialTarget(connection);
+    const expectedCredential = {
+      credentialId: status.credentialId,
+      revision: status.revision,
+    };
+
+    // Client B wins the Host mutation lane and retargets the same entity.
+    const moved = await coordinator.handlers['connection.catalog.update'](
+      {
+        expected: {
+          connectionId: connection.connectionId,
+          revision: connection.revision,
+        },
+        changes: {
+          name: connection.name,
+          baseUrl: 'https://target-relay.example/v1',
+          enabled: connection.enabled,
+          enabledModelIds: connection.enabledModelIds,
+          relayModelProfiles: null,
+        },
+      },
+      context,
+    );
+    assert.equal(moved.ok, true);
+    if (!moved.ok || moved.result.kind !== 'committed') return;
+
+    const stale = await coordinator.handlers['credential.vault.set'](
+      {
+        locator,
+        expected: expectedCredential,
+        expectedConnection,
+        secret: 'source-import-secret',
+      },
+      context,
+    );
+
+    assert.deepEqual(stale, {
+      ok: true,
+      result: {
+        kind: 'connection_stale',
+        expected: {
+          connectionId: connection.connectionId,
+          revision: connection.revision,
+        },
+        actual: moved.result.connection,
+      },
+    });
+    assert.equal(
+      (await stores.operations.exportCredentialMaterial(locator))?.secret,
+      'target-secret',
+    );
   });
 });
 

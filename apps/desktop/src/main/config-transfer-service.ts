@@ -17,12 +17,12 @@
  * under the License.
  */
 
-import type { AppSettings, UpdateAppSettingsInput } from '@maka/core/settings';
+import type { UpdateAppSettingsInput } from '@maka/core/settings';
 import {
-  effectiveBaseUrl,
   reconcileConnectionAfterEnabledModelsChange,
   type LlmConnection,
 } from '@maka/core/llm-connections';
+import { canonicalConnectionEffectiveBaseUrl } from '@maka/core/runtime-policy';
 import {
   type ConfigBundle,
   type ConnectionConflictStrategy,
@@ -57,9 +57,11 @@ const VALID_CREDENTIAL_KINDS: ReadonlySet<string> = new Set<CredentialKind>([
 
 export interface ConfigTransferDeps {
   connectionStore: { list(): Promise<LlmConnection[]>; save(c: LlmConnection): Promise<LlmConnection> };
-  settingsStore: { update(patch: UpdateAppSettingsInput): Promise<AppSettings> };
+  settingsStore: {
+    update(patch: UpdateAppSettingsInput): Promise<{ skippedCredentials: number }>;
+  };
   credentialStore: {
-    setSecret(slug: string, kind: CredentialKind, value: string): Promise<void>;
+    setSecret(entry: ExportedCredential): Promise<boolean>;
   };
   writeMemory(content: string): Promise<void>;
 }
@@ -80,7 +82,7 @@ export async function applyConfigImport(
   // A connection snapshot limits credential writes to connections created or
   // overwritten by this import. Credentials-only bundles instead require an
   // existing slug whose provider and effective endpoint match the export.
-  const credentialTargets = new Map<string, LlmConnection | null>();
+  const credentialTargets = new Map<string, LlmConnection>();
 
   if (Array.isArray(bundle.data.connections)) {
     const incoming = bundle.data.connections as LlmConnection[];
@@ -96,7 +98,7 @@ export async function applyConfigImport(
         ? reconcileConnectionAfterEnabledModelsChange(connection, connection.enabledModelIds)
         : null;
       await deps.connectionStore.save(selection ? { ...connection, ...selection } : connection);
-      credentialTargets.set(connection.slug, null);
+      credentialTargets.set(connection.slug, connection);
     }
     result.connections = {
       created: plan.create.length,
@@ -118,14 +120,18 @@ export async function applyConfigImport(
     }
   }
 
+  let settingsCredentialSkips = 0;
   if (bundle.data.settings && typeof bundle.data.settings === 'object') {
-    await deps.settingsStore.update(bundle.data.settings as unknown as UpdateAppSettingsInput);
+    const applied = await deps.settingsStore.update(
+      bundle.data.settings as unknown as UpdateAppSettingsInput,
+    );
+    settingsCredentialSkips = applied.skippedCredentials;
     result.settings = { applied: true };
   }
 
   if (Array.isArray(bundle.data.credentials)) {
     let applied = 0;
-    let skipped = 0;
+    let skipped = settingsCredentialSkips;
     for (const entry of bundle.data.credentials as ExportedCredential[]) {
       const valid =
         entry &&
@@ -137,18 +143,24 @@ export async function applyConfigImport(
       // Unknown targets and connections explicitly skipped by a connection
       // snapshot keep their existing stored secret untouched.
       const target = credentialTargets.get(entry.slug);
-      if (!credentialTargets.has(entry.slug)) {
+      if (!target) {
         skipped += 1;
         continue;
       }
-      if (target && !matchesCredentialConnection(entry.connection, target)) {
+      const binding = entry.connection ?? credentialConnectionBinding(target);
+      if (!matchesCredentialConnection(binding, target)) {
         skipped += 1;
         continue;
       }
-      await deps.credentialStore.setSecret(entry.slug, entry.kind, entry.value);
-      applied += 1;
+      if (await deps.credentialStore.setSecret({ ...entry, connection: binding })) {
+        applied += 1;
+      } else {
+        skipped += 1;
+      }
     }
     result.credentials = { applied, skipped };
+  } else if (settingsCredentialSkips > 0) {
+    result.credentials = { applied: 0, skipped: settingsCredentialSkips };
   }
 
   if (typeof bundle.data.memory === 'string') {
@@ -159,13 +171,30 @@ export async function applyConfigImport(
   return result;
 }
 
-function matchesCredentialConnection(
+export function matchesCredentialConnection(
   binding: ExportedCredential['connection'] | undefined,
-  target: LlmConnection,
+  target: Pick<LlmConnection, 'providerType' | 'baseUrl'>,
 ): boolean {
   return (
     binding !== undefined &&
     binding.providerType === target.providerType &&
-    binding.effectiveBaseUrl === effectiveBaseUrl(target)
+    canonicalEndpoint(binding.effectiveBaseUrl) === canonicalConnectionEffectiveBaseUrl(target)
   );
+}
+
+function credentialConnectionBinding(
+  connection: LlmConnection,
+): NonNullable<ExportedCredential['connection']> {
+  return {
+    providerType: connection.providerType,
+    effectiveBaseUrl: canonicalConnectionEffectiveBaseUrl(connection),
+  };
+}
+
+function canonicalEndpoint(value: string): string | null {
+  try {
+    return new URL(value).toString();
+  } catch {
+    return null;
+  }
 }
