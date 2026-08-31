@@ -135,7 +135,9 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('publishes a new compatibility epoch for mandatory submit Skill outcomes', () => {
-    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 61);
+    // Submit Skill outcomes and usage-log Session titles independently claimed
+    // epoch 77, so their merge requires a distinct compatibility boundary.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 77);
   });
 
   test('rejects the legacy connection update result in the current compatibility epoch', () => {
