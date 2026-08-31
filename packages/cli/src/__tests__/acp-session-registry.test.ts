@@ -30,6 +30,7 @@ import {
 } from '@maka/runtime-host/client';
 import {
   SESSION_CATALOG_CWD_MAX_BYTES,
+  SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS,
   SESSION_CONTINUITY_SCHEMA_VERSION,
   type SessionContinuitySnapshot,
   type SubscriptionFrame,
@@ -296,6 +297,81 @@ describe('ACP Session registry', () => {
       reason: 'slow_consumer',
     });
 
+    await registry.dispose();
+  });
+
+  test('rejects a concurrent create before persistence when subscription capacity is exhausted', async () => {
+    const createdSessionIds: string[] = [];
+    const openedSessionIds: string[] = [];
+    let nextId = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') {
+              createdSessionIds.push((input as { sessionId: string }).sessionId);
+            }
+            return {};
+          },
+          open: async ({ sessionId }) => {
+            openedSessionIds.push(sessionId);
+            return new TestSubscription(sessionId);
+          },
+        }),
+      newSessionId: () => `session-capacity-${++nextId}`,
+    });
+
+    const results = await Promise.allSettled(
+      Array.from({ length: SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS + 1 }, () =>
+        registry.create({ cwd: '/workspace', mcpServers: [] }),
+      ),
+    );
+
+    assert.equal(
+      results.filter((result) => result.status === 'fulfilled').length,
+      SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS,
+    );
+    const rejected = results.find((result) => result.status === 'rejected');
+    assert.ok(rejected && rejected.status === 'rejected');
+    assert.ok(rejected.reason instanceof RequestError);
+    assert.equal(rejected.reason.code, -32603);
+    assert.deepEqual(rejected.reason.data, {
+      source: 'runtime_host',
+      operation: 'subscription.open',
+      code: 'subscription_capacity_exhausted',
+      maxSubscriptions: SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS,
+    });
+    assert.equal(createdSessionIds.length, SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS);
+    assert.equal(openedSessionIds.length, SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS);
+    await registry.dispose();
+  });
+
+  test('reuses subscription capacity after the Runtime Host releases a slot', async () => {
+    const subscriptions = new Map<string, TestSubscription>();
+    let nextId = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          open: async ({ sessionId }) => {
+            const subscription = new TestSubscription(sessionId);
+            subscriptions.set(sessionId, subscription);
+            return subscription;
+          },
+        }),
+      newSessionId: () => `session-reuse-${++nextId}`,
+    });
+
+    for (let index = 0; index < SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS; index += 1) {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+    }
+    subscriptions.get('session-reuse-1')?.end();
+    await waitFor(
+      () => registry.inspect('session-reuse-1')?.failure?.code === 'subscription_closed',
+    );
+
+    assert.deepEqual(await registry.create({ cwd: '/workspace', mcpServers: [] }), {
+      sessionId: `session-reuse-${SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS + 1}`,
+    });
     await registry.dispose();
   });
 

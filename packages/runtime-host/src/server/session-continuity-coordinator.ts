@@ -24,6 +24,7 @@ import {
   decodeRuntimeResourceRef,
   encodeProtocolMessage,
   RUNTIME_HOST_MAX_MESSAGE_BYTES,
+  SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS,
   SESSION_LIVE_DELTA_MAX_BYTES,
   SESSION_RUNTIME_RESOURCE_PTY_DATA_MAX_BYTES,
   SESSION_RUNTIME_RESOURCE_CHANGES_MAX,
@@ -75,7 +76,6 @@ import {
   type SessionTranscriptReader,
 } from './session-transcript-reader.js';
 
-const MAX_CONNECTION_SUBSCRIPTIONS = 16;
 const MAX_SUBSCRIBER_QUEUED_FRAMES = 32;
 const MAX_SUBSCRIBER_QUEUED_BYTES = 256 * 1024;
 
@@ -802,7 +802,7 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
     if (!connection) throw new Error('Runtime Host connection is not attached to continuity');
     if (
       connection.subscriptionIds.size + connection.pendingOpenCount >=
-      MAX_CONNECTION_SUBSCRIPTIONS
+      SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS
     ) {
       return {
         ok: false,

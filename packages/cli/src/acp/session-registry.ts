@@ -38,6 +38,7 @@ import {
   type RuntimeHostSessionCatalogPageCursor,
 } from '@maka/runtime-host/client';
 import {
+  SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS,
   SESSION_CATALOG_CURSOR_MAX_BYTES,
   SESSION_CATALOG_CWD_MAX_BYTES,
   type SessionContinuitySnapshot,
@@ -97,6 +98,8 @@ export class AcpSessionRegistry {
   #connection: AcpSessionRegistryConnection | undefined;
   #connectTask: Promise<AcpSessionRegistryConnection> | undefined;
   #connectAbortController: AbortController | undefined;
+  #activeSubscriptions = 0;
+  #pendingSubscriptionOpens = 0;
   #closing = false;
   #connectionCloseTask: Promise<void> | undefined;
   #disposeTask: Promise<void> | undefined;
@@ -135,62 +138,86 @@ export class AcpSessionRegistry {
 
   async #create(params: NewSessionRequest): Promise<NewSessionResponse> {
     const connection = await this.#getConnection();
-    const sessionId = this.#newSessionId();
+    this.#reserveSubscriptionCapacity();
     try {
-      await connection.request('session.create', {
-        sessionId,
-        workspace: { kind: 'host_path', path: params.cwd },
-        modelTarget: { kind: 'default' },
-      });
-    } catch (error) {
-      throw requestErrorFromRuntimeHost(error, 'session.create', { sessionId });
-    }
-
-    let subscription: AcpSessionSubscription;
-    try {
-      subscription = await connection.openSessionSubscriptionOnce({
-        sessionId,
-        transcript: { kind: 'none' },
-      });
-    } catch (error) {
-      throw RequestError.internalError(
-        {
-          ...runtimeHostErrorData(error, 'subscription.open'),
-          sessionId,
-          durableSessionCreated: true,
-        },
-        'Runtime Host subscription could not be opened for the durable session',
-      );
-    }
-
-    if (this.#closing) {
+      const sessionId = this.#newSessionId();
       try {
-        await subscription.close();
-      } catch {
-        await this.#closeOwnedConnection();
+        await connection.request('session.create', {
+          sessionId,
+          workspace: { kind: 'host_path', path: params.cwd },
+          modelTarget: { kind: 'default' },
+        });
+      } catch (error) {
+        throw requestErrorFromRuntimeHost(error, 'session.create', { sessionId });
       }
+
+      let subscription: AcpSessionSubscription;
+      try {
+        subscription = await connection.openSessionSubscriptionOnce({
+          sessionId,
+          transcript: { kind: 'none' },
+        });
+      } catch (error) {
+        throw RequestError.internalError(
+          {
+            ...runtimeHostErrorData(error, 'subscription.open'),
+            sessionId,
+            durableSessionCreated: true,
+          },
+          'Runtime Host subscription could not be opened for the durable session',
+        );
+      }
+
+      if (this.#closing) {
+        try {
+          await subscription.close();
+        } catch {
+          await this.#closeOwnedConnection();
+        }
+        throw RequestError.internalError(
+          {
+            source: 'runtime_host',
+            operation: 'subscription.open',
+            code: 'registry_closed',
+            sessionId,
+            durableSessionCreated: true,
+          },
+          'ACP connection closed while the durable session was being attached',
+        );
+      }
+
+      const record: AcpSessionRecord = {
+        sessionId,
+        subscription,
+        snapshot: structuredClone(subscription.snapshot),
+        consumerTask: Promise.resolve(),
+        closing: false,
+      };
+      this.#records.set(sessionId, record);
+      this.#activeSubscriptions += 1;
+      record.consumerTask = this.#consume(record);
+      return { sessionId };
+    } finally {
+      this.#pendingSubscriptionOpens -= 1;
+    }
+  }
+
+  #reserveSubscriptionCapacity(): void {
+    if (
+      this.#activeSubscriptions + this.#pendingSubscriptionOpens >=
+      SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS
+    ) {
       throw RequestError.internalError(
         {
           source: 'runtime_host',
           operation: 'subscription.open',
-          code: 'registry_closed',
-          sessionId,
-          durableSessionCreated: true,
+          code: 'subscription_capacity_exhausted',
+          maxSubscriptions: SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS,
         },
-        'ACP connection closed while the durable session was being attached',
+        'ACP connection subscription capacity is exhausted',
       );
     }
-
-    const record: AcpSessionRecord = {
-      sessionId,
-      subscription,
-      snapshot: structuredClone(subscription.snapshot),
-      consumerTask: Promise.resolve(),
-      closing: false,
-    };
-    this.#records.set(sessionId, record);
-    record.consumerTask = this.#consume(record);
-    return { sessionId };
+    this.#pendingSubscriptionOpens += 1;
   }
 
   async #consume(record: AcpSessionRecord): Promise<void> {
@@ -211,6 +238,8 @@ export class AcpSessionRegistry {
       if (!record.closing) {
         record.failure = runtimeHostSubscriptionFailure(error);
       }
+    } finally {
+      this.#activeSubscriptions -= 1;
     }
   }
 

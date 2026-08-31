@@ -57,6 +57,7 @@ import {
 
 export const SESSION_CONTINUITY_SCHEMA_VERSION = 5 as const;
 export const SESSION_CONTINUITY_SNAPSHOT_MAX_BYTES = 56 * 1024;
+export const SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS = 16;
 // Leave transport headroom for the response envelope and request correlation.
 export const SUBSCRIPTION_OPEN_RESULT_MAX_BYTES = 92 * 1024;
 export const SESSION_LIVE_DELTA_MAX_BYTES = 16 * 1024;

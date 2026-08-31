@@ -83,11 +83,22 @@ export class RuntimeHostCliConflictError extends RuntimeHostPermanentReconnectEr
   }
 }
 
-export interface RuntimeHostCliConnectionContext {
+export interface RuntimeHostCliConnectionOnlyContext {
   readonly connection: RuntimeHostConnection;
-  readonly catalog: ConnectionCatalogSnapshot;
   readonly profile: RuntimeHostProfile;
   close(): Promise<void>;
+}
+
+export interface RuntimeHostCliConnectionContext extends RuntimeHostCliConnectionOnlyContext {
+  readonly catalog: ConnectionCatalogSnapshot;
+}
+
+export interface RuntimeHostCliConnectionInput {
+  readonly rootPath: string;
+  readonly profileId?: string;
+  readonly clientDataRoot?: string;
+  readonly interactiveSsh?: boolean;
+  readonly signal?: AbortSignal;
 }
 
 export interface RuntimeHostCliTarget {
@@ -107,15 +118,27 @@ interface RuntimeHostCliContextDeps {
 }
 
 export async function connectRuntimeHostCli(
-  input: {
-    readonly rootPath: string;
-    readonly profileId?: string;
-    readonly clientDataRoot?: string;
-    readonly interactiveSsh?: boolean;
-    readonly signal?: AbortSignal;
-  },
+  input: RuntimeHostCliConnectionInput,
   overrides: Partial<RuntimeHostCliContextDeps> = {},
 ): Promise<RuntimeHostCliConnectionContext> {
+  const context = await connectRuntimeHostCliConnection(input, overrides);
+  try {
+    const catalog = await runAbortably(
+      () =>
+        (overrides.readConnectionCatalog ?? readRuntimeHostConnectionCatalog)(context.connection),
+      input.signal,
+    );
+    return { ...context, catalog };
+  } catch (error) {
+    await context.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function connectRuntimeHostCliConnection(
+  input: RuntimeHostCliConnectionInput,
+  overrides: Partial<RuntimeHostCliContextDeps> = {},
+): Promise<RuntimeHostCliConnectionOnlyContext> {
   const deps: RuntimeHostCliContextDeps = {
     connectOrSpawn: connectOrSpawnRuntimeHost,
     connectProfile: connectRuntimeHostProfile,
@@ -204,13 +227,8 @@ export async function connectRuntimeHostCli(
     });
     initialConnection = undefined;
     const liveConnection = connection;
-    const catalog = await runAbortably(
-      () => deps.readConnectionCatalog(liveConnection),
-      input.signal,
-    );
     return {
       connection: liveConnection,
-      catalog,
       profile,
       close: async () => {
         try {

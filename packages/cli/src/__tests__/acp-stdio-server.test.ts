@@ -236,14 +236,16 @@ function createHarness(
         {
           stdin,
           stdout,
-          connectRuntimeHostCli: async () => {
+          connectRuntimeHostCliConnection: async () => {
             connects += 1;
             if (options.connectError) throw options.connectError;
             return {
               connection,
               close: () => connection.close(),
             } as Awaited<
-              ReturnType<typeof import('../runtime-host-cli-context.js').connectRuntimeHostCli>
+              ReturnType<
+                typeof import('../runtime-host-cli-context.js').connectRuntimeHostCliConnection
+              >
             >;
           },
         },

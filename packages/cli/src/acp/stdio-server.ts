@@ -22,7 +22,7 @@ import { ndJsonStream } from '@agentclientprotocol/sdk';
 import type { RuntimeHostConnection } from '@maka/runtime-host/client';
 import { createMakaAcpAgent } from './maka-acp-agent.js';
 import { AcpSessionRegistry } from './session-registry.js';
-import { connectRuntimeHostCli } from '../runtime-host-cli-context.js';
+import { connectRuntimeHostCliConnection } from '../runtime-host-cli-context.js';
 
 export interface MakaAcpStdioServerInput {
   readonly workspaceRoot: string;
@@ -31,7 +31,7 @@ export interface MakaAcpStdioServerInput {
 }
 
 export interface MakaAcpStdioServerDependencies {
-  readonly connectRuntimeHostCli?: typeof connectRuntimeHostCli;
+  readonly connectRuntimeHostCliConnection?: typeof connectRuntimeHostCliConnection;
   readonly stdin?: Readable;
   readonly stdout?: Writable;
 }
@@ -42,7 +42,9 @@ export async function runMakaAcpStdioServer(
 ): Promise<number> {
   const sessionRegistry = new AcpSessionRegistry({
     connect: async (signal) => {
-      const context = await (dependencies.connectRuntimeHostCli ?? connectRuntimeHostCli)({
+      const context = await (
+        dependencies.connectRuntimeHostCliConnection ?? connectRuntimeHostCliConnection
+      )({
         rootPath: input.workspaceRoot,
         clientDataRoot: input.clientDataRoot,
         signal,

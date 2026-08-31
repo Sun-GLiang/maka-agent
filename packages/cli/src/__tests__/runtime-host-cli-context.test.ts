@@ -42,6 +42,7 @@ import {
 } from '@maka/runtime-host/protocol';
 import {
   connectRuntimeHostCli,
+  connectRuntimeHostCliConnection,
   resolveRuntimeHostCliConflictDecision,
   RuntimeHostCliConflictError,
   shouldRetryRuntimeHostConflict,
@@ -96,6 +97,34 @@ test('CLI Runtime Host bootstrap launches the execution composition', async () =
   assert.ok(clientInstanceId);
   await context.close();
   assert.equal(closes, 1);
+});
+
+test('connection-only CLI bootstrap does not read the model connection catalog', async () => {
+  const connection = {
+    rootId: 'root-id',
+    hostEpoch: 'host-epoch',
+    connectionId: 'connection-id',
+    selectedProtocol: 0,
+    closed: new Promise<void>(() => {}),
+    status: async () => ({ state: 'ready' }),
+    subscribeConfigurationChanges: () => () => {},
+    subscribeProjectCatalogChanges: () => () => {},
+    subscribeSessionCatalogChanges: () => () => {},
+    subscribeScheduledTaskChanges: () => () => {},
+    close: async () => {},
+  } as unknown as RuntimeHostConnection;
+  const context = await connectRuntimeHostCliConnection(
+    { rootPath: '/runtime-host-root' },
+    {
+      connectOrSpawn: async () => connectedHostResult(connection),
+      readConnectionCatalog: async () => {
+        throw new Error('model connection catalog unavailable');
+      },
+    },
+  );
+
+  assert.equal(context.connection.connectionId, connection.connectionId);
+  await context.close();
 });
 
 test('CLI refuses a staged Host whose durable installation claim is missing', async () => {
