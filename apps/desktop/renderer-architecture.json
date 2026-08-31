@@ -17,7 +17,6 @@
     "src/renderer/app-shell-project-actions.ts",
     "src/renderer/app-shell-revision-actions.ts",
     "src/renderer/app-shell-session-events.ts",
-    "src/renderer/app-shell-session-settings-actions.ts",
     "src/renderer/app-shell-session-start-actions.ts",
     "src/renderer/app-shell-session-ui-state.ts",
     "src/renderer/app-shell-stop-action.ts",
@@ -237,7 +236,6 @@
     "src/renderer/use-onboarding-snapshot.ts",
     "src/renderer/use-project-context.ts",
     "src/renderer/use-session-collaboration-dialog.ts",
-    "src/renderer/use-session-setting-intent.ts",
     "src/renderer/use-settings-modal.ts",
     "src/renderer/use-shell-appearance.ts",
     "src/renderer/use-shell-chat-model.ts",
@@ -714,34 +712,6 @@
         "importSpecifiers": 23,
         "nonTriviaTokens": 3042
       },
-      "src/renderer/app-shell-session-settings-actions.ts": {
-        "importDeclarations": 9,
-        "bridgePaths": {
-          "window.maka.sessions.setModel": 1,
-          "window.maka.sessions.setPermissionMode": 1,
-          "window.maka.sessions.setThinkingLevel": 1
-        },
-        "environmentCapabilities": {},
-        "hookCalls": {},
-        "lifecycleMethods": {},
-        "unresolvedDependencies": 0,
-        "actionFactories": [
-          "createAppShellSessionSettingsActions"
-        ],
-        "dependencyPaths": {
-          "../preload/bridge-contract.js": 1,
-          "./app-shell-session-ui-state.js": 1,
-          "./locales/shell-copy.js": 1,
-          "@maka/core/llm-connections": 1,
-          "@maka/core/model-thinking": 1,
-          "@maka/core/permission": 1,
-          "@maka/core/session": 1,
-          "@maka/core/settings": 1,
-          "@maka/core/ui-locale": 1
-        },
-        "importSpecifiers": 11,
-        "nonTriviaTokens": 1267
-      },
       "src/renderer/app-shell-session-start-actions.ts": {
         "importDeclarations": 7,
         "bridgePaths": {
@@ -788,7 +758,7 @@
           "react": 1
         },
         "importSpecifiers": 8,
-        "nonTriviaTokens": 1223
+        "nonTriviaTokens": 1183
       },
       "src/renderer/app-shell-stop-action.ts": {
         "importDeclarations": 4,
@@ -863,7 +833,7 @@
         "nonTriviaTokens": 1425
       },
       "src/renderer/app-shell.tsx": {
-        "importDeclarations": 107,
+        "importDeclarations": 105,
         "bridgePaths": {
           "window.maka.app.installUpdate": 1,
           "window.maka.app.retryUpdateDownload": 1,
@@ -888,7 +858,6 @@
           "window.maka.sessions.reorderQueueEntries": 1,
           "window.maka.sessions.retractQueueEntry": 1,
           "window.maka.sessions.setCollaborationMode": 1,
-          "window.maka.sessions.setOrchestrationMode": 1,
           "window.maka.sessions.subscribeActiveInteractions": 1,
           "window.maka.sessions.updateQueueEntry": 1,
           "window.maka.settings.getClient": 1,
@@ -933,7 +902,7 @@
           "useSessionCollaborationDialog": 1,
           "useSessionEventHealthPolling": 1,
           "useSessionNavigationReads": 1,
-          "useSessionSettingIntent": 2,
+          "useSessionSettingIntent": 1,
           "useSettingsModal": 1,
           "useShellAppearance": 1,
           "useShellChatModel": 1,
@@ -943,7 +912,7 @@
           "useShellResume": 1,
           "useShellRunUpdates": 1,
           "useShellSearch": 1,
-          "useStableActions": 7,
+          "useStableActions": 6,
           "useState": 17,
           "useSystemUiLocale": 1,
           "useTaskEntryController": 1,
@@ -970,7 +939,6 @@
           "./app-shell-overlays": 1,
           "./app-shell-revision-actions": 1,
           "./app-shell-session-events": 1,
-          "./app-shell-session-settings-actions": 1,
           "./app-shell-session-start-actions": 1,
           "./app-shell-stop-action": 1,
           "./app-shell-turn-actions": 1,
@@ -990,6 +958,7 @@
           "./features/goals": 1,
           "./features/module-hub": 1,
           "./features/session-navigation": 1,
+          "./features/session-settings": 1,
           "./features/task-entry": 1,
           "./features/workbar": 1,
           "./follow-up-submit-routing": 1,
@@ -1020,12 +989,10 @@
           "./use-app-shell-session-ui-reads": 1,
           "./use-app-shell-session-workspace": 1,
           "./use-composer-attachments": 1,
-          "./use-external-store-selector": 1,
           "./use-new-task-choice": 1,
           "./use-onboarding-snapshot": 1,
           "./use-project-context": 1,
           "./use-session-collaboration-dialog": 1,
-          "./use-session-setting-intent": 1,
           "./use-settings-modal": 1,
           "./use-shell-appearance": 1,
           "./use-shell-chat-model": 1,
@@ -1062,7 +1029,7 @@
           "react": 1
         },
         "importSpecifiers": 187,
-        "nonTriviaTokens": 15908
+        "nonTriviaTokens": 15887
       },
       "src/renderer/use-app-shell-composer-quotes.ts": {
         "importDeclarations": 3,
@@ -1117,7 +1084,7 @@
         "bridgePaths": {},
         "environmentCapabilities": {},
         "hookCalls": {
-          "useExternalStoreSelector": 9
+          "useExternalStoreSelector": 7
         },
         "lifecycleMethods": {},
         "unresolvedDependencies": 0,
@@ -1129,7 +1096,7 @@
           "@maka/ui": 1
         },
         "importSpecifiers": 10,
-        "nonTriviaTokens": 391
+        "nonTriviaTokens": 329
       },
       "src/renderer/use-app-shell-session-workspace.ts": {
         "importDeclarations": 11,
@@ -2062,7 +2029,6 @@
         "actionFactories": [],
         "dependencyPaths": {
           "@maka/core/goal": 1,
-          "@maka/core/model-thinking": 1,
           "@maka/core/permission": 1,
           "@maka/core/redaction": 1,
           "@maka/core/settings": 1,
@@ -4994,21 +4960,6 @@
           "react": 1
         }
       },
-      "src/renderer/use-session-setting-intent.ts": {
-        "bridgePaths": {},
-        "environmentCapabilities": {},
-        "hookCalls": {
-          "useEffect": 1,
-          "useRef": 2,
-          "useState": 1
-        },
-        "lifecycleMethods": {},
-        "unresolvedDependencies": 0,
-        "actionFactories": [],
-        "dependencyPaths": {
-          "react": 1
-        }
-      },
       "src/renderer/use-settings-modal.ts": {
         "bridgePaths": {},
         "environmentCapabilities": {
@@ -5665,7 +5616,6 @@
       "legacyPaths": [
         "src/renderer/app-shell-context-compaction.ts",
         "src/renderer/app-shell-revision-actions.ts",
-        "src/renderer/app-shell-session-settings-actions.ts",
         "src/renderer/app-shell-stop-action.ts",
         "src/renderer/app-shell-turn-actions.ts"
       ]

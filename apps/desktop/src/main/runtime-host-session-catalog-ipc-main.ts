@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { isCollaborationMode } from '@maka/core/collaboration';
 import { isOrchestrationMode } from '@maka/core/orchestration';
 import { isPermissionMode } from '@maka/core/permission';
-import { isThinkingLevel } from '@maka/core/model-thinking';
+import { isThinkingLevel, type ThinkingLevel } from '@maka/core/model-thinking';
 import { type CreateSessionRequestInput, type SessionListFilter } from '@maka/core/runtime-inputs';
 import { type SessionChangedEvent, type SessionChangedReason, type SessionCatalogSummary } from '@maka/core/session';
 import { projectSessionCatalogSummary } from '@maka/runtime-host/client';
@@ -204,10 +204,14 @@ export function registerRuntimeHostSessionCatalogIpc(
       return updateConfiguration(deps, sessionId, { orchestrationMode: mode }, 'mode-change');
     },
   );
-  ipcMain.handle('sessions:setModel', async (_event, sessionId: string, input: unknown) => {
-    const modelTarget = normalizeExplicitModel(input);
-    return updateConfiguration(deps, sessionId, { modelTarget, thinkingLevel: null }, 'updated');
-  });
+  ipcMain.handle(
+    'sessions:setModelConfiguration',
+    async (_event, sessionId: string, input: unknown) => {
+      const modelTarget = normalizeExplicitModel(input);
+      const thinkingLevel = normalizeRequiredThinkingLevel(input);
+      return updateConfiguration(deps, sessionId, { modelTarget, thinkingLevel }, 'updated');
+    },
+  );
   ipcMain.handle('sessions:setThinkingLevel', async (_event, sessionId: string, level: unknown) => {
     if (level !== undefined && level !== null && !isThinkingLevel(level)) {
       throw new Error(`Invalid thinking level: ${String(level)}`);
@@ -364,6 +368,14 @@ function normalizeExplicitModel(input: unknown): Extract<SessionModelTarget, { k
     connectionSlug: selection.llmConnectionSlug,
     model: selection.model,
   };
+}
+
+function normalizeRequiredThinkingLevel(input: unknown): ThinkingLevel | null {
+  const level = (input as Record<string, unknown> | null)?.thinkingLevel;
+  if (level !== null && !isThinkingLevel(level)) {
+    throw new Error(`Invalid thinking level: ${String(level)}`);
+  }
+  return level;
 }
 
 function normalizeOptionalString(value: unknown, label: string): string | undefined {

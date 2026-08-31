@@ -24,6 +24,7 @@ import {
   armLiveTurn,
   reconcileTerminalLiveTurn,
   useMountedRef,
+  useSessionSettingIntent,
   type InteractionQueues,
   type LiveTurnProjection,
 } from '@maka/ui';
@@ -62,6 +63,8 @@ import {
   type StagedCompanionQuote,
 } from './quote-companion-panel-state.js';
 import type { CompanionForkVisibilityEvent } from './quote-companion-visibility.js';
+
+type QuoteCompanionSettingValues = { permissionMode: PermissionMode };
 
 type PendingAdmission = {
   messageId: string;
@@ -129,7 +132,6 @@ export interface UseQuoteCompanionResult {
   /** Whether the source and any committed companion can execute their exact model. */
   modelReady: boolean;
   permissionMode: PermissionMode | undefined;
-  permissionModePending: boolean;
   regeneratePendingTurnId: string | null;
   /** A localized, retryable error (fork setup, run error, or a rejected send). */
   error: string | null;
@@ -226,7 +228,6 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
   );
   const turnInFlight = streaming;
   const [preparing, setPreparing] = useState(Boolean(sourceSession));
-  const [permissionModePending, setPermissionModePending] = useState(false);
   const [regeneratePendingTurnId, setRegeneratePendingTurnId] = useState<string | null>(
     null,
   );
@@ -244,6 +245,41 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
   // double-invoke; a hand-rolled disposed flag would stay tripped after replay).
   const mountedRef = useMountedRef();
   const dismissalGuardRef = useRef(createCompanionDismissalGuard());
+  const [permissionCatalogRevision, setPermissionCatalogRevision] = useState(0);
+  const permissionModeIntent = useSessionSettingIntent<QuoteCompanionSettingValues>({
+    catalogRevision: permissionCatalogRevision,
+    refreshCatalog: async () => {
+      const sessionId = companionIdRef.current;
+      if (!sessionId) return;
+      const sessions = await sideChat.listSessions();
+      const next = sessions.find((session) => session.id === sessionId);
+      if (!mountedRef.current || companionIdRef.current !== sessionId || !next) return;
+      companionRef.current = next;
+      setCompanion(next);
+      setPermissionCatalogRevision((revision) => revision + 1);
+    },
+    channels: {
+      permissionMode: {
+        write: async (sessionId, mode) => {
+          const next = await sideChat.setPermissionMode(sessionId, mode);
+          if (mountedRef.current && companionIdRef.current === sessionId) {
+            companionRef.current = next;
+            setCompanion(next);
+          }
+          return next.permissionMode === mode;
+        },
+        onWriteError: () => {
+          if (mountedRef.current) setError(copyRef.current.errors.respondFailed);
+        },
+      },
+    },
+  });
+  const requestPermissionMode = useCallback(
+    (sessionId: string, mode: PermissionMode) =>
+      permissionModeIntent.request('permissionMode', sessionId, mode),
+    [permissionModeIntent.request],
+  );
+  const clearPermissionModeIntent = permissionModeIntent.clear;
 
   const setPendingAdmission = useCallback((admission: PendingAdmission | null) => {
     pendingAdmissionRef.current = admission;
@@ -525,6 +561,7 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
           subscriptionReadyRef.current = Promise.resolve();
           companionIdRef.current = null;
           companionRef.current = undefined;
+          clearPermissionModeIntent(existing.id);
           setCompanion(undefined);
           setAllMessages([]);
           onForkVisibilityChangeRef.current?.({
@@ -608,7 +645,7 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
       forkSetupPromiseRef.current = promise;
       return promise;
     },
-    [commitFork, mountedRef, panelId, sideChat],
+    [clearPermissionModeIntent, commitFork, mountedRef, panelId, sideChat],
   );
 
   const companionModelReady =
@@ -946,25 +983,13 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
   ]);
 
   const setPermissionMode = useCallback(
-    async (mode: PermissionMode): Promise<boolean> => {
+    (mode: PermissionMode): Promise<boolean> => {
       const id = companionIdRef.current;
-      if (!id || turnInFlight || permissionModePending) return false;
-      setPermissionModePending(true);
-      try {
-        const next = await sideChat.setPermissionMode(id, mode);
-        if (!mountedRef.current) return false;
-        companionRef.current = next;
-        setCompanion(next);
-        setError(null);
-        return true;
-      } catch {
-        if (mountedRef.current) setError(copyRef.current.errors.respondFailed);
-        return false;
-      } finally {
-        if (mountedRef.current) setPermissionModePending(false);
-      }
+      if (!id || turnInFlight) return Promise.resolve(false);
+      setError(null);
+      return requestPermissionMode(id, mode);
     },
-    [mountedRef, permissionModePending, sideChat, turnInFlight],
+    [requestPermissionMode, turnInFlight],
   );
 
   const regenerate = useCallback(
@@ -1036,7 +1061,10 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
     : sourceSession
       ? { llmConnectionSlug: sourceSession.llmConnectionSlug, model: sourceSession.model }
       : undefined;
-  const permissionMode = (companion?.permissionMode ??
+  const companionPermissionOverlay = companion?.id
+    ? permissionModeIntent.overlayByChannel.permissionMode[companion.id]
+    : undefined;
+  const permissionMode = (companionPermissionOverlay ?? companion?.permissionMode ??
     sourceSession?.permissionMode) as PermissionMode | undefined;
   const activeInteraction = companionIdRef.current
     ? activeInteractionFor(interactions, companionIdRef.current)
@@ -1056,7 +1084,6 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
     preparing,
     modelReady: sourceModelReady && companionModelReady,
     permissionMode,
-    permissionModePending,
     regeneratePendingTurnId,
     error,
     activeModel,

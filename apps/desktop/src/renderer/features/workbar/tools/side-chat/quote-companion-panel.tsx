@@ -289,7 +289,6 @@ export function QuoteCompanionPanel(props: {
               // (the companion has no independent picker; it inherits the source model).
               modelLabel={activeModelLabel}
               permissionMode={companion.permissionMode}
-              permissionModePending={companion.permissionModePending}
               permissionModeDisabledReason={
                 companion.streaming ? copy.permissionStreaming : undefined
               }
