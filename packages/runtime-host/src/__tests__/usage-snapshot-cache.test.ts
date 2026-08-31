@@ -140,3 +140,76 @@ test('expires an idle lease before its hard deadline', () => {
   now = 100;
   assert.equal(cache.get('connection-a', retained.revision), undefined);
 });
+
+test('pending reservations occupy capacity until their exact owner finalizes them', () => {
+  let revision = 0;
+  const cache = new UsageSnapshotCache({
+    capacity: 4,
+    createRevision: () => `revision-${++revision}`,
+  });
+  const reservations = Array.from({ length: 4 }, (_, index) =>
+    cache.reserve(`connection-${index}`),
+  );
+
+  assert.throws(() => cache.reserve('connection-5'), UsageSnapshotCapacityError);
+  for (const [index, reservation] of reservations.entries()) {
+    assert.equal(cache.get(`connection-${index}`, reservation.revision), undefined);
+  }
+
+  const first = cache.finalize('connection-0', reservations[0]!.revision, CONTENTS);
+  assert.equal(first?.revision, reservations[0]!.revision);
+  assert.equal(cache.get('connection-0', reservations[0]!.revision)?.revision, first?.revision);
+  assert.throws(() => cache.reserve('connection-5'), UsageSnapshotCapacityError);
+});
+
+test('abort, release, and connection teardown reclaim pending reservations', () => {
+  let revision = 0;
+  const cache = new UsageSnapshotCache({
+    capacity: 2,
+    createRevision: () => `revision-${++revision}`,
+  });
+  const first = cache.reserve('connection-a');
+  const second = cache.reserve('connection-b');
+
+  cache.release('connection-b', first.revision);
+  assert.throws(() => cache.reserve('connection-c'), UsageSnapshotCapacityError);
+
+  cache.abort('connection-a', first.revision);
+  const third = cache.reserve('connection-c');
+  cache.release('connection-b', second.revision);
+  const fourth = cache.reserve('connection-d');
+
+  cache.releaseConnection('connection-c');
+  assert.equal(cache.finalize('connection-c', third.revision, CONTENTS), undefined);
+  assert.equal(
+    cache.finalize('connection-d', fourth.revision, CONTENTS)?.revision,
+    fourth.revision,
+  );
+  assert.doesNotThrow(() => cache.reserve('connection-e'));
+});
+
+test('finalization never revives a wrong, released, or expired reservation', () => {
+  let now = 0;
+  let revision = 0;
+  const cache = new UsageSnapshotCache({
+    now: () => now,
+    ttlMs: 100,
+    hardTtlMs: 250,
+    capacity: 2,
+    createRevision: () => `revision-${++revision}`,
+  });
+  const exact = cache.reserve('connection-a');
+
+  assert.equal(cache.finalize('connection-b', exact.revision, CONTENTS), undefined);
+  assert.equal(cache.finalize('connection-a', 'missing-revision', CONTENTS), undefined);
+  assert.equal(cache.get('connection-a', exact.revision), undefined);
+  assert.equal(cache.finalize('connection-a', exact.revision, CONTENTS)?.revision, exact.revision);
+
+  cache.release('connection-a', exact.revision);
+  assert.equal(cache.finalize('connection-a', exact.revision, CONTENTS), undefined);
+
+  const expiring = cache.reserve('connection-a');
+  now = 100;
+  assert.equal(cache.finalize('connection-a', expiring.revision, CONTENTS), undefined);
+  assert.equal(cache.get('connection-a', expiring.revision), undefined);
+});

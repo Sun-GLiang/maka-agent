@@ -316,45 +316,52 @@ export class HostUsagePricingCoordinator {
     range: UsageQuery['range'],
     now: number,
   ): Promise<Extract<UsageQueryResult, { kind: 'snapshot_started' }>> {
-    const query: UsageQuery = { range: resolveUsageRange(range, now) };
-    const captureLimit = this.#usageSnapshots.activityLimit + 1;
-    const captured = await this.#stores.captureUsageSnapshot({
-      query,
-      activityLimit: captureLimit,
-    });
-    const canonical: CanonicalUsageSource = {
-      attempts: captured.canonical.attempts,
-      unreadableRecords: captured.canonical.unreadableRecords + captured.repair.unreadableEvents,
-      pendingRepairs: captured.repair.pendingRuns,
-    };
-    const mergedSummary = mergeUsageSummary(captured.legacySummary, canonical, query, now);
-    const { provenance, ...summary } = mergedSummary;
-    const mergedLogs = mergeUsageLogs(
-      captured.legacyLlmLogs,
-      canonical,
-      query,
-      now,
-      0,
-      captureLimit,
-    );
-    const llmRows = mergedLogs.rows.slice(0, this.#usageSnapshots.activityLimit);
-    const toolRows = captured.toolLogs.rows.slice(0, this.#usageSnapshots.activityLimit);
-    const titles = await this.#resolveSessionTitles([...llmRows, ...toolRows]);
-    const retained = this.#usageSnapshots.retain(connectionId, {
-      summary,
-      provenance,
-      llmRows: llmRows.map((row) => projectUsageLog(row, titles)),
-      llmTruncated: mergedLogs.total > this.#usageSnapshots.activityLimit,
-      toolRows: toolRows.map((row) => projectToolUsageLog(row, titles)),
-      toolTruncated: captured.toolLogs.total > this.#usageSnapshots.activityLimit,
-      pricingEntries: projectEffectivePricingEntries(captured.pricing.overrides),
-    });
-    return encodeUsageQueryResult({
-      kind: 'snapshot_started',
-      revision: retained.revision,
-      summary: retained.summary,
-      provenance: retained.provenance,
-    }) as Extract<UsageQueryResult, { kind: 'snapshot_started' }>;
+    const reservation = this.#usageSnapshots.reserve(connectionId);
+    try {
+      const query: UsageQuery = { range: resolveUsageRange(range, now) };
+      const captureLimit = this.#usageSnapshots.activityLimit + 1;
+      const captured = await this.#stores.captureUsageSnapshot({
+        query,
+        activityLimit: captureLimit,
+      });
+      const canonical: CanonicalUsageSource = {
+        attempts: captured.canonical.attempts,
+        unreadableRecords: captured.canonical.unreadableRecords + captured.repair.unreadableEvents,
+        pendingRepairs: captured.repair.pendingRuns,
+      };
+      const mergedSummary = mergeUsageSummary(captured.legacySummary, canonical, query, now);
+      const { provenance, ...summary } = mergedSummary;
+      const mergedLogs = mergeUsageLogs(
+        captured.legacyLlmLogs,
+        canonical,
+        query,
+        now,
+        0,
+        captureLimit,
+      );
+      const llmRows = mergedLogs.rows.slice(0, this.#usageSnapshots.activityLimit);
+      const toolRows = captured.toolLogs.rows.slice(0, this.#usageSnapshots.activityLimit);
+      const titles = await this.#resolveSessionTitles([...llmRows, ...toolRows]);
+      const retained = this.#usageSnapshots.finalize(connectionId, reservation.revision, {
+        summary,
+        provenance,
+        llmRows: llmRows.map((row) => projectUsageLog(row, titles)),
+        llmTruncated: mergedLogs.total > this.#usageSnapshots.activityLimit,
+        toolRows: toolRows.map((row) => projectToolUsageLog(row, titles)),
+        toolTruncated: captured.toolLogs.total > this.#usageSnapshots.activityLimit,
+        pricingEntries: projectEffectivePricingEntries(captured.pricing.overrides),
+      });
+      if (!retained) throw new Error('Usage snapshot reservation is no longer active');
+      return encodeUsageQueryResult({
+        kind: 'snapshot_started',
+        revision: retained.revision,
+        summary: retained.summary,
+        provenance: retained.provenance,
+      }) as Extract<UsageQueryResult, { kind: 'snapshot_started' }>;
+    } catch (error) {
+      this.#usageSnapshots.abort(connectionId, reservation.revision);
+      throw error;
+    }
   }
 
   async #queryPricing(input: PricingQueryInput): Promise<OperationOutcome<'pricing.query'>> {

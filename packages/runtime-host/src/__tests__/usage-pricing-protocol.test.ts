@@ -834,6 +834,105 @@ describe('Usage/Pricing protocol', () => {
     }
   });
 
+  test('reserves capacity before overlapping snapshot title hydration', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'maka-usage-snapshot-reservations-'));
+    const capability = await resolveStorageRoot({
+      path: join(base, 'interactive-root'),
+      kind: 'interactive',
+    });
+    const owner = await tryAcquireInteractiveRootOwner(capability);
+    assert.ok(owner);
+    const stores = await openInteractiveUsageStoresForWrite(owner.lease);
+    const releaseTitles = deferred();
+    const fourTitlesEntered = deferred();
+    const inFlight: Promise<unknown>[] = [];
+    let titleReads = 0;
+    try {
+      await stores.telemetry.recordLlmCall(longUsageRecord('barrier-session', 1));
+      const coordinator = new HostUsagePricingCoordinator(
+        stores,
+        () => {},
+        new RuntimePolicyActivationGate(),
+        () => {},
+        async (sessionId) => {
+          assert.equal(sessionId, 'barrier-session');
+          titleReads += 1;
+          if (titleReads === 4) fourTitlesEntered.resolve();
+          await releaseTitles.promise;
+          return 'Barrier title';
+        },
+      );
+      const contexts = Array.from({ length: 5 }, (_, index) =>
+        connectionContext(`overlap-${index}`),
+      );
+      const firstStarts = contexts
+        .slice(0, 4)
+        .map((context) =>
+          coordinator.handlers['usage.query']({ kind: 'snapshot_start', range: 'all' }, context),
+        );
+      inFlight.push(...firstStarts);
+      await within(
+        fourTitlesEntered.promise,
+        1_000,
+        'Four admitted snapshot starts did not reach title hydration',
+      );
+
+      const fifthStart = coordinator.handlers['usage.query'](
+        { kind: 'snapshot_start', range: 'all' },
+        contexts[4]!,
+      );
+      inFlight.push(fifthStart);
+      let admissionFailure: unknown;
+      try {
+        const fifthBeforeRelease = await within(
+          fifthStart,
+          1_000,
+          'Fifth snapshot start reached expensive work before capacity conflict',
+        );
+        assert.deepEqual(fifthBeforeRelease, {
+          ok: false,
+          error: {
+            code: 'operation_conflict',
+            message: 'Usage snapshot capacity is occupied',
+          },
+        });
+        assert.equal(titleReads, 4, 'only admitted starts may hydrate Session titles');
+      } catch (error) {
+        admissionFailure = error;
+      } finally {
+        releaseTitles.resolve();
+      }
+
+      const firstOutcomes = await Promise.all(firstStarts);
+      await fifthStart;
+      if (admissionFailure) throw admissionFailure;
+      for (const [index, outcome] of firstOutcomes.entries()) {
+        assert.equal(outcome.ok, true);
+        if (!outcome.ok || outcome.result.kind !== 'snapshot_started') {
+          throw new Error('Admitted overlapping Usage snapshot did not start');
+        }
+        const logs = await expectUsageSnapshotLogs(
+          coordinator,
+          outcome.result.revision,
+          'llm',
+          contexts[index]!,
+        );
+        assert.equal(logs.rows[0]?.sessionTitle, 'Barrier title');
+      }
+      assert.equal(titleReads, 4);
+    } finally {
+      releaseTitles.resolve();
+      await Promise.allSettled(inFlight);
+      await stores.close().catch(() => undefined);
+      await owner.close();
+      await rm(join(resolveRootControlNamespace(), capability.rootId), {
+        recursive: true,
+        force: true,
+      });
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
   test('decodes revision-pinned numeric-offset pricing pages and revision-CAS mutation', () => {
     assert.doesNotThrow(() => pricingRequest('pricing.query', { kind: 'start' }));
     assert.doesNotThrow(() =>
@@ -1341,6 +1440,28 @@ async function expectUsageSnapshotPricing(
 
 function connectionContext(connectionId: string): ConnectionContext {
   return { ...CONNECTION_CONTEXT, connectionId };
+}
+
+function deferred(): { readonly promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+async function within<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function assertDistinctBoundedIdentities(values: readonly (string | undefined)[]): void {

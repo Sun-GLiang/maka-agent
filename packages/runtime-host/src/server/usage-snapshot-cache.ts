@@ -61,11 +61,25 @@ export interface RetainedUsageSnapshot extends UsageSnapshotContents {
   readonly revision: string;
 }
 
-interface CacheEntry extends RetainedUsageSnapshot {
+export interface UsageSnapshotReservation {
+  readonly revision: string;
+}
+
+interface BaseCacheEntry extends UsageSnapshotReservation {
   readonly connectionId: string;
   idleExpiresAt: number;
   readonly hardExpiresAt: number;
 }
+
+interface PendingCacheEntry extends BaseCacheEntry {
+  readonly state: 'pending';
+}
+
+interface RetainedCacheEntry extends BaseCacheEntry, RetainedUsageSnapshot {
+  readonly state: 'retained';
+}
+
+type CacheEntry = PendingCacheEntry | RetainedCacheEntry;
 
 /** Host-epoch-local, connection-owned lease cache for coherent Settings Usage reads. */
 export class UsageSnapshotCache {
@@ -99,6 +113,18 @@ export class UsageSnapshotCache {
   }
 
   retain(connectionId: string, contents: UsageSnapshotContents): RetainedUsageSnapshot {
+    const reservation = this.reserve(connectionId);
+    try {
+      const retained = this.finalize(connectionId, reservation.revision, contents);
+      if (!retained) throw new Error('Usage snapshot reservation is no longer active');
+      return retained;
+    } catch (error) {
+      this.abort(connectionId, reservation.revision);
+      throw error;
+    }
+  }
+
+  reserve(connectionId: string): UsageSnapshotReservation {
     const now = this.#now();
     this.#pruneExpired(now);
     if (this.#entries.size >= this.#capacity) throw new UsageSnapshotCapacityError();
@@ -107,10 +133,12 @@ export class UsageSnapshotCache {
       throw new Error('Usage snapshot revision generator returned an invalid revision');
     }
     const hardExpiresAt = now + this.#hardTtlMs;
-    const entry: CacheEntry = {
+    const entry: PendingCacheEntry = {
       revision,
-      ...contents,
       connectionId,
+      state: 'pending',
+      // Both deadlines begin at reservation so capture and projection time can
+      // never escape either the renewable idle bound or the hard lifetime.
       idleExpiresAt: Math.min(now + this.#ttlMs, hardExpiresAt),
       hardExpiresAt,
     };
@@ -118,13 +146,46 @@ export class UsageSnapshotCache {
     return entry;
   }
 
+  finalize(
+    connectionId: string,
+    revision: string,
+    contents: UsageSnapshotContents,
+  ): RetainedUsageSnapshot | undefined {
+    const now = this.#now();
+    this.#pruneExpired(now);
+    const reservation = this.#entries.get(revision);
+    if (
+      !reservation ||
+      reservation.state !== 'pending' ||
+      reservation.connectionId !== connectionId
+    ) {
+      return undefined;
+    }
+    const retained: RetainedCacheEntry = {
+      revision,
+      ...contents,
+      connectionId,
+      state: 'retained',
+      idleExpiresAt: reservation.idleExpiresAt,
+      hardExpiresAt: reservation.hardExpiresAt,
+    };
+    this.#entries.set(revision, retained);
+    return retained;
+  }
+
   get(connectionId: string, revision: string): RetainedUsageSnapshot | undefined {
     const now = this.#now();
     this.#pruneExpired(now);
     const entry = this.#entries.get(revision);
-    if (!entry || entry.connectionId !== connectionId) return undefined;
+    if (!entry || entry.state !== 'retained' || entry.connectionId !== connectionId) {
+      return undefined;
+    }
     entry.idleExpiresAt = Math.min(now + this.#ttlMs, entry.hardExpiresAt);
     return entry;
+  }
+
+  abort(connectionId: string, revision: string): void {
+    this.release(connectionId, revision);
   }
 
   release(connectionId: string, revision: string): void {
