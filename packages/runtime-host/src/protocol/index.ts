@@ -95,10 +95,12 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 78 as const;
-// 78: Every `turn.message.submit` disposition carries the exact Skill
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 79 as const;
+// 79: Every `turn.message.submit` disposition carries the exact Skill
 // invocation outcome. Durable queued replays may omit the previous Host
 // Epoch's transient queue revision; older strict peers reject either shape.
+// 78: OAuth login targets explicit create/existing Connection entities and
+// returns their canonical identity. Older peers reject both closed wire shapes.
 // 77: LLM and tool usage-log projections carry an optional `sessionTitle` (the
 // Host-resolved session name for the usage Task column). Older Clients reject
 // the unknown field, so a newer Host's usage logs are unreadable to them.
@@ -111,6 +113,8 @@ export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 78 as const;
 // unrelated provider for an interactive Session.
 // 73: Transcript pages carry a Host-owned Turn range boundary. Older peers
 // cannot preserve both the complete edge Turn and the bounded projection.
+// 72: Collaboration Turn request query results require `canRequestTurns`.
+// Older peers reject the new closed result shape.
 // 71: Session Guests can submit durable exact Turn access requests and Owners
 // can decide them. Older peers do not understand this execution-authority flow.
 // 70: Session Guest connections receive resource-scoped shared catalog and

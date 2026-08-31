@@ -135,9 +135,9 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('publishes a new compatibility epoch for mandatory submit Skill outcomes', () => {
-    // Submit Skill outcomes and usage-log Session titles independently claimed
-    // epoch 77, so their merge requires a distinct compatibility boundary.
-    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 77);
+    // Submit Skill outcomes and explicit OAuth Connection targets independently
+    // claimed epoch 78, so their merge requires a distinct compatibility boundary.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 78);
   });
 
   test('rejects the legacy connection update result in the current compatibility epoch', () => {
@@ -219,6 +219,12 @@ describe('Runtime Host bootstrap protocol', () => {
     // Epoch 51 peers require nullable connectionId targeting and decode a
     // successful save without its committed Connection identity.
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 52);
+  });
+
+  test('publishes a new compatibility epoch for explicit OAuth Connection targets', () => {
+    // Epoch 53 peers still send connectionId directly and receive provider plus
+    // connectionId fields instead of one canonical Connection identity.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 53);
   });
 
   test('publishes a new compatibility epoch for queued message editing', () => {
