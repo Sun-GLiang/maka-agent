@@ -1,0 +1,5 @@
+{
+  "epoch": 77,
+  "files": ["packages/runtime-host/src/protocol/session-continuity.ts"],
+  "reason": "Exports the existing per-connection subscription capacity for client admission without changing any protocol codec or message shape"
+}
