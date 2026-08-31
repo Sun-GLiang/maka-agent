@@ -21,7 +21,10 @@ import { readFile, writeFile } from 'node:fs/promises';
 import type { IpcMain } from 'electron';
 import type { AppSettings, UpdateAppSettingsInput } from '@maka/core/settings';
 import type { LlmConnection } from '@maka/core/llm-connections';
-import { PROVIDER_DEFAULTS } from '@maka/core/llm-connections';
+import {
+  effectiveBaseUrl,
+  PROVIDER_DEFAULTS,
+} from '@maka/core/llm-connections';
 import type {
   ConnectionCatalogEntry,
   CredentialLocator,
@@ -373,12 +376,33 @@ function connectionCredentials(
     } as const;
     const requestHeaders = secrets.get(locatorKey(requestHeadersLocator));
     return [
-      ...(locator && secret ? [{ slug: connection.slug, kind: locator.kind, value: secret }] : []),
+      ...(locator && secret
+        ? [{
+            slug: connection.slug,
+            kind: locator.kind,
+            value: secret,
+            connection: credentialConnectionBinding(connection),
+          }]
+        : []),
       ...(requestHeaders
-        ? [{ slug: connection.slug, kind: 'request_headers' as const, value: requestHeaders }]
+        ? [{
+            slug: connection.slug,
+            kind: 'request_headers' as const,
+            value: requestHeaders,
+            connection: credentialConnectionBinding(connection),
+          }]
         : []),
     ];
   });
+}
+
+function credentialConnectionBinding(
+  connection: ConnectionCatalogEntry,
+): NonNullable<ExportedCredential['connection']> {
+  return {
+    providerType: connection.providerType,
+    effectiveBaseUrl: effectiveBaseUrl(connection),
+  };
 }
 
 function restoreHostSettingsSecrets(
@@ -429,7 +453,7 @@ function projectHostSettingsSecrets(
       ? {}
       : {
           network: {
-            proxy: { password: proxy },
+            proxy: { authEnabled: true, password: proxy },
           },
         }),
     ...(tavily === undefined

@@ -19,6 +19,7 @@
 
 import type { AppSettings, UpdateAppSettingsInput } from '@maka/core/settings';
 import {
+  effectiveBaseUrl,
   reconcileConnectionAfterEnabledModelsChange,
   type LlmConnection,
 } from '@maka/core/llm-connections';
@@ -38,6 +39,10 @@ export interface ExportedCredential {
   slug: string;
   kind: CredentialKind;
   value: string;
+  connection?: {
+    providerType: LlmConnection['providerType'];
+    effectiveBaseUrl: string;
+  };
 }
 
 const VALID_CREDENTIAL_KINDS: ReadonlySet<string> = new Set<CredentialKind>([
@@ -73,9 +78,9 @@ export async function applyConfigImport(
 ): Promise<ConfigImportResult> {
   const result: ConfigImportResult = {};
   // A connection snapshot limits credential writes to connections created or
-  // overwritten by this import. Credentials-only bundles instead bind to an
-  // already-existing logical connection with the same slug.
-  const credentialTargetSlugs = new Set<string>();
+  // overwritten by this import. Credentials-only bundles instead require an
+  // existing slug whose provider and effective endpoint match the export.
+  const credentialTargets = new Map<string, LlmConnection | null>();
 
   if (Array.isArray(bundle.data.connections)) {
     const incoming = bundle.data.connections as LlmConnection[];
@@ -91,7 +96,7 @@ export async function applyConfigImport(
         ? reconcileConnectionAfterEnabledModelsChange(connection, connection.enabledModelIds)
         : null;
       await deps.connectionStore.save(selection ? { ...connection, ...selection } : connection);
-      credentialTargetSlugs.add(connection.slug);
+      credentialTargets.set(connection.slug, null);
     }
     result.connections = {
       created: plan.create.length,
@@ -103,12 +108,13 @@ export async function applyConfigImport(
     Array.isArray(bundle.data.credentials)
   ) {
     // Without a connection snapshot, the credential slug names an existing
-    // logical connection directly. A bundle that does include connections
-    // still uses the create/overwrite set above so an explicit skip cannot
-    // overwrite the target's credential.
+    // connection, while its binding proves that the slug still names the same
+    // credential destination. A bundle that does include connections still
+    // uses the create/overwrite set above so an explicit skip cannot overwrite
+    // the target's credential.
     const existing = await deps.connectionStore.list();
     for (const connection of existing) {
-      credentialTargetSlugs.add(connection.slug);
+      credentialTargets.set(connection.slug, connection);
     }
   }
 
@@ -130,7 +136,12 @@ export async function applyConfigImport(
       if (!valid) continue;
       // Unknown targets and connections explicitly skipped by a connection
       // snapshot keep their existing stored secret untouched.
-      if (!credentialTargetSlugs.has(entry.slug)) {
+      const target = credentialTargets.get(entry.slug);
+      if (!credentialTargets.has(entry.slug)) {
+        skipped += 1;
+        continue;
+      }
+      if (target && !matchesCredentialConnection(entry.connection, target)) {
         skipped += 1;
         continue;
       }
@@ -146,4 +157,15 @@ export async function applyConfigImport(
   }
 
   return result;
+}
+
+function matchesCredentialConnection(
+  binding: ExportedCredential['connection'] | undefined,
+  target: LlmConnection,
+): boolean {
+  return (
+    binding !== undefined &&
+    binding.providerType === target.providerType &&
+    binding.effectiveBaseUrl === effectiveBaseUrl(target)
+  );
 }

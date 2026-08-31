@@ -106,7 +106,15 @@ test('Runtime Host config export reads selected credentials from Host authority'
 
   const settings = bundle.data.settings as Record<string, any>;
   assert.deepEqual(bundle.data.credentials, [
-    { slug: 'deepseek-main', kind: 'api_key', value: 'sk-host' },
+    {
+      slug: 'deepseek-main',
+      kind: 'api_key',
+      value: 'sk-host',
+      connection: {
+        providerType: 'deepseek',
+        effectiveBaseUrl: 'https://api.deepseek.com',
+      },
+    },
   ]);
   assert.equal(settings.network.proxy.password, 'proxy-host');
   assert.equal(settings.webSearch.providers.tavily.apiKey, 'tavily-host');
@@ -139,12 +147,55 @@ test('Runtime Host credentials-only export includes only schema-v1 credential fi
 
   assert.deepEqual(bundle.includedData, ['settings', 'credentials']);
   assert.deepEqual(bundle.data.settings, {
-    network: { proxy: { password: 'proxy-host' } },
+    network: { proxy: { authEnabled: true, password: 'proxy-host' } },
     webSearch: { providers: { tavily: { apiKey: 'tavily-host' } } },
   });
   assert.deepEqual(bundle.data.credentials, [
-    { slug: 'deepseek-main', kind: 'api_key', value: 'sk-host' },
+    {
+      slug: 'deepseek-main',
+      kind: 'api_key',
+      value: 'sk-host',
+      connection: {
+        providerType: 'deepseek',
+        effectiveBaseUrl: 'https://api.deepseek.com',
+      },
+    },
   ]);
+});
+
+test('Runtime Host credentials-only proxy export adapts onto default target policy', async () => {
+  const exported = await gatherRuntimeHostConfig(
+    ['credentials'],
+    {
+      client: {
+        loadConnectionCatalog: async () => ({ ...CATALOG, connections: [] }),
+        exportConfigurationCredentials: async ({ locator }: { locator: CredentialLocator }) => ({
+          credential:
+            locator.scope === 'network_proxy'
+              ? {
+                  locator,
+                  secretBase64: Buffer.from('proxy-host').toString('base64'),
+                }
+              : null,
+        }),
+      },
+      appVersion: '0.1.0',
+      getSettings: async () => createDefaultSettings(),
+    } as never,
+  );
+
+  const adapted = adaptRuntimeHostConfigImport(exported);
+  const importedProxy = (adapted.data.settings as Record<string, any>).network.proxy;
+  const targetProxy = {
+    ...createDefaultSettings().network.proxy,
+    ...importedProxy,
+  };
+
+  assert.equal(targetProxy.authEnabled, true);
+  assert.deepEqual(targetProxy.credential, {
+    kind: 'replace',
+    secret: 'proxy-host',
+  });
 });
 
 test('Runtime Host credentials-only export omits each absent settings-carried secret', async () => {
@@ -158,7 +209,7 @@ test('Runtime Host credentials-only export omits each absent settings-carried se
     {
       presentScope: 'network_proxy',
       expected: {
-        network: { proxy: { password: 'proxy-host' } },
+        network: { proxy: { authEnabled: true, password: 'proxy-host' } },
       },
     },
     {
