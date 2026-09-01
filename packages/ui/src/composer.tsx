@@ -64,6 +64,8 @@ import {
   type ComposerModelSwitchAvailability,
 } from './composer-helpers.js';
 import { stripQuoteHeadingMarkers } from './quote-ref-chip.js';
+import { DirectoryReferenceChip } from './directory-reference-chip.js';
+import { FolderOpen } from './icons.js';
 import { WorkspacePicker, type WorkspacePickerModel } from './workspace-picker.js';
 import { useComposerDraft, type ComposerDraftPersistence } from './use-composer-draft.js';
 import { useComposerHistory } from './use-composer-history.js';
@@ -223,7 +225,7 @@ export interface ComposerSendMetadata {
   followUpMode?: FollowUpMode;
 }
 
-type ComposerImportActionId = 'pick' | 'attach';
+type ComposerImportActionId = 'pick' | 'attach' | 'directory';
 
 export const Composer = forwardRef<
   ComposerHandle,
@@ -292,6 +294,9 @@ export const Composer = forwardRef<
     ): boolean | void | Promise<boolean | void>;
     onStop(): void | Promise<void>;
     onPickAttachments?(): void | Promise<void>;
+    onPickDirectory?(): void | Promise<void>;
+    pendingDirectories?: readonly import('@maka/core/events').DirectoryReference[];
+    onRemoveDirectory?(index: number): void;
     onAttachFilePaths?(files: File[]): void | Promise<void>;
     pendingAttachments?: readonly {
       displayName: string;
@@ -1416,7 +1421,9 @@ export const Composer = forwardRef<
    * Skill is a chip in the draft itself, visible where it will be sent from.
    */
   const drawerTokenCount =
-    (props.pendingQuotes?.length ?? 0) + (props.pendingAttachments?.length ?? 0);
+    (props.pendingQuotes?.length ?? 0) +
+    (props.pendingAttachments?.length ?? 0) +
+    (props.pendingDirectories?.length ?? 0);
   /** The last staged image opened from a chip (Lightbox media shape). Kept
    *  mounted after close — see the Lightbox render — so only the open flag
    *  drives visibility. */
@@ -1549,7 +1556,7 @@ export const Composer = forwardRef<
    * that wires only the mode controls would open the menu on a rule.
    */
   const hasPlusMenuActions = Boolean(
-    props.onPickAttachments || props.mentionSkills || props.onSetGoal,
+    props.onPickAttachments || props.onPickDirectory || props.mentionSkills || props.onSetGoal,
   );
   const hasPlusMenuModes = Boolean(props.onPlanModeChange || props.onOrchestrationModeChange);
   const showPlusMenu = Boolean(hasPlusMenuActions || hasPlusMenuModes);
@@ -1662,6 +1669,13 @@ export const Composer = forwardRef<
               }}
             >
               <div className="maka-composer-context-drawer" role="group" aria-label={copy.stagedContext}>
+                {props.pendingDirectories?.map((reference, index) => (
+                  <DirectoryReferenceChip
+                    key={`${reference.hostId}:${reference.path}`}
+                    reference={reference}
+                    onRemove={props.onRemoveDirectory ? () => props.onRemoveDirectory?.(index) : undefined}
+                  />
+                ))}
                 {props.pendingQuotes?.map((quote, index) => (
                   <Token
                     key={`${quote.sourceTurnId ?? 'quote'}-${index}`}
@@ -1830,6 +1844,16 @@ export const Composer = forwardRef<
                         isDisabled={attachmentImportBlocked || importActionBusy}
                         onClick={() => {
                           void runImportAction('pick', props.onPickAttachments);
+                        }}
+                      />
+                    ) : null}
+                    {props.onPickDirectory ? (
+                      <DropdownMenuItem
+                        label={copy.referenceFolder}
+                        icon={<FolderOpen size={ICON_SIZE.control} aria-hidden="true" />}
+                        isDisabled={props.disabled || props.streaming === true || importActionBusy}
+                        onClick={() => {
+                          void runImportAction('directory', props.onPickDirectory);
                         }}
                       />
                     ) : null}

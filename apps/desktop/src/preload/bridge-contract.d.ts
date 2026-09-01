@@ -1040,6 +1040,7 @@ export interface MakaBridge {
         attachmentItems?: RendererIngestInput[];
         retainedAttachments?: import('@maka/core/events').AttachmentRef[];
         turnOrchestration?: TurnOrchestration;
+        directoryReferences?: import('@maka/core/events').DirectoryReference[];
         quotes?: import('@maka/core/events').QuoteRef[];
         workspaceFileReferences?: Array<
           Pick<import('@maka/core/events').InlineReference, 'value' | 'start'>
@@ -1110,6 +1111,7 @@ export interface MakaBridge {
         turnOrchestration?: TurnOrchestration;
         attachmentItems?: RendererIngestInput[];
         retainedAttachments?: import('@maka/core/events').AttachmentRef[];
+        directoryReferences?: import('@maka/core/events').DirectoryReference[];
         quotes?: import('@maka/core/events').QuoteRef[];
         workspaceFileReferences?: Array<
           Pick<import('@maka/core/events').InlineReference, 'value' | 'start'>
@@ -1469,6 +1471,7 @@ export interface MakaBridge {
     openBackup(kind: 'save' | 'reset' | 'restore', host?: DesktopRuntimeHostRef): Promise<{ ok: true } | { ok: false; message: string }>;
   };
   attachments: {
+    pickDirectory(): Promise<{ ok: true; reference: import('@maka/core/events').DirectoryReference } | { ok: false; reason: 'cancelled' }>;
     pickFiles(): Promise<
       | {
           ok: true;
