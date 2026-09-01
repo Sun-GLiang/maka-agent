@@ -234,6 +234,30 @@ describe('app shell session UI state controller', () => {
     assert.deepEqual(Object.keys(controller.sessionEventHealthBySessionRef.current), ['keep']);
   });
 
+  it('owns per-session transcript reading anchors without notifying render subscribers', () => {
+    let notifications = 0;
+    const controller = createAppShellSessionUiStateController();
+    controller.subscribe(() => {
+      notifications += 1;
+    });
+
+    controller.setTranscriptReadingAnchor('drop', { turnId: 'turn-drop', sequence: 7 });
+    controller.setTranscriptReadingAnchor('keep', { turnId: 'turn-keep', sequence: 11 });
+    controller.setTranscriptReadingAnchor('drop', { turnId: 'turn-drop' });
+
+    assert.deepEqual(controller.transcriptReadingAnchorBySessionRef.current, {
+      drop: { turnId: 'turn-drop', sequence: 7 },
+      keep: { turnId: 'turn-keep', sequence: 11 },
+    });
+    assert.equal(notifications, 0, 'reading anchors have no live render subscriber');
+
+    controller.setTranscriptReadingAnchor('keep', undefined);
+    controller.clearSessionUiState('drop');
+
+    assert.deepEqual(controller.transcriptReadingAnchorBySessionRef.current, {});
+    assert.equal(notifications, 0);
+  });
+
   it('keeps the synchronous live-turn ref aligned with reducer updates', () => {
     const controller = createAppShellSessionUiStateController();
     const projection = armLiveTurn('turn-1');

@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import { expect, test, COMPOSER_INPUT } from './fixtures';
+import { expect, test, COMPOSER_INPUT, ensureSidebarExpanded } from './fixtures';
 import type { Page } from '@playwright/test';
 
 /**
@@ -97,6 +97,15 @@ function turnTop(page: Page, turnId: string): Promise<number> {
     if (!turn) throw new Error(`turn ${id} is not mounted`);
     return Math.round(turn.getBoundingClientRect().top);
   }, turnId);
+}
+
+function turnOffsetFromScroller(page: Page, turnId: string): Promise<number> {
+  return page.evaluate(([selector, id]) => {
+    const root = document.querySelector(selector);
+    const turn = document.querySelector(`[data-turn-id="${CSS.escape(id as string)}"]`);
+    if (!root || !turn) return Number.POSITIVE_INFINITY;
+    return Math.round(turn.getBoundingClientRect().top - root.getBoundingClientRect().top);
+  }, [SCROLLER, turnId] as const);
 }
 
 /**
@@ -203,6 +212,94 @@ test('a streaming answer keeps the viewport at the tail', async ({ window: page 
   expect(lag.worstLag).toBeLessThanOrEqual(lag.worstFrameGrowth + 8);
   const settled = await scrollMetrics(page);
   expect(settled.distance, JSON.stringify(settled)).toBeLessThanOrEqual(4);
+  expect(await scrollButtonOffered(page)).toBe(false);
+});
+
+test('switching Sessions restores a Turn anchor while a tail Session follows background growth', async ({
+  promptRailWindow: page,
+}) => {
+  test.slow();
+  await page.setViewportSize({ width: 900, height: 700 });
+  await ensureSidebarExpanded(page);
+  const rows = page.locator('.maka-session-row');
+  const selected = rows.locator('button.astryx-side-nav-item.selected');
+  const readingSessionId = await selected.evaluate(
+    (button) => button.closest('.maka-session-row')?.getAttribute('data-session-id'),
+  );
+  if (!readingSessionId) throw new Error('the prompt-rail Session is not selected');
+  const tailSessionId = await rows.evaluateAll(
+    (items, active) => items
+      .map((row) => row.getAttribute('data-session-id'))
+      .find((sessionId) => sessionId !== active) ?? null,
+    readingSessionId,
+  );
+  if (!tailSessionId) throw new Error('the fixture has no tail-intent Session');
+  const rowButton = (sessionId: string) => page.locator(
+    `.maka-session-row[data-session-id=${JSON.stringify(sessionId)}] button`,
+  ).first();
+
+  // Move the active bounded range away from the latest window, then establish
+  // a reading position through the real scroll event path. Reopening the
+  // Session now has to use the saved sequence before the Turn can exist.
+  await page.locator('.maka-prompt-rail-tick').first().click({ force: true });
+  const readingTurnId = 'turn-prompt-rail-1';
+  await expect(page.locator(`[data-turn-id="${readingTurnId}"]`)).toHaveCount(1, {
+    timeout: 20_000,
+  });
+  await expect.poll(
+    async () => Math.abs(await turnOffsetFromScroller(page, readingTurnId)),
+    { message: 'the unloaded prompt reaches the scroller start' },
+  ).toBeLessThanOrEqual(24);
+  // The prompt rail holds its target through late content measurement. Let it
+  // hand the viewport back before switching, exactly as a reader who paused on
+  // the selected prompt would.
+  await page.waitForTimeout(1_200);
+  expect(await scrollButtonOffered(page)).toBe(true);
+
+  await rowButton(tailSessionId).click();
+  await expect(rowButton(tailSessionId)).toHaveClass(/selected/);
+  await waitForPaintedFrames(page, 6);
+  expect(await distanceToTail(page)).toBeLessThanOrEqual(4);
+  // The fixture Session predates connection identities. Choosing any current
+  // model upgrades it onto the E2E Runtime Host before this test starts a Turn.
+  const modelSwitcher = page.getByRole('button', { name: '切换当前任务模型' });
+  await modelSwitcher.click();
+  await page.getByRole('menuitem', { name: 'glm-4.5', exact: true }).click();
+  await expect(modelSwitcher).toContainText('glm-4.5');
+
+  await page.evaluate((sessionId) => {
+    const state = { complete: false, unsubscribe: () => undefined };
+    state.unsubscribe = window.maka.sessions.subscribeEvents(sessionId, (event) => {
+      if (event.type !== 'complete') return;
+      state.complete = true;
+      state.unsubscribe();
+    });
+    (window as typeof window & { __makaBackgroundTailProbe?: typeof state })
+      .__makaBackgroundTailProbe = state;
+  }, tailSessionId);
+  await sendPrompt(page, LONG_PROMPT);
+  await expect(page.locator('.maka-user-message', { hasText: '第 1 行' })).toBeVisible();
+
+  // The transcript collapses before each async replacement. This round trip
+  // therefore exercises the production ordering that made a saved scrollTop
+  // become zero, not merely a pre-filled test tree.
+  await rowButton(readingSessionId).click();
+  await expect.poll(
+    async () => Math.abs(await turnOffsetFromScroller(page, readingTurnId)),
+    { timeout: 20_000, message: 'the saved reading Turn returns to the scroller start' },
+  ).toBeLessThanOrEqual(4);
+  expect(await scrollButtonOffered(page)).toBe(true);
+
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & {
+      __makaBackgroundTailProbe?: { complete: boolean };
+    }
+  ).__makaBackgroundTailProbe?.complete === true), { timeout: 30_000 }).toBe(true);
+  await rowButton(tailSessionId).click();
+  await expect(rowButton(tailSessionId)).toHaveClass(/selected/);
+  await waitForPaintedFrames(page, 6);
+  const tail = await scrollMetrics(page);
+  expect(tail.distance, JSON.stringify(tail)).toBeLessThanOrEqual(4);
   expect(await scrollButtonOffered(page)).toBe(false);
 });
 

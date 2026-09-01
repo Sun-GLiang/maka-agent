@@ -57,6 +57,11 @@ export interface SessionPendingClaim {
   release(key: string): void;
 }
 
+export interface TranscriptReadingAnchor {
+  readonly turnId: string;
+  readonly sequence?: number;
+}
+
 const SESSION_UI_MAP_KEYS = [
   'messageLoadErrorBySession',
   'messageRetryPendingBySession',
@@ -145,6 +150,13 @@ export function createAppShellSessionUiStateController(
   const sessionEventHealthBySessionRef: { current: Record<string, SessionEventStreamSnapshot> } = {
     current: {},
   };
+  // A reading anchor is renderer-only intent. Keeping it outside observed
+  // state means ordinary scrolling does not render the shell, while the
+  // controller still owns the same deletion lifetime as every other Session
+  // UI registry.
+  const transcriptReadingAnchorBySessionRef: {
+    current: Record<string, TranscriptReadingAnchor>;
+  } = { current: {} };
 
   // The ref mirrors whatever is about to become current, so it is already
   // correct when the synchronous notification reaches a listener that reads it.
@@ -197,6 +209,7 @@ export function createAppShellSessionUiStateController(
     subscribe: state.subscribe,
     liveTurnBySessionRef,
     sessionEventHealthBySessionRef,
+    transcriptReadingAnchorBySessionRef,
     setMessageLoadErrorBySession: createMapSetter('messageLoadErrorBySession'),
     messageRetryPending: createPendingClaim('messageRetryPendingBySession'),
     stopPending: createPendingClaim('stopPendingBySession'),
@@ -207,6 +220,28 @@ export function createAppShellSessionUiStateController(
     setSessionEventHealthBySession: ((updater) => {
       sessionEventHealthBySessionRef.current = updater(sessionEventHealthBySessionRef.current);
     }) satisfies StateUpdater<Record<string, SessionEventStreamSnapshot>>,
+    setTranscriptReadingAnchor: (
+      sessionId: string,
+      anchor: TranscriptReadingAnchor | undefined,
+    ) => {
+      const current = transcriptReadingAnchorBySessionRef.current;
+      if (!anchor) {
+        transcriptReadingAnchorBySessionRef.current = omitSessionKey(current, sessionId);
+        return;
+      }
+      const previous = current[sessionId];
+      // A temporarily unavailable bounded range cannot make a known sequence
+      // less true. The Turn identity is the semantic anchor; sequence is
+      // monotonic metadata for reopening it later.
+      const next =
+        previous?.turnId === anchor.turnId &&
+        previous.sequence !== undefined &&
+        anchor.sequence === undefined
+          ? previous
+          : anchor;
+      if (previous === next) return;
+      transcriptReadingAnchorBySessionRef.current = { ...current, [sessionId]: next };
+    },
     /**
      * The authority said something about `turnId` — it started, failed to
      * start, or ended. Drop that arm's `unconfirmed` claim so a session list
@@ -224,6 +259,10 @@ export function createAppShellSessionUiStateController(
     clearSessionUiState: (sessionId: string) => {
       sessionEventHealthBySessionRef.current = omitSessionKey(
         sessionEventHealthBySessionRef.current,
+        sessionId,
+      );
+      transcriptReadingAnchorBySessionRef.current = omitSessionKey(
+        transcriptReadingAnchorBySessionRef.current,
         sessionId,
       );
       replaceState(clearAppShellSessionUiStateForSession(state.getState(), sessionId));

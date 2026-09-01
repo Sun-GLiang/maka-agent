@@ -2419,16 +2419,36 @@ function AppShellContent({
     };
   }, [activeId, activeIdRef, newestDurablePromptSequence, transcriptTurnIndex]);
   useEffect(() => {
-    const target = searchScrollTarget;
-    if (!target || target.sessionId !== activeId || target.sequence === undefined) return;
-    const sequence = target.sequence;
+    if (!activeId) return;
+    const searchTarget = searchScrollTarget?.sessionId === activeId
+      ? searchScrollTarget
+      : undefined;
+    const readingAnchor = sessionUiController.transcriptReadingAnchorBySessionRef.current[activeId];
+    const target = searchTarget
+      ? searchTarget.sequence === undefined
+        ? undefined
+        : { sessionId: activeId, turnId: searchTarget.turnId, sequence: searchTarget.sequence }
+      : readingAnchor?.sequence !== undefined
+          ? { sessionId: activeId, turnId: readingAnchor.turnId, sequence: readingAnchor.sequence }
+          : undefined;
+    if (!target) return;
     const controller = transcriptRangeRef.current;
     if (!controller) return;
     let disposed = false;
     void controller.ready()
-      .then(() => controller.loadAround(sequence))
-      .then(() => {
+      .then(async () => {
         if (
+          disposed ||
+          transcriptRangeRef.current !== controller ||
+          activeIdRef.current !== target.sessionId ||
+          controller.store.sequenceForTurn(target.turnId) !== null
+        ) return false;
+        await controller.loadAround(target.sequence);
+        return true;
+      })
+      .then((loaded) => {
+        if (
+          !loaded ||
           disposed ||
           transcriptRangeRef.current !== controller ||
           activeIdRef.current !== target.sessionId
@@ -2436,7 +2456,11 @@ function AppShellContent({
         setMessages([...controller.store.snapshot().messages]);
       })
       .catch((error) => {
-        if (disposed || activeIdRef.current !== target.sessionId) return;
+        if (
+          disposed ||
+          transcriptRangeRef.current !== controller ||
+          activeIdRef.current !== target.sessionId
+        ) return;
         sessionUiController.setMessageLoadErrorBySession((current) => ({
           ...current,
           [target.sessionId]: localizedShellErrorMessage(
@@ -2449,7 +2473,7 @@ function AppShellContent({
     return () => {
       disposed = true;
     };
-  }, [activeId, searchScrollTarget?.nonce]);
+  }, [activeId, activeSession?.profileId, searchScrollTarget?.nonce]);
   useShellRunUpdates({
     activeId,
     setShellRunUpdatesBySession: sessionUiController.setShellRunUpdatesBySession,
@@ -2603,6 +2627,9 @@ function AppShellContent({
     activeId !== undefined || taskEntry.selectors.target !== undefined;
 
   const activeMessageLoadError = activeId ? messageLoadErrorBySession[activeId] : undefined;
+  const activeTranscriptReadingAnchor = activeId
+    ? sessionUiController.transcriptReadingAnchorBySessionRef.current[activeId]
+    : undefined;
   let activeTranscriptRange;
   try {
     const controller = transcriptRangeRef.current;
@@ -2610,6 +2637,27 @@ function AppShellContent({
     if (range?.sessionId === activeId) activeTranscriptRange = range;
   } catch {
     activeTranscriptRange = undefined;
+  }
+  function handleTranscriptReadingAnchorChange(turnId?: string) {
+    const sessionId = activeId;
+    if (!sessionId || activeIdRef.current !== sessionId) return;
+    if (!turnId) {
+      sessionUiController.setTranscriptReadingAnchor(sessionId, undefined);
+      return;
+    }
+    const controller = transcriptRangeRef.current;
+    if (!controller) return;
+    let sequence: number | undefined;
+    try {
+      if (controller.store.range().sessionId !== sessionId) return;
+      sequence = controller.store.sequenceForTurn(turnId) ?? undefined;
+    } catch {
+      return;
+    }
+    sessionUiController.setTranscriptReadingAnchor(
+      sessionId,
+      sequence === undefined ? { turnId } : { turnId, sequence },
+    );
   }
   async function loadTranscriptHistory(target: 'earlier' | 'latest', anchorTurnId?: string) {
     const controller = transcriptRangeRef.current;
@@ -3155,6 +3203,12 @@ function AppShellContent({
                           }
                     : undefined
                 }
+                restoreTargetTurn={activeTranscriptReadingAnchor
+                  ? { turnId: activeTranscriptReadingAnchor.turnId }
+                  : undefined}
+                onReadingAnchorChange={activeId
+                  ? handleTranscriptReadingAnchorChange
+                  : undefined}
                 transcriptTurnIndex={
                   transcriptTurnIndex && transcriptTurnIndex.sessionId === activeId
                     ? transcriptTurnIndex.turns
