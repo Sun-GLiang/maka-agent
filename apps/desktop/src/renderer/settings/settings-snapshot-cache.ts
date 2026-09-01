@@ -18,14 +18,16 @@
  */
 
 import type { AppSettings, RuntimeHostAppSettings } from '@maka/core/settings';
-import type { IdentifiedLlmConnection } from '@maka/core/llm-connections';
+import type {
+  ProjectedLlmConnection,
+} from '@maka/core/llm-connections';
 import type {
   DesktopRuntimeHostProfileSnapshot,
   DesktopRuntimeHostRef,
 } from '../../preload/bridge-contract.js';
 
 export interface RuntimeHostConnectionsSnapshot {
-  readonly connections: IdentifiedLlmConnection[];
+  readonly connections: ProjectedLlmConnection[];
   readonly defaultSlug: string | null;
 }
 

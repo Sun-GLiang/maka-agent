@@ -95,11 +95,24 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 85 as const;
-// 85: Configuration credential transfer binds proxy destinations and
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 87 as const;
+// 87: The connection catalog projects each model as the Host resolved it —
+// a `catalog_entry` item per model, counted by the connection header. Clients
+// render those entries instead of merging the stored row against their own
+// bundled model metadata, so a Desktop and a TUI attached to one Host cannot
+// describe the same model differently. An older client ignores the new items
+// but would still resolve locally; an older Host sends none, leaving a newer
+// client with an empty catalog. Both are rejected at the handshake.
+// 86: Client Capability accepted frames carry typed admission evidence used to
+// enforce Session Grant scopes. Older peers cannot preserve that boundary.
+// 85: Plugin package and Entry composition operations become Host-owned protocol
+// surfaces. Older peers cannot safely exchange these strict operation shapes.
+// 84: Message content carries Host-bound directory references. Older peers
+// reject this field and cannot preserve its identity through admission/replay.
+// Configuration credential transfer also binds proxy destinations and
 // Connection credentials to exact Host-owned targets before secret access.
-// 84: Proxy policy and credentials commit through one recoverable Host command.
-// Older peers can split the writes and violate the shared credential basis.
+// Proxy policy and credentials commit through one recoverable Host command;
+// older peers can split the writes and violate the shared credential basis.
 // 83: WorkHub Coordination actions add linked replacement proposals,
 // destructive user confirmation, and replacement results. Older peers reject
 // these closed action and result shapes.

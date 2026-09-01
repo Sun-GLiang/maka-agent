@@ -24,7 +24,6 @@ import {
   type RuntimeHostAppSettings,
 } from '@maka/core/settings';
 import type {
-  ConnectionCatalogSnapshot,
   CredentialLocator,
 } from '@maka/core/runtime-policy';
 import type { ConfigBundle } from '@maka/storage/config-transfer';
@@ -32,6 +31,9 @@ import {
   adaptRuntimeHostConfigImport,
   gatherRuntimeHostConfig,
 } from '../runtime-host-config-ipc-main.js';
+import type {
+  RuntimeHostConnectionCatalogSnapshot as ConnectionCatalogSnapshot,
+} from '@maka/runtime-host/client';
 
 const CATALOG: ConnectionCatalogSnapshot = {
   revision: 1,
@@ -48,6 +50,7 @@ const CATALOG: ConnectionCatalogSnapshot = {
       providerType: 'deepseek',
       enabled: true,
       enabledModelIds: ['deepseek-v4-pro'],
+      catalogEntries: [],
       models: [{ id: 'deepseek-v4-pro' }],
     },
   ],

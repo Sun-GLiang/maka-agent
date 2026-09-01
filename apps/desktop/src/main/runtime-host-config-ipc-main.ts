@@ -22,7 +22,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { IpcMain } from 'electron';
 import type { AppSettings, UpdateAppSettingsInput } from '@maka/core/settings';
 import type { LlmConnection } from '@maka/core/llm-connections';
-import { PROVIDER_DEFAULTS } from '@maka/core/llm-connections';
+import { PROVIDER_REGISTRY } from '@maka/core/llm-connections';
 import {
   canonicalConnectionEffectiveBaseUrl,
   connectionCredentialTarget,
@@ -635,7 +635,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function connectionCredentialLocator(
   connection: ConnectionCatalogEntry,
 ): Extract<CredentialLocator, { scope: 'connection' }> | null {
-  const kind = PROVIDER_DEFAULTS[connection.providerType].authKind;
+  const kind = PROVIDER_REGISTRY[connection.providerType].authKind;
   if (kind === 'none') return null;
   return {
     scope: 'connection',
