@@ -63,6 +63,11 @@ import {
   type UpdateNetworkProxyInput,
   type UpdateNetworkProxyResult,
 } from '@maka/core/runtime-policy';
+import {
+  applyModelFactOverridesToConnection,
+  applyModelFactOverridesToCatalogSnapshot,
+  type ModelFactsDocument,
+} from '@maka/core/model-facts';
 import { deriveProviderAuthContract, type ProviderAuthAction } from '@maka/core/provider-auth';
 import { isRetiredProvider } from '@maka/core/provider-registry';
 import {
@@ -153,6 +158,7 @@ import {
 } from './oauth-login-receipt-document.js';
 import { policySnapshot, RuntimePolicyDocumentOwner } from './policy-document.js';
 import { SerializedOperationLane } from '../serialized-operation-lane.js';
+import { ModelFactsDocumentOwner } from '../model-facts-store.js';
 
 type RootExecutor = <T>(operation: (root: string) => Promise<T>) => Promise<T>;
 
@@ -202,6 +208,7 @@ type SemanticConnectionBasis =
       readonly kind: 'connection_test';
       readonly requestBodyOverlayJson: string;
       readonly model: ConnectionTestModelBasis;
+      readonly modelFactsFingerprint: string;
     });
 
 interface ConnectionTicketRecord {
@@ -268,6 +275,8 @@ export class RuntimePolicyCoordinator {
   private readonly policy = new RuntimePolicyDocumentOwner();
   private readonly catalog = new ConnectionCatalogDocumentOwner();
   private readonly vault = new CredentialVaultDocumentOwner();
+  private readonly modelFacts = new ModelFactsDocumentOwner();
+  private warnedModelFactsFingerprint: string | undefined;
   private readonly tickets = new WeakMap<object, OperationTicketRecord>();
   private onboardingRecoveryRequired = false;
 
@@ -295,7 +304,7 @@ export class RuntimePolicyCoordinator {
   }
 
   getCatalogSnapshot() {
-    return this.inLane(async (root) => catalogSnapshot(await this.catalog.read(root)));
+    return this.inLane(async (root) => this.projectCatalogSnapshot(root));
   }
 
   getVaultSnapshot() {
@@ -404,11 +413,15 @@ export class RuntimePolicyCoordinator {
   }
 
   createConnection(input: CreateCatalogConnectionInput) {
-    return this.inLane((root) => this.catalog.create(root, input));
+    return this.inLane(async (root) =>
+      this.projectCatalogMutation(root, await this.catalog.create(root, input)),
+    );
   }
 
   updateConnection(input: UpdateCatalogConnectionInput) {
-    return this.inLane((root) => this.catalog.update(root, input));
+    return this.inLane(async (root) =>
+      this.projectCatalogMutation(root, await this.catalog.update(root, input)),
+    );
   }
 
   removeConnection(rawInput: RemoveCatalogConnectionInput) {
@@ -429,7 +442,10 @@ export class RuntimePolicyCoordinator {
       const vault = await this.vault.read(root);
       if (!connection) {
         await this.vault.deleteConnectionCredentials(root, vault, expected.connectionId);
-        return deepFreeze({ kind: 'committed' as const, snapshot: catalogSnapshot(catalog) });
+        return deepFreeze({
+          kind: 'committed' as const,
+          snapshot: await this.projectCatalogSnapshot(root),
+        });
       }
       const result = await this.catalog.remove(root, { expected });
       if (result.kind === 'committed') {
@@ -442,12 +458,14 @@ export class RuntimePolicyCoordinator {
           );
         }
       }
-      return result;
+      return this.projectCatalogMutation(root, result);
     });
   }
 
   setDefaultTarget(input: SetDefaultConnectionTargetInput) {
-    return this.inLane((root) => this.catalog.setDefaultTarget(root, input));
+    return this.inLane(async (root) =>
+      this.projectCatalogMutation(root, await this.catalog.setDefaultTarget(root, input)),
+    );
   }
 
   migrateSystemSeed(input: MigrateSystemSeedInput) {
@@ -845,7 +863,10 @@ export class RuntimePolicyCoordinator {
       if (prepared.kind !== 'ready') return prepared;
       return deepFreeze({
         kind: 'ready' as const,
-        connection: structuredClone(connection),
+        connection: applyModelFactOverridesToConnection(
+          structuredClone(connection),
+          (await this.readModelFacts(root)).document.overrides,
+        ),
         secretMaterial: prepared.secretMaterial,
         networkProxy: structuredClone(prepared.networkProxy),
       });
@@ -1193,7 +1214,10 @@ export class RuntimePolicyCoordinator {
           connectionBasis(checked.connection),
           result,
         );
-        return deepFreeze({ kind: 'committed' as const, snapshot });
+        return deepFreeze({
+          kind: 'committed' as const,
+          snapshot: await this.projectCatalogSnapshot(root),
+        });
       }),
     );
   }
@@ -1531,21 +1555,32 @@ export class RuntimePolicyCoordinator {
         'test_credentials',
       );
       if (prepared.kind !== 'ready') return prepared;
+      const facts = await this.readModelFacts(root);
+      const projectedConnection = applyModelFactOverridesToConnection(
+        structuredClone(prepared.connection),
+        facts.document.overrides,
+      );
       const modelId =
         rawModelId === null
           ? null
           : decodeConnectionInput(() => decodeConnectionModelId(rawModelId));
-      if (modelId !== null && !isCanonicalConnectionTestModel(prepared.connection, modelId)) {
+      if (modelId !== null && !isCanonicalConnectionTestModel(projectedConnection, modelId)) {
         throw codecError(
           'invalid_connection_input',
           'Connection test model is not in the canonical model set',
         );
       }
-      const ticket = this.issueTicket('connection_test', connectionTestSemanticBasis(prepared));
+      const ticket = this.issueTicket(
+        'connection_test',
+        connectionTestSemanticBasis(
+          prepared,
+          this.modelFacts.fingerprintForConnection(facts.document, prepared.connection),
+        ),
+      );
       return deepFreeze({
         kind: 'ready' as const,
         ticket: ticket as ConnectionTestTicket,
-        connection: structuredClone(prepared.connection),
+        connection: projectedConnection,
         modelId,
         secretMaterial: prepared.secretMaterial,
         networkProxy: structuredClone(prepared.networkProxy),
@@ -1560,6 +1595,9 @@ export class RuntimePolicyCoordinator {
     const claimed = this.claimTicket(ticket, 'connection_test');
     return this.completeClaimedTicket(claimed, () =>
       this.inLane(async (root) => {
+        if (claimed.basis.kind !== 'connection_test') {
+          throw new Error('Coordinator admitted a non-connection-test ticket');
+        }
         const catalog = await this.catalog.read(root);
         const checked = await this.checkSemanticConnectionBasis(root, catalog, claimed.basis);
         if (checked.changed.length > 0 || !checked.connection) {
@@ -1570,8 +1608,12 @@ export class RuntimePolicyCoordinator {
           catalog,
           connectionBasis(checked.connection),
           result,
+          claimed.basis.modelFactsFingerprint,
         );
-        return deepFreeze({ kind: 'committed' as const, snapshot });
+        return deepFreeze({
+          kind: 'committed' as const,
+          snapshot: await this.projectCatalogSnapshot(root),
+        });
       }),
     );
   }
@@ -1715,17 +1757,31 @@ export class RuntimePolicyCoordinator {
   }> {
     const connection = findConnection(catalog, { connectionId: basis.connectionId });
     const changed: ConnectionEffectChangedDomain[] = [];
+    const facts = basis.kind === 'connection_test' ? await this.readModelFacts(root) : undefined;
     if (
-      !connection ||
-      connection.providerType !== basis.providerType ||
-      !connection.enabled ||
-      canonicalEffectiveEndpoint(connection) !== basis.effectiveEndpoint ||
+      basis.kind === 'connection_test' &&
+      (!connection ||
+        this.modelFacts.fingerprintForConnection(facts!.document, connection) !==
+          basis.modelFactsFingerprint)
+    ) {
+      changed.push('connection');
+    }
+    const effectiveConnection =
+      connection && basis.kind === 'connection_test'
+        ? applyModelFactOverridesToConnection(connection, facts!.document.overrides)
+        : connection;
+    if (
+      !effectiveConnection ||
+      effectiveConnection.providerType !== basis.providerType ||
+      !effectiveConnection.enabled ||
+      canonicalEffectiveEndpoint(effectiveConnection) !== basis.effectiveEndpoint ||
       (basis.kind === 'model_fetch' &&
-        !sameStringArray(connection.enabledModelIds, basis.enabledModelIds)) ||
+        !sameStringArray(effectiveConnection.enabledModelIds, basis.enabledModelIds)) ||
       (basis.kind === 'connection_test' &&
-        JSON.stringify(connection.requestBodyOverlay ?? {}) !== basis.requestBodyOverlayJson) ||
+        JSON.stringify(effectiveConnection.requestBodyOverlay ?? {}) !==
+          basis.requestBodyOverlayJson) ||
       (basis.kind === 'connection_test' &&
-        !sameConnectionTestModelBasis(connectionTestModelBasis(connection), basis.model))
+        !sameConnectionTestModelBasis(connectionTestModelBasis(connection!), basis.model))
     ) {
       changed.push('connection');
     }
@@ -2133,6 +2189,81 @@ export class RuntimePolicyCoordinator {
       return operation(root);
     });
   }
+
+  private async projectCatalogSnapshot(root: string): Promise<ConnectionCatalogSnapshot> {
+    const facts = await this.readModelFacts(root);
+    const snapshot = catalogSnapshot(await this.catalog.read(root));
+    return deepFreeze(
+      hideStaleModelFactsVerification(
+        applyModelFactOverridesToCatalogSnapshot(snapshot, facts.document.overrides),
+        snapshot,
+        facts.document,
+        this.modelFacts,
+      ),
+    );
+  }
+
+  private async readModelFacts(root: string) {
+    const facts = await this.modelFacts.readWithDiagnostics(root);
+    if (facts.diagnostic !== undefined && this.warnedModelFactsFingerprint !== facts.fingerprint) {
+      process.emitWarning(`model-facts.json is ${facts.diagnostic}; ignoring its overrides`, {
+        type: 'RuntimePolicyWarning',
+      });
+      this.warnedModelFactsFingerprint = facts.fingerprint;
+    }
+    return facts;
+  }
+
+  private async projectCatalogMutation<T extends { readonly kind: string }>(
+    root: string,
+    result: T,
+  ): Promise<T> {
+    if (result.kind !== 'committed' || !('snapshot' in result)) return result;
+    return deepFreeze({
+      ...result,
+      snapshot: await this.projectCatalogSnapshot(root),
+    }) as T;
+  }
+}
+
+function hideStaleModelFactsVerification(
+  projected: ConnectionCatalogSnapshot,
+  persisted: ConnectionCatalogSnapshot,
+  document: ModelFactsDocument,
+  owner: ModelFactsDocumentOwner,
+): ConnectionCatalogSnapshot {
+  const persistedById = new Map(
+    persisted.connections.map((connection) => [connection.connectionId, connection] as const),
+  );
+  return {
+    ...projected,
+    connections: projected.connections.map((connection) => {
+      if (connection.lastTest === undefined) return connection;
+      const raw = persistedById.get(connection.connectionId);
+      if (!raw) return connection;
+      const current = owner.fingerprintForConnection(document, raw);
+      const emptyFactsFingerprint = owner.fingerprintForConnection(
+        { ...document, overrides: {} },
+        raw,
+      );
+      // Catalogs written before model facts existed have no marker. They remain
+      // valid until facts for this connection actually exist; every test
+      // recorded by this feature carries a connection-scoped marker and is
+      // checked exactly.
+      if (
+        raw.lastTestModelFactsFingerprint === current ||
+        (raw.lastTestModelFactsFingerprint === undefined && current === emptyFactsFingerprint)
+      ) {
+        return connection;
+      }
+      const {
+        lastTest: _lastTest,
+        lastTestModelFactsFingerprint: _lastTestModelFactsFingerprint,
+        ...withoutLastTest
+      } = connection;
+      return withoutLastTest;
+    }),
+  };
 }
 
 function matchesCredentialExpectation(
@@ -2181,12 +2312,14 @@ function modelFetchSemanticBasis(
 
 function connectionTestSemanticBasis(
   prepared: PreparedConnectionMaterial,
+  modelFactsFingerprint: string,
 ): Extract<SemanticConnectionBasis, { readonly kind: 'connection_test' }> {
   return {
     kind: 'connection_test',
     ...commonSemanticConnectionBasis(prepared),
     requestBodyOverlayJson: JSON.stringify(prepared.connection.requestBodyOverlay ?? {}),
     model: connectionTestModelBasis(prepared.connection),
+    modelFactsFingerprint,
   };
 }
 

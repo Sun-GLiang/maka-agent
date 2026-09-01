@@ -86,7 +86,7 @@ export * from './scheduled-task-change.js';
 export * from './session-retirement.js';
 export * from './session-transcript.js';
 export * from './session-turns.js';
-export * from './task-ledger.js';
+export * from './session-todo.js';
 export * from './workspace.js';
 export * from './workhub-coordination.js';
 export * from './websocket-path.js';
@@ -95,11 +95,26 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 80 as const;
-// 80: Configuration credential transfer binds proxy destinations and
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 85 as const;
+// 85: Configuration credential transfer binds proxy destinations and
 // Connection credentials to exact Host-owned targets before secret access.
-// 79: Proxy policy and credentials commit through one recoverable Host command.
+// 84: Proxy policy and credentials commit through one recoverable Host command.
 // Older peers can split the writes and violate the shared credential basis.
+// 83: WorkHub Coordination actions add linked replacement proposals,
+// destructive user confirmation, and replacement results. Older peers reject
+// these closed action and result shapes.
+// 82: Session removal reports how many linked subtasks it archived, and adds a
+// `session.remove.preview` query for that count before the delete. Older peers
+// reject the extra removed-result field and the unknown operation.
+// 81: SessionTodo replaces the Task Ledger protocol and continuity domain with
+// one bounded current-state snapshot. Older peers cannot decode the operation
+// or preserve the new invalidation vocabulary.
+// 80: Runtime Policy catalog models gained validated user-overridden fact
+// provenance. Older peers reject this projected model shape, so they must be
+// refused during the handshake before catalog admission.
+// 79: Every `turn.message.submit` disposition carries the exact Skill
+// invocation outcome. Durable queued replays may omit the previous Host
+// Epoch's transient queue revision; older strict peers reject either shape.
 // 78: OAuth login targets explicit create/existing Connection entities and
 // returns their canonical identity. Older peers reject both closed wire shapes.
 // 77: LLM and tool usage-log projections carry an optional `sessionTitle` (the
