@@ -28,6 +28,7 @@ import type { ChatModelChoice } from '@maka/core/chat-model-choice';
 import type { SessionChangedEvent, SessionSummary, TurnRecord } from '@maka/core/session';
 import {
   createFakeWorkbarServices,
+  requestPermissionModeWithConfirmation,
   useQuoteCompanion,
   sessionHasExactModelChoice,
   WorkbarServicesProvider,
@@ -52,6 +53,27 @@ const SOURCE_SESSION = session('source-session');
 type SideChatStopTarget = Parameters<WorkbarServices['sideChat']['stop']>[1];
 type QueueUpdate = Extract<SessionEvent, { type: 'queue_update' }>;
 type QueueEntry = NonNullable<QueueUpdate['steeringEntries']>[number];
+
+test('declining Full access does not persist the side-chat permission mode', async () => {
+  let confirmations = 0;
+  let writes = 0;
+
+  const result = await requestPermissionModeWithConfirmation(
+    'bypass',
+    async () => {
+      confirmations += 1;
+      return false;
+    },
+    async () => {
+      writes += 1;
+      return true;
+    },
+  );
+
+  assert.equal(result, false);
+  assert.equal(confirmations, 1);
+  assert.equal(writes, 0);
+});
 
 function completeEvent(id: string, turnId: string, ts: number): SessionEvent {
   return { type: 'complete', id, turnId, ts, stopReason: 'end_turn' };
@@ -1510,6 +1532,7 @@ function QuoteCompanionProbe(props: {
     modelChoices: props.modelChoices ?? [choiceFor(sourceSession)],
     locale: 'en',
     onQuotesConsumed: () => undefined,
+    confirmBypass: async () => true,
   });
   return createElement('div', {
     'data-error': companion.error ?? '',
@@ -1535,6 +1558,7 @@ function QuoteCompanionOwnershipProbe(props: {
     modelChoices: props.modelChoices ?? [choiceFor(sourceSession)],
     locale: 'en',
     onQuotesConsumed: props.onQuotesConsumed ?? (() => undefined),
+    confirmBypass: async () => true,
   });
   props.onSend(companion.send);
   props.onSteer?.(companion.steer);

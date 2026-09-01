@@ -112,9 +112,20 @@ export interface UseQuoteCompanionInput {
   locale: UiLocale;
   /** Called once a send has consumed the staged quotes, so the host clears them. */
   onQuotesConsumed: (snapshot: CompanionQuoteSnapshot) => void;
+  /** Confirms the destructive Full access permission mode before it is written. */
+  confirmBypass: () => Promise<boolean>;
   /** Reports creation and authoritative cleanup so the host can keep every
    *  ephemeral fork hidden for its complete lifetime. */
   onForkVisibilityChange?: (event: CompanionForkVisibilityEvent) => void;
+}
+
+export async function requestPermissionModeWithConfirmation(
+  mode: PermissionMode,
+  confirmBypass: () => Promise<boolean>,
+  write: () => Promise<boolean>,
+): Promise<boolean> {
+  if (mode === 'bypass' && !(await confirmBypass())) return false;
+  return write();
 }
 
 export interface UseQuoteCompanionResult {
@@ -195,6 +206,8 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
   sourceSessionRef.current = sourceSession;
   const modelChoicesRef = useRef(modelChoices);
   modelChoicesRef.current = modelChoices;
+  const confirmBypassRef = useRef(input.confirmBypass);
+  confirmBypassRef.current = input.confirmBypass;
   const sourceModelReady = sessionHasExactModelChoice(sourceSession, modelChoices);
   const sourceSessionId = sourceSession?.id;
   const sourceSessionIdRef = useRef(sourceSession?.id);
@@ -987,7 +1000,11 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
       const id = companionIdRef.current;
       if (!id || turnInFlight) return Promise.resolve(false);
       setError(null);
-      return requestPermissionMode(id, mode);
+      return requestPermissionModeWithConfirmation(
+        mode,
+        () => confirmBypassRef.current(),
+        () => requestPermissionMode(id, mode),
+      );
     },
     [requestPermissionMode, turnInFlight],
   );

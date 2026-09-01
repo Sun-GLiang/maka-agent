@@ -38,6 +38,7 @@ import { useComposerMentionsContext } from '../../../../composer-mentions.js';
 import { preflightAttachmentItems } from '../../../../attachment-preflight';
 import { toComposerIngestItems } from '../../../../composer-attachments';
 import { getDesktopConversationCopy } from '../../../../locales/conversation-copy.js';
+import { confirmBypassPermission } from '../../../../locales/shell-copy.js';
 import { deriveTurnFooterActions } from '../../../../turn-footer-actions';
 import type {
   CompanionQuoteTarget,
@@ -102,6 +103,7 @@ export function QuoteCompanionPanel(props: {
     modelChoices: props.modelChoices,
     locale,
     onQuotesConsumed: props.onQuotesConsumed,
+    confirmBypass: () => confirmBypassPermission(toast, locale),
     onForkVisibilityChange: props.onForkVisibilityChange,
   });
   useEffect(() => {
