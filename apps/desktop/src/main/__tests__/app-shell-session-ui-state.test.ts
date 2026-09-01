@@ -31,6 +31,7 @@ import {
   createInitialAppShellSessionUiState,
   type AppShellSessionUiState,
 } from '../../renderer/app-shell-session-ui-state.js';
+import { transcriptReadingPosition } from '../../renderer/features/conversation/index.js';
 
 function boundaryRequest(requestId: string): SandboxBoundaryRequestEvent {
   return {
@@ -256,6 +257,32 @@ describe('app shell session UI state controller', () => {
 
     assert.deepEqual(controller.transcriptReadingAnchorBySessionRef.current, {});
     assert.equal(notifications, 0);
+  });
+
+  it('enriches a Turn-only reading anchor when its range sequence arrives later', () => {
+    let anchor: { turnId: string; sequence?: number } | undefined;
+    transcriptReadingPosition.restoreRange({
+      sessionId: 'session',
+      readingAnchor: { turnId: 'turn' },
+      controller: {
+        store: {
+          range: () => ({ sessionId: 'session' }),
+          sequenceForTurn: () => 17,
+          newestDurableUserSequence: () => 17,
+          snapshot: () => ({ messages: [] }),
+        },
+        ready: async () => undefined,
+        loadAround: async () => assert.fail('the resident Turn must not load another range'),
+      },
+      isCurrent: () => true,
+      setMessages: () => assert.fail('the resident range must not replace messages'),
+      setReadingAnchor: (_sessionId, next) => {
+        anchor = next;
+      },
+      onError: (error) => assert.fail(String(error)),
+    });
+
+    assert.deepEqual(anchor, { turnId: 'turn', sequence: 17 });
   });
 
   it('keeps the synchronous live-turn ref aligned with reducer updates', () => {

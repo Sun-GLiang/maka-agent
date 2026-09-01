@@ -80,7 +80,8 @@ import {
   deriveTaskReadinessNotice,
   isTaskSubmissionHardBlocked,
   resolveTaskReadinessModelTarget,
-} from './task-readiness-notice';
+  transcriptReadingPosition,
+} from './features/conversation';
 import { deriveWorkspaceReadinessRecovery } from './workspace-readiness-recovery';
 import { LiveTurnReconciler } from './live-turn-reconciler';
 import { useAppShellSessionUiReads } from './use-app-shell-session-ui-reads';
@@ -101,11 +102,7 @@ import {
   type SessionNavigationPorts,
   type SessionNavigationRowActions,
 } from './features/session-navigation';
-import {
-  TaskEntryHost,
-  useTaskEntryController,
-  type TaskEntryError,
-} from './features/task-entry';
+import { TaskEntryHost, useTaskEntryController } from './features/task-entry';
 import { useNewTaskChoice } from './use-new-task-choice';
 import { SessionCollaborationDialog } from './session-collaboration-dialog';
 import { SessionTurnRequestComposer } from './session-turn-request-composer.js';
@@ -393,8 +390,10 @@ function AppShellContent({
   } = useSettingsModal();
 
   const onboarding = useOnboardingSnapshot(initialOnboardingSnapshot);
-  const reportTaskEntryError = useCallback(
-    ({ title, description, profileId }: TaskEntryError) => {
+  const reportTaskEntryError = useCallback<
+    Parameters<typeof useTaskEntryController>[0]['reportError']
+  >(
+    ({ title, description, profileId }) => {
       toastApi.error(title, description, undefined, { profileId });
     },
     [toastApi],
@@ -2381,99 +2380,40 @@ function AppShellContent({
     setSessionEventHealthBySession: sessionUiController.setSessionEventHealthBySession,
     toastApi,
   });
-  let newestDurablePromptSequence: number | null = null;
-  try {
-    const controller = transcriptRangeRef.current;
-    if (controller && controller.store.range().sessionId === activeId) {
-      newestDurablePromptSequence = controller.store.newestDurableUserSequence();
-    }
-  } catch {
-    newestDurablePromptSequence = null;
-  }
-  useEffect(() => {
-    const sessionId = activeId;
-    if (!sessionId) {
-      setTranscriptTurnIndex(undefined);
-      return;
-    }
-    let disposed = false;
-    if (
-      transcriptTurnIndex?.sessionId === sessionId &&
-      (newestDurablePromptSequence === null ||
-        (transcriptTurnIndex.throughSequence !== null &&
-          newestDurablePromptSequence <= transcriptTurnIndex.throughSequence))
-    ) return;
-    void window.maka.sessions.listTurnLandmarks(sessionId).then(
-      (snapshot) => {
-        if (disposed || activeIdRef.current !== sessionId) return;
-        setTranscriptTurnIndex({
-          sessionId,
-          throughSequence: snapshot.throughSequence,
-          turns: snapshot.landmarks,
-        });
-      },
-      () => undefined,
-    );
-    return () => {
-      disposed = true;
-    };
-  }, [activeId, activeIdRef, newestDurablePromptSequence, transcriptTurnIndex]);
-  useEffect(() => {
-    if (!activeId) return;
-    const searchTarget = searchScrollTarget?.sessionId === activeId
-      ? searchScrollTarget
-      : undefined;
-    const readingAnchor = sessionUiController.transcriptReadingAnchorBySessionRef.current[activeId];
-    const target = searchTarget
-      ? searchTarget.sequence === undefined
-        ? undefined
-        : { sessionId: activeId, turnId: searchTarget.turnId, sequence: searchTarget.sequence }
-      : readingAnchor?.sequence !== undefined
-          ? { sessionId: activeId, turnId: readingAnchor.turnId, sequence: readingAnchor.sequence }
-          : undefined;
-    if (!target) return;
-    const controller = transcriptRangeRef.current;
-    if (!controller) return;
-    let disposed = false;
-    void controller.ready()
-      .then(async () => {
-        if (
-          disposed ||
-          transcriptRangeRef.current !== controller ||
-          activeIdRef.current !== target.sessionId ||
-          controller.store.sequenceForTurn(target.turnId) !== null
-        ) return false;
-        await controller.loadAround(target.sequence);
-        return true;
-      })
-      .then((loaded) => {
-        if (
-          !loaded ||
-          disposed ||
-          transcriptRangeRef.current !== controller ||
-          activeIdRef.current !== target.sessionId
-        ) return;
-        setMessages([...controller.store.snapshot().messages]);
-      })
-      .catch((error) => {
-        if (
-          disposed ||
-          transcriptRangeRef.current !== controller ||
-          activeIdRef.current !== target.sessionId
-        ) return;
-        sessionUiController.setMessageLoadErrorBySession((current) => ({
-          ...current,
-          [target.sessionId]: localizedShellErrorMessage(
-            error,
-            desktopConversationCopy.actions.operationFailedFallback,
-            uiLocale,
-          ),
-        }));
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [activeId, activeSession?.profileId, searchScrollTarget?.nonce]);
+  const newestDurablePromptSequence = transcriptReadingPosition.newestDurablePromptSequence(
+    transcriptRangeRef.current,
+    activeId,
+  );
+  useEffect(() => transcriptReadingPosition.refreshLandmarks({
+    sessionId: activeId,
+    newestDurablePromptSequence,
+    current: transcriptTurnIndex,
+    list: (sessionId) => window.maka.sessions.listTurnLandmarks(sessionId),
+    isCurrent: (sessionId) => activeIdRef.current === sessionId,
+    setIndex: setTranscriptTurnIndex,
+  }), [activeId, activeIdRef, newestDurablePromptSequence, transcriptTurnIndex]);
+  useEffect(() => transcriptReadingPosition.restoreRange({
+    sessionId: activeId,
+    searchTarget: searchScrollTarget,
+    readingAnchor: activeId
+      ? sessionUiController.transcriptReadingAnchorBySessionRef.current[activeId]
+      : undefined,
+    controller: transcriptRangeRef.current,
+    isCurrent: (sessionId, controller) =>
+      activeIdRef.current === sessionId && transcriptRangeRef.current === controller,
+    setMessages,
+    setReadingAnchor: sessionUiController.setTranscriptReadingAnchor,
+    onError: (error, sessionId) => {
+      sessionUiController.setMessageLoadErrorBySession((current) => ({
+        ...current,
+        [sessionId]: localizedShellErrorMessage(
+          error,
+          desktopConversationCopy.actions.operationFailedFallback,
+          uiLocale,
+        ),
+      }));
+    },
+  }), [activeId, activeSession?.profileId, messages, searchScrollTarget?.nonce]);
   useShellRunUpdates({
     activeId,
     setShellRunUpdatesBySession: sessionUiController.setShellRunUpdatesBySession,
@@ -2630,34 +2570,18 @@ function AppShellContent({
   const activeTranscriptReadingAnchor = activeId
     ? sessionUiController.transcriptReadingAnchorBySessionRef.current[activeId]
     : undefined;
-  let activeTranscriptRange;
-  try {
-    const controller = transcriptRangeRef.current;
-    const range = controller?.store.range();
-    if (range?.sessionId === activeId) activeTranscriptRange = range;
-  } catch {
-    activeTranscriptRange = undefined;
-  }
+  const activeTranscriptRange = transcriptReadingPosition.currentRange(
+    transcriptRangeRef.current,
+    activeId,
+  );
   function handleTranscriptReadingAnchorChange(turnId?: string) {
-    const sessionId = activeId;
-    if (!sessionId || activeIdRef.current !== sessionId) return;
-    if (!turnId) {
-      sessionUiController.setTranscriptReadingAnchor(sessionId, undefined);
-      return;
-    }
-    const controller = transcriptRangeRef.current;
-    if (!controller) return;
-    let sequence: number | undefined;
-    try {
-      if (controller.store.range().sessionId !== sessionId) return;
-      sequence = controller.store.sequenceForTurn(turnId) ?? undefined;
-    } catch {
-      return;
-    }
-    sessionUiController.setTranscriptReadingAnchor(
-      sessionId,
-      sequence === undefined ? { turnId } : { turnId, sequence },
-    );
+    transcriptReadingPosition.captureAnchor({
+      sessionId: activeId,
+      currentSessionId: activeIdRef.current,
+      turnId,
+      controller: transcriptRangeRef.current,
+      setAnchor: sessionUiController.setTranscriptReadingAnchor,
+    });
   }
   async function loadTranscriptHistory(target: 'earlier' | 'latest', anchorTurnId?: string) {
     const controller = transcriptRangeRef.current;

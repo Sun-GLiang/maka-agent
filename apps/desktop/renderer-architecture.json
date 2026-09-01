@@ -733,27 +733,18 @@
         "nonTriviaTokens": 650
       },
       "src/renderer/app-shell-session-ui-state.ts": {
-        "importDeclarations": 6,
+        "importDeclarations": 0,
         "bridgePaths": {},
         "environmentCapabilities": {},
-        "hookCalls": {
-          "useRef": 1
-        },
+        "hookCalls": {},
         "lifecycleMethods": {},
         "unresolvedDependencies": 0,
-        "actionFactories": [
-          "createAppShellSessionUiStateController"
-        ],
+        "actionFactories": [],
         "dependencyPaths": {
-          "./observable-state.js": 1,
-          "./shell-run-update-state.js": 1,
-          "@maka/core/events": 1,
-          "@maka/core/session-event-health": 1,
-          "@maka/ui": 1,
-          "react": 1
+          "./features/conversation/index.js": 1
         },
-        "importSpecifiers": 8,
-        "nonTriviaTokens": 1183
+        "importSpecifiers": 0,
+        "nonTriviaTokens": 7
       },
       "src/renderer/app-shell-stop-action.ts": {
         "importDeclarations": 4,
@@ -949,6 +940,7 @@
           "./desktop-execution-boundary-surface": 1,
           "./desktop-slash-command": 1,
           "./error-boundary": 1,
+          "./features/conversation": 1,
           "./features/goals": 1,
           "./features/module-hub": 1,
           "./features/session-collaboration": 1,
@@ -978,7 +970,6 @@
           "./settings/runtime-host-ssh-terminal-dialog.js": 1,
           "./settings/tasks-settings-page": 1,
           "./stale-sessions": 1,
-          "./task-readiness-notice": 1,
           "./use-active-execution-boundary": 1,
           "./use-app-shell-composer-quotes": 1,
           "./use-app-shell-session-ui-reads": 1,
@@ -1023,7 +1014,7 @@
           "react": 1
         },
         "importSpecifiers": 186,
-        "nonTriviaTokens": 15779
+        "nonTriviaTokens": 15653
       },
       "src/renderer/use-app-shell-composer-quotes.ts": {
         "importDeclarations": 3,
@@ -4612,9 +4603,7 @@
         "unresolvedDependencies": 0,
         "actionFactories": [],
         "dependencyPaths": {
-          "@maka/core/session-send-projection": 1,
-          "@maka/core/task-submission-readiness": 1,
-          "@maka/core/ui-locale": 1
+          "./features/conversation/index.js": 1
         }
       },
       "src/renderer/theme.ts": {

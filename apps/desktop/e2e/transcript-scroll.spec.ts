@@ -80,15 +80,15 @@ function scrollMetrics(page: Page): Promise<{
  * `toBeVisible` passes on the transparent one.
  */
 function scrollButtonOffered(page: Page): Promise<boolean> {
-  return page.evaluate((name) => {
+  return page.evaluate((names) => {
     const button = [...document.querySelectorAll('button')].find(
-      (candidate) => candidate.getAttribute('aria-label') === name
-        || candidate.textContent?.trim() === name,
+      (candidate) => names.includes(candidate.getAttribute('aria-label') ?? '')
+        || names.includes(candidate.textContent?.trim() ?? ''),
     );
-    if (!button) throw new Error(`the "${name}" affordance is missing`);
+    if (!button) throw new Error(`the "${names.join('" / "')}" affordance is missing`);
     const style = getComputedStyle(button);
     return style.pointerEvents !== 'none' && Number(style.opacity) > 0.5;
-  }, '滚动主对话到底部');
+  }, ['滚动主对话到底部', 'Scroll main conversation to bottom']);
 }
 
 function turnTop(page: Page, turnId: string): Promise<number> {
@@ -106,6 +106,39 @@ function turnOffsetFromScroller(page: Page, turnId: string): Promise<number> {
     if (!root || !turn) return Number.POSITIVE_INFINITY;
     return Math.round(turn.getBoundingClientRect().top - root.getBoundingClientRect().top);
   }, [SCROLLER, turnId] as const);
+}
+
+function waitForStableTurnAtScrollerStart(page: Page, turnId: string): Promise<void> {
+  return page.evaluate(([selector, id]) => new Promise<void>((resolve, reject) => {
+    let previousTop = Number.NaN;
+    let previousHeight = Number.NaN;
+    let stableFrames = 0;
+    const timeout = window.setTimeout(
+      () => reject(new Error(`Turn ${id} did not settle at the scroller start`)),
+      10_000,
+    );
+    const measure = (): void => {
+      const root = document.querySelector<HTMLElement>(selector);
+      const turn = root?.querySelector<HTMLElement>(`[data-turn-id="${CSS.escape(id)}"]`);
+      if (root && turn) {
+        const offset = turn.getBoundingClientRect().top - root.getBoundingClientRect().top;
+        stableFrames = Math.abs(offset) <= 4
+            && root.scrollTop === previousTop
+            && root.scrollHeight === previousHeight
+          ? stableFrames + 1
+          : 0;
+        previousTop = root.scrollTop;
+        previousHeight = root.scrollHeight;
+        if (stableFrames >= 6) {
+          window.clearTimeout(timeout);
+          resolve();
+          return;
+        }
+      }
+      window.requestAnimationFrame(measure);
+    };
+    measure();
+  }), [SCROLLER, turnId]);
 }
 
 /**
@@ -250,11 +283,13 @@ test('switching Sessions restores a Turn anchor while a tail Session follows bac
     async () => Math.abs(await turnOffsetFromScroller(page, readingTurnId)),
     { message: 'the unloaded prompt reaches the scroller start' },
   ).toBeLessThanOrEqual(24);
-  // The prompt rail holds its target through late content measurement. Let it
-  // hand the viewport back before switching, exactly as a reader who paused on
-  // the selected prompt would.
-  await page.waitForTimeout(1_200);
-  expect(await scrollButtonOffered(page)).toBe(true);
+  // The prompt rail holds its target through late content measurement. Six
+  // unchanged painted frames exceed its own quiet-frame handoff, so switching
+  // after this point cannot carry that release into the next Session. Observe
+  // transcript geometry directly: the Astryx dock can be briefly unmounted on
+  // a loaded Xvfb worker even though the reading position is already stable.
+  await waitForStableTurnAtScrollerStart(page, readingTurnId);
+  expect(await distanceToTail(page)).toBeGreaterThan(100);
 
   await rowButton(tailSessionId).click();
   await expect(rowButton(tailSessionId)).toHaveClass(/selected/);
@@ -262,7 +297,7 @@ test('switching Sessions restores a Turn anchor while a tail Session follows bac
   expect(await distanceToTail(page)).toBeLessThanOrEqual(4);
   // The fixture Session predates connection identities. Choosing any current
   // model upgrades it onto the E2E Runtime Host before this test starts a Turn.
-  const modelSwitcher = page.getByRole('button', { name: '切换当前任务模型' });
+  const modelSwitcher = page.locator('.maka-model-switcher-trigger');
   await modelSwitcher.click();
   await page.getByRole('menuitem', { name: 'glm-4.5', exact: true }).click();
   await expect(modelSwitcher).toContainText('glm-4.5');
