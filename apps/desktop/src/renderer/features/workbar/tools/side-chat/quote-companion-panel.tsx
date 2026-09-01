@@ -38,7 +38,6 @@ import { useComposerMentionsContext } from '../../../../composer-mentions.js';
 import { preflightAttachmentItems } from '../../../../attachment-preflight';
 import { toComposerIngestItems } from '../../../../composer-attachments';
 import { getDesktopConversationCopy } from '../../../../locales/conversation-copy.js';
-import { confirmBypassPermission } from '../../../../locales/shell-copy.js';
 import { deriveTurnFooterActions } from '../../../../turn-footer-actions';
 import type {
   CompanionQuoteTarget,
@@ -68,6 +67,7 @@ export function QuoteCompanionPanel(props: {
   sourceSession: SessionSummary | undefined;
   /** Shared global choice list, only used to render the inherited model's label. */
   modelChoices: readonly ChatModelChoice[];
+  confirmBypass: () => Promise<boolean>;
   onQuotesConsumed: (snapshot: CompanionQuoteSnapshot) => void;
   onRemoveQuote?: (target: CompanionQuoteTarget) => void;
   onForkVisibilityChange?: (event: CompanionForkVisibilityEvent) => void;
@@ -103,7 +103,7 @@ export function QuoteCompanionPanel(props: {
     modelChoices: props.modelChoices,
     locale,
     onQuotesConsumed: props.onQuotesConsumed,
-    confirmBypass: () => confirmBypassPermission(toast, locale),
+    confirmBypass: props.confirmBypass,
     onForkVisibilityChange: props.onForkVisibilityChange,
   });
   useEffect(() => {
