@@ -25,10 +25,10 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { SessionEvent } from '@maka/core/events';
 import type { ChatModelChoice } from '@maka/core/chat-model-choice';
+import type { PermissionMode } from '@maka/core/permission';
 import type { SessionChangedEvent, SessionSummary, TurnRecord } from '@maka/core/session';
 import {
   createFakeWorkbarServices,
-  requestPermissionModeWithConfirmation,
   useQuoteCompanion,
   sessionHasExactModelChoice,
   WorkbarServicesProvider,
@@ -54,21 +54,31 @@ type SideChatStopTarget = Parameters<WorkbarServices['sideChat']['stop']>[1];
 type QueueUpdate = Extract<SessionEvent, { type: 'queue_update' }>;
 type QueueEntry = NonNullable<QueueUpdate['steeringEntries']>[number];
 
-test('declining Full access does not persist the side-chat permission mode', async () => {
+test('declining Full access through the side-chat hook does not persist the permission mode', async () => {
   let confirmations = 0;
   let writes = 0;
+  let setPermissionMode!: (mode: PermissionMode) => Promise<boolean>;
 
-  const result = await requestPermissionModeWithConfirmation(
-    'bypass',
-    async () => {
-      confirmations += 1;
-      return false;
+  const { container } = await renderProbe(
+    {
+      setPermissionMode: async (sessionId, mode) => {
+        writes += 1;
+        return session(sessionId, { permissionMode: mode });
+      },
     },
-    async () => {
-      writes += 1;
-      return true;
+    {
+      confirmBypass: async () => {
+        confirmations += 1;
+        return false;
+      },
+      onSetPermissionMode: (setter) => {
+        setPermissionMode = setter;
+      },
     },
   );
+
+  assert.ok(container.firstElementChild);
+  const result = await act(async () => setPermissionMode('bypass'));
 
   assert.equal(result, false);
   assert.equal(confirmations, 1);
@@ -151,6 +161,8 @@ async function renderProbe(
     onSend?: (send: (text: string) => Promise<boolean>) => void;
     onSteer?: (steer: (text: string) => Promise<boolean>) => void;
     onStop?: (stop: () => Promise<void>) => void;
+    onSetPermissionMode?: (setPermissionMode: (mode: PermissionMode) => Promise<boolean>) => void;
+    confirmBypass?: () => Promise<boolean>;
     pendingQuotes?: readonly StagedCompanionQuote[];
     onQuotesConsumed?: (snapshot: CompanionQuoteSnapshot) => void;
   } = {},
@@ -181,6 +193,8 @@ async function renderProbe(
     : createElement(QuoteCompanionProbe, {
         sourceSession: options.sourceSession,
         modelChoices: options.modelChoices,
+        onSetPermissionMode: options.onSetPermissionMode,
+        confirmBypass: options.confirmBypass,
       });
 
   await act(async () => {
@@ -1523,6 +1537,8 @@ test('releases a send waiting for observation when the Side Conversation is disp
 function QuoteCompanionProbe(props: {
   sourceSession?: SessionSummary;
   modelChoices?: readonly ChatModelChoice[];
+  onSetPermissionMode?: (setPermissionMode: (mode: PermissionMode) => Promise<boolean>) => void;
+  confirmBypass?: () => Promise<boolean>;
 }) {
   const sourceSession = props.sourceSession ?? SOURCE_SESSION;
   const companion = useQuoteCompanion({
@@ -1532,8 +1548,9 @@ function QuoteCompanionProbe(props: {
     modelChoices: props.modelChoices ?? [choiceFor(sourceSession)],
     locale: 'en',
     onQuotesConsumed: () => undefined,
-    confirmBypass: async () => true,
+    confirmBypass: props.confirmBypass ?? (async () => true),
   });
+  props.onSetPermissionMode?.(companion.setPermissionMode);
   return createElement('div', {
     'data-error': companion.error ?? '',
     'data-companion-id': companion.companionSession?.id ?? '',
