@@ -140,6 +140,8 @@ export {
   readRuntimeHostSkillCatalog,
   type RuntimeHostSessionCatalogPage,
   type RuntimeHostSessionCatalogPageCursor,
+  type RuntimeHostConnectionCatalogEntry,
+  type RuntimeHostConnectionCatalogSnapshot,
 } from './catalog-reader.js';
 export {
   connectOrSpawnRuntimeHost,
