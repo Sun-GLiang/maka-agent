@@ -38,7 +38,6 @@ export * from './tools/side-chat/quote-companion-panel-state.js';
 export * from './tools/side-chat/quote-companion-core.js';
 export * from './tools/side-chat/quote-companion-visibility.js';
 export {
-  requestPermissionModeWithConfirmation,
   useQuoteCompanion,
 } from './tools/side-chat/use-quote-companion.js';
 export * from './tools/terminal/session-terminal-hydration.js';
