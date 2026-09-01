@@ -95,7 +95,7 @@ import type {
 } from '@maka/core/daily-review';
 import type { WebSearchProvider, WebSearchResponse } from '@maka/core/web-search';
 import type { BrowserState, BrowserViewRect } from '@maka/core/browser';
-import type { Task, TaskLedgerChangedEvent } from '@maka/core/task-ledger';
+import type { SessionTodoItem } from '@maka/core/session-todo';
 import type { DeepResearchChangedEvent, DeepResearchClientProgress } from '@maka/core/deep-research-run';
 import type {
   DesktopTranscriptBatch,
@@ -322,6 +322,7 @@ export interface DesktopRuntimeHostProfileEntry {
   readonly isDefault: boolean;
   readonly readiness: 'disabled' | 'connecting' | 'ready' | 'reconnecting' | 'unavailable';
   readonly hostId?: string;
+  readonly peerPath?: import('@maka/runtime-host/client').RuntimeHostPeerConnectionPath;
   readonly message?: string;
 }
 
@@ -582,6 +583,7 @@ export interface DesktopRuntimeHostDirectPeerSnapshot {
   readonly routeHints: readonly string[];
   readonly coordinationRelays: readonly string[];
   readonly automaticRelayDiscovery: boolean;
+  readonly webRtcStunPolicy?: import('@maka/runtime-host/operator').RuntimeHostWebRtcStunPolicy;
   readonly profilePresent: boolean;
   readonly profileEnabled: boolean;
   readonly clientAvailable: boolean;
@@ -843,6 +845,7 @@ export interface MakaBridge {
       enabled: boolean,
       coordinationRelays: readonly string[],
       automaticRelayDiscovery: boolean,
+      webRtcStunPolicy?: import('@maka/runtime-host/operator').RuntimeHostWebRtcStunPolicy,
     ): Promise<DesktopRuntimeHostDirectPeerSnapshot>;
     listCredentials(profileId: string): Promise<DesktopRuntimeHostAccessSnapshot>;
     rotateCredential(profileId: string): Promise<DesktopRuntimeHostAccessSnapshot>;
@@ -853,6 +856,10 @@ export interface MakaBridge {
   };
 
   runtimeHostPeerMesh: {
+    getConnectivityPolicy(): Promise<import('@maka/runtime-host/client').RuntimeHostWebRtcStunPolicy>;
+    setConnectivityPolicy(
+      policy: import('@maka/runtime-host/client').RuntimeHostWebRtcStunPolicy,
+    ): Promise<import('@maka/runtime-host/client').RuntimeHostWebRtcStunPolicy>;
     execute(
       target: DesktopRuntimeHostPeerMeshTarget,
       action: DesktopRuntimeHostPeerMeshAction,
@@ -961,9 +968,9 @@ export interface MakaBridge {
     subscribeChanges(handler: (event: WorkBoardChangedEvent) => void): () => void;
   };
 
-  tasks: {
-    list(sessionId: string): Promise<Task[]>;
-    subscribeChanges(handler: (event: TaskLedgerChangedEvent) => void): () => void;
+  todo: {
+    read(sessionId: string): Promise<SessionTodoItem[]>;
+    subscribeChanges(handler: (event: { sessionId: string; at: number }) => void): () => void;
   };
   deepResearch: {
     get(sessionId: string): Promise<DeepResearchClientProgress | undefined>;
@@ -1225,12 +1232,20 @@ export interface MakaBridge {
     setThinkingLevel(sessionId: string, level: ThinkingLevel | undefined | null): Promise<DesktopSessionSummary>;
     /**
      * `requireArchived` holds the caller's premise through the deletion: a task
-     * restored meanwhile answers `restored` and is kept.
+     * restored meanwhile answers `restored` and is kept. `archivedSubtaskCount`
+     * is the Host's executed count of ordinary linked subtasks moved to the
+     * archive — 0 when restored or when nothing was archived.
      */
     remove(
       sessionId: string,
       options?: { revisionFamily?: boolean; requireArchived?: boolean },
-    ): Promise<'removed' | 'restored'>;
+    ): Promise<{ disposition: 'removed' | 'restored'; archivedSubtaskCount: number }>;
+    /**
+     * How many linked subtasks a delete of this parent would move to the
+     * archive, per the Host's removal plan. The confirm warns off this instead
+     * of estimating from the catalog projection.
+     */
+    previewRemoval(sessionId: string): Promise<number>;
     cleanupSessionCopy(sessionId: string): Promise<void>;
     abandonSessionCopy(sourceSessionId: string, copyId: string): Promise<void>;
   };
