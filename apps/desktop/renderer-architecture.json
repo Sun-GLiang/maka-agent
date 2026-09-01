@@ -890,7 +890,6 @@
           "useCommandPalette": 1,
           "useComposerAttachments": 1,
           "useEffect": 14,
-          "useGoalController": 1,
           "useKeyboardHelp": 1,
           "useLayoutEffect": 2,
           "useModuleHubController": 1,
@@ -1027,8 +1026,8 @@
           "@maka/ui/icons": 1,
           "react": 1
         },
-        "importSpecifiers": 187,
-        "nonTriviaTokens": 15834
+        "importSpecifiers": 186,
+        "nonTriviaTokens": 15804
       },
       "src/renderer/use-app-shell-composer-quotes.ts": {
         "importDeclarations": 3,
@@ -4326,8 +4325,8 @@
           "./settings-status-badge.js": 1,
           "./subagent-preset-presentation.js": 1,
           "@astryxdesign/core": 1,
-          "@maka/core/llm-connections": 2,
-          "@maka/core/model-thinking": 2,
+          "@maka/core/llm-connections": 1,
+          "@maka/core/model-thinking": 1,
           "@maka/core/settings": 1,
           "@maka/core/subagent-settings": 1,
           "@maka/ui": 1,
