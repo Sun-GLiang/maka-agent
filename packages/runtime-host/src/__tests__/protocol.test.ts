@@ -259,6 +259,13 @@ describe('Runtime Host bootstrap protocol', () => {
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 84);
   });
 
+  test('publishes a new compatibility epoch for explicit proxy credential updates', () => {
+    // Epoch 87 predates the Host-owned proxy credential mutation and its
+    // target-bound transfer result. Older peers cannot safely exchange these
+    // shapes, so the merged PR must advance the handshake boundary.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 87);
+  });
+
   test('publishes a new compatibility epoch for the removed execution.inspect.resolve operation', () => {
     // Epoch 63 peers still know execution.inspect.resolve and would send it
     // only to fail mid-connection now that it is gone, so its removal must
