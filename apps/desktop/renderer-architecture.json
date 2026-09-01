@@ -708,8 +708,8 @@
           "@maka/core/ui-locale": 1,
           "@maka/ui": 1
         },
-        "importSpecifiers": 23,
-        "nonTriviaTokens": 3041
+        "importSpecifiers": 21,
+        "nonTriviaTokens": 2974
       },
       "src/renderer/app-shell-session-start-actions.ts": {
         "importDeclarations": 7,
@@ -1028,7 +1028,7 @@
           "react": 1
         },
         "importSpecifiers": 187,
-        "nonTriviaTokens": 15861
+        "nonTriviaTokens": 15834
       },
       "src/renderer/use-app-shell-composer-quotes.ts": {
         "importDeclarations": 3,
