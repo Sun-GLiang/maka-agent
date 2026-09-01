@@ -71,6 +71,7 @@ export * from './configuration-change.js';
 export * from './goal.js';
 export * from './hosted-execution.js';
 export * from './plan.js';
+export * from './peer-mesh.js';
 export * from './project-catalog.js';
 export * from './project-catalog-change.js';
 export * from './execution-inspect.js';
@@ -80,11 +81,12 @@ export * from './operations.js';
 export * from './runtime-resource.js';
 export * from './session-continuity.js';
 export * from './session-catalog-change.js';
+export * from './session-collaboration.js';
 export * from './scheduled-task-change.js';
 export * from './session-retirement.js';
 export * from './session-transcript.js';
 export * from './session-turns.js';
-export * from './task-ledger.js';
+export * from './session-todo.js';
 export * from './workspace.js';
 export * from './workhub-coordination.js';
 export * from './websocket-path.js';
@@ -93,7 +95,62 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 61 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 83 as const;
+// 83: WorkHub Coordination actions add linked replacement proposals,
+// destructive user confirmation, and replacement results. Older peers reject
+// these closed action and result shapes.
+// 82: Session removal reports how many linked subtasks it archived, and adds a
+// `session.remove.preview` query for that count before the delete. Older peers
+// reject the extra removed-result field and the unknown operation.
+// 81: SessionTodo replaces the Task Ledger protocol and continuity domain with
+// one bounded current-state snapshot. Older peers cannot decode the operation
+// or preserve the new invalidation vocabulary.
+// 80: Runtime Policy catalog models gained validated user-overridden fact
+// provenance. Older peers reject this projected model shape, so they must be
+// refused during the handshake before catalog admission.
+// 79: Every `turn.message.submit` disposition carries the exact Skill
+// invocation outcome. Durable queued replays may omit the previous Host
+// Epoch's transient queue revision; older strict peers reject either shape.
+// 78: OAuth login targets explicit create/existing Connection entities and
+// returns their canonical identity. Older peers reject both closed wire shapes.
+// 77: LLM and tool usage-log projections carry an optional `sessionTitle` (the
+// Host-resolved session name for the usage Task column). Older Clients reject
+// the unknown field, so a newer Host's usage logs are unreadable to them.
+// 76: Peer Mesh endpoint and Mesh display names are signed, persisted facts
+// managed through Host operations rather than local-only Client labels.
+// 75: Peer Mesh routes identify whether a peer is a Client or Runtime Host so
+// management surfaces can present the endpoint authority boundary accurately.
+// 74: Capability-provider credentials may carry one Host-authenticated owner
+// identity. Older peers cannot preserve the association and could select an
+// unrelated provider for an interactive Session.
+// 73: Transcript pages carry a Host-owned Turn range boundary. Older peers
+// cannot preserve both the complete edge Turn and the bounded projection.
+// 72: Collaboration Turn request query results require `canRequestTurns`.
+// Older peers reject the new closed result shape.
+// 71: Session Guests can submit durable exact Turn access requests and Owners
+// can decide them. Older peers do not understand this execution-authority flow.
+// 70: Session Guest connections receive resource-scoped shared catalog and
+// continuity projections. Older peers cannot enforce the Session grant fence.
+// 69: Runtime Host access authority recognizes restricted Session Guest
+// principals and typed Session collaboration grants. Older Hosts would either
+// reject the new operations or misclassify the authenticated principal.
+// 68: Connection onboarding replaces nullable canonical-slug targeting with
+// explicit create/existing identity and returns the committed Connection.
+// Older peers reject the closed target and saved-result shapes.
+// 67: Message lifecycle queries expose durable execution ownership and
+// cancellation. Older peers cannot decode or provide the closed proof list.
+// 66: Peer Mesh queries expose one canonical transit selection and runtime metrics.
+// 65: live `tool_start` frames may carry optional `intent` / `argsPreview`
+// keys. Older Clients decode the event with a strict allowed-key list and tear
+// the connection down on unknown keys, so the pair must be refused up front.
+// The strict decoder's allowed-key union also retains `shellRunRef`.
+// 64: execution.inspect drops the retired resolve operation. Older peers still
+// know execution.inspect.resolve and would send it only to fail mid-connection,
+// so removing it needs its own handshake boundary.
+// 63: Connection updates accept the full canonical enabled-model limit.
+// Older peers reject valid catalogs containing more than 64 enabled models.
+// 62: A Direct peer listener can expose owner-only Peer Mesh management
+// operations. Older peers do not have this closed operation vocabulary.
 // 61: Session explicit model targets carry immutable Connection identity,
 // configuration updates are Host-merged patches, and projections expose the
 // required nullable binding ID. Older peers cannot preserve these invariants.
@@ -412,7 +469,9 @@ export function decodeHostRegistration(value: unknown): HostRegistration {
     compositionRevision: decodeCompositionRevision(registration.compositionRevision),
     ...(registration.lifecycleMode === undefined
       ? {}
-      : { lifecycleMode: requireHostLifecycleMode(registration.lifecycleMode) }),
+      : {
+          lifecycleMode: requireHostLifecycleMode(registration.lifecycleMode),
+        }),
     ...(registration.generation === undefined
       ? {}
       : { generation: requireHostGeneration(registration.generation) }),
@@ -463,7 +522,9 @@ function requireHostLifecycleMode(value: unknown): 'ephemeral' | 'service' {
 function decodeTakeover(value: unknown): ClientHello['takeover'] {
   if (value === undefined) return undefined;
   const takeover = requireRecord(value, 'Runtime Host takeover');
-  return { expectedHostEpoch: requireId(takeover.expectedHostEpoch, 'expectedHostEpoch') };
+  return {
+    expectedHostEpoch: requireId(takeover.expectedHostEpoch, 'expectedHostEpoch'),
+  };
 }
 
 export function encodeProtocolMessage(value: ClientFrame | HostFrame): EncodedProtocolMessage {

@@ -19,7 +19,6 @@
 
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { realpath, stat } from 'node:fs/promises';
 import { posix as pathPosix } from 'node:path';
 import type { IpcMain } from 'electron';
 import type { IPty } from 'node-pty';
@@ -39,6 +38,7 @@ import {
   decodeRuntimeHostActivationFrame,
   decodeRuntimeHostAccessManagementFrame,
   decodeRuntimeHostPeerManagementFrame,
+  decodeRuntimeHostPeerMeshManagementFrame,
   decodeRuntimeHostServiceManagementFrame,
   decodeRuntimeHostSetupFrame,
   RUNTIME_HOST_ACTIVATION_FRAME_MAX_BYTES,
@@ -49,25 +49,35 @@ import {
   RUNTIME_HOST_OPERATOR_PROJECT_DIRECTORY_CONFIGURATION_REQUEST_ENV,
   RUNTIME_HOST_OPERATOR_UPDATE_SCHEDULER_CAPABILITY,
   RUNTIME_HOST_PEER_MANAGEMENT_FRAME_PREFIX,
+  RUNTIME_HOST_PEER_MESH_MANAGEMENT_FRAME_MAX_BYTES,
+  RUNTIME_HOST_PEER_MESH_MANAGEMENT_FRAME_PREFIX,
   RUNTIME_HOST_SERVICE_MANAGEMENT_FRAME_PREFIX,
   RUNTIME_HOST_SETUP_FRAME_PREFIX,
+  RUNTIME_HOST_SETUP_SOURCE_PACKAGE_INTEGRITY_ENV,
   type RuntimeHostAccessManagementFrame,
   type RuntimeHostActivationResult,
   type RuntimeHostManagedUpdatePolicy,
   type RuntimeHostPeerManagementAction,
   type RuntimeHostPeerManagementFrame,
+  type RuntimeHostPeerMeshManagementAction,
+  type RuntimeHostPeerMeshManagementFrame,
   type RuntimeHostOperatorCapability,
   type RuntimeHostServiceManagementAction,
   type RuntimeHostServiceManagementFrame,
   type RuntimeHostServiceUpdatePhase,
   type RuntimeHostSetupFrame,
+  type RuntimeHostWebRtcStunPolicy,
 } from '@maka/runtime-host/operator';
 import type {
   DesktopRuntimeHostSshTerminalEvent,
   DesktopRuntimeHostSshTerminalSnapshot,
 } from '../preload/bridge-contract.js';
 import { createRuntimeHostFramedOutputFilter } from './runtime-host-framed-output.js';
-import type { DesktopRuntimeHostDevelopmentPeerTarget } from './runtime-host-setup-package.js';
+import {
+  runtimeHostSetupPackageVersion,
+  type DesktopRuntimeHostDevelopmentPeerTarget,
+  type DesktopRuntimeHostSetupPackage,
+} from './runtime-host-setup-package.js';
 
 interface ActiveTerminal {
   readonly sessionId: string;
@@ -169,7 +179,23 @@ export interface DesktopRuntimeHostSshPeerManagementInput {
   readonly operatorPath: string;
   readonly action: Extract<RuntimeHostPeerManagementAction, 'enable' | 'disable' | 'status'>;
   readonly coordinationRelays?: readonly string[];
+  readonly automaticRelayDiscovery?: boolean;
+  readonly webRtcStunPolicy?: RuntimeHostWebRtcStunPolicy;
+  readonly webRtcStunStatus?: boolean;
   readonly expectedTarget: DesktopRuntimeHostSshManagementInput['expectedTarget'];
+  readonly signal?: AbortSignal;
+}
+
+export interface DesktopRuntimeHostSshPeerMeshManagementInput {
+  readonly destination: string;
+  readonly sshPort?: number;
+  readonly operatorPath: string;
+  readonly action: RuntimeHostPeerMeshManagementAction;
+  readonly expectedTarget: DesktopRuntimeHostSshManagementInput['expectedTarget'];
+  readonly meshId?: string | null;
+  readonly peerId?: string;
+  readonly displayName?: string | null;
+  readonly invitation?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -202,10 +228,6 @@ export type DesktopRuntimeHostSshAccessInput = DesktopRuntimeHostSshAccessTarget
       }
   );
 
-export type DesktopRuntimeHostSetupPackage =
-  | { readonly kind: 'npm'; readonly specifier: string }
-  | { readonly kind: 'development_archive'; readonly path: string };
-
 export type RuntimeHostServiceUpdateTerminalFrame =
   | Extract<RuntimeHostServiceManagementFrame, { kind: 'result'; action: 'update' }>
   | (Extract<RuntimeHostServiceManagementFrame, { kind: 'error' }> & {
@@ -221,10 +243,6 @@ export type RuntimeHostServiceUpdateReconciliationTerminalFrame = Extract<
   RuntimeHostServiceManagementFrame,
   { kind: 'result' | 'error'; action: 'reconcile_update' }
 >;
-
-export function isExactRuntimeHostSetupPackageSpecifier(value: unknown): value is string {
-  return typeof value === 'string' && /^maka-agent@[0-9][0-9A-Za-z.+-]*$/u.test(value);
-}
 
 type RuntimeHostSetupCompleteFrame = Extract<RuntimeHostSetupFrame, { kind: 'complete' }>;
 
@@ -271,6 +289,9 @@ export function createDesktopRuntimeHostSshTerminal(input: {
   runPeerManagement(
     input: DesktopRuntimeHostSshPeerManagementInput,
   ): Promise<RuntimeHostPeerManagementFrame>;
+  runPeerMeshManagement(
+    input: DesktopRuntimeHostSshPeerMeshManagementInput,
+  ): Promise<Exclude<RuntimeHostPeerMeshManagementFrame, { kind: 'input' }>>;
   cleanupManagedDeployment(input: DesktopRuntimeHostSshCleanupInput): Promise<void>;
   close(): Promise<void>;
 } {
@@ -510,6 +531,7 @@ export function createDesktopRuntimeHostSshTerminal(input: {
     readonly frameAction: (frame: Frame) => string;
     readonly isTerminalFrame?: (frame: Frame) => boolean;
     readonly onProgress?: (frame: Frame) => void;
+    readonly inputLine?: string;
     readonly label: string;
     readonly timeoutMs?: number;
   }): Promise<Frame> => {
@@ -521,6 +543,12 @@ export function createDesktopRuntimeHostSshTerminal(input: {
     let failure: Error | undefined;
     let activeTerminal: ActiveTerminal | undefined;
     let receivedProgress = false;
+    let inputSent = false;
+    const sendInput = () => {
+      if (inputSent || options.inputLine === undefined || !activeTerminal) return;
+      inputSent = true;
+      activeTerminal.pty.write(`${options.inputLine}\r`);
+    };
     const filter = createRuntimeHostFramedOutputFilter({
       prefix: options.prefix,
       pendingMaxBytes: options.pendingMaxBytes,
@@ -536,6 +564,7 @@ export function createDesktopRuntimeHostSshTerminal(input: {
           receivedProgress = true;
           if (activeTerminal) suppressPresentation(activeTerminal);
           options.onProgress?.(next);
+          sendInput();
           return;
         }
         if (frame) {
@@ -556,6 +585,7 @@ export function createDesktopRuntimeHostSshTerminal(input: {
       true,
     );
     activeTerminal = terminal;
+    if (receivedProgress) sendInput();
     if (frame) completePresentation(terminal);
     else if (receivedProgress) suppressPresentation(terminal);
     const wait = await waitForTerminalProcess(process, {
@@ -861,6 +891,24 @@ export function createDesktopRuntimeHostSshTerminal(input: {
         frameAction: (frame) => frame.action,
         label: 'Remote Runtime Host direct-peer management',
       }),
+    runPeerMeshManagement: async (meshInput) => {
+      const frame = await runFramedManagement({
+        ...meshInput,
+        remoteCommand: runtimeHostPeerMeshManagementRemoteCommand(meshInput),
+        prefix: RUNTIME_HOST_PEER_MESH_MANAGEMENT_FRAME_PREFIX,
+        pendingMaxBytes: RUNTIME_HOST_PEER_MESH_MANAGEMENT_FRAME_MAX_BYTES,
+        decode: decodeRuntimeHostPeerMeshManagementFrame,
+        action: meshInput.action,
+        frameAction: (candidate) => candidate.action,
+        isTerminalFrame: (candidate) => candidate.kind !== 'input',
+        ...(meshInput.invitation ? { inputLine: meshInput.invitation } : {}),
+        label: 'Remote Runtime Host Peer Mesh management',
+      });
+      if (frame.kind === 'input') {
+        throw new Error('Remote Runtime Host Peer Mesh management ended before its result');
+      }
+      return frame;
+    },
     cleanupManagedDeployment: async (cleanupInput) => {
       if (closed) throw new Error('Runtime Host SSH terminal is closed');
       cleanupInput.signal?.throwIfAborted();
@@ -952,10 +1000,14 @@ function cancellableUntilComplete(signal: AbortSignal | undefined): {
   };
 }
 
-interface PreparedSetupPackage {
-  readonly specifier: string;
-  readonly removeAfterSetup?: string;
-}
+type PreparedSetupPackage =
+  | { readonly kind: 'npm'; readonly specifier: string }
+  | {
+      readonly kind: 'development_archive';
+      readonly specifier: string;
+      readonly integrity: string;
+      readonly removeAfterSetup: string;
+    };
 
 async function prepareSetupPackage(
   setupPackage: DesktopRuntimeHostSetupPackage,
@@ -974,16 +1026,9 @@ async function prepareSetupPackage(
   terminateTree: typeof terminateProcessTree | undefined,
 ): Promise<PreparedSetupPackage> {
   if (setupPackage.kind === 'npm') {
-    if (!isExactRuntimeHostSetupPackageSpecifier(setupPackage.specifier)) {
-      throw new Error('Runtime Host setup package is invalid');
-    }
-    return { specifier: setupPackage.specifier };
+    return setupPackage;
   }
   signal?.throwIfAborted();
-  const archive = await realpath(setupPackage.path);
-  if (!(await stat(archive)).isFile() || !archive.endsWith('.tgz')) {
-    throw new Error('Runtime Host development package must be a .tgz file');
-  }
   const remoteArchive = remoteDevelopmentArchivePath(principalId);
   const { process, terminal } = startTerminalProcess('scp', [
     '-o',
@@ -997,7 +1042,7 @@ async function prepareSetupPackage(
     '-o',
     'ClearAllForwardings=yes',
     ...(sshPort === undefined ? [] : ['-P', String(sshPort)]),
-    archive,
+    setupPackage.path,
     `${destination}:${remoteArchive}`,
   ], undefined, true);
   const wait = await waitForTerminalProcess(process, {
@@ -1014,7 +1059,12 @@ async function prepareSetupPackage(
       `Uploading the Runtime Host development package exited with code ${String(wait.exit.code)}`,
     );
   }
-  return { specifier: remoteArchive, removeAfterSetup: remoteArchive };
+  return {
+    kind: 'development_archive',
+    specifier: remoteArchive,
+    integrity: setupPackage.integrity,
+    removeAfterSetup: remoteArchive,
+  };
 }
 
 function remoteDevelopmentArchivePath(principalId: string): string {
@@ -1133,6 +1183,10 @@ function runtimeHostSetupRemoteCommand(
     'desktop-client',
     '--lifecycle',
     input.lifecycle === 'on_demand' ? 'on-demand' : 'supervised',
+    // Development archives identify every source revision as a distinct exact
+    // package. Re-running Add computer is the explicit replacement gesture in
+    // that environment; released packages keep using the normal update UI.
+    ...(setupPackage.kind === 'development_archive' ? ['--update-existing'] : []),
     '--defer-pairing-commit',
     ...(input.projectDirectoryRoots === undefined
       ? []
@@ -1199,10 +1253,10 @@ function runtimeHostUpdateRemoteCommand(
   setupPackage: PreparedSetupPackage,
   input: DesktopRuntimeHostSshUpdateInput,
 ): string {
-  const deploymentId = input.expectedTarget.deploymentId;
-  if (!deploymentId) {
+  if (!input.expectedTarget.deploymentId) {
     throw new Error('Runtime Host update requires a deployment generation');
   }
+  const targetVersion = runtimeHostSetupPackageVersion(setupPackage);
   return runtimeHostPackageRemoteCommand(
     setupPackage,
     [
@@ -1210,10 +1264,9 @@ function runtimeHostUpdateRemoteCommand(
       'service',
       'update',
       '--framed',
+      ...(targetVersion ? ['--target', targetVersion] : []),
       '--managed-root-id',
       input.expectedTarget.rootId,
-      '--operator-deployment-id',
-      deploymentId,
       ...managedServiceTargetArgs(input.expectedTarget),
       ...(input.allowInterruptActiveTasks ? ['--allow-interrupt-active-tasks'] : []),
     ],
@@ -1296,11 +1349,49 @@ function runtimeHostPeerManagementRemoteCommand(
     'peer',
     input.action,
     '--framed',
+    '--relay-discovery-status',
+    ...(input.webRtcStunStatus ? ['--webrtc-stun-status'] : []),
     ...(input.action === 'enable' && input.coordinationRelays
       ? input.coordinationRelays.length === 0
         ? ['--clear-coordination-relays']
         : input.coordinationRelays.flatMap((relay) => ['--coordination-relay', relay])
       : []),
+    ...(input.action === 'enable' && input.automaticRelayDiscovery !== undefined
+      ? [input.automaticRelayDiscovery
+          ? '--automatic-relay-discovery'
+          : '--no-automatic-relay-discovery']
+      : []),
+    ...(input.action === 'enable' && input.webRtcStunPolicy
+      ? input.webRtcStunPolicy.kind === 'default'
+        ? ['--default-public-stun']
+        : input.webRtcStunPolicy.kind === 'disabled'
+          ? ['--no-public-stun']
+          : input.webRtcStunPolicy.urls.flatMap((url) => ['--webrtc-stun', url])
+      : []),
+    ...managedServiceTargetArgs(input.expectedTarget),
+  ].map(quotePosix).join(' ');
+  return `exec "\${SHELL:-/bin/sh}" -lic ${quotePosix(`exec ${command}`)}`;
+}
+
+function runtimeHostPeerMeshManagementRemoteCommand(
+  input: DesktopRuntimeHostSshPeerMeshManagementInput,
+): string {
+  const command = [
+    input.operatorPath,
+    'mesh',
+    input.action,
+    '--framed',
+    ...(typeof input.meshId === 'string'
+      ? ['--mesh', input.meshId]
+      : input.meshId === null
+        ? ['--off']
+        : []),
+    ...(input.peerId ? ['--peer', input.peerId] : []),
+    ...(input.displayName === null
+      ? ['--clear-name']
+      : input.displayName
+        ? ['--name', input.displayName]
+        : []),
     ...managedServiceTargetArgs(input.expectedTarget),
   ].map(quotePosix).join(' ');
   return `exec "\${SHELL:-/bin/sh}" -lic ${quotePosix(`exec ${command}`)}`;
@@ -1345,14 +1436,19 @@ function runtimeHostPackageRemoteCommand(
   environment: Readonly<Record<string, string>> = {},
 ): string {
   const commandArgs = ['maka', ...args].map(quotePosix).join(' ');
-  const environmentPrefix = Object.entries(environment)
+  const environmentPrefix = Object.entries({
+    ...environment,
+    ...(setupPackage.kind === 'development_archive'
+      ? { [RUNTIME_HOST_SETUP_SOURCE_PACKAGE_INTEGRITY_ENV]: setupPackage.integrity }
+      : {}),
+  })
     .map(([name, value]) => `${name}=${quotePosix(value)}`)
     .join(' ');
   const invocationPrefix = environmentPrefix ? `${environmentPrefix} ` : '';
-  const commandInvocation = setupPackage.removeAfterSetup
+  const commandInvocation = setupPackage.kind === 'development_archive'
     ? `${invocationPrefix}npx --yes --package ${quotePosix(setupPackage.specifier)} ${commandArgs}`
     : `${invocationPrefix}npx --yes --prefix "$maka_command_prefix" --package ${quotePosix(setupPackage.specifier)} ${commandArgs}`;
-  const command = setupPackage.removeAfterSetup
+  const command = setupPackage.kind === 'development_archive'
     ? `cd "$HOME" || exit 1; maka_command_exit=0; ${commandInvocation} || maka_command_exit=$?; rm -f -- ${quotePosix(setupPackage.removeAfterSetup)}; exit "$maka_command_exit"`
     : `maka_command_prefix=$(mktemp -d) || exit 1; trap 'rm -rf -- "$maka_command_prefix"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; cd "$maka_command_prefix" || exit 1; ${commandInvocation}`;
   const loginCommand = `exec /bin/sh -c ${quotePosix(command)}`;

@@ -21,11 +21,11 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import { parse as parseYaml } from 'yaml';
-import desktopBuilderConfig from '../apps/desktop/electron-builder.config.mjs';
+import { resolveDesktopBuilderConfig } from '../apps/desktop/electron-builder.config.mjs';
 import {
   parseAsfSourceReferenceTag,
   resolveProductManifestIdentity,
@@ -56,6 +56,7 @@ import { ensureProductTag } from './product-release-tag.mjs';
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, '..');
+const desktopBuilderConfig = resolveDesktopBuilderConfig({});
 
 const rootManifest = {
   version: '1.2.3',
@@ -77,7 +78,6 @@ test('one root version defines every product artifact from one source commit', (
   });
 
   assert.equal(identity.version, '1.2.3');
-  assert.equal(identity.isPrerelease, false);
   assert.equal(identity.tag, 'v1.2.3');
   assert.equal(identity.sourceCommit, 'a'.repeat(40));
   assert.equal(identity.sourceReferenceTag, 'v1.2.3-incubating-rc2');
@@ -143,32 +143,8 @@ printf verified
   assert.equal(stdout, 'verified');
 });
 
-test('the product identity classifies prereleases once for every publication surface', () => {
-  const version = '1.2.3-beta.2';
-  const identity = resolveProductReleaseIdentity({
-    rootManifest: { ...rootManifest, version },
-    desktopManifest: { version },
-    cliManifest: { version, bin: { maka: './dist/cli.js' } },
-    sha: 'a'.repeat(40),
-    sourceReferenceTag: `v${version}-incubating-rc1`,
-  });
-
-  assert.equal(identity.isPrerelease, true);
-  assert.equal(identity.tag, `v${version}`);
-});
-
-test('product prereleases use only updater-compatible alpha and beta channels', () => {
-  for (const version of ['1.2.3-alpha.1', '1.2.3-beta.2']) {
-    assert.equal(
-      resolveProductManifestIdentity({
-        rootManifest: { ...rootManifest, version },
-        desktopManifest: { version },
-        cliManifest: { version, bin: { maka: './dist/cli.js' } },
-      }).isPrerelease,
-      true,
-    );
-  }
-  for (const version of ['1.2.3-rc.1', '1.2.3-dev.1']) {
+test('formal product identity rejects every prerelease channel', () => {
+  for (const version of ['1.2.3-alpha.1', '1.2.3-beta.2', '1.2.3-rc.1', '1.2.3-dev.1']) {
     assert.throws(
       () =>
         resolveProductManifestIdentity({
@@ -176,7 +152,7 @@ test('product prereleases use only updater-compatible alpha and beta channels', 
           desktopManifest: { version },
           cliManifest: { version, bin: { maka: './dist/cli.js' } },
         }),
-      /prerelease channel must be alpha or beta/u,
+      /require a stable version/u,
     );
   }
 });
@@ -192,10 +168,37 @@ test('Desktop packaging derives the Runtime Host setup package from product mani
   const checkedRootManifest = JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8'));
   assert.deepEqual(desktopBuilderConfig.extraMetadata, {
     runtimeHostSetupPackage: `maka-agent@${checkedRootManifest.version}`,
+    makaUpdateChannel: 'release',
   });
   assert.deepEqual(desktopBuilderConfig.publish, [
     { provider: 'github', owner: 'apache', repo: 'maka' },
   ]);
+});
+
+test('Desktop stages release manifests before electron-builder builds the archive', async (t) => {
+  const stage = await mkdtemp(join(tmpdir(), 'maka-desktop-release-manifests-'));
+  t.after(() => rm(stage, { recursive: true, force: true }));
+  const files = [{ filter: [...desktopBuilderConfig.files] }];
+
+  await desktopBuilderConfig.beforePack({
+    packager: {
+      config: { files },
+      info: { tempDirManager: { createTempDir: async () => stage } },
+    },
+  });
+
+  assert.equal(files.length, 2);
+  assert.ok(
+    files[0].filter.includes('!node_modules/@maka/{mcp,runtime,runtime-host}/package.json'),
+  );
+  assert.deepEqual(files.at(-1), { from: stage, to: 'node_modules/@maka' });
+  for (const name of ['mcp', 'runtime', 'runtime-host']) {
+    const projected = JSON.parse(await readFile(join(stage, name, 'package.json')));
+    assert.equal(
+      Object.keys(projected.exports).some((subpath) => subpath.startsWith('./test-only/')),
+      false,
+    );
+  }
 });
 
 test('Desktop packaging does not distribute the retired bundled Git runtime', () => {
@@ -216,6 +219,37 @@ test('Desktop packaging does not distribute the retired bundled Git runtime', ()
     resources.some(({ to }) => to.startsWith('licenses/dugite')),
     false,
   );
+});
+
+test('packaged third-party license sources are resolved, not assumed hoisted', () => {
+  // electron and @fontsource-variable/geist* are declared by apps/desktop, so
+  // `../../node_modules/<pkg>` only resolves when the installer hoists them to
+  // the workspace root. electron-builder logs a warning and still exits 0 on a
+  // missing `extraResources` source, so a non-hoisting layout would silently
+  // drop these notices. The config resolves each package instead; assert the
+  // sources are absolute paths that end at the intended in-package file.
+  const expectedSuffixes = new Map([
+    ['licenses/electron/LICENSE', join('electron', 'dist', 'LICENSE')],
+    [
+      'licenses/electron/LICENSES.chromium.html',
+      join('electron', 'dist', 'LICENSES.chromium.html'),
+    ],
+    ['licenses/renderer/GEIST_LICENSE.txt', join('@fontsource-variable', 'geist', 'LICENSE')],
+    [
+      'licenses/renderer/GEIST_MONO_LICENSE.txt',
+      join('@fontsource-variable', 'geist-mono', 'LICENSE'),
+    ],
+  ]);
+  const byTarget = new Map(desktopBuilderConfig.extraResources.map(({ from, to }) => [to, from]));
+  for (const [to, suffix] of expectedSuffixes) {
+    const from = byTarget.get(to);
+    assert.ok(from, `missing extraResources entry for ${to}`);
+    assert.ok(
+      isAbsolute(from),
+      `${to} source must be a resolved absolute path, not a '../../node_modules' hoisting assumption`,
+    );
+    assert.ok(from.endsWith(suffix), `${to} source must resolve to ${suffix}, got ${from}`);
+  }
 });
 
 test('macOS DMG ships correctly sized background assets', async () => {
@@ -257,7 +291,7 @@ test('platform package verifiers keep Git checks out of current artifacts', asyn
   );
   assert.match(
     windowsSource,
-    /if \(requiresCurrentContract\) \{\s*await assertPackagedUpdateConfiguration\(resources\);\s*await assertPackagedDependencyClosure\(resources\);\s*\}\s*else await requirePath\(join\(resources, ['"]git['"]/u,
+    /if \(requiresCurrentContract\) \{\s*await assertPackagedUpdateConfiguration\(resources, \{\s*channel: environment\.MAKA_DESKTOP_NIGHTLY_VERSION \? ['"]nightly['"] : ['"]release['"],\s*\}\);\s*await assertPackagedDependencyClosure\(resources\);\s*\}\s*else await requirePath\(join\(resources, ['"]git['"]/u,
   );
 
   const macosSource = await readFile(
@@ -577,14 +611,22 @@ test('standalone packaging applies the shared CLI file policy to dependencies', 
   }
 });
 
-test('standalone workspace staging keeps runtime files and removes Maka development output', async () => {
+test('standalone workspace staging keeps manifests consistent with copied files', async () => {
   const root = await mkdtemp(join(tmpdir(), 'maka-standalone-workspace-'));
   const workspace = join(root, 'workspace');
   const install = join(root, 'install');
   try {
+    const manifest = {
+      name: '@maka/example',
+      exports: {
+        '.': './dist/index.js',
+        './test-only/fixture': './dist/__tests__/fixture.js',
+      },
+      scripts: { build: 'tsc' },
+    };
     await mkdir(join(workspace, 'dist', '__tests__'), { recursive: true });
     await mkdir(install);
-    await writeFile(join(workspace, 'package.json'), '{}\n');
+    await writeFile(join(workspace, 'package.json'), `${JSON.stringify(manifest)}\n`);
     await writeFile(join(workspace, 'dist', 'index.js'), 'runtime\n');
     await writeFile(join(workspace, 'dist', 'dev-cli.js'), 'development\n');
     await writeFile(join(workspace, 'dist', 'index.d.ts'), 'development\n');
@@ -594,11 +636,15 @@ test('standalone workspace staging keeps runtime files and removes Maka developm
     await stageWorkspacePackages(install, [
       {
         directory: workspace,
-        manifest: { name: '@maka/example' },
+        manifest,
         workspacePath: 'packages/example',
       },
     ]);
 
+    assert.deepEqual(JSON.parse(await readFile(join(install, 'packages/example/package.json'))), {
+      name: '@maka/example',
+      exports: { '.': './dist/index.js' },
+    });
     const staged = join(install, 'packages', 'example', 'dist');
     assert.equal(await readFile(join(staged, 'index.js'), 'utf8'), 'runtime\n');
     for (const path of ['dev-cli.js', 'index.d.ts', 'index.js.map', '__tests__/fixture.js']) {
@@ -719,17 +765,16 @@ test('one product workflow gates one draft release on every required artifact', 
   const publishRelease = jobs.publish.steps.find(
     (step) => step.name === 'Create or update the draft GitHub Release',
   ).run;
+  assert.equal(Object.hasOwn(jobs['release-identity'].outputs, 'is_prerelease'), false);
   assert.equal(
-    jobs['release-identity'].outputs.is_prerelease,
-    '${{ steps.identity.outputs.is_prerelease }}',
+    Object.hasOwn(
+      jobs.publish.steps.find((step) => step.name === 'Create or update the draft GitHub Release')
+        .env,
+      'IS_PRERELEASE',
+    ),
+    false,
   );
-  assert.equal(
-    jobs.publish.steps.find((step) => step.name === 'Create or update the draft GitHub Release').env
-      .IS_PRERELEASE,
-    '${{ needs.release-identity.outputs.is_prerelease }}',
-  );
-  assert.match(publishRelease, /classification=\(--prerelease=false --latest=false\)/u);
-  assert.match(publishRelease, /classification=\(--prerelease --latest=false\)/u);
+  assert.match(publishRelease, /--prerelease=false/u);
   assert.doesNotMatch(publishRelease, /--latest(?:\s|\\|$)/u);
   assert.match(publishRelease, /--json isPrerelease/u);
   assert.doesNotMatch(publishRelease, /gh release delete-asset/u);
@@ -751,7 +796,6 @@ test('repository control plane admits only each release phase owner ref', async 
   const environments = config.github.environments;
   for (const [name, pattern, type] of [
     ['release', 'v*-incubating-rc*', 'tag'],
-    ['npm-release', 'v*', 'tag'],
     ['product-release', 'main', 'branch'],
   ]) {
     assert.deepEqual(environments[name], {
@@ -761,6 +805,17 @@ test('repository control plane admits only each release phase owner ref', async 
       deployment_branch_policy: {
         protected_branches: false,
         policies: [{ name: pattern, type }],
+      },
+    });
+  }
+  for (const name of ['npm-publication', 'nightly']) {
+    assert.deepEqual(environments[name], {
+      required_reviewers: [],
+      wait_timer: 0,
+      prevent_self_review: false,
+      deployment_branch_policy: {
+        protected_branches: false,
+        policies: [{ name: 'main', type: 'branch' }],
       },
     });
   }

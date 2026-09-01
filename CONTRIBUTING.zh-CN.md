@@ -45,14 +45,14 @@
 
 ## 快速开始
 
-需要 Node `>=22.19.0` 和 npm `11.19.0`（见根 `package.json`）；桌面端开发需要 macOS Apple Silicon。
+需要 Node `>=22.19.0` 和 npm `11.19.0`（见根 `package.json`）。开发 Desktop Direct Peer 或 Peer Mesh 还需要 Rust stable 1.98 或更高版本，以及 macOS 的 Xcode Command Line Tools 或 Windows 的 MSVC Build Tools。
 
 ```sh
 git clone https://github.com/apache/maka.git
 cd maka
 npm install                 # 只在根目录装 —— 不要在某个 workspace 里跑
 npm run build               # 按依赖顺序构建全部 workspace
-npm --workspace @maka/core test
+npm --workspace @maka/core run test:dist
 ```
 
 ## 开发
@@ -60,10 +60,10 @@ npm --workspace @maka/core test
 ```sh
 npm run dev          # 带 HMR 的桌面应用
 npm run cli:dev      # TUI；`npm run cli:dev -- run "…"` 非交互地跑一个 Turn
-npm test             # 全部 workspace，或：npm --workspace @maka/core test
+npm test             # 全部 workspace，或：npm --workspace @maka/core run test:dist
 ```
 
-只有依赖都已构建好时，单独构建某个 workspace 才会成功——拿不准就从根目录构建。测试跑的是 `dist/` 里的编译产物；每个 workspace 的 `test` 脚本都会先清理、再构建，然后执行 `node --test`。务必走它。
+只有依赖都已构建好时，单独构建某个 workspace 才会成功——拿不准就从根目录构建。测试跑的是 `dist/` 里的编译产物，`test:dist` 覆盖的是最近一次构建的结果，跑之前先重新构建。根目录的 `npm test` 会把两步都做掉。
 
 推送前先在本地对齐 CI：
 

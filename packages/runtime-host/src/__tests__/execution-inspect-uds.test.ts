@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { withTimeout } from '@maka/core/test-only/async-primitives';
 import assert from 'node:assert/strict';
 import { fork, type ChildProcess } from 'node:child_process';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
@@ -73,14 +74,6 @@ test('a live Host serves Interactive inspection over its real endpoint while ret
     assert.equal(connected.kind, 'connected');
     if (connected.kind !== 'connected') throw new Error('Live inspection did not connect');
     try {
-      assert.deepEqual(
-        await connected.connection.request('execution.inspect.resolve', { id: session.id }),
-        {
-          status: 'resolved',
-          candidates: [{ kind: 'session', id: session.id }],
-          truncated: false,
-        },
-      );
       const inspected = await connected.connection.request('execution.inspect.query', {
         kind: 'session',
         sessionId: session.id,
@@ -200,17 +193,5 @@ function waitForExit(
     };
     child.once('error', onError);
     child.once('exit', onExit);
-  });
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  return Promise.race([
-    promise,
-    new Promise<T>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-    }),
-  ]).finally(() => {
-    if (timer) clearTimeout(timer);
   });
 }

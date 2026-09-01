@@ -68,6 +68,8 @@ import {
 } from '../protocol/index.js';
 import { FramedTransport, RuntimeHostTransportError } from '../transport/framed-transport.js';
 import type { RuntimeHostMessageTransport } from '../transport/message-transport.js';
+import type { RuntimeHostPeerConnectionPath } from '../transport/peer-native.js';
+export type { RuntimeHostPeerConnectionPath } from '../transport/peer-native.js';
 import { WebSocketTransport } from '../transport/websocket-transport.js';
 import type { OperationMode, OperationSpec } from '../protocol/operation-spec.js';
 import {
@@ -174,6 +176,7 @@ export interface ConnectRuntimeHostMessageTransportInput {
   readonly livenessIntervalMs?: number;
   readonly onLivenessProbe?: () => void;
   readonly connectionResource?: RuntimeHostConnectionResource;
+  readonly peerPath?: RuntimeHostPeerConnectionPath;
 }
 
 export interface RuntimeHostConnectionResource {
@@ -230,6 +233,7 @@ export interface RuntimeHostConnection {
   readonly selectedProtocol: number;
   readonly compositionId: string;
   readonly compositionRevision: string;
+  readonly peerPath?: RuntimeHostPeerConnectionPath;
   readonly closed: Promise<void>;
   request<K extends DirectRequestOperationKey>(
     operation: K,
@@ -333,6 +337,7 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
   readonly selectedProtocol: number;
   readonly compositionId: string;
   readonly compositionRevision: string;
+  readonly peerPath: RuntimeHostPeerConnectionPath | undefined;
   readonly closed: Promise<void>;
   readonly #transport: RuntimeHostMessageTransport;
   readonly #pendingRequests = new Map<string, PendingRequest>();
@@ -368,6 +373,7 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       livenessIntervalMs?: number;
       onLivenessProbe?: () => void;
       connectionResource?: RuntimeHostConnectionResource;
+      peerPath?: RuntimeHostPeerConnectionPath;
     },
   ) {
     this.#livenessIntervalMs = options?.livenessIntervalMs ?? DEFAULT_LIVENESS_INTERVAL_MS;
@@ -379,6 +385,7 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     this.selectedProtocol = accepted.selectedProtocol;
     this.compositionId = accepted.compositionId;
     this.compositionRevision = accepted.compositionRevision;
+    this.peerPath = options?.peerPath;
     const connectionResource = options?.connectionResource;
     if (connectionResource) {
       const abortForResourceClosure = (cause: Error) =>
@@ -1056,6 +1063,7 @@ export async function connectRuntimeHostMessageTransport(
       livenessIntervalMs: normalized.livenessIntervalMs,
       onLivenessProbe: input.onLivenessProbe,
       connectionResource: input.connectionResource,
+      ...(input.peerPath ? { peerPath: input.peerPath } : {}),
     });
     if (result.kind === 'connected') {
       resourceTransferred = true;
@@ -1360,6 +1368,7 @@ interface ExchangeRuntimeHostHandshakeInput {
   readonly livenessIntervalMs?: number;
   readonly onLivenessProbe?: () => void;
   readonly connectionResource?: RuntimeHostConnectionResource;
+  readonly peerPath?: RuntimeHostPeerConnectionPath;
 }
 
 interface LegacySurfaceClientHello extends ClientHello {
@@ -1439,6 +1448,7 @@ async function exchangeRuntimeHostHandshake(
       livenessIntervalMs: input.livenessIntervalMs,
       onLivenessProbe: input.onLivenessProbe,
       connectionResource: input.connectionResource,
+      ...(input.peerPath ? { peerPath: input.peerPath } : {}),
     }),
   };
 }

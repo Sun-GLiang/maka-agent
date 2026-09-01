@@ -27,13 +27,27 @@ import {
   timingSafeEqual,
   verify,
 } from 'node:crypto';
+import {
+  decodePeerMeshInvitation as decodePeerMeshInvitationWire,
+  type PeerMeshInvitationV1,
+} from '../protocol/peer-mesh.js';
+import {
+  PEER_MESH_MAX_MEMBERS,
+  PEER_MESH_MAX_ROUTE_HINTS,
+  PEER_MESH_ROUTE_RECORD_MAX_BYTES,
+} from './limits.js';
+import { canonicalPeerMeshDisplayName } from './display-name.js';
 
-export const PEER_MESH_MAX_MEMBERS = 64;
-export const PEER_MESH_MAX_MESHES = 16;
-export const PEER_MESH_MAX_PENDING_INVITATIONS = 32;
-export const PEER_MESH_MAX_INVITATION_RECORDS = PEER_MESH_MAX_PENDING_INVITATIONS * 3;
-export const PEER_MESH_MAX_ROUTE_HINTS = 16;
-export const PEER_MESH_ROUTE_RECORD_MAX_BYTES = 4 * 1024;
+export {
+  PEER_MESH_MAX_INVITATION_RECORDS,
+  PEER_MESH_MAX_MEMBERS,
+  PEER_MESH_MAX_MESHES,
+  PEER_MESH_MAX_PENDING_INVITATIONS,
+  PEER_MESH_MAX_ROUTE_HINTS,
+  PEER_MESH_MAX_TRANSIT_ADDRESSES_PER_RELAY,
+  PEER_MESH_MAX_TRANSIT_RELAY_ADDRESSES,
+  PEER_MESH_ROUTE_RECORD_MAX_BYTES,
+} from './limits.js';
 
 export interface PeerMeshRosterV1 {
   readonly version: 1;
@@ -41,6 +55,7 @@ export interface PeerMeshRosterV1 {
   readonly revision: number;
   readonly members: readonly string[];
   readonly closed: boolean;
+  readonly displayName?: string;
 }
 
 export interface SignedPeerMeshRosterV1 {
@@ -55,13 +70,6 @@ export interface PeerMeshAuthorityTarget {
   readonly coordinationRelays: readonly string[];
 }
 
-export interface PeerMeshInvitationV1 extends PeerMeshAuthorityTarget {
-  readonly version: 1;
-  readonly meshId: string;
-  readonly authorityPublicKey: string;
-  readonly secret: string;
-}
-
 export interface PeerMeshAuthorityKeyPair {
   readonly publicKey: string;
   readonly privateKey: string;
@@ -71,6 +79,9 @@ export interface PeerMeshRouteRecordV1 extends PeerMeshAuthorityTarget {
   readonly version: 1;
   readonly sequence: number;
   readonly expiresAt: number;
+  readonly endpointKind?: 'client' | 'host';
+  readonly displayName?: string;
+  readonly transitMeshId?: string;
 }
 
 export interface SignedPeerMeshRouteRecordV1 {
@@ -173,43 +184,25 @@ export function matchesPeerMeshInvitationSecret(secret: string, expectedDigest: 
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-export function decodePeerMeshInvitation(value: unknown): PeerMeshInvitationV1 {
-  const record = exactObject(value, 'Peer Mesh invitation', [
-    'version',
-    'meshId',
-    'authorityPublicKey',
-    'secret',
-    'peerId',
-    'routeHints',
-    'coordinationRelays',
-  ]);
-  if (record.version !== 1) throw new Error('Unsupported Peer Mesh invitation version');
-  const authorityPublicKey = string(record.authorityPublicKey, 'authorityPublicKey', 256);
-  const meshId = string(record.meshId, 'meshId', 128);
+export function validatePeerMeshInvitation(value: unknown): PeerMeshInvitationV1 {
+  const invitation = decodePeerMeshInvitationWire(value);
+  const authorityPublicKey = invitation.authorityPublicKey;
+  const meshId = invitation.meshId;
   if (meshId !== peerMeshId(authorityPublicKey)) {
     throw new Error('Peer Mesh invitation has the wrong authority');
   }
   return Object.freeze({
-    version: 1,
-    meshId,
-    authorityPublicKey,
-    secret: validateSecret(record.secret),
-    ...decodeAuthorityTarget({
-      peerId: record.peerId,
-      routeHints: record.routeHints,
-      coordinationRelays: record.coordinationRelays,
-    }),
+    ...invitation,
+    secret: validateSecret(invitation.secret),
   });
 }
 
 export function canonicalPeerMeshRoster(value: unknown): PeerMeshRosterV1 {
-  const record = exactObject(value, 'Peer Mesh roster', [
-    'version',
-    'meshId',
-    'revision',
-    'members',
-    'closed',
-  ]);
+  const keys = ['version', 'meshId', 'revision', 'members', 'closed'];
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    if (Object.hasOwn(value, 'displayName')) keys.push('displayName');
+  }
+  const record = exactObject(value, 'Peer Mesh roster', keys);
   if (record.version !== 1) throw new Error('Unsupported Peer Mesh roster version');
   const members = stringArray(record.members, 'members', PEER_MESH_MAX_MEMBERS, 256)
     .map((member) => token(member, 'member', 256))
@@ -224,6 +217,9 @@ export function canonicalPeerMeshRoster(value: unknown): PeerMeshRosterV1 {
     revision: integer(record.revision, 'revision', 1),
     members: Object.freeze(members),
     closed: record.closed,
+    ...(record.displayName === undefined
+      ? {}
+      : { displayName: canonicalPeerMeshDisplayName(record.displayName) }),
   });
 }
 
@@ -243,15 +239,21 @@ export function decodeAuthorityTarget(value: unknown): PeerMeshAuthorityTarget {
 }
 
 export function canonicalPeerMeshRouteRecord(value: unknown): PeerMeshRouteRecordV1 {
-  const record = exactObject(value, 'Peer Mesh route record', [
-    'version',
-    'peerId',
-    'sequence',
-    'expiresAt',
-    'routeHints',
-    'coordinationRelays',
-  ]);
+  const keys = ['version', 'peerId', 'sequence', 'expiresAt', 'routeHints', 'coordinationRelays'];
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    if (Object.hasOwn(value, 'endpointKind')) keys.push('endpointKind');
+    if (Object.hasOwn(value, 'displayName')) keys.push('displayName');
+    if (Object.hasOwn(value, 'transitMeshId')) keys.push('transitMeshId');
+  }
+  const record = exactObject(value, 'Peer Mesh route record', keys);
   if (record.version !== 1) throw new Error('Unsupported Peer Mesh route record version');
+  if (
+    record.endpointKind !== undefined &&
+    record.endpointKind !== 'client' &&
+    record.endpointKind !== 'host'
+  ) {
+    throw new Error('Invalid Peer Mesh endpoint kind');
+  }
   const route = Object.freeze({
     version: 1 as const,
     peerId: token(record.peerId, 'peerId', 256),
@@ -261,6 +263,13 @@ export function canonicalPeerMeshRouteRecord(value: unknown): PeerMeshRouteRecor
     coordinationRelays: Object.freeze(
       addressArray(record.coordinationRelays, 'coordinationRelays'),
     ),
+    ...(record.endpointKind === undefined ? {} : { endpointKind: record.endpointKind }),
+    ...(record.displayName === undefined
+      ? {}
+      : { displayName: canonicalPeerMeshDisplayName(record.displayName) }),
+    ...(record.transitMeshId === undefined
+      ? {}
+      : { transitMeshId: string(record.transitMeshId, 'transitMeshId', 128) }),
   });
   if (peerMeshRouteRecordSigningBytes(route).byteLength > PEER_MESH_ROUTE_RECORD_MAX_BYTES) {
     throw new Error('Peer Mesh route record is too large');
@@ -287,10 +296,13 @@ export function peerMeshRouteRecordSigningBytes(route: PeerMeshRouteRecordV1): B
   return Buffer.from(
     `maka.peer-mesh.route.v1\n${JSON.stringify({
       coordinationRelays: route.coordinationRelays,
+      ...(route.displayName ? { displayName: route.displayName } : {}),
+      ...(route.endpointKind ? { endpointKind: route.endpointKind } : {}),
       expiresAt: route.expiresAt,
       peerId: route.peerId,
       routeHints: route.routeHints,
       sequence: route.sequence,
+      ...(route.transitMeshId ? { transitMeshId: route.transitMeshId } : {}),
       version: route.version,
     })}`,
   );
@@ -300,6 +312,7 @@ function encodeRoster(roster: PeerMeshRosterV1): Buffer {
   return Buffer.from(
     `maka.peer-mesh.roster.v1\n${JSON.stringify({
       closed: roster.closed,
+      ...(roster.displayName ? { displayName: roster.displayName } : {}),
       members: roster.members,
       meshId: roster.meshId,
       revision: roster.revision,

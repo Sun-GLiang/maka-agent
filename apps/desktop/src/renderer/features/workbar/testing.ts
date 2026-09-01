@@ -73,8 +73,8 @@ export function createFakeWorkbarServices(
       subscribePtyData: noopSubscription,
       subscribeResync: noopSubscription,
     },
-    tasks: {
-      list: async () => [],
+    todo: {
+      read: async () => [],
       subscribeChanges: noopSubscription,
     },
     browser: {
@@ -113,6 +113,7 @@ export function createFakeWorkbarServices(
       subscribeUsageChanges: noopSubscription,
     },
     attachments: {
+      readBytes: async () => ({ ok: false, reason: 'not_found' }),
       pickFiles: async () => ({ ok: false, reason: 'cancelled' }),
       previewApproval: async () => ({ ok: false, reason: 'not configured' }),
     },

@@ -35,6 +35,7 @@ This page is the authority map for Maka documentation. Code and contract tests r
 - [Renderer architecture](../apps/desktop/src/renderer/README.md)
 - [Evaluation kernel](../packages/eval/README.md)
 - [Runtime package](../packages/runtime/README.md)
+- [Computer Use package](../packages/computer-use/README.md)
 - [UI package architecture](../packages/ui/README.md)
 - [Security policy](../SECURITY.md)
 
@@ -43,7 +44,7 @@ This page is the authority map for Maka documentation. Code and contract tests r
 ### Runtime and Eval
 
 - [Deep Research durable workspace](./deep-research-durable-workspace.md)
-- [Session task ledger lifecycle](./session-task-ledger-lifecycle.md)
+- [SessionTodo lifecycle](./session-todo-lifecycle.md)
 - [Work Board contract](./work-board-contract.md)
 - [Work Board Phase 1 surface](./work-board-phase1.md)
 - [WorkHub domain language](./workhub-domain-language.md)

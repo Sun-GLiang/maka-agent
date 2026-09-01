@@ -28,17 +28,21 @@ import {
   resolveStorageRoot,
   tryAcquireInteractiveRootOwner,
 } from '@maka/storage/root-authority';
+import { openInteractiveSessionTodoStoreForWrite } from '@maka/storage/session-todo-authority';
 import { openInteractiveUsageStoresForWrite } from '@maka/storage/usage-stores';
 import {
   E2E_FIXTURE_NOW,
   LONG_SIDEBAR_PROJECT_ID,
   LONG_SIDEBAR_PROJECT_NAME,
   LONG_SIDEBAR_SESSION_PREFIX,
+  PARTIAL_HISTORY_SESSION_ID,
   PROMPT_RAIL_SESSION_ID,
   TURN_SESSION_ID,
   writeSession,
 } from './e2e-fixture/seed-helpers.js';
 import {
+  partialHistoryMessages,
+  partialHistorySession,
   promptRailMessages,
   promptRailSession,
   turnMessages,
@@ -59,6 +63,7 @@ const E2E_FIXTURE_SCENARIOS = new Set<E2eFixtureScenario>([
   'turn-narrative',
   'turn-narrative-browser',
   'chat-prompt-rail',
+  'chat-partial-history',
   'settings-data',
   'settings-bots-onboarding',
   'settings-general',
@@ -174,6 +179,8 @@ export function getE2eFixtureState(fixture: E2eFixture | null): E2eFixtureState 
       // this window scrolls smoothly is a per-launch choice (`scrollMotion`),
       // because only the jump case needs it and it costs seconds of settling.
       return { ...state, activeSessionId: PROMPT_RAIL_SESSION_ID, workbarCollapsed: true };
+    case 'chat-partial-history':
+      return { ...state, activeSessionId: PARTIAL_HISTORY_SESSION_ID, workbarCollapsed: true };
     case 'settings-data':
       return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'data' };
     case 'settings-bots-onboarding':
@@ -222,8 +229,34 @@ export async function seedE2eFixture(input: {
   await writeConnections(input.workspaceRoot, now, scenario);
   await writeSession(input.workspaceRoot, turnSession(now), turnMessages(now));
 
+  if (scenario === 'turn-narrative' || scenario === 'turn-narrative-browser') {
+    const owner = await tryAcquireInteractiveRootOwner(storageRoot);
+    if (!owner) throw new Error('Unable to acquire the E2E fixture SessionTodo root');
+    try {
+      const todos = await openInteractiveSessionTodoStoreForWrite(owner.lease);
+      try {
+        await todos.replaceAll(TURN_SESSION_ID, [
+          { content: '补齐桌面端无障碍覆盖', status: 'in_progress' },
+          { content: '核对模型选择器的键盘路径', status: 'pending' },
+          { content: '确认工具结果可以展开阅读', status: 'completed' },
+        ]);
+      } finally {
+        todos.close();
+      }
+    } finally {
+      await owner.close();
+    }
+  }
+
   if (scenario === 'chat-prompt-rail') {
     await writeSession(input.workspaceRoot, promptRailSession(now), promptRailMessages(now));
+  }
+  if (scenario === 'chat-partial-history') {
+    await writeSession(
+      input.workspaceRoot,
+      partialHistorySession(now),
+      partialHistoryMessages(now),
+    );
   }
   if (scenario === 'sidebar-search-modal-open') {
     for (const seed of longSidebarSessions(now)) {

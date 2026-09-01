@@ -21,6 +21,7 @@ import type {
   ConnectionCatalogEntry,
   ConnectionCatalogSnapshot,
   ConnectionModelDiscoveryResult,
+  ConnectionOnboardingTarget,
   ConnectionTestSummary,
   CredentialMutationResult,
   CredentialLocator,
@@ -144,9 +145,38 @@ export type InteractiveOAuthLoginProvider = Extract<
   'openai-codex' | 'xai-oauth'
 >;
 
+export type InteractiveOAuthLoginTarget =
+  | { readonly kind: 'create'; readonly providerType: InteractiveOAuthLoginProvider }
+  | { readonly kind: 'existing'; readonly connectionId: string };
+
+export interface InteractiveOAuthLoginInput {
+  readonly attemptId: string;
+  readonly target: InteractiveOAuthLoginTarget;
+}
+
+export type InteractiveOAuthConnectionIdentity = Pick<
+  ConnectionCatalogEntry,
+  'connectionId' | 'slug' | 'providerType'
+> & { readonly providerType: InteractiveOAuthLoginProvider };
+
+export type QueryInteractiveOAuthLoginResult =
+  | { readonly kind: 'not_found' }
+  | {
+      readonly kind: 'authenticated';
+      readonly target: InteractiveOAuthLoginTarget;
+      readonly connection: InteractiveOAuthConnectionIdentity;
+    };
+
 export type BeginInteractiveOAuthLoginResult =
+  | {
+      readonly kind: 'authenticated';
+      readonly target: InteractiveOAuthLoginTarget;
+      readonly connection: InteractiveOAuthConnectionIdentity;
+    }
   | { readonly kind: 'connection_not_found' }
   | { readonly kind: 'connection_disabled' }
+  | { readonly kind: 'catalog_full' }
+  | { readonly kind: 'attempt_conflict' }
   | {
       readonly kind: 'provider_action_unavailable';
       readonly availability: UnavailableProviderActionAvailability;
@@ -155,6 +185,8 @@ export type BeginInteractiveOAuthLoginResult =
   | {
       readonly kind: 'ready';
       readonly ticket: InteractiveOAuthLoginTicket;
+      readonly target: InteractiveOAuthLoginTarget;
+      readonly identity: InteractiveOAuthConnectionIdentity;
       readonly connection: ConnectionCatalogEntry & {
         readonly providerType: InteractiveOAuthLoginProvider;
       };
@@ -167,6 +199,7 @@ export type InteractiveOAuthLoginCompletionResult =
       readonly kind: 'committed';
       readonly credentialId: string;
       readonly revision: number;
+      readonly connection: InteractiveOAuthConnectionIdentity;
     }
   | {
       readonly kind: 'superseded';
@@ -218,12 +251,8 @@ export interface ConnectionOnboardingTicket {
 }
 
 export interface BeginConnectionOnboardingInput {
-  readonly providerType: ConnectionCatalogEntry['providerType'];
-  /**
-   * The existing connection to edit in place (any slug); null targets the
-   * canonical-slug connection, creating it when absent.
-   */
-  readonly connectionId: string | null;
+  readonly target: ConnectionOnboardingTarget;
+  readonly baseUrl: string | null;
 }
 
 /**
@@ -237,12 +266,16 @@ export interface BeginConnectionOnboardingInput {
 export type BeginConnectionOnboardingResult =
   // The explicitly targeted connection does not exist or changed provider type.
   | { readonly kind: 'target_missing' }
-  | { readonly kind: 'slug_conflict' }
+  | { readonly kind: 'provider_unsupported' }
+  | { readonly kind: 'catalog_full' }
   | {
       readonly kind: 'ready';
       readonly ticket: ConnectionOnboardingTicket;
-      /** The targeted connection, or null when onboarding creates one. */
-      readonly connection: ConnectionCatalogEntry | null;
+      readonly candidate: Pick<ConnectionCatalogEntry, 'connectionId' | 'slug' | 'providerType'>;
+      /** The targeted persisted connection, or null when onboarding creates one. */
+      readonly existingConnection: ConnectionCatalogEntry | null;
+      /** Provider-normalized endpoint override pinned into the ticket. */
+      readonly baseUrl: string | null;
       /** The target's stored API key, for blank-key reuse during discovery. */
       readonly storedSecret: string | null;
       /**
@@ -262,15 +295,7 @@ export type BeginConnectionOnboardingResult =
     };
 
 export interface CommitConnectionOnboardingInput {
-  readonly providerType: ConnectionCatalogEntry['providerType'];
-  /**
-   * The existing connection to edit in place (any slug); null targets the
-   * canonical-slug connection, creating it when absent.
-   */
-  readonly connectionId: string | null;
   readonly suppliedSecret: string | null;
-  /** Endpoint override; null keeps the existing entry's persisted URL or the registry default. */
-  readonly baseUrl: string | null;
   readonly enabledModelIds: readonly string[];
   readonly discovery: ConnectionModelDiscoveryResult;
 }
@@ -280,8 +305,12 @@ export type CommitConnectionOnboardingResult =
       readonly kind: 'committed';
       readonly snapshot: ConnectionCatalogSnapshot;
       readonly changed: boolean;
+      readonly connection: Pick<
+        ConnectionCatalogEntry,
+        'connectionId' | 'slug' | 'providerType' | 'revision'
+      >;
     }
-  | { readonly kind: 'slug_conflict' }
+  | { readonly kind: 'catalog_full' }
   // The explicitly targeted connection no longer exists (or changed provider
   // type) between the caller's snapshot and this commit.
   | { readonly kind: 'target_missing' }
@@ -349,7 +378,10 @@ export interface RuntimePolicyOperationCoordinator {
     input: CompareAndSetOAuthCredentialInput,
   ): Promise<CompareAndSetOAuthCredentialResult>;
   importConnectionCredential(input: SetCredentialInput): Promise<CredentialMutationResult>;
-  beginInteractiveOAuthLogin(connectionId: string): Promise<BeginInteractiveOAuthLoginResult>;
+  beginInteractiveOAuthLogin(
+    input: InteractiveOAuthLoginInput,
+  ): Promise<BeginInteractiveOAuthLoginResult>;
+  queryInteractiveOAuthLogin(attemptId: string): Promise<QueryInteractiveOAuthLoginResult>;
   completeInteractiveOAuthLogin(
     ticket: InteractiveOAuthLoginTicket,
     secret: string,

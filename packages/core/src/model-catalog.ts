@@ -63,6 +63,7 @@ export interface KnownModelCapabilities {
   functionCalling?: true;
   parallelToolCalls?: true;
   imageGeneration?: true;
+  webSearch?: true;
 }
 
 export interface ModelCatalogPricing {
@@ -264,13 +265,46 @@ export function buildConnectionModelCatalogEntries(
   const fallbackModels = [...(catalogFallbackModels ?? defaults.fallbackModels)].filter(
     (id) => !broken.has(id),
   );
+  // A quarantined id persisted as this connection's `defaultModel` must not
+  // re-enter the catalog either. `models` and `enabledModelIds` are filtered
+  // below, but a broken default reaches `makeMissingDefaultEntry` unfiltered and
+  // would be re-added as a selectable `provider_default` row — picker-visible
+  // and default-capable while `authorizeConnectionModel` vetoes the same id. A
+  // reachable persisted state: the id was picker-visible before the quarantine.
+  // Dropping it leaves the connection with no valid default (readiness reports
+  // `missing_model`), which is what a model that can no longer send warrants.
+  const defaultModel = broken.has((connection.defaultModel ?? '').trim())
+    ? undefined
+    : connection.defaultModel;
+  const fallbackModelIds = new Set(fallbackModels);
+  const projectedModelsById = new Map(
+    (connection.models ?? []).filter(({ id }) => !broken.has(id)).map((model) => [model.id, model]),
+  );
+  // Fallback providers have no live inventory, but a projected connection can
+  // still carry enabled model-facts entries that are absent from the static
+  // list. Keep both sets in the catalog so those user-declared models retain
+  // their metadata and provenance.
+  const models = supportsModelDiscovery
+    ? connection.models?.filter(({ id }) => !broken.has(id))
+    : [
+        ...fallbackModels.map(
+          (id) =>
+            projectedModelsById.get(id) ?? {
+              id,
+              ...displayNameForKnownModel(connection.providerType, id),
+            },
+        ),
+        ...(connection.models ?? []).filter(
+          (model) => !broken.has(model.id) && !fallbackModelIds.has(model.id),
+        ),
+      ];
   return buildModelCatalogEntries({
     providerType: connection.providerType,
     connectionSlug: connection.slug,
-    defaultModel: connection.defaultModel,
-    models: connection.models?.filter(({ id }) => !broken.has(id)),
-    modelSource: connection.modelSource,
-    modelsFetchedAt: connection.modelsFetchedAt,
+    defaultModel,
+    models,
+    modelSource: supportsModelDiscovery ? connection.modelSource : 'fallback',
+    modelsFetchedAt: supportsModelDiscovery ? connection.modelsFetchedAt : undefined,
     fallbackModels: supportsModelDiscovery
       ? (input.fallbackModels ?? fallbackModels)
       : fallbackModels,
@@ -345,9 +379,15 @@ function makeEntry(
   const lastUpdated = normalizedModel.lastUpdated ?? metadata.lastUpdated;
   const modalities = normalizedModel.modalities ?? metadata.modalities;
   const capabilities = mergeCapabilities(normalizedModel.capabilities, metadata.capabilities);
+  // `modalities` too, not just `capabilities`: both are merged from the
+  // provider row and the bundled metadata a few lines up, and the chat guard
+  // reads the modality. Passing the unmerged `normalizedModel.modalities`
+  // meant a bundled image-only model reached the guard with no output
+  // declaration at all.
   const unavailableReason = deriveModelUnavailableReason(input, {
     ...normalizedModel,
     capabilities,
+    ...(modalities !== undefined ? { modalities } : {}),
   });
   return {
     id: normalizedModel.id,
@@ -356,11 +396,13 @@ function makeEntry(
     providerType: input.providerType,
     ...(input.connectionSlug ? { connectionSlug: input.connectionSlug } : {}),
     source,
-    capabilitySource: normalizedModel.capabilities
-      ? source
-      : metadata.capabilities
-        ? 'static_catalog'
-        : 'unknown',
+    capabilitySource: normalizedModel.factOverriddenFields?.includes('capabilities')
+      ? 'user_override'
+      : normalizedModel.capabilities
+        ? source
+        : metadata.capabilities
+          ? 'static_catalog'
+          : 'unknown',
     unavailableReason,
     availability: availabilityOf(unavailableReason),
     canUseAsChatDefault: canUseUnavailableReasonAsDefault(unavailableReason),
@@ -408,6 +450,7 @@ function mergeCapabilities(
     parallelToolCalls:
       providerCapabilities.parallelToolCalls ?? metadataCapabilities.parallelToolCalls,
     imageGeneration: providerCapabilities.imageGeneration ?? metadataCapabilities.imageGeneration,
+    webSearch: providerCapabilities.webSearch ?? metadataCapabilities.webSearch,
   };
 }
 
@@ -626,10 +669,34 @@ function isStale(
   return now - input.modelsFetchedAt > staleAfterMs;
 }
 
+/**
+ * Whether a declared output modality rules the model out of chat.
+ *
+ * A model that answers only in images or only in audio cannot hold a
+ * conversation, and this is the form that fact actually arrives in: the
+ * generated metadata records `modalities.output` for every such model and has
+ * never set `capabilities.imageGeneration` for any of them, so the capability
+ * check below could not fire on bundled data.
+ *
+ * An EMPTY list is not evidence. `modalities.output` is typed to text, image,
+ * and audio, so a video model's real output has no representation and
+ * serializes as `[]` — the same shape a future generator bug would produce.
+ * Only a non-empty list says something, and what it says is what it lists.
+ */
+function declaresNoTextOutput(model: ModelInfo): boolean {
+  const output = model.modalities?.output;
+  if (output === undefined || output.length === 0) return false;
+  return !output.includes('text');
+}
+
 export function isModelExplicitlyUnsupportedForChat(model: ModelInfo): boolean {
   const caps = model.capabilities;
+  if (caps?.chat === false) return true;
+  // Only an explicit `chat: true` outranks the modality. `reasoning` and
+  // `functionCalling` do not: a TTS model carrying `reasoning: true` is
+  // describing how it composes speech, and it still cannot answer in text.
+  if (caps?.chat !== true && declaresNoTextOutput(model)) return true;
   if (!caps) return false;
-  if (caps.chat === false) return true;
   return (
     caps.imageGeneration === true &&
     caps.chat !== true &&
@@ -647,6 +714,7 @@ function normalizeCapabilities(caps: ModelInfo['capabilities']): KnownModelCapab
     ...(caps.functionCalling === true ? { functionCalling: true as const } : {}),
     ...(caps.parallelToolCalls === true ? { parallelToolCalls: true as const } : {}),
     ...(caps.imageGeneration === true ? { imageGeneration: true as const } : {}),
+    ...(caps.webSearch === true ? { webSearch: true as const } : {}),
   };
 }
 

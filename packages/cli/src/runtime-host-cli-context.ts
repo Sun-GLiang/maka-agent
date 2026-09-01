@@ -89,9 +89,19 @@ export interface RuntimeHostCliConnectionOnlyContext {
   close(): Promise<void>;
 }
 
+export interface RuntimeHostCliConnectionOnlyContextWithIdentity
+  extends RuntimeHostCliConnectionOnlyContext {
+  readonly clientInstanceId: string;
+  readonly profileIncarnationId?: string;
+}
+
 export interface RuntimeHostCliConnectionContext extends RuntimeHostCliConnectionOnlyContext {
   readonly catalog: ConnectionCatalogSnapshot;
 }
+
+export interface RuntimeHostCliConnectionContextWithIdentity
+  extends RuntimeHostCliConnectionContext,
+    RuntimeHostCliConnectionOnlyContextWithIdentity {}
 
 export interface RuntimeHostCliConnectionInput {
   readonly rootPath: string;
@@ -120,7 +130,7 @@ interface RuntimeHostCliContextDeps {
 export async function connectRuntimeHostCli(
   input: RuntimeHostCliConnectionInput,
   overrides: Partial<RuntimeHostCliContextDeps> = {},
-): Promise<RuntimeHostCliConnectionContext> {
+): Promise<RuntimeHostCliConnectionContextWithIdentity> {
   const context = await connectRuntimeHostCliConnection(input, overrides);
   try {
     const catalog = await runAbortably(
@@ -138,7 +148,7 @@ export async function connectRuntimeHostCli(
 export async function connectRuntimeHostCliConnection(
   input: RuntimeHostCliConnectionInput,
   overrides: Partial<RuntimeHostCliContextDeps> = {},
-): Promise<RuntimeHostCliConnectionOnlyContext> {
+): Promise<RuntimeHostCliConnectionOnlyContextWithIdentity> {
   const deps: RuntimeHostCliContextDeps = {
     connectOrSpawn: connectOrSpawnRuntimeHost,
     connectProfile: connectRuntimeHostProfile,
@@ -230,6 +240,10 @@ export async function connectRuntimeHostCliConnection(
     return {
       connection: liveConnection,
       profile,
+      clientInstanceId,
+      ...(resolvedProfile.profileIncarnationId
+        ? { profileIncarnationId: resolvedProfile.profileIncarnationId }
+        : {}),
       close: async () => {
         try {
           await liveConnection.close();

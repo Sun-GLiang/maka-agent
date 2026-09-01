@@ -41,6 +41,8 @@ export interface DesktopSessionSummary extends SessionSummary {
   readonly profileId: string;
   readonly profileName: string;
   readonly profileKind: RuntimeHostProfileKind;
+  /** Present only for Session projections granted to a Guest principal. */
+  readonly shared?: true;
 }
 
 export interface DesktopSessionHost extends DesktopHostRef {
@@ -126,9 +128,18 @@ export function projectDesktopStoredMessage(
         ? { ...message, parentSessionId: projectSessionId(host, message.parentSessionId) }
         : message;
     case 'workhub_coordination':
+      if (message.kind === 'delegation_superseded') return message;
       return {
         ...message,
         targetSessionId: projectSessionId(host, message.targetSessionId),
+        ...(message.kind === 'delegation_replacement_requested'
+          ? {
+              replacedTargetSessionId: projectSessionId(
+                host,
+                message.replacedTargetSessionId,
+              ),
+            }
+          : {}),
       };
     default:
       return message;

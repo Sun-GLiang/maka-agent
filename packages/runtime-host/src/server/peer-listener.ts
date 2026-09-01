@@ -42,6 +42,8 @@ export interface RuntimeHostPeerListenerConfiguration {
   readonly expectedPeerId?: string;
   readonly listenAddresses?: readonly string[];
   readonly coordinationRelays?: readonly string[];
+  readonly automaticRelayDiscovery?: boolean;
+  readonly webRtcStunUrls?: readonly string[];
 }
 
 export type RuntimeHostPeerListenerEndpointOptions =

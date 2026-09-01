@@ -45,14 +45,14 @@ Submit only work you have the right to contribute, and record third-party source
 
 ## Quick start
 
-Requires Node `>=22.19.0` and npm `11.19.0` (root `package.json`); desktop work needs macOS Apple Silicon.
+Requires Node `>=22.19.0` and npm `11.19.0` (root `package.json`). Direct Peer or Peer Mesh Desktop development additionally needs Rust stable 1.98 or newer and Xcode Command Line Tools on macOS, or MSVC Build Tools on Windows.
 
 ```sh
 git clone https://github.com/apache/maka.git
 cd maka
 npm install                 # root only — never inside a workspace
 npm run build               # builds every workspace in dependency order
-npm --workspace @maka/core test
+npm --workspace @maka/core run test:dist
 ```
 
 ## Developing Maka
@@ -60,10 +60,10 @@ npm --workspace @maka/core test
 ```sh
 npm run dev          # desktop app with HMR
 npm run cli:dev      # TUI; `npm run cli:dev -- run "…"` runs one non-interactive turn
-npm test             # all workspaces, or: npm --workspace @maka/core test
+npm test             # all workspaces, or: npm --workspace @maka/core run test:dist
 ```
 
-Building a single workspace only succeeds when its dependencies are already built — when unsure, build from the root. Tests run against compiled output in `dist/`; each workspace's `test` script cleans, builds, then runs `node --test`. Always go through it.
+Building a single workspace only succeeds when its dependencies are already built — when unsure, build from the root. Tests run against compiled output in `dist/`, so `test:dist` covers whatever the last build produced; rebuild before running it. `npm test` from the root does both.
 
 Before pushing, match CI locally:
 

@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { deferred } from '@maka/core/test-only/async-primitives';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
@@ -41,6 +42,7 @@ import {
   type OperationKey,
   type OperationOutput,
 } from '../protocol/index.js';
+import { waitFor } from '@maka/core/test-only/async-primitives';
 
 test('a reconnecting Client retries an interrupted query on the replacement connection', async () => {
   const first = connectionHarness('first', (operation) => {
@@ -519,6 +521,37 @@ test('reconnect lifecycle quiescence waits through a connection gap before freez
   await lifecycle.close();
 });
 
+test('reconnect lifecycle suspension admits recovery while no connection exists', async () => {
+  const first = connectionHarness('first', () => undefined);
+  const replacement = connectionHarness('replacement', () => undefined);
+  const reconnectStarted = deferred();
+  let connectCalls = 0;
+  const lifecycle = await startRuntimeHostReconnectLifecycle({
+    initial: first.connection,
+    connect: async (signal) => {
+      connectCalls += 1;
+      if (connectCalls === 1) {
+        reconnectStarted.resolve();
+        await new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }
+      return replacement.connection;
+    },
+  });
+
+  first.disconnect();
+  await reconnectStarted.promise;
+  const suspension = await lifecycle.suspend();
+  assert.equal(suspension.current, undefined);
+  assert.equal(connectCalls, 1);
+
+  suspension.resume();
+  assert.equal(await lifecycle.waitForCurrent(), replacement.connection);
+  assert.equal(connectCalls, 2);
+  await lifecycle.close();
+});
+
 test('reconnect delay escalates past maxMs while the Host never stabilizes', async () => {
   const first = connectionHarness('first', () => undefined);
   const delays: number[] = [];
@@ -646,12 +679,7 @@ test('an omitted unstableMaxMs stays compatible with a large maxMs', async () =>
 });
 
 function waitForCondition(condition: () => boolean): Promise<void> {
-  return (async () => {
-    for (let i = 0; i < 1_000 && !condition(); i += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    assert.ok(condition());
-  })();
+  return waitFor(condition, { attempts: 1_000 });
 }
 
 function yieldToEventLoop(): Promise<void> {
@@ -738,15 +766,6 @@ function interrupted(
 ): RuntimeHostRequestInterruptedError {
   return new RuntimeHostRequestInterruptedError(operation, mode, dispatch, 'connection_lost');
 }
-
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((settle) => {
-    resolve = settle;
-  });
-  return { promise, resolve };
-}
-
 function deferredValue<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((settle) => {

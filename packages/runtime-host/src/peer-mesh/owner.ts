@@ -18,7 +18,14 @@
  */
 
 import { createRuntimeHostPeerClient, type RuntimeHostPeerClient } from '../client/peer-client.js';
+import { chmod, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import {
+  acquireFileLifetimeOwner,
+  type FileLifetimeOwner,
+} from '@maka/storage/file-lifetime-owner';
 import { openPeerMeshNode, type PeerMeshNode } from './node.js';
+import { migrateLegacyPeerMeshState } from './store.js';
 
 export interface RuntimeHostPeerMeshOwner {
   readonly client: RuntimeHostPeerClient;
@@ -32,31 +39,67 @@ export async function openRuntimeHostPeerMeshOwner(input: {
   readonly keyPath: string;
   readonly expectedPeerId?: string;
   readonly dataRoot: string;
+  readonly endpointKind: 'client' | 'host';
   readonly listenAddresses?: readonly string[];
   readonly coordinationRelays?: readonly string[];
+  readonly automaticRelayDiscovery?: boolean;
+  readonly webRtcStunUrls?: readonly string[];
 }): Promise<RuntimeHostPeerMeshOwner> {
   let mesh: PeerMeshNode | undefined;
-  const client = createRuntimeHostPeerClient({
-    nativePath: input.nativePath,
-    keyPath: input.keyPath,
-    ...(input.expectedPeerId ? { expectedPeerId: input.expectedPeerId } : {}),
-    ...(input.listenAddresses ? { listenAddresses: input.listenAddresses } : {}),
-    ...(input.coordinationRelays ? { coordinationRelays: input.coordinationRelays } : {}),
-    routeResolver: { resolveRoutes: (peerId) => mesh?.resolveRoutes(peerId) },
-  });
+  let resolverMesh: PeerMeshNode | undefined;
+  await mkdir(input.dataRoot, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') await chmod(input.dataRoot, 0o700);
+  const rootOwner = await acquireFileLifetimeOwner(join(input.dataRoot, 'peer-mesh.owner'));
+  let client: RuntimeHostPeerClient;
   try {
-    mesh = await openPeerMeshNode({ dataRoot: input.dataRoot, peer: client });
+    client = createRuntimeHostPeerClient({
+      nativePath: input.nativePath,
+      keyPath: input.keyPath,
+      ...(input.expectedPeerId ? { expectedPeerId: input.expectedPeerId } : {}),
+      ...(input.listenAddresses ? { listenAddresses: input.listenAddresses } : {}),
+      ...(input.coordinationRelays ? { coordinationRelays: input.coordinationRelays } : {}),
+      ...(input.automaticRelayDiscovery === undefined
+        ? {}
+        : { automaticRelayDiscovery: input.automaticRelayDiscovery }),
+      ...(input.webRtcStunUrls === undefined ? {} : { webRtcStunUrls: input.webRtcStunUrls }),
+      routeResolver: {
+        resolveRoutes: (peerId) => resolverMesh?.resolveRoutes(peerId),
+        prepareRoutes: async (peerId, signal) => resolverMesh?.prepareRoutes(peerId, signal),
+      },
+    });
+  } catch (error) {
+    await rootOwner.close().catch(() => undefined);
+    throw error;
+  }
+  try {
+    await migrateLegacyPeerMeshState(input.dataRoot, client.identity().peerId);
+    mesh = await openPeerMeshNode({
+      dataRoot: join(input.dataRoot, client.identity().peerId),
+      peer: client,
+      endpointKind: input.endpointKind,
+    });
+    resolverMesh = mesh;
   } catch (error) {
     await client.close().catch(() => undefined);
+    await rootOwner.close().catch(() => undefined);
     throw error;
   }
   const serving = mesh.serve();
   let closeTask: Promise<void> | undefined;
   const close = () => {
-    closeTask ??= closeOwner(mesh!, client, serving);
+    resolverMesh = undefined;
+    closeTask ??= closeOwner(mesh!, client, serving, rootOwner);
     return closeTask;
   };
-  const closed = serving.then(close, close);
+  const stopUnexpected = (error: unknown) => {
+    resolverMesh = undefined;
+    return stopUnexpectedOwner(mesh!, error);
+  };
+  const closed = serving.then(
+    () =>
+      closeTask ?? stopUnexpected(new Error('Runtime Host Peer Mesh owner stopped unexpectedly')),
+    (error: unknown) => closeTask ?? stopUnexpected(error),
+  );
   void closed.catch(() => undefined);
   return Object.freeze({
     client,
@@ -66,10 +109,20 @@ export async function openRuntimeHostPeerMeshOwner(input: {
   });
 }
 
+async function stopUnexpectedOwner(mesh: PeerMeshNode, error: unknown): Promise<never> {
+  try {
+    await mesh.close();
+  } catch (closeError) {
+    throw new AggregateError([error, closeError], 'Runtime Host Peer Mesh owner failed to stop');
+  }
+  throw error;
+}
+
 async function closeOwner(
   mesh: PeerMeshNode,
   client: RuntimeHostPeerClient,
   serving: Promise<void>,
+  rootOwner: FileLifetimeOwner,
 ): Promise<void> {
   const errors: unknown[] = [];
   await mesh.close().catch((error: unknown) => {
@@ -79,6 +132,9 @@ async function closeOwner(
     errors.push(error);
   });
   await client.close().catch((error: unknown) => {
+    errors.push(error);
+  });
+  await rootOwner.close().catch((error: unknown) => {
     errors.push(error);
   });
   if (errors.length === 1) throw errors[0];

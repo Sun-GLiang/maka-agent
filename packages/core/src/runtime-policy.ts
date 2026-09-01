@@ -244,7 +244,19 @@ export interface ConnectionCatalogEntry extends ConnectionConfiguration {
   readonly modelSource?: ConnectionModelDiscoveryResult['source'];
   readonly modelsFetchedAt?: ConnectionModelDiscoveryResult['fetchedAt'];
   readonly lastTest?: ConnectionTestSummary;
+  /** Digest of the model-facts subset used when `lastTest` was recorded. */
+  readonly lastTestModelFactsFingerprint?: string;
 }
+
+export type ConnectionOnboardingTarget =
+  | {
+      readonly kind: 'create';
+      readonly providerType: ProviderType;
+    }
+  | {
+      readonly kind: 'existing';
+      readonly connectionId: EntityId;
+    };
 
 export type ConnectionCatalogEntryDraft = ConnectionConfiguration;
 

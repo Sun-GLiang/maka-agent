@@ -26,7 +26,10 @@ import {
   type TurnRecord,
 } from "@maka/core/session";
 import { markPersisted } from "@maka/core/persisted-value";
-import type { Task } from "@maka/core/task-ledger";
+import {
+  projectSessionTodoItemsForDisplay,
+  type SessionTodoItem,
+} from "@maka/core/session-todo";
 
 import type {
   ConnectionCatalogSnapshot,
@@ -46,6 +49,7 @@ import {
   type DecodedSessionTranscriptPage,
   type DirectRequestOperationKey,
   type RuntimeHostConnection,
+  type RuntimeHostPeerConnectionPath,
   type RuntimeHostRetirementMode,
   type RuntimeHostRetirementPreparation,
   type RuntimeHostSessionSubscription,
@@ -104,6 +108,17 @@ import {
   type ScheduledTaskChangedFrame,
   type SessionCatalogItem,
   type SessionCatalogProjection,
+  type SharedSessionCatalogProjection,
+  type CollaborationAccessQueryResult,
+  type CollaborationGrantRevokeResult,
+  type CollaborationInvitationPrepareResult,
+  type CollaborationPrincipalRevokeResult,
+  type CollaborationTurnRequestAcknowledgeResult,
+  type CollaborationTurnRequestDecideResult,
+  type CollaborationTurnRequestQueryResult,
+  type SessionCollaborationGrantKind,
+  type SessionTurnAccessRequest,
+  type SessionTurnRequestIntent,
   type SessionConfigurationPatch,
   type SessionAssistantStreamIdentity,
   type SessionContinuitySnapshot,
@@ -150,6 +165,17 @@ export type DesktopSessionConfigurationPatch = SessionConfigurationPatch;
  * the caller decided against, so nothing was destroyed and nothing is wrong.
  */
 export type SessionRemoveDisposition = "removed" | "restored";
+
+/**
+ * How a remove settled together with what it archived. `archivedSubtaskCount`
+ * is the Host's executed count of ordinary linked subtasks moved to the archive
+ * — 0 when the delete was called off (`restored`) or archived nothing — so the
+ * renderer's toast reports a fact rather than a renderer-side estimate.
+ */
+export interface SessionRemoveOutcome {
+  readonly disposition: SessionRemoveDisposition;
+  readonly archivedSubtaskCount: number;
+}
 
 export type DesktopRuntimeHostClientErrorCode =
   | "catalog_unstable"
@@ -261,6 +287,10 @@ export class DesktopRuntimeHostClient {
     return this.connection.rootId;
   }
 
+  get peerPath(): RuntimeHostPeerConnectionPath | undefined {
+    return this.connection.peerPath;
+  }
+
   get lifecycleState(): 'ready' | 'unavailable' {
     return this.#connectionClosed || this.#closeTask ? 'unavailable' : 'ready';
   }
@@ -269,6 +299,56 @@ export class DesktopRuntimeHostClient {
     timeoutMs?: number,
   ): Promise<OperationOutput<'access.credential.finalize'>> {
     return this.request('access.credential.finalize', {}, timeoutMs);
+  }
+
+  prepareCollaborationInvitation(
+    sessionId: string,
+    grantKinds: readonly SessionCollaborationGrantKind[],
+  ): Promise<CollaborationInvitationPrepareResult> {
+    return this.request('collaboration.invitation.prepare', { sessionId, grantKinds });
+  }
+
+  queryCollaborationAccess(sessionId?: string): Promise<CollaborationAccessQueryResult> {
+    return this.request(
+      'collaboration.access.query',
+      sessionId === undefined ? {} : { sessionId },
+    );
+  }
+
+  revokeCollaborationGrant(grantId: string): Promise<CollaborationGrantRevokeResult> {
+    return this.request('collaboration.grant.revoke', { grantId });
+  }
+
+  revokeCollaborationPrincipal(
+    principalId: string,
+  ): Promise<CollaborationPrincipalRevokeResult> {
+    return this.request('collaboration.principal.revoke', { principalId });
+  }
+
+  createCollaborationTurnRequest(
+    intent: SessionTurnRequestIntent,
+  ): Promise<SessionTurnAccessRequest> {
+    return this.request('collaboration.turn-request.create', { intent });
+  }
+
+  queryCollaborationTurnRequests(sessionId: string): Promise<CollaborationTurnRequestQueryResult> {
+    return this.request('collaboration.turn-request.query', { sessionId });
+  }
+
+  acknowledgeCollaborationTurnRequest(
+    requestId: string,
+  ): Promise<CollaborationTurnRequestAcknowledgeResult> {
+    return this.request('collaboration.turn-request.acknowledge', { requestId });
+  }
+
+  decideCollaborationTurnRequest(
+    requestId: string,
+    decision: 'approve' | 'reject',
+  ): Promise<CollaborationTurnRequestDecideResult> {
+    return this.request('collaboration.turn-request.decide', {
+      requestId,
+      decision,
+    });
   }
 
   subscribeConfigurationChanges(listener: (revision: number) => void): () => void {
@@ -418,9 +498,9 @@ export class DesktopRuntimeHostClient {
 
   startOAuthLogin(
     attemptId: string,
-    connectionId: string,
+    target: OperationInput<"oauth.login.start">["target"],
   ): Promise<OperationOutput<"oauth.login.start">> {
-    return this.request("oauth.login.start", { attemptId, connectionId });
+    return this.request("oauth.login.start", { attemptId, target });
   }
 
   queryOAuthLogin(
@@ -570,6 +650,11 @@ export class DesktopRuntimeHostClient {
         "Session catalog kept changing while Desktop read it",
       );
     }
+  }
+
+  async getSharedSession(): Promise<SharedSessionCatalogProjection | null> {
+    this.#assertOpen();
+    return (await this.request('session.shared.query', {})).session;
   }
 
   async listProjects(
@@ -951,17 +1036,32 @@ export class DesktopRuntimeHostClient {
   async removeSession(
     sessionId: string,
     options: { requireArchived?: boolean } = {},
-  ): Promise<SessionRemoveDisposition> {
+  ): Promise<SessionRemoveOutcome> {
     for (let attempt = 0; attempt < MAX_SESSION_REVISION_ATTEMPTS; attempt += 1) {
       const current = await this.#requireSession(sessionId);
-      if (options.requireArchived && !current.isArchived) return "restored";
+      if (options.requireArchived && !current.isArchived) {
+        return { disposition: "restored", archivedSubtaskCount: 0 };
+      }
       const result = await this.request("session.remove", {
         sessionId,
         expectedRevision: current.revision,
       });
-      if (result.kind === "removed") return "removed";
+      if (result.kind === "removed") {
+        return { disposition: "removed", archivedSubtaskCount: result.archivedSubtaskCount ?? 0 };
+      }
     }
     throw revisionConflict("remove", sessionId);
+  }
+
+  /**
+   * How many linked subtasks a delete of this parent would move to the archive,
+   * per the Host's own removal plan. The delete confirm warns off this so the
+   * renderer never re-derives the plan from a catalog projection that omits the
+   * operator marker and copy state.
+   */
+  async previewSessionRemoval(sessionId: string): Promise<number> {
+    const result = await this.request("session.remove.preview", { sessionId });
+    return result.archivableSubtaskCount;
   }
 
   async removeSessionCopy(sessionId: string): Promise<'removed' | 'retained'> {
@@ -1082,6 +1182,12 @@ export class DesktopRuntimeHostClient {
     input: OperationInput<'turn.message.query'>,
   ): Promise<OperationOutput<'turn.message.query'>> {
     return this.request('turn.message.query', input);
+  }
+
+  queryMessageExecutions(
+    input: OperationInput<'turn.message.execution.query'>,
+  ): Promise<OperationOutput<'turn.message.execution.query'>> {
+    return this.request('turn.message.execution.query', input);
   }
 
   retractQueueEntry(
@@ -1211,35 +1317,10 @@ export class DesktopRuntimeHostClient {
     return this.request("context.compact", input);
   }
 
-  async listTasks(sessionId: string): Promise<Task[]> {
-    const projection = await collectStableProjection({
-      name: "Task ledger",
-      sessionId,
-      start: () =>
-        this.request("task.ledger.query", { kind: "list_start", sessionId }),
-      continue: (first, cursor) =>
-        this.request("task.ledger.query", {
-          kind: "list_continue",
-          sessionId,
-          revision: first.revision,
-          cursor,
-        }),
-      page(result, first) {
-        if (
-          result.kind !== "page" ||
-          result.sessionId !== sessionId ||
-          (first !== undefined && result.revision !== first.revision)
-        ) {
-          throw invalidProjection("Task ledger");
-        }
-        return {
-          source: result,
-          items: result.tasks,
-          nextCursor: result.nextCursor,
-        };
-      },
-    });
-    return projection.items;
+  async querySessionTodo(sessionId: string): Promise<SessionTodoItem[]> {
+    const result = await this.request("session.todo.query", { sessionId });
+    if (result.sessionId !== sessionId) throw invalidProjection("SessionTodo");
+    return projectSessionTodoItemsForDisplay(result.items);
   }
 
   queryUsage(

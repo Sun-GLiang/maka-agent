@@ -27,6 +27,7 @@
  */
 
 import * as nodeCrypto from 'node:crypto';
+import { CONTEXT_OFFLOAD_ID_MAX_CODE_POINTS, type SessionContextRef } from './context-offload.js';
 import type {
   AdditionalPermissionRequest,
   PermissionMode,
@@ -47,6 +48,7 @@ import type {
 export { SHELL_RUN_SOURCE_TOOL_CALL_ID_MAX_BYTES } from './shell-run.js';
 import { type TokenUsageFields } from './usage-record-schema.js';
 import { defineObjectShape, hasExactShape, isRecord } from './record-schema.js';
+import type { DurableToolResultProjection } from './durable-tool-result-projection.js';
 
 export const TOOL_OUTPUT_STREAMS = ['stdout', 'stderr'] as const;
 export const TOOL_OUTPUT_DELTA_MAX_CHARS = 8192;
@@ -74,6 +76,7 @@ type TerminalToolResultStatus = Exclude<ShellRunTerminalStatus, 'orphaned'>;
 // ============================================================================
 
 export type StorageRef =
+  | SessionContextRef
   | { kind: 'session_file'; sessionId: string; relativePath: string }
   | { kind: 'workspace_file'; relativePath: string }
   | { kind: 'external_file'; absolutePath: string };
@@ -154,6 +157,9 @@ const SESSION_FILE_REF_SHAPE = defineObjectShape<Extract<StorageRef, { kind: 'se
   ['kind', 'sessionId', 'relativePath'],
   [],
 );
+const SESSION_CONTEXT_REF_SHAPE = defineObjectShape<
+  Extract<StorageRef, { kind: 'session_context' }>
+>()(['kind', 'sessionId', 'refId'], []);
 const WORKSPACE_FILE_REF_SHAPE = defineObjectShape<
   Extract<StorageRef, { kind: 'workspace_file' }>
 >()(['kind', 'relativePath'], []);
@@ -328,6 +334,13 @@ export function isStorageRef(value: unknown): value is StorageRef {
       typeof value.relativePath === 'string'
     );
   }
+  if (value.kind === 'session_context') {
+    return (
+      hasExactShape(value, SESSION_CONTEXT_REF_SHAPE) &&
+      typeof value.sessionId === 'string' &&
+      typeof value.refId === 'string'
+    );
+  }
   if (value.kind === 'workspace_file') {
     return hasExactShape(value, WORKSPACE_FILE_REF_SHAPE) && typeof value.relativePath === 'string';
   }
@@ -341,8 +354,14 @@ export function isStorageRef(value: unknown): value is StorageRef {
 export function isCanonicalStorageRef(value: unknown): value is StorageRef {
   if (!isStorageRef(value)) return false;
   if (value.kind === 'external_file') return isCanonicalAbsolutePath(value.absolutePath);
-  if (value.kind === 'session_file' && !/^[A-Za-z0-9_-]{1,128}$/.test(value.sessionId)) {
+  if (
+    (value.kind === 'session_file' || value.kind === 'session_context') &&
+    !/^[A-Za-z0-9_-]{1,128}$/.test(value.sessionId)
+  ) {
     return false;
+  }
+  if (value.kind === 'session_context') {
+    return value.refId.length > 0 && [...value.refId].length <= CONTEXT_OFFLOAD_ID_MAX_CODE_POINTS;
   }
   return isCanonicalRelativePath(value.relativePath);
 }
@@ -445,6 +464,12 @@ function attachmentRefsEqual(left: AttachmentRef, right: AttachmentRef): boolean
     return false;
   }
   switch (left.ref.kind) {
+    case 'session_context':
+      return (
+        right.ref.kind === 'session_context' &&
+        left.ref.sessionId === right.ref.sessionId &&
+        left.ref.refId === right.ref.refId
+      );
     case 'session_file':
       return (
         right.ref.kind === 'session_file' &&
@@ -564,6 +589,12 @@ export interface ToolStartEvent extends BaseEvent, ToolActivityIdentity {
   displayName?: string;
   intent?: string;
   /**
+   * Transient, never persisted: a bounded/redacted args subset synthesized at
+   * the Runtime Host client seam (live `tool_start` frames omit full args).
+   * Display formatters read `args ?? argsPreview`; durable replay never has it.
+   */
+  argsPreview?: unknown;
+  /**
    * Id of the assistant step this tool call belongs to (equals the step's
    * AssistantMessage id / the step's text+thinking messageId). Lets model
    * replay group a step's reasoning + text + tool calls into one provider
@@ -668,6 +699,8 @@ export interface ToolResultEvent extends BaseEvent, ToolActivityIdentity {
   providerExecuted?: boolean;
   /** Raw provider result retained for provider-native replay; never rendered directly. */
   providerOutput?: unknown;
+  /** Provider-neutral model-visible output computed before durable publication. */
+  modelProjection?: DurableToolResultProjection;
   /** The transport omitted durable result content; consumers must not treat the placeholder as authoritative. */
   contentOmitted?: true;
   isError: boolean;
@@ -761,7 +794,13 @@ export type ToolResultContent =
       originalEstimatedTokens: number;
       originalBytes: number;
       rewriteVersion: number;
-      reason: 'stale_tool_result_pruned_before_compact';
+      /**
+       * Both prune paths now record the same durable projection transition
+       * (#4283), so the archived-result read model spans both reasons.
+       */
+      reason:
+        | 'stale_tool_result_pruned_before_compact'
+        | 'active_current_turn_tool_result_pruned_before_next_step';
     }
   | {
       kind: 'terminal';
@@ -805,45 +844,6 @@ export type ToolResultContent =
       reason: string;
       message: string;
       credentialSource?: string;
-    }
-  | {
-      kind: 'explore_agent';
-      ok: boolean;
-      partial?: boolean;
-      terminalStatus?: 'completed' | 'completed_empty' | 'failed' | 'canceled' | 'canceled_partial';
-      mode: 'read_only';
-      objective: string;
-      roots: string[];
-      queries: string[];
-      ignoredPaths?: string[];
-      stoppingCondition?: string;
-      limitReasons?: ReadonlyArray<
-        'candidate_budget' | 'file_budget' | 'match_budget' | 'byte_budget'
-      >;
-      filesDiscovered?: number;
-      filesInspected: number;
-      filesSkipped: number;
-      sensitiveFilesSkipped?: number;
-      bytesRead: number;
-      startedAt?: number;
-      completedAt?: number;
-      durationMs?: number;
-      progress: string[];
-      recentEvents?: ReadonlyArray<{ type: string; at: number; message: string }>;
-      evidence?: ReadonlyArray<{
-        type: 'match' | 'candidate';
-        path: string;
-        line?: number;
-        label: string;
-        score?: number;
-      }>;
-      summary?: string;
-      report?: string;
-      candidateFiles: ReadonlyArray<{ path: string; score: number; reasons: string[] }>;
-      matches: ReadonlyArray<{ path: string; line: number; query: string; snippet: string }>;
-      notes: string[];
-      reason?: 'invalid_objective' | 'invalid_root' | 'no_readable_roots' | 'aborted';
-      message?: string;
     }
   | {
       kind: 'subagent';

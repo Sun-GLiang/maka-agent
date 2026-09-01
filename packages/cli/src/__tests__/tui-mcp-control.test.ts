@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { deferred } from '@maka/core/test-only/async-primitives';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -29,7 +30,8 @@ import type {
   RuntimeHostConnectionAvailability,
 } from '@maka/runtime-host/client';
 import { createMcpConfigStore } from '@maka/storage/mcp-config-store';
-import { createTuiMcpController } from '../tui-mcp-control.js';
+import { createTuiMcpController, type TuiMcpPublicationAvailability } from '../tui-mcp-control.js';
+import { waitFor } from './tui-terminal-mock.js';
 
 test('TUI MCP startup stays backgrounded and publishes the discovered snapshot', async () => {
   const config = deferredValue<McpConfigFile>();
@@ -47,7 +49,10 @@ test('TUI MCP startup stays backgrounded and publishes the discovered snapshot',
   assert.equal(controller.snapshot().initialization, 'loading');
   assert.equal(connection.replacements.length, 0);
   config.resolve(emptyConfig());
-  await waitFor(() => controller.snapshot().publication === 'published');
+  await waitFor(
+    () => controller.snapshot().publication === 'published',
+    "TUI MCP startup publication to reach 'published'",
+  );
   assert.equal(controller.snapshot().initialization, 'ready');
   assert.equal(controller.snapshot().toolCount, 1);
   assert.deepEqual(controller.snapshot().servers, [
@@ -65,6 +70,77 @@ test('TUI MCP startup stays backgrounded and publishes the discovered snapshot',
   await controller.close();
   assert.equal(connection.unregisters, 1);
   assert.equal(manager.closed, 1);
+});
+
+test('TUI MCP serializes remote provider credential changes through its publication lane', async () => {
+  let availability: TuiMcpPublicationAvailability = {
+    kind: 'unavailable',
+    reason: 'credential_required',
+  };
+  let listener: ((value: TuiMcpPublicationAvailability) => void) | undefined;
+  const credentials: string[] = [];
+  let removed = 0;
+  let closed = 0;
+  const connection = {
+    replaceClientCapabilities: async () => ({ registrationId: 'registration', revision: 1 }),
+    unregisterClientCapabilities: async () => ({ registrationId: 'registration', revision: 1 }),
+    subscribeConnectionAvailability: (next: (value: TuiMcpPublicationAvailability) => void) => {
+      listener = next;
+      next(availability);
+      return () => {
+        if (listener === next) listener = undefined;
+      };
+    },
+    setCredential: async (credential: string) => {
+      credentials.push(credential);
+      availability = { kind: 'connected', hostEpoch: 'host-1', connectionId: 'provider-1' };
+      listener?.(availability);
+    },
+    removeCredential: async () => {
+      removed += 1;
+      availability = { kind: 'unavailable', reason: 'credential_required' };
+      listener?.(availability);
+    },
+    closePublication: async () => {
+      closed += 1;
+    },
+  };
+  const manager = managerHarness(0, []);
+  const controller = createTuiMcpController(
+    { workspaceRoot: '/unused', connection },
+    {
+      configStore: configStoreHarness(async () => emptyConfig()),
+      manager: manager.manager,
+      createProvider: () => undefined,
+    },
+  );
+  await waitFor(
+    () => controller.snapshot().initialization === 'ready',
+    'remote MCP controller initialization',
+  );
+  assert.equal(controller.snapshot().publication, 'credential_required');
+  assert.equal(controller.snapshot().canManagePublicationCredential, true);
+
+  assert.deepEqual(
+    await controller.execute({
+      kind: 'set_publication_credential',
+      credential: 'provider-secret',
+    }),
+    { status: 'applied', effect: 'published' },
+  );
+  assert.deepEqual(credentials, ['provider-secret']);
+  assert.deepEqual(await controller.execute({ kind: 'remove_publication_credential' }), {
+    status: 'applied',
+    effect: 'pending_host',
+  });
+  assert.equal(removed, 1);
+  assert.equal(controller.snapshot().publication, 'credential_required');
+  availability = { kind: 'unavailable', reason: 'provider_conflict' };
+  listener?.(availability);
+  assert.equal(controller.snapshot().publication, 'provider_conflict');
+  assert.equal(controller.snapshot().canManagePublicationCredential, false);
+  await controller.close();
+  assert.equal(closed, 1);
 });
 
 test('TUI MCP publication coalesces a discovery change behind the in-flight revision', async () => {
@@ -89,11 +165,20 @@ test('TUI MCP publication coalesces a discovery change behind the in-flight revi
     },
   );
 
-  await waitFor(() => connection.replacements.length === 1);
+  await waitFor(
+    () => connection.replacements.length === 1,
+    'first capability publication before revision change',
+  );
   manager.changeRevision(2);
   firstPublication.resolve();
-  await waitFor(() => connection.replacements.length === 2);
-  await waitFor(() => controller.snapshot().publication === 'published');
+  await waitFor(
+    () => connection.replacements.length === 2,
+    'second capability publication after coalesced revision',
+  );
+  await waitFor(
+    () => controller.snapshot().publication === 'published',
+    "coalesced TUI MCP publication to reach 'published'",
+  );
   assert.deepEqual(providers, ['provider-1', 'provider-2']);
   await controller.close();
 });
@@ -110,12 +195,21 @@ test('TUI MCP invalidates a lost generation and republishes on its replacement',
     },
   );
 
-  await waitFor(() => connection.replacements.length === 1);
+  await waitFor(
+    () => connection.replacements.length === 1,
+    'first capability publication before host unavailable',
+  );
   connection.emit({ kind: 'unavailable' });
   assert.equal(controller.snapshot().publication, 'host_unavailable');
   connection.emit({ kind: 'connected', hostEpoch: 'host-2', connectionId: 'connection-2' });
-  await waitFor(() => connection.replacements.length === 2);
-  await waitFor(() => controller.snapshot().publication === 'published');
+  await waitFor(
+    () => connection.replacements.length === 2,
+    'second capability publication after generation replacement',
+  );
+  await waitFor(
+    () => controller.snapshot().publication === 'published',
+    "TUI MCP publication to reach 'published' after generation replacement",
+  );
   await controller.close();
 });
 
@@ -132,9 +226,15 @@ test('TUI MCP unregisters the current generation when discovery removes every to
     },
   );
 
-  await waitFor(() => controller.snapshot().publication === 'published');
+  await waitFor(
+    () => controller.snapshot().publication === 'published',
+    "initial TUI MCP publication to reach 'published' before empty snapshot",
+  );
   manager.changeRevision(2, 0);
-  await waitFor(() => controller.snapshot().publication === 'not_published');
+  await waitFor(
+    () => controller.snapshot().publication === 'not_published',
+    "TUI MCP publication to reach 'not_published' after empty tool snapshot",
+  );
   assert.equal(connection.unregisters, 1);
   await controller.close();
   assert.equal(connection.unregisters, 1);
@@ -154,7 +254,10 @@ test('TUI MCP fails closed when its saved config cannot be read', async () => {
     },
   );
 
-  await waitFor(() => controller.snapshot().initialization === 'error');
+  await waitFor(
+    () => controller.snapshot().initialization === 'error',
+    "TUI MCP initialization to reach 'error' when config read fails",
+  );
   assert.equal(controller.snapshot().publication, 'not_published');
   assert.equal(JSON.stringify(controller.snapshot()).includes('secret-value'), false);
   assert.equal(connection.replacements.length, 0);
@@ -178,7 +281,10 @@ test('TUI MCP unregisters a publication that settles while close is waiting', as
     },
   );
 
-  await waitFor(() => connection.replacements.length === 1);
+  await waitFor(
+    () => connection.replacements.length === 1,
+    'initial capability publication before close',
+  );
   const closing = controller.close();
   publication.resolve();
   await closing;
@@ -199,7 +305,10 @@ test('TUI MCP add commits before manager synchronization and reports Host conver
       createProvider: () => undefined,
     },
   );
-  await waitFor(() => controller.snapshot().initialization === 'ready');
+  await waitFor(
+    () => controller.snapshot().initialization === 'ready',
+    "TUI MCP initialization to reach 'ready' before add",
+  );
   order.length = 0;
 
   const result = await controller.execute({
@@ -235,7 +344,10 @@ test('TUI MCP retires endpoint credentials before persistence and aborts on clea
     { workspaceRoot: '/unused', connection: connection.connection },
     { configStore: store.store, manager: manager.manager, createProvider: () => undefined },
   );
-  await waitFor(() => controller.snapshot().initialization === 'ready');
+  await waitFor(
+    () => controller.snapshot().initialization === 'ready',
+    "TUI MCP initialization to reach 'ready' before credential-retiring edit",
+  );
   order.length = 0;
   const edit = controller.configForEdit('docs');
   assert.ok(edit);
@@ -267,7 +379,10 @@ test('TUI MCP rejects an invalid endpoint before retiring the previous credentia
     { workspaceRoot: '/unused', connection: connection.connection },
     { configStore: store.store, manager: manager.manager, createProvider: () => undefined },
   );
-  await waitFor(() => controller.snapshot().initialization === 'ready');
+  await waitFor(
+    () => controller.snapshot().initialization === 'ready',
+    "TUI MCP initialization to reach 'ready' before invalid edit",
+  );
   const edit = controller.configForEdit('docs');
   assert.ok(edit);
   order.length = 0;
@@ -297,7 +412,10 @@ test('TUI MCP edit rejects a stale revision without touching credentials or disk
     { workspaceRoot: '/unused', connection: connection.connection },
     { configStore: store.store, manager: manager.manager, createProvider: () => undefined },
   );
-  await waitFor(() => controller.snapshot().initialization === 'ready');
+  await waitFor(
+    () => controller.snapshot().initialization === 'ready',
+    "TUI MCP initialization to reach 'ready' before stale-revision edit",
+  );
   const edit = controller.configForEdit('docs');
   assert.ok(edit);
   store.replace({ version: 3, mcpServers: { docs: { url: 'https://other.example/mcp' } } });
@@ -327,7 +445,10 @@ test('TUI MCP import preserves unrelated external edits and rejects changed prev
     { workspaceRoot: '/unused', connection: connection.connection },
     { configStore: store.store, manager: manager.manager, createProvider: () => undefined },
   );
-  await waitFor(() => controller.snapshot().initialization === 'ready');
+  await waitFor(
+    () => controller.snapshot().initialization === 'ready',
+    "TUI MCP initialization to reach 'ready' before import preview",
+  );
   const preview = controller.previewImport('{"docs":{"url":"https://docs.example/mcp"}}');
   assert.equal(preview.status, 'ready');
   if (preview.status !== 'ready') throw new Error('preview did not prepare');
@@ -376,7 +497,10 @@ test('TUI MCP keeps a durable mutation visible when manager synchronization fail
     { workspaceRoot: '/unused', connection: connection.connection },
     { configStore: store.store, manager: manager.manager, createProvider: () => undefined },
   );
-  await waitFor(() => controller.snapshot().initialization === 'ready');
+  await waitFor(
+    () => controller.snapshot().initialization === 'ready',
+    "TUI MCP initialization to reach 'ready' before sync-failed mutation",
+  );
   manager.failNextSync();
 
   const result = await controller.execute({
@@ -410,7 +534,10 @@ test('TUI MCP reports a committed action as pending while the Host is unavailabl
     { workspaceRoot: '/unused', connection: connection.connection },
     { configStore: store.store, manager: manager.manager, createProvider: () => undefined },
   );
-  await waitFor(() => controller.snapshot().initialization === 'ready');
+  await waitFor(
+    () => controller.snapshot().initialization === 'ready',
+    "TUI MCP initialization to reach 'ready' while host unavailable",
+  );
 
   assert.deepEqual(
     await controller.execute({ kind: 'add', serverId: 'local', config: { command: 'server' } }),
@@ -445,13 +572,16 @@ test('TUI MCP close fences an admitted mutation before persistence', async () =>
     { workspaceRoot: '/unused', connection: connection.connection },
     { configStore: store, manager: manager.manager, createProvider: () => undefined },
   );
-  await waitFor(() => controller.snapshot().initialization === 'ready');
+  await waitFor(
+    () => controller.snapshot().initialization === 'ready',
+    "TUI MCP initialization to reach 'ready' before fenced mutation",
+  );
   const executing = controller.execute({
     kind: 'add',
     serverId: 'late',
     config: { command: 'server' },
   });
-  await waitFor(() => transforms === 1);
+  await waitFor(() => transforms === 1, 'config transform to be admitted before close fence');
   const closing = controller.close();
   transactionAdmission.resolve();
 
@@ -493,7 +623,10 @@ test('TUI MCP waits for manager synchronization before publishing an action snap
     { workspaceRoot: '/unused', connection: connection.connection },
     { configStore: store.store, manager, createProvider: () => provider('provider') },
   );
-  await waitFor(() => controller.snapshot().publication === 'published');
+  await waitFor(
+    () => controller.snapshot().publication === 'published',
+    "initial TUI MCP publication to reach 'published' before action sync",
+  );
   connection.replacements.length = 0;
 
   const executing = controller.execute({
@@ -501,7 +634,10 @@ test('TUI MCP waits for manager synchronization before publishing an action snap
     serverId: 'local',
     config: { command: 'server' },
   });
-  await waitFor(() => syncCount === 2);
+  await waitFor(
+    () => syncCount === 2,
+    'manager sync to reach count 2 before publishing action snapshot',
+  );
   assert.equal(connection.replacements.length, 0);
   assert.equal(controller.snapshot().configuration, 'synchronizing');
   actionSync.resolve();
@@ -534,7 +670,10 @@ test('TUI MCP rebases an action over an unrelated concurrent config edit', async
     { workspaceRoot: '/unused', connection: connection.connection },
     { configStore: store, manager: manager.manager, createProvider: () => undefined },
   );
-  await waitFor(() => controller.snapshot().initialization === 'ready');
+  await waitFor(
+    () => controller.snapshot().initialization === 'ready',
+    "TUI MCP initialization to reach 'ready' before rebased concurrent edit",
+  );
 
   assert.deepEqual(
     await controller.execute({ kind: 'add', serverId: 'local', config: { command: 'server' } }),
@@ -569,6 +708,7 @@ test('independent TUI controllers preserve concurrent additions in one workspace
   );
   await waitFor(
     () => left.snapshot().initialization === 'ready' && right.snapshot().initialization === 'ready',
+    "both TUI controllers to reach 'ready' before concurrent additions",
   );
 
   const [leftResult, rightResult] = await Promise.all([
@@ -609,6 +749,7 @@ test('same-server credential retirement stays inside the shared config transacti
   );
   await waitFor(
     () => left.snapshot().initialization === 'ready' && right.snapshot().initialization === 'ready',
+    "both TUI controllers to reach 'ready' before credential-retirement transaction",
   );
   const leftEdit = left.configForEdit('docs');
   const rightEdit = right.configForEdit('docs');
@@ -621,7 +762,10 @@ test('same-server credential retirement stays inside the shared config transacti
     expectedRevision: leftEdit.revision,
     config: { url: 'https://left.example/mcp' },
   });
-  await waitFor(() => leftOrder.includes('forget:docs'));
+  await waitFor(
+    () => leftOrder.includes('forget:docs'),
+    'left controller to retire credentials inside the shared config transaction',
+  );
   const second = right.execute({
     kind: 'edit',
     serverId: 'docs',
@@ -658,7 +802,10 @@ test('TUI MCP manages enabled state, tests, reconnects, and removes through one 
     { workspaceRoot: '/unused', connection: connection.connection },
     { configStore: store.store, manager: manager.manager, createProvider: () => undefined },
   );
-  await waitFor(() => controller.snapshot().initialization === 'ready');
+  await waitFor(
+    () => controller.snapshot().initialization === 'ready',
+    "TUI MCP initialization to reach 'ready' before enabled/test/reconnect/remove lane",
+  );
   order.length = 0;
 
   assert.deepEqual(
@@ -894,22 +1041,6 @@ function configStoreHarness(get: () => Promise<McpConfigFile>) {
       apply(await get()),
   };
 }
-
-async function waitFor(condition: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 1_000 && !condition(); attempt += 1) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-  assert.ok(condition());
-}
-
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((settle) => {
-    resolve = settle;
-  });
-  return { promise, resolve };
-}
-
 function deferredValue<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((settle) => {

@@ -17,25 +17,63 @@
  * under the License.
  */
 
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import {
+  resolveDesktopBuildVersion,
+  resolveRuntimeHostSetupPackage,
+} from '../../scripts/desktop-nightly.mjs';
+import { workspaceReleaseManifest } from '../../scripts/release-cli-file-policy.mjs';
 import { resolveProductManifestIdentity } from '../../scripts/product-release-identity.mjs';
 
 function readManifest(relativePath) {
   return JSON.parse(readFileSync(new URL(relativePath, import.meta.url), 'utf8'));
 }
 
+// Some license files below ship inside third-party packages that apps/desktop
+// depends on (electron, @fontsource-variable/geist*). Locate each package by
+// resolving its manifest rather than assuming its node_modules location:
+// `../../node_modules/<pkg>` only resolves when the installer hoists these
+// packages to the workspace root, but they are declared in apps/desktop, not
+// the root. electron-builder logs a warning and still exits 0 when a `from`
+// path is missing, so a non-hoisting layout would silently drop the notices
+// (verify-packaged-app.mjs then fails far from the cause). resolve() finds the
+// package wherever the installer placed it — hoisted or nested.
+const require = createRequire(import.meta.url);
+function resolvePackageFile(packageName, relativePath) {
+  return join(dirname(require.resolve(`${packageName}/package.json`)), relativePath);
+}
+
+async function stageReleaseManifests({ packager }) {
+  const stage = await packager.info.tempDirManager.createTempDir({
+    prefix: 'maka-release-manifests',
+  });
+  for (const name of ['mcp', 'runtime', 'runtime-host']) {
+    const directory = join(stage, name);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(
+      join(directory, 'package.json'),
+      `${JSON.stringify(workspaceReleaseManifest(readManifest(`../../packages/${name}/package.json`)), null, 2)}\n`,
+    );
+  }
+  packager.config.files.push({ from: stage, to: 'node_modules/@maka' });
+}
+
+const rootManifest = readManifest('../../package.json');
 const { runtimeHostSetupPackage } = resolveProductManifestIdentity({
-  rootManifest: readManifest('../../package.json'),
+  rootManifest,
   desktopManifest: readManifest('./package.json'),
   cliManifest: readManifest('../../packages/cli/package.json'),
 });
 
-export default {
+const baseDesktopBuilderConfig = {
   appId: 'com.maka.desktop',
   productName: 'Maka',
   artifactName: 'Maka-${version}-mac-${arch}.${ext}',
   asar: true,
-  extraMetadata: { runtimeHostSetupPackage },
+  beforePack: stageReleaseManifests,
+  extraMetadata: { runtimeHostSetupPackage, makaUpdateChannel: 'release' },
   directories: {
     output: 'release',
   },
@@ -52,6 +90,7 @@ export default {
     'dist/**/*',
     'dist-renderer/**/*',
     'package.json',
+    '!node_modules/@maka/{mcp,runtime,runtime-host}/package.json',
     '!**/__tests__/**',
     // FakeBackend and the Desktop E2E candidate bootstrap live under
     // `test-only/`; they must not reach a packaged app.
@@ -126,11 +165,11 @@ export default {
       to: 'licenses/maka/DISCLAIMER-WIP',
     },
     {
-      from: '../../node_modules/electron/dist/LICENSE',
+      from: resolvePackageFile('electron', 'dist/LICENSE'),
       to: 'licenses/electron/LICENSE',
     },
     {
-      from: '../../node_modules/electron/dist/LICENSES.chromium.html',
+      from: resolvePackageFile('electron', 'dist/LICENSES.chromium.html'),
       to: 'licenses/electron/LICENSES.chromium.html',
     },
     {
@@ -142,11 +181,11 @@ export default {
       to: 'licenses/renderer/THIRD_PARTY_LICENSES.txt',
     },
     {
-      from: '../../node_modules/@fontsource-variable/geist/LICENSE',
+      from: resolvePackageFile('@fontsource-variable/geist', 'LICENSE'),
       to: 'licenses/renderer/GEIST_LICENSE.txt',
     },
     {
-      from: '../../node_modules/@fontsource-variable/geist-mono/LICENSE',
+      from: resolvePackageFile('@fontsource-variable/geist-mono', 'LICENSE'),
       to: 'licenses/renderer/GEIST_MONO_LICENSE.txt',
     },
     {
@@ -249,3 +288,21 @@ export default {
     },
   ],
 };
+
+export function resolveDesktopBuilderConfig(environment = process.env) {
+  const nightlyVersion = environment.MAKA_DESKTOP_NIGHTLY_VERSION?.trim();
+  if (!nightlyVersion) return baseDesktopBuilderConfig;
+  const version = resolveDesktopBuildVersion(rootManifest.version, environment);
+  return {
+    ...baseDesktopBuilderConfig,
+    extraMetadata: {
+      ...baseDesktopBuilderConfig.extraMetadata,
+      version,
+      runtimeHostSetupPackage: resolveRuntimeHostSetupPackage(rootManifest.version, environment),
+      makaUpdateChannel: 'nightly',
+    },
+    publish: [{ provider: 'github', owner: 'apache', repo: 'maka', channel: 'dev' }],
+  };
+}
+
+export default resolveDesktopBuilderConfig();

@@ -28,8 +28,10 @@ import {
   resolveRuntimeHostNpmDeploymentLayout,
   type RuntimeHostPeerManagementFrame,
   type RuntimeHostPeerStatus,
+  type RuntimeHostWebRtcStunPolicy,
 } from '@maka/runtime-host/operator';
 import { ensureRuntimeHostPeerIdentity } from '@maka/runtime-host/client';
+import { hasPeerMeshIdentityObligations } from '@maka/runtime-host/peer-mesh';
 import {
   allocateRuntimeHostPeerPort,
   RuntimeHostServiceManagerError,
@@ -72,6 +74,10 @@ export interface RuntimeHostPeerManagementCliOptions {
   readonly operatorDeploymentId: string;
   readonly listenAddresses: readonly string[];
   readonly coordinationRelays?: readonly string[];
+  readonly automaticRelayDiscovery?: boolean;
+  readonly relayDiscoveryStatus?: boolean;
+  readonly webRtcStunPolicy?: RuntimeHostWebRtcStunPolicy;
+  readonly webRtcStunStatus?: boolean;
   readonly expectedTarget?: RuntimeHostManagedServiceTarget;
   readonly allowInterruptActiveTasks?: boolean;
 }
@@ -139,6 +145,7 @@ async function runCanonicalRuntimeHostPeerManagementLocked(
   let desired = config;
   let stagedKeyPath: string | undefined;
   let previousPeerId: string | undefined;
+  let validateRetiredState: (() => Promise<void>) | undefined;
   let restarted: boolean | undefined;
   if (options.action === 'enable') {
     const peer = await prepareCanonicalPeer(options, config, config.listeners.directPeer);
@@ -166,6 +173,21 @@ async function runCanonicalRuntimeHostPeerManagementLocked(
         'Direct peer is not enabled for the managed Runtime Host deployment',
       );
     }
+    validateRetiredState = async () => {
+      if (
+        !(await hasPeerMeshIdentityObligations(
+          join(config.deploymentRoot, 'peer-mesh', current.peerId),
+          current.peerId,
+        ))
+      ) {
+        return;
+      }
+      throw new RuntimeHostServiceManagerError(
+        'invalid_config',
+        'Close or finish leaving every Peer Mesh before rotating the Direct peer identity',
+      );
+    };
+    await validateRetiredState();
     previousPeerId = current.peerId;
     stagedKeyPath = join(dirname(current.keyPath), `runtime-host-peer.${randomUUID()}.key`);
     const layout = resolveRuntimeHostNpmDeploymentLayout(
@@ -193,6 +215,7 @@ async function runCanonicalRuntimeHostPeerManagementLocked(
       desired,
       allowInterruptActiveTasks: options.allowInterruptActiveTasks ?? false,
       deps: lifecycleDeps,
+      ...(validateRetiredState ? { validateRetiredState } : {}),
     }).catch(async (error: unknown) => {
       if (stagedKeyPath && canDiscardRuntimeHostLifecycleDesiredArtifacts(error)) {
         await rm(stagedKeyPath, { force: true }).catch(() => undefined);
@@ -239,13 +262,14 @@ async function runCanonicalRuntimeHostPeerManagementLocked(
     if (options.action === 'descriptor') {
       throw new TypeError('Direct-peer descriptor does not support framed output');
     }
+    const framedStatus = omitUnrequestedPeerStatus(status, options);
     writePeerFrame(
       options.action === 'status'
-        ? { kind: 'result', action: options.action, status }
+        ? { kind: 'result', action: options.action, status: framedStatus }
         : {
             kind: 'result',
             action: options.action,
-            status,
+            status: framedStatus,
             restarted: restarted!,
           },
       deps,
@@ -260,6 +284,18 @@ async function runCanonicalRuntimeHostPeerManagementLocked(
     deps.writeStdout(formatPeerStatus(status));
   }
   return 0;
+}
+
+function omitUnrequestedPeerStatus(
+  status: RuntimeHostPeerStatus,
+  options: Pick<RuntimeHostPeerManagementCliOptions, 'relayDiscoveryStatus' | 'webRtcStunStatus'>,
+): RuntimeHostPeerStatus {
+  const { automaticRelayDiscovery, webRtcStunPolicy, ...legacy } = status;
+  return {
+    ...legacy,
+    ...(options.relayDiscoveryStatus ? { automaticRelayDiscovery } : {}),
+    ...(options.webRtcStunStatus ? { webRtcStunPolicy } : {}),
+  };
 }
 
 async function prepareCanonicalPeer(
@@ -300,7 +336,20 @@ async function prepareCanonicalPeer(
     coordinationRelays: [
       ...new Set(options.coordinationRelays ?? current?.coordinationRelays ?? []),
     ],
+    automaticRelayDiscovery:
+      options.automaticRelayDiscovery ?? current?.automaticRelayDiscovery ?? true,
+    webRtcStunPolicy: canonicalWebRtcStunPolicy(
+      options.webRtcStunPolicy ?? current?.webRtcStunPolicy ?? { kind: 'default' },
+    ),
   };
+}
+
+function canonicalWebRtcStunPolicy(
+  policy: RuntimeHostWebRtcStunPolicy,
+): { kind: 'default' } | { kind: 'disabled' } | { kind: 'custom'; urls: string[] } {
+  return policy.kind === 'custom'
+    ? { kind: 'custom', urls: [...policy.urls] }
+    : { kind: policy.kind };
 }
 
 async function readCanonicalPeerStatus(
@@ -328,6 +377,8 @@ async function readCanonicalPeerStatus(
       serviceState: result.service.state,
       routeHints: [],
       coordinationRelays: [],
+      automaticRelayDiscovery: true,
+      webRtcStunPolicy: { kind: 'default' },
     };
   }
   return {
@@ -337,6 +388,8 @@ async function readCanonicalPeerStatus(
     rootId: config.root.id,
     routeHints: expandWildcardListenAddresses(peer.listenAddresses),
     coordinationRelays: [...peer.coordinationRelays],
+    automaticRelayDiscovery: peer.automaticRelayDiscovery,
+    webRtcStunPolicy: peer.webRtcStunPolicy,
   };
 }
 

@@ -215,7 +215,7 @@ function createProfileCatalogCapture(): {
   saved: Array<{ profile: RemoteRuntimeHostProfile; credential?: string }>;
 } {
   const state: { document: RuntimeHostProfileDocument } = {
-    document: { schemaVersion: 2, profiles: [] },
+    document: { schemaVersion: 3, profiles: [] },
   };
   const saved: Array<{ profile: RemoteRuntimeHostProfile; credential?: string }> = [];
   const catalog: RuntimeHostProfileCatalog = {
@@ -225,7 +225,7 @@ function createProfileCatalogCapture(): {
     save: async (profile: RemoteRuntimeHostProfile, credential?: string) => {
       saved.push({ profile, credential });
       state.document = {
-        schemaVersion: 2,
+        schemaVersion: 3,
         profiles: [
           ...state.document.profiles.filter((candidate) => candidate.id !== profile.id),
           profile,
@@ -236,6 +236,8 @@ function createProfileCatalogCapture(): {
     remove: async () => assert.fail('unexpected profile removal'),
     removeIfCurrent: async () => assert.fail('unexpected conditional profile removal'),
     rebindIfCurrent: async () => assert.fail('unexpected conditional profile rebind'),
+    mutateRemoteProfileIfCurrent: async () => assert.fail('unexpected conditional mutation'),
+    readRemoteProfileIfCurrent: async () => assert.fail('unexpected conditional read'),
   };
   return {
     get document() {

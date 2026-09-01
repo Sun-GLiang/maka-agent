@@ -262,6 +262,34 @@ test('the model picker lists an enabled model a snapshot provider never listed',
   ]);
 });
 
+test('chat model choices project exact vision support for attachment composition', () => {
+  const choices = buildChatModelChoices([
+    {
+      connectionId: 'connection-vision',
+      slug: 'openai-compatible',
+      name: 'OpenAI compatible',
+      providerType: 'openai-compatible',
+      enabled: true,
+      defaultModel: 'text-model',
+      enabledModelIds: ['text-model', 'vision-model'],
+      models: [
+        { id: 'text-model', capabilities: { vision: false } },
+        { id: 'vision-model', capabilities: { vision: true } },
+      ],
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  ]);
+
+  assert.deepEqual(
+    choices.map(({ model, supportsVision }) => ({ model, supportsVision })),
+    [
+      { model: 'text-model', supportsVision: false },
+      { model: 'vision-model', supportsVision: true },
+    ],
+  );
+});
+
 test('provider recognition does not resolve inherited object members', () => {
   // `PROVIDER_DEFAULTS` is an object literal, so plain indexing answers truthy
   // for `__proto__` / `toString` / `constructor` and they would read as
@@ -300,4 +328,31 @@ test('a quarantined model id is vetoed even when enabled and present in the inve
   assert.deepEqual(authorizeConnectionModel(connection, 'nemotron-3-ultra-free'), {
     id: 'nemotron-3-ultra-free',
   });
+});
+
+test('a quarantined stored default is dropped from the picker, not re-added as a missing-default row', () => {
+  // The retired `x-preview-f-free` was picker-visible before the quarantine, so
+  // an upgrade connection can carry it as `defaultModel` and enabled. `models`
+  // and `enabledModelIds` are filtered against `brokenModelIds`, but the raw
+  // `defaultModel` used to pass through unfiltered and `makeMissingDefaultEntry`
+  // re-added it as a selectable `provider_default` row — visible and pickable
+  // while `authorizeConnectionModel` vetoed the same id. The picker and the send
+  // authority must agree: neither offers it, and the live model still renders.
+  const connection = {
+    connectionId: 'connection-opencode-free',
+    slug: 'opencode-free',
+    name: 'OpenCode Free',
+    providerType: 'opencode-free' as ProviderType,
+    enabled: true,
+    defaultModel: 'x-preview-f-free',
+    enabledModelIds: ['x-preview-f-free', 'nemotron-3-ultra-free'],
+    models: [{ id: 'x-preview-f-free' }, { id: 'nemotron-3-ultra-free' }],
+    modelSource: 'fetched' as const,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const models = buildChatModelChoices([connection]).map(({ model }) => model);
+  assert.ok(!models.includes('x-preview-f-free'), 'quarantined default must not be offered');
+  assert.ok(models.includes('nemotron-3-ultra-free'), 'live enabled model still renders');
+  assert.equal(authorizeConnectionModel(connection, 'x-preview-f-free'), undefined);
 });

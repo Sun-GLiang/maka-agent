@@ -22,10 +22,12 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { truncateUtf8 } from '@maka/core/diagnostic-log';
+import { generalizedErrorMessage } from '@maka/core/redaction';
 import {
   activateRuntimeHostManagedDeployment,
   connectRemoteRuntimeHost,
   ensureRuntimeHostPeerIdentity,
+  RuntimeHostOperationError,
 } from '@maka/runtime-host/client';
 import {
   RuntimeHostManagedDeploymentError as RuntimeHostDeploymentAuthorityError,
@@ -47,6 +49,7 @@ import {
   prepareRuntimeHostAccessCredential,
   replaceRuntimeHostAccessCredential,
   revokeRuntimeHostAccessCredential,
+  RuntimeHostAccessUnavailableError,
   type RuntimeHostAccessPreset,
 } from './runtime-host-access-command.js';
 import {
@@ -105,6 +108,8 @@ import {
   canDiscardRuntimeHostLifecycleDesiredArtifacts,
   replaceRuntimeHostLifecycle,
   resolveRecoverableRuntimeHostManagedDeployment,
+  RUNTIME_HOST_READY_TIMEOUT_MS,
+  RuntimeHostLifecycleTransactionError,
   type RuntimeHostLifecycleTransactionDeps,
 } from './runtime-host-lifecycle-transaction.js';
 import type {
@@ -118,6 +123,7 @@ import {
 import { activateRuntimeHostManagedDeploymentWithReconciliation } from './runtime-host-activation-command.js';
 
 const SETUP_LOCK_TIMEOUT_MS = 5 * 60_000;
+const PAIRING_AVAILABILITY_POLL_MS = 100;
 
 export interface RuntimeHostSetupCliOptions {
   readonly json: boolean;
@@ -405,7 +411,7 @@ async function runRuntimeHostSupervisedSetupLocked(
   const legacyToMigrate = current ? null : legacyConfig;
   if (current && legacyConfig) await assertLegacyArtifactsAbsent(legacyBackend);
   if (legacyToMigrate) await assertCompatibleExistingVersion(legacyStatus, options.version);
-  if (current && current.launch.package.version !== options.version) {
+  if (current && current.launch.package.version !== options.version && !options.updateExisting) {
     throw new RuntimeHostSetupError(
       'version_change_requires_update',
       `Runtime Host ${current.launch.package.version} is already installed; changing to ${options.version} requires the update workflow`,
@@ -414,7 +420,8 @@ async function runRuntimeHostSupervisedSetupLocked(
 
   const resolvedPackage = await resolveRuntimeHostSetupPackage(options, deps);
   const { candidate } = resolvedPackage;
-  if (current && !sameExactPackage(current, candidate)) {
+  const packageChanged = current !== undefined && !sameExactPackage(current, candidate);
+  if (current && packageChanged && !options.updateExisting) {
     throw new RuntimeHostSetupError(
       'version_change_requires_update',
       `Runtime Host ${current.launch.package.version} is already installed; changing its exact package requires the update workflow`,
@@ -435,6 +442,7 @@ async function runRuntimeHostSupervisedSetupLocked(
       sourcePackageRoot: packageRoot,
       version: candidate.version,
       packageIntegrity: candidate.integrity,
+      ...(current ? { deploymentRoot: current.deploymentRoot } : {}),
     });
     let committed = false;
     try {
@@ -449,13 +457,16 @@ async function runRuntimeHostSupervisedSetupLocked(
         legacyToMigrate,
         lifecycleOffer,
       );
-      if (current && !sameDesiredManagedDeployment(current, desired)) {
-        if (current.lifecycle.mode === 'supervised') {
-          throw new RuntimeHostSetupError(
-            'configuration_changed',
-            'Change an existing supervised Runtime Host through its explicit configure or update workflow',
-          );
-        }
+      if (
+        current &&
+        !sameDesiredManagedDeployment(current, desired) &&
+        !options.updateExisting &&
+        current.lifecycle.mode === 'supervised'
+      ) {
+        throw new RuntimeHostSetupError(
+          'configuration_changed',
+          'Change an existing supervised Runtime Host through its explicit configure or update workflow',
+        );
       }
       emit({ kind: 'progress', phase: 'installing_service' });
       if (legacyToMigrate) {
@@ -467,9 +478,11 @@ async function runRuntimeHostSupervisedSetupLocked(
         operation: legacyToMigrate
           ? 'legacy_migration'
           : current
-            ? isDeepStrictEqual(current.lifecycle, desired.lifecycle)
-              ? 'configure'
-              : 'lifecycle_change'
+            ? packageChanged
+              ? 'update'
+              : isDeepStrictEqual(current.lifecycle, desired.lifecycle)
+                ? 'configure'
+                : 'lifecycle_change'
             : 'install',
         ...(current ? { current } : {}),
         desired,
@@ -482,6 +495,7 @@ async function runRuntimeHostSupervisedSetupLocked(
                   .then(() => undefined),
             }
           : {}),
+        allowInterruptActiveTasks: Boolean(current && packageChanged && options.updateExisting),
         deps: lifecycleDeps,
       });
       if (replacement.kind === 'active_tasks') {
@@ -534,10 +548,14 @@ async function runRuntimeHostSupervisedSetupLocked(
           : {}),
       };
     } catch (error) {
-      if (!current && !committed && canDiscardRuntimeHostLifecycleDesiredArtifacts(error)) {
-        await removeRuntimeHostManagedDeployment(deployment.root, capability.rootId).catch(
-          () => undefined,
-        );
+      if (!committed && canDiscardRuntimeHostLifecycleDesiredArtifacts(error)) {
+        if (current && packageChanged) {
+          await deployment.rollback().catch(() => undefined);
+        } else if (!current) {
+          await removeRuntimeHostManagedDeployment(deployment.root, capability.rootId).catch(
+            () => undefined,
+          );
+        }
       }
       throw error;
     }
@@ -651,6 +669,8 @@ async function prepareSupervisedDirectPeer(
     coordinationRelays: [
       ...(options.directPeer?.coordinationRelays ?? current?.coordinationRelays ?? []),
     ],
+    automaticRelayDiscovery: current?.automaticRelayDiscovery ?? true,
+    webRtcStunPolicy: current?.webRtcStunPolicy ?? { kind: 'default' },
   };
 }
 
@@ -860,6 +880,7 @@ async function runRuntimeHostOnDemandSetupLocked(
           activateDesired: async () => {
             await deps.activateDesired({ rootId: capability.rootId });
           },
+          allowInterruptActiveTasks: Boolean(current && packageChanged && options.updateExisting),
           deps: lifecycleDeps,
         });
         if (replacement.kind === 'active_tasks') {
@@ -1074,20 +1095,38 @@ async function pairAndVerifyRuntimeHostSetup(
     const pairCredential = options.deferPairingCommit
       ? deps.prepareCredential
       : deps.replaceCredential;
-    paired = await pairCredential({
+    const credentialInput = {
       rootPath: target.rootPath,
-      principalKind: 'remote_owner',
+      principalKind: 'remote_owner' as const,
       principalId: options.principalId,
       operationGrants: [],
       canPublishClientCapabilities: false,
       canUseHostPaths: false,
       preset: options.preset,
       ...(options.bindPairingToClient ? { bindClientInstance: true } : {}),
-    });
+    };
+    const deadline = Date.now() + RUNTIME_HOST_READY_TIMEOUT_MS;
+    while (true) {
+      try {
+        paired = await pairCredential(credentialInput);
+        break;
+      } catch (error) {
+        if (!isTransientPairingAvailabilityError(error) || Date.now() >= deadline) {
+          throw error;
+        }
+        await new Promise<void>((resolveWait) =>
+          setTimeout(resolveWait, Math.min(PAIRING_AVAILABILITY_POLL_MS, deadline - Date.now())),
+        );
+      }
+    }
   } catch (error) {
+    const reason =
+      error instanceof RuntimeHostAccessUnavailableError
+        ? error.message
+        : generalizedErrorMessage(error, 'Runtime Host access service is unavailable');
     throw new RuntimeHostSetupError(
       'pairing_failed',
-      'Runtime Host could not pair the requested Client identity',
+      `Runtime Host could not pair the requested Client identity: ${reason}`,
       { cause: error },
     );
   }
@@ -1136,6 +1175,14 @@ async function pairAndVerifyRuntimeHostSetup(
     }
     throw error;
   }
+}
+
+function isTransientPairingAvailabilityError(error: unknown): boolean {
+  return (
+    error instanceof RuntimeHostAccessUnavailableError ||
+    (error instanceof RuntimeHostOperationError &&
+      (error.code === 'host_not_ready' || error.code === 'host_draining'))
+  );
 }
 
 async function assertCompatibleExistingVersion(
@@ -1242,7 +1289,8 @@ function setupFailure(error: unknown): { code: string; message: string } {
     error instanceof RuntimeHostManagedDeploymentError ||
     error instanceof RuntimeHostDeploymentAuthorityError ||
     error instanceof RuntimeHostUpdateDiscoveryError ||
-    error instanceof RuntimeHostUpdatePackageError
+    error instanceof RuntimeHostUpdatePackageError ||
+    error instanceof RuntimeHostLifecycleTransactionError
   ) {
     code = error.code;
     message = error.message;

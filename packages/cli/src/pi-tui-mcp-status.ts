@@ -19,6 +19,7 @@
 
 import {
   Editor,
+  Input,
   Key,
   matchesKey,
   truncateToWidth,
@@ -27,7 +28,12 @@ import {
   type TUI,
 } from '@earendil-works/pi-tui';
 import type { McpProtocolPreference, McpServerConfig } from '@maka/core/mcp';
-import type { UiLocale } from '@maka/core/ui-locale';
+import {
+  defineUiMessageCatalog,
+  formatUiMessage,
+  resolveUiMessageCatalog,
+  type UiLocale,
+} from '@maka/core/ui-locale';
 import { normalizeMcpConfig } from '@maka/storage/mcp-config-store';
 import type {
   TuiMcpAction,
@@ -37,8 +43,43 @@ import type {
   TuiMcpServerSnapshot,
 } from './tui-mcp-control.js';
 import { ansi, editorTheme } from './tui-ansi.js';
+import { TUI_COPY_RESOURCES } from './tui-copy-catalog.js';
 
 const CHROME_ROWS = 2;
+
+interface TuiMcpStatusCopy {
+  readonly title: string;
+  readonly footer: {
+    readonly back: string;
+    readonly readOnly: string;
+    readonly manage: string;
+    readonly managePublication: string;
+  };
+  readonly unavailableTitle: string;
+  readonly unavailableDetail: string;
+  readonly loading: string;
+  readonly loadError: string;
+  readonly noServers: string;
+  readonly publication: Readonly<
+    Record<ReturnType<TuiMcpManagement['snapshot']>['publication'], string>
+  >;
+  readonly serverState: Readonly<Record<NonNullable<TuiMcpServerSnapshot['state']>, string>>;
+  readonly configuredOnly: string;
+  readonly configPending: string;
+  readonly toolCount: string;
+}
+
+const MCP_STATUS_COPY = resolveUiMessageCatalog(
+  defineUiMessageCatalog<TuiMcpStatusCopy>()(TUI_COPY_RESOURCES['mcp-status']),
+);
+
+interface OverlayTextInput extends Component {
+  focused: boolean;
+  onSubmit?: (value: string) => void;
+  onChange?: (value: string) => void;
+  setText(value: string): void;
+  handleInput(data: string): void;
+}
 
 type GuidedDraft = {
   serverId: string;
@@ -61,7 +102,8 @@ type InputKind =
   | 'env'
   | 'headers'
   | 'edit'
-  | 'import';
+  | 'import'
+  | 'publication_credential';
 
 type McpOverlayPhase =
   | { kind: 'list' }
@@ -78,10 +120,11 @@ type McpOverlayPhase =
   | { kind: 'confirm_add'; draft: GuidedDraft }
   | { kind: 'confirm_import'; preview: TuiMcpImportPreview }
   | { kind: 'confirm_remove'; serverId: string }
+  | { kind: 'confirm_remove_publication_credential' }
   | { kind: 'busy'; label: string };
 
 /** One in-frame state machine for status, editing, confirmation, and errors.
- * Raw config values live only in the editor and are cleared on every exit;
+ * Raw config values live only in the input component and are cleared on every exit;
  * no management result is written into the conversation transcript. */
 export class McpManagementOverlay implements Component {
   private top = 0;
@@ -92,7 +135,7 @@ export class McpManagementOverlay implements Component {
   private phase: McpOverlayPhase = { kind: 'list' };
   private notice: { level: 'info' | 'error'; text: string } | undefined;
   private readonly dispose: () => void;
-  private editor: Editor | undefined;
+  private editor: OverlayTextInput | undefined;
   private closed = false;
   private actionAttempt = 0;
 
@@ -156,6 +199,11 @@ export class McpManagementOverlay implements Component {
       void this.runAction({ kind: 'commit_import', previewId: this.phase.preview.previewId });
     } else if (this.phase.kind === 'confirm_remove' && matchesKey(data, 'y')) {
       void this.runAction({ kind: 'remove', serverId: this.phase.serverId });
+    } else if (
+      this.phase.kind === 'confirm_remove_publication_credential' &&
+      matchesKey(data, 'y')
+    ) {
+      void this.runAction({ kind: 'remove_publication_credential' });
     }
   }
 
@@ -171,7 +219,7 @@ export class McpManagementOverlay implements Component {
     const visible = document.slice(this.top, this.top + this.bodyRows);
     const start = visible.length === 0 ? 0 : this.top + 1;
     const end = visible.length === 0 ? 0 : this.top + visible.length;
-    const title = this.input.locale === 'zh' ? 'MCP 服务器' : 'MCP SERVERS';
+    const title = MCP_STATUS_COPY[this.input.locale].title;
     const header = padLine(
       `${ansi.bold(title)} ${ansi.dim(`${start}-${end} / ${document.length}`)}`,
       safeWidth,
@@ -191,7 +239,8 @@ export class McpManagementOverlay implements Component {
   }
 
   private handleListInput(data: string): void {
-    const servers = this.input.surface?.snapshot().servers ?? [];
+    const snapshot = this.input.surface?.snapshot();
+    const servers = snapshot?.servers ?? [];
     if (matchesKey(data, Key.up)) {
       this.selected = clamp(this.selected - 1, 0, servers.length - 1);
     } else if (matchesKey(data, Key.down)) {
@@ -203,7 +252,19 @@ export class McpManagementOverlay implements Component {
     } else if (matchesKey(data, Key.home)) this.selected = 0;
     else if (matchesKey(data, Key.end)) this.selected = Math.max(0, servers.length - 1);
     else if (matchesKey(data, 'a') && this.management()) this.phase = { kind: 'add_choice' };
-    else {
+    else if (
+      matchesKey(data, 'p') &&
+      this.management() &&
+      snapshot?.canManagePublicationCredential
+    ) {
+      this.startInput('publication_credential');
+    } else if (
+      matchesKey(data, 'x') &&
+      this.management() &&
+      snapshot?.canManagePublicationCredential
+    ) {
+      this.phase = { kind: 'confirm_remove_publication_credential' };
+    } else {
       const server = servers[this.selected];
       if (!server || !this.management()) return;
       if (matchesKey(data, Key.enter)) this.startEdit(server.serverId);
@@ -280,7 +341,10 @@ export class McpManagementOverlay implements Component {
     this.clearEditor();
     this.notice = undefined;
     this.phase = { kind: 'input', input, draft, serverId, revision };
-    this.editor = new Editor(this.input.tui, editorTheme(), { paddingX: 0 });
+    this.editor =
+      input === 'publication_credential'
+        ? new MaskedTextInput()
+        : new Editor(this.input.tui, editorTheme(), { paddingX: 0 });
     this.editor.onSubmit = (submitted) => this.submitInput(submitted);
     this.editor.setText(value);
     this.editor.focused = true;
@@ -336,6 +400,10 @@ export class McpManagementOverlay implements Component {
           expectedRevision: phase.revision,
           config,
         });
+      } else if (phase.input === 'publication_credential') {
+        if (!trimmed) throw new Error();
+        this.clearEditor();
+        void this.runAction({ kind: 'set_publication_credential', credential: trimmed });
       } else {
         const preview = this.management()?.previewImport(value);
         if (!preview || preview.status !== 'ready') throw new Error();
@@ -423,6 +491,21 @@ export class McpManagementOverlay implements Component {
         confirmCopy(this.input.locale),
       ];
     }
+    if (this.phase.kind === 'confirm_remove_publication_credential') {
+      return [
+        heading(
+          this.input.locale,
+          'Remove the remote provider credential?',
+          '删除远程 Provider 凭据？',
+        ),
+        '',
+        this.input.locale === 'zh'
+          ? '这会停止向所选 Runtime Host 发布 MCP 工具。'
+          : 'This stops publishing MCP tools to the selected Runtime Host.',
+        '',
+        confirmCopy(this.input.locale),
+      ];
+    }
     if (this.phase.kind === 'busy') return [ansi.yellow(this.phase.label)];
     const lines = [publicationLine(snapshot, this.input.locale)];
     if (snapshot.configuration !== 'ready') {
@@ -463,13 +546,12 @@ export class McpManagementOverlay implements Component {
   }
 
   private footer(): string {
-    if (this.phase.kind !== 'list') return this.input.locale === 'zh' ? 'Esc 返回' : 'Esc back';
-    if (!this.management()) {
-      return this.input.locale === 'zh' ? '↑/↓ 滚动 · q/Esc 关闭' : '↑/↓ scroll · q/Esc close';
-    }
-    return this.input.locale === 'zh'
-      ? 'a 添加 · Enter 编辑 · Space 启用/停用 · t 测试 · r 重连 · d 删除 · Esc 关闭'
-      : 'a Add · Enter Edit · Space Enable/disable · t Test · r Reconnect · d Remove · Esc Close';
+    const copy = MCP_STATUS_COPY[this.input.locale].footer;
+    if (this.phase.kind !== 'list') return copy.back;
+    if (!this.management()) return copy.readOnly;
+    return this.input.surface?.snapshot().canManagePublicationCredential
+      ? copy.managePublication
+      : copy.manage;
   }
 
   private backToList(clearNotice = true): void {
@@ -537,6 +619,47 @@ export class McpManagementOverlay implements Component {
   }
 }
 
+class MaskedTextInput implements OverlayTextInput {
+  readonly #input = new Input();
+  onSubmit?: (value: string) => void;
+  onChange?: (value: string) => void;
+
+  constructor() {
+    this.#input.onSubmit = (value) => this.onSubmit?.(value);
+  }
+
+  get focused(): boolean {
+    return this.#input.focused;
+  }
+
+  set focused(value: boolean) {
+    this.#input.focused = value;
+  }
+
+  setText(value: string): void {
+    this.#input.setValue(value);
+  }
+
+  handleInput(data: string): void {
+    this.#input.handleInput(data);
+    this.onChange?.(this.#input.getValue());
+  }
+
+  invalidate(): void {
+    this.#input.invalidate();
+  }
+
+  render(width: number): string[] {
+    const value = this.#input.getValue();
+    this.#input.setValue('•'.repeat(value.length));
+    try {
+      return this.#input.render(width);
+    } finally {
+      this.#input.setValue(value);
+    }
+  }
+}
+
 function normalizeOneServer(serverId: string, source: string): McpServerConfig {
   const value: unknown = JSON.parse(source);
   return normalizeMcpConfig({ version: 3, mcpServers: { [serverId]: value } }).mcpServers[serverId];
@@ -581,15 +704,9 @@ function publicationLine(
   snapshot: ReturnType<TuiMcpManagement['snapshot']>,
   locale: UiLocale,
 ): string {
-  const publication = {
-    waiting: locale === 'zh' ? '等待发布' : 'waiting to publish',
-    host_unavailable: locale === 'zh' ? 'Runtime Host 重连中' : 'Runtime Host reconnecting',
-    publishing: locale === 'zh' ? '正在发布' : 'publishing',
-    published: locale === 'zh' ? '已发布' : 'published',
-    not_published: locale === 'zh' ? '未发布' : 'not published',
-    error: locale === 'zh' ? '发布失败' : 'publication failed',
-  }[snapshot.publication];
-  const tools = locale === 'zh' ? `${snapshot.toolCount} 个工具` : `${snapshot.toolCount} tools`;
+  const copy = MCP_STATUS_COPY[locale];
+  const publication = copy.publication[snapshot.publication];
+  const tools = formatUiMessage(copy.toolCount, { count: snapshot.toolCount }, locale);
   return `${ansi.bold(publication)} · ${tools}`;
 }
 
@@ -598,12 +715,9 @@ function serverLines(server: TuiMcpServerSnapshot, locale: UiLocale, selected: b
     ? `${server.negotiatedProtocol.era} ${server.negotiatedProtocol.revision}`
     : server.configuredProtocol;
   const transport = server.transport ?? server.configuredTransport;
-  const tools = locale === 'zh' ? `${server.toolCount} 个工具` : `${server.toolCount} tools`;
-  const sync = !server.synchronized
-    ? locale === 'zh'
-      ? '配置待同步'
-      : 'config pending'
-    : undefined;
+  const copy = MCP_STATUS_COPY[locale];
+  const tools = formatUiMessage(copy.toolCount, { count: server.toolCount }, locale);
+  const sync = server.synchronized ? undefined : copy.configPending;
   const details = [stateLabel(server.state, locale), transport, protocol, tools, sync]
     .filter(Boolean)
     .join(' · ');
@@ -650,6 +764,7 @@ function copy(locale: UiLocale, key: string): string {
     'invalid-config': 'The server configuration is invalid.',
     'credential-cleanup-failed':
       'Stored credentials could not be removed; the configuration was not changed.',
+    'publication-credential-failed': 'The provider credential could not be stored or applied.',
     'persist-failed': 'The configuration could not be saved.',
     'manager-failed': 'The MCP connection action failed.',
     turn_active: 'MCP cannot be changed while a turn or another control action is running.',
@@ -672,6 +787,7 @@ function copy(locale: UiLocale, key: string): string {
     closed: 'MCP 控制器已关闭。',
     'invalid-config': '服务器配置无效。',
     'credential-cleanup-failed': '无法删除旧凭据，配置未修改。',
+    'publication-credential-failed': '无法保存或应用 Provider 凭据。',
     'persist-failed': '无法保存配置。',
     'manager-failed': 'MCP 连接操作失败。',
     turn_active: 'Turn 或其他控制操作运行期间不能修改 MCP。',
@@ -730,6 +846,7 @@ function inputLabel(kind: InputKind, locale: UiLocale): string {
     headers: ['Request headers', '请求头'],
     edit: ['Edit server JSON', '编辑服务器 JSON'],
     import: ['Paste MCP JSON', '粘贴 MCP JSON'],
+    publication_credential: ['Provider credential', 'Provider 凭据'],
   };
   return labels[kind][locale === 'zh' ? 1 : 0];
 }
@@ -739,6 +856,11 @@ function inputHint(kind: InputKind, locale: UiLocale): string {
   if (kind === 'args') return `JSON string array, ${optional}`;
   if (kind === 'env' || kind === 'headers') return `JSON string map, ${optional}`;
   if (kind === 'cwd') return optional;
+  if (kind === 'publication_credential') {
+    return locale === 'zh'
+      ? '仅保存到本机凭据存储；不会写入 profile、参数或对话 · Enter 提交 · Esc 返回'
+      : 'Stored only in the local credential store; never written to profiles, arguments, or chat · Enter submit · Esc back';
+  }
   return locale === 'zh' ? 'Enter 提交 · Esc 返回' : 'Enter submit · Esc back';
 }
 
@@ -754,15 +876,8 @@ function configurationLine(state: 'synchronizing' | 'out_of_sync', locale: UiLoc
 }
 
 function unavailableDocument(locale: UiLocale): string[] {
-  return locale === 'zh'
-    ? [
-        ansi.yellow('当前 TUI 未连接本地 MCP 控制面。'),
-        '远程 Runtime Host 的客户端 MCP 工具关联将在后续版本提供。',
-      ]
-    : [
-        ansi.yellow('This TUI is not connected to a local MCP control plane.'),
-        'Client MCP tool association for remote Runtime Hosts is planned for a later release.',
-      ];
+  const copy = MCP_STATUS_COPY[locale];
+  return [ansi.yellow(copy.unavailableTitle), copy.unavailableDetail];
 }
 
 function heading(locale: UiLocale, en: string, zh: string): string {
@@ -774,21 +889,15 @@ function confirmCopy(locale: UiLocale): string {
 }
 
 function loadingCopy(locale: UiLocale): string {
-  return locale === 'zh'
-    ? '正在读取 mcp.json 并发现工具…'
-    : 'Loading mcp.json and discovering tools…';
+  return MCP_STATUS_COPY[locale].loading;
 }
 
 function loadErrorCopy(locale: UiLocale): string {
-  return locale === 'zh'
-    ? '无法读取或应用 MCP 配置；没有向 Runtime Host 发布工具。'
-    : 'MCP configuration could not be loaded; no tools were published to the Runtime Host.';
+  return MCP_STATUS_COPY[locale].loadError;
 }
 
 function emptyCopy(locale: UiLocale): string {
-  return locale === 'zh'
-    ? '尚未配置 MCP 服务器。按 a 添加。'
-    : 'No MCP servers are configured. Press a to add one.';
+  return MCP_STATUS_COPY[locale].noServers;
 }
 
 function statusMarker(state: TuiMcpServerSnapshot['state']): string {
@@ -799,16 +908,9 @@ function statusMarker(state: TuiMcpServerSnapshot['state']): string {
 }
 
 function stateLabel(state: TuiMcpServerSnapshot['state'], locale: UiLocale): string {
-  if (!state) return locale === 'zh' ? '仅已配置' : 'configured only';
-  if (locale === 'en') return state;
-  return {
-    disabled: '已停用',
-    disconnected: '未连接',
-    connecting: '连接中',
-    connected: '已连接',
-    'needs-auth': '需要登录',
-    error: '错误',
-  }[state];
+  const copy = MCP_STATUS_COPY[locale];
+  if (!state) return copy.configuredOnly;
+  return copy.serverState[state] ?? state;
 }
 
 function clamp(value: number, min: number, max: number): number {

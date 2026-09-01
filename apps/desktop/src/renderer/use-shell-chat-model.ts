@@ -27,23 +27,29 @@ import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { UiLocale } from '@maka/core/ui-locale';
 import {
   chatModelChoiceLabel,
+  composerModelSupportsVision,
   pickNewChatModel,
   type NewChatModel,
   type NewChatModelCandidate,
-} from './shell-chat-model-selection';
-import { deriveSessionHealthNotice } from './session-health-notice';
-import type { ComposerDefaults } from './composer-defaults';
+} from './shell-chat-model-selection.js';
+import {
+  deriveSessionHealthNotice,
+  type SessionHealthNoticeTarget,
+} from './session-health-notice.js';
+import type { ComposerDefaults } from './composer-defaults.js';
 import { getDesktopConversationCopy } from './locales/conversation-copy.js';
 import { useNewTaskChoice } from './use-new-task-choice.js';
 
-export type { NewChatModel } from './shell-chat-model-selection';
+export type { NewChatModel } from './shell-chat-model-selection.js';
 
 export type SessionHealthNoticeView = {
   tone: 'info' | 'warning' | 'destructive';
   label: string;
   tooltip?: string;
+  actionLabel?: string;
+  actionDisabled?: boolean;
   onClick(): void;
-  onClickTarget: 'models';
+  onClickTarget: SessionHealthNoticeTarget;
 };
 
 /**
@@ -70,7 +76,11 @@ export function useShellChatModel(options: {
   usePersistedComposerDefaults: boolean;
   /** Settings → 通用 → 默认思考级别; undefined means "no preference". */
   defaultThinkingLevel?: ThinkingLevel;
+  connectionSnapshotReady: boolean;
+  modelPickerDisabled: boolean;
   openSettingsSection: (section: SettingsSection) => void;
+  openModelPicker(): void;
+  refreshModelChoices(): void | Promise<void>;
 }): {
   chatModelChoices: ChatModelChoice[];
   activeConnection: IdentifiedLlmConnection | undefined;
@@ -83,13 +93,14 @@ export function useShellChatModel(options: {
   newChatModelLabel: string | undefined;
   newChatThinkingLevels: readonly ThinkingLevel[];
   newChatThinkingLevel: ThinkingLevel | undefined;
+  composerSupportsVision: boolean | undefined;
   pendingNewChatModel: NewChatModelCandidate | null;
   setPendingNewChatModel: (next: NewChatModelCandidate | null) => void;
   pendingNewChatThinkingLevel: ThinkingLevel | null;
   setPendingNewChatThinkingLevel: (next: ThinkingLevel | null) => void;
   sessionHealthNotice: SessionHealthNoticeView | undefined;
 } {
-  const { uiLocale, connections, defaultConnection, activationCandidate, activeSession, persistedComposerDefaults, openSettingsSection } = options;
+  const { uiLocale, connections, defaultConnection, activationCandidate, activeSession, persistedComposerDefaults, openSettingsSection, openModelPicker } = options;
   const conversationCopy = getDesktopConversationCopy(uiLocale);
   const [pendingNewChatModelChoice, setPendingNewChatModel] = useNewTaskChoice<
     NewChatModelCandidate | null
@@ -215,15 +226,30 @@ export function useShellChatModel(options: {
     newChatModel?.llmConnectionSlug,
     newChatModel?.model,
   );
+  const composerSupportsVision = composerModelSupportsVision({
+    active: activeSession
+      ? {
+          llmConnectionId: activeSession.llmConnectionId,
+          llmConnectionSlug: activeSession.llmConnectionSlug,
+          model: activeModel,
+        }
+      : undefined,
+    next: newChatModel,
+    choices: chatModelChoices,
+  });
 
-  // Notice derivation is a pure function (see `session-health-notice.ts`); we
-  // wrap the returned `onClickTarget` here with the Settings-jump action.
+  // Notice derivation is a pure function (see `session-health-notice.ts`); this
+  // adapter routes configuration repair to Settings, catalog retries to the
+  // existing Host snapshot read, and identity recovery to the exact picker.
   const sessionHealthNotice = useMemo<SessionHealthNoticeView | undefined>(() => {
     const derived = deriveSessionHealthNotice({
       locale: uiLocale,
       session: activeSession,
       outcome: options.sessionSendOutcome,
       connections,
+      hasModelChoices: chatModelChoices.length > 0,
+      modelChoicesSettled: options.connectionSnapshotReady,
+      modelPickerDisabled: options.modelPickerDisabled,
       lastTestStatus: activeConnection?.lastTestStatus,
     });
     if (!derived) return undefined;
@@ -232,8 +258,14 @@ export function useShellChatModel(options: {
       tone: derived.tone,
       label: derived.label,
       ...(derived.tooltip ? { tooltip: derived.tooltip } : {}),
+      ...(derived.actionLabel ? { actionLabel: derived.actionLabel } : {}),
+      ...(derived.actionDisabled ? { actionDisabled: true } : {}),
       onClickTarget: target,
-      onClick: () => openSettingsSection(target),
+      onClick: target === 'model_picker'
+        ? openModelPicker
+        : target === 'model_choices_refresh'
+          ? () => void options.refreshModelChoices()
+          : () => openSettingsSection(target),
     };
     // openSettingsSection is stable enough for our purposes — main.tsx
     // doesn't depend on it changing, and including it would force the
@@ -245,8 +277,13 @@ export function useShellChatModel(options: {
     activeSession?.model,
     options.sessionSendOutcome,
     connections,
+    chatModelChoices.length,
+    options.connectionSnapshotReady,
+    options.modelPickerDisabled,
+    options.refreshModelChoices,
     activeConnection?.lastTestStatus,
     uiLocale,
+    openModelPicker,
   ]);
 
   return {
@@ -261,6 +298,7 @@ export function useShellChatModel(options: {
     newChatModelLabel,
     newChatThinkingLevels,
     newChatThinkingLevel,
+    composerSupportsVision,
     pendingNewChatModel,
     setPendingNewChatModel,
     // Resolved, not raw: callers want the level the next chat would actually

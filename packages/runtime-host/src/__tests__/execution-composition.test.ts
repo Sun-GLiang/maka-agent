@@ -19,7 +19,6 @@
 
 import assert from 'node:assert/strict';
 import { parseNoRealConnectionError } from '@maka/core/connection-error-copy';
-import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -31,7 +30,11 @@ import type {
   AgentGraphIntentClaimRequest,
 } from '@maka/core/agent-graph-control';
 import type { ShellRunRecord } from '@maka/core/shell-run';
-import { FAKE_ASK_USER_QUESTION_PROMPT, FakeBackend } from '@maka/runtime/test-only/fake-backend';
+import {
+  FAKE_ASK_USER_QUESTION_PROMPT,
+  FAKE_HOLD_OPEN_PROMPT,
+  FakeBackend,
+} from '@maka/runtime/test-only/fake-backend';
 import { LOCAL_READ_AGENT_DEFINITION } from '@maka/runtime/agent-catalog';
 import { SessionManager } from '@maka/runtime/session-manager';
 import { fingerprintAgentGraphRunnableIntent } from '@maka/runtime/stream-graph-admission';
@@ -55,45 +58,15 @@ import {
   createExecutionRuntimeHostComposition,
   runtimeHostFilesystemWorkerRuntime,
 } from '../server/execution-composition.js';
-import {
-  createManagedWorkspaceExecutionProfile,
-  RuntimeHostWorkspaceExecutionError,
-} from '../server/workspace-execution-composition.js';
+import { waitFor as pollFor } from '@maka/core/test-only/async-primitives';
 
 const require = createRequire(import.meta.url);
 const FAKE_CONNECTION_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const CONTEXT_OFFLOAD_DATABASE_NAME = 'context-offload.sqlite';
 
 test('filesystem worker follows the candidate executable runtime', () => {
   assert.equal(runtimeHostFilesystemWorkerRuntime({ electron: '43.1.1' }), 'electron');
   assert.equal(runtimeHostFilesystemWorkerRuntime({}), 'node');
-});
-
-test('production composition never discovers PATH Git when no runtime is admitted', async () => {
-  await new Promise<void>((resolve, reject) => {
-    execFile('git', ['--version'], (error) => (error ? reject(error) : resolve()));
-  });
-
-  await withCompositionRoot(async ({ owner }) => {
-    const composition = await createExecutionRuntimeHostComposition(compositionContext(owner));
-    try {
-      assert.equal(composition.workspaceExecution.state, 'ready');
-      const managed = createManagedWorkspaceExecutionProfile(
-        Object.freeze({ kind: 'managed_workspace_execution_handle_v1' }),
-      );
-      await assert.rejects(
-        () =>
-          composition.workspaceExecution.executeReadOnly(managed, {
-            kind: 'read',
-            path: 'README.md',
-          }),
-        (error) =>
-          error instanceof RuntimeHostWorkspaceExecutionError &&
-          error.code === 'managed_workspace_profile_unavailable',
-      );
-    } finally {
-      await composition.close();
-    }
-  });
 });
 
 test('production composition owns the long-term memory database lifecycle', async () => {
@@ -126,6 +99,27 @@ test('production composition owns the long-term memory database lifecycle', asyn
       assert.equal(counts.operation_count, 0);
     } finally {
       database.close();
+    }
+  });
+});
+
+test('production composition reaches Ready when the optional context reader cannot open', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    await mkdir(join(root, CONTEXT_OFFLOAD_DATABASE_NAME));
+    const originalConsoleError = console.error;
+    const diagnostics: string[] = [];
+    console.error = (...values: unknown[]) => diagnostics.push(values.map(String).join(' '));
+    let composition: Awaited<ReturnType<typeof createExecutionRuntimeHostComposition>> | undefined;
+    try {
+      composition = await createExecutionRuntimeHostComposition(compositionContext(owner));
+      assert.equal(composition.workspaceExecution.state, 'ready');
+      assert.equal(
+        diagnostics.some((message) => message.includes('optional context-offload reader')),
+        true,
+      );
+    } finally {
+      console.error = originalConsoleError;
+      await composition?.close();
     }
   });
 });
@@ -426,6 +420,208 @@ test('production composition commits automatic titles through Host-owned Session
         return summary?.name === 'Host owns this automatic title';
       });
     } finally {
+      await composition.close();
+    }
+  });
+});
+
+test('WorkHub creates new work through the production assignment composition', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const { composition, manager } = await createCapturedExecutionComposition(owner);
+    const context = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'workhub-create-client',
+      principal: 'local_os_user' as const,
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const resolved = await composition.handlers['workhub.coordination.resolve']({}, context);
+      assert.equal(resolved.ok, true);
+      const created = await composition.handlers['workhub.coordination.act'](
+        {
+          actionId: 'workhub-create-action',
+          userText: 'Fix login stability',
+          proposal: { disposition: 'create_new', title: 'Login stability' },
+          create: { workspace: { kind: 'host_path', path: root } },
+        },
+        context,
+      );
+
+      assert.equal(created.ok, true, JSON.stringify(created));
+      if (!created.ok || created.result.disposition !== 'create_new') return;
+      const targetSessionId = created.result.targetSessionId;
+      const session = (await manager.listSessions()).find(({ id }) => id === targetSessionId);
+      assert.equal(session?.name, 'Login stability');
+      assert.equal(session?.llmConnectionId, connectionId);
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
+test('WorkHub correction replaces its link without stopping a shared manual Turn', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const { composition, manager } = await createCapturedExecutionComposition(owner);
+    const context = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'workhub-shared-turn-client',
+      principal: 'local_os_user' as const,
+      acquireResidency: () => ({ release() {} }),
+    };
+    let activeRunId: string | undefined;
+    let sourceId: string | undefined;
+    try {
+      const source = await manager.createSession({
+        cwd: root,
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      sourceId = source.id;
+      const destination = await manager.createSession({
+        cwd: root,
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      const started = await composition.handlers['turn.start'](
+        {
+          sessionId: source.id,
+          turnId: 'manual-active-turn',
+          content: { text: FAKE_HOLD_OPEN_PROMPT },
+        },
+        context,
+      );
+      assert.equal(started.ok, true);
+      if (!started.ok || started.result.kind !== 'started') return;
+      activeRunId = started.result.turn.runId;
+
+      const resolved = await composition.handlers['workhub.coordination.resolve']({}, context);
+      assert.equal(resolved.ok, true);
+      const candidates = await composition.handlers['workhub.coordination.candidates']({}, context);
+      assert.equal(candidates.ok, true);
+      if (!candidates.ok) return;
+      const sourceCandidate = candidates.result.candidates.find(
+        (candidate) => candidate.sessionId === source.id,
+      );
+      const destinationCandidate = candidates.result.candidates.find(
+        (candidate) => candidate.sessionId === destination.id,
+      );
+      assert.ok(sourceCandidate);
+      assert.ok(destinationCandidate);
+      if (!sourceCandidate || !destinationCandidate) return;
+
+      const delegated = await composition.handlers['workhub.coordination.act'](
+        {
+          actionId: 'workhub-steering-action',
+          userText: 'Continue this manual work from WorkHub',
+          candidateSetId: candidates.result.candidateSetId,
+          proposal: {
+            disposition: 'delegate_existing',
+            candidateRef: sourceCandidate.candidateRef,
+          },
+        },
+        context,
+      );
+      assert.equal(delegated.ok, true);
+      if (!delegated.ok) return;
+      assert.equal(delegated.result.disposition, 'delegate_existing');
+      if (delegated.result.disposition !== 'delegate_existing') return;
+      assert.equal(delegated.result.steered, true);
+
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const assignment = await stores.sessionStore.readWorkHubAssignment('workhub-steering-action');
+      assert.ok(assignment);
+      if (!assignment) return;
+      await waitFor(async () => {
+        const proof = await composition.handlers['turn.message.execution.query'](
+          { sessionId: source.id, messageIds: [assignment.targetMessageId] },
+          context,
+        );
+        return proof.ok && proof.result.resolutions[0]?.state === 'owned';
+      });
+
+      const unrelated = await composition.handlers['turn.message.submit'](
+        {
+          originHostEpoch: context.hostEpoch,
+          sessionId: source.id,
+          messageId: 'unrelated-followup-message',
+          content: { text: 'Keep this unrelated follow-up queued' },
+          placement: 'next_turn',
+        },
+        context,
+      );
+      assert.equal(unrelated.ok, true);
+      if (!unrelated.ok) return;
+      assert.equal(unrelated.result.disposition, 'followup');
+
+      const correctionCandidates = await composition.handlers['workhub.coordination.candidates'](
+        {},
+        context,
+      );
+      assert.equal(correctionCandidates.ok, true);
+      if (!correctionCandidates.ok) return;
+      const correctionDestination = correctionCandidates.result.candidates.find(
+        (candidate) => candidate.sessionId === destination.id,
+      );
+      assert.ok(correctionDestination);
+      if (!correctionDestination) return;
+
+      const correction = await composition.handlers['workhub.coordination.act'](
+        {
+          actionId: 'workhub-correction-action',
+          userText: `No, move this to ${correctionDestination.sessionName} instead`,
+          candidateSetId: correctionCandidates.result.candidateSetId,
+          confirmation: { kind: 'user_correction' },
+          proposal: {
+            disposition: 'replace',
+            replacesActionId: assignment.actionId,
+            target: {
+              disposition: 'delegate_existing',
+              candidateRef: correctionDestination.candidateRef,
+            },
+          },
+        },
+        context,
+      );
+      assert.equal(correction.ok, true, JSON.stringify(correction));
+      if (!correction.ok) return;
+      assert.equal(correction.result.disposition, 'replace');
+      if (correction.result.disposition === 'replace') {
+        assert.equal(correction.result.targetSessionId, destination.id);
+      }
+
+      const supersession = await stores.sessionStore.readWorkHubSupersession(
+        assignment.delegationId,
+      );
+      assert.equal(supersession?.replacementDelegationId.startsWith('whd_'), true);
+
+      const active = await composition.handlers['turn.query'](
+        { sessionId: source.id, turnId: 'manual-active-turn' },
+        context,
+      );
+      assert.equal(active.ok, true);
+      if (active.ok) {
+        assert.equal(active.result.status, 'running');
+        assert.equal(active.result.runId, activeRunId);
+      }
+      const queued = await composition.handlers['turn.message.execution.query'](
+        { sessionId: source.id, messageIds: ['unrelated-followup-message'] },
+        context,
+      );
+      assert.equal(queued.ok, true);
+      if (queued.ok) assert.equal(queued.result.resolutions[0]?.state, 'pending');
+    } finally {
+      if (sourceId && activeRunId) {
+        await composition.handlers['turn.stop'](
+          { sessionId: sourceId, turnId: 'manual-active-turn', runId: activeRunId },
+          context,
+        );
+      }
       await composition.close();
     }
   });
@@ -1007,6 +1203,42 @@ function compositionContext(owner: InteractiveRootOwner) {
   };
 }
 
+async function configureFakeDefaultTarget(owner: InteractiveRootOwner): Promise<string> {
+  const policy = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
+  const created = await policy.connectionCatalog.create({
+    expectedCatalogRevision: 0,
+    connection: {
+      slug: 'fake',
+      name: 'Fake',
+      providerType: 'ollama',
+      enabled: true,
+      enabledModelIds: ['fake-model'],
+    },
+  });
+  assert.equal(created.kind, 'committed');
+  if (created.kind !== 'committed') throw new Error('Fake connection was not committed');
+  const connection = created.snapshot.connections[0];
+  assert.ok(connection);
+  if (!connection) throw new Error('Fake connection is unavailable');
+  const fetch = await policy.operations.beginModelFetch(connection.connectionId);
+  assert.equal(fetch.kind, 'ready');
+  if (fetch.kind !== 'ready') throw new Error('Fake model fetch did not start');
+  const fetched = await policy.operations.completeModelFetch(fetch.ticket, {
+    models: [{ id: 'fake-model' }],
+    source: 'fetched',
+    fetchedAt: Date.now(),
+  });
+  assert.equal(fetched.kind, 'committed');
+  if (fetched.kind !== 'committed') throw new Error('Fake model catalog was not committed');
+  const selected = await policy.connectionCatalog.setDefaultTarget({
+    expectedCatalogRevision: fetched.snapshot.revision,
+    target: { connectionId: connection.connectionId, modelId: 'fake-model' },
+  });
+  assert.equal(selected.kind, 'committed');
+  if (selected.kind !== 'committed') throw new Error('Fake default target was not committed');
+  return connection.connectionId;
+}
+
 function shellRunRecord(
   sessionId: string,
   shellRunId: string,
@@ -1268,9 +1500,5 @@ async function withCompositionRoot(
 }
 
 async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 2_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await predicate())) {
-    if (Date.now() >= deadline) throw new Error('Timed out waiting for condition');
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
-  }
+  await pollFor(predicate, { timeoutMs, pollMs: 10, message: 'Timed out waiting for condition' });
 }

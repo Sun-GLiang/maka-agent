@@ -119,8 +119,6 @@ test('source legal authority and generated provenance select the ASF source gate
     'apps/desktop/src/renderer/assets/provider-brands/example.svg',
     'apps/desktop/resources/licenses/renderer/SIMPLE_ICONS_LICENSE.md',
     'packages/eval/harbor/deepseek-harness-profile/cordis.patch.yml',
-    'packages/core/src/model-metadata.generated.ts',
-    'packages/runtime/src/telemetry/model-pricing.generated.ts',
     'scripts/model-metadata/models-dev-api.snapshot.json',
     'scripts/sync-model-metadata.mjs',
   ]) {
@@ -135,6 +133,8 @@ test('release authority changes select their dedicated contract gate', () => {
     'apps/desktop/electron-builder.config.mjs',
     'apps/desktop/package.json',
     '.github/workflows/cli-package-validation.yml',
+    '.github/workflows/desktop-nightly.yml',
+    '.github/workflows/npm-publication.yml',
     '.github/workflows/release-cli-finalize.yml',
     '.github/workflows/release-cli-stage.yml',
     '.github/workflows/release.yml',
@@ -165,6 +165,21 @@ test('release authority changes select their dedicated contract gate', () => {
     assert.equal(planTests([path], { graph }).releaseContract, true, path);
   }
   assert.equal(planTests(['.github/RELEASE_CHECKLIST.md'], { graph }).releaseContract, false);
+});
+
+test('Product Nightly authority changes select the release contract gate', () => {
+  for (const path of [
+    '.github/workflows/desktop-nightly.yml',
+    '.github/workflows/npm-publication.yml',
+    'scripts/desktop-nightly.mjs',
+    'scripts/desktop-nightly.test.mjs',
+    'scripts/desktop-nightly-stage.test.mjs',
+    'scripts/desktop-nightly-workflow-policy.test.mjs',
+    'scripts/product-nightly.mjs',
+    'scripts/product-nightly.test.mjs',
+  ]) {
+    assert.equal(planTests([path], { graph }).releaseContract, true, path);
+  }
 });
 
 // Both notices are committed generator output. A hand edit or a merge-conflict
@@ -310,6 +325,20 @@ test('core CI checks the Astryx inventory for every code change before building'
   assert.doesNotMatch(inventoryStep, /continue-on-error/u);
 });
 
+test('CI installs dependencies whenever the Astryx surface inventory runs', () => {
+  const workflow = readWorkflow('ci.yml');
+  // The inventory step imports the generator, which resolves @astryxdesign/core
+  // and parses the @maka/ui barrel. An inventory-doc-only PR is `astryx_surface`
+  // without `code`, so the `npm ci` step must gate on astryx_surface too — else
+  // the generator runs with no dependencies installed and fails closed.
+  const npmCi = workflow.indexOf('run: npm ci');
+  assert.ok(npmCi >= 0, 'expected an `npm ci` install step');
+  const stepStart = workflow.lastIndexOf('\n      - name:', npmCi) + 1;
+  const stepEnd = workflow.indexOf('\n      - ', npmCi);
+  const installStep = workflow.slice(stepStart, stepEnd);
+  assert.match(installStep, /steps\.plan\.outputs\.astryx_surface == 'true'/u);
+});
+
 test('core CI validates affected installed CLI packages on its existing runner', () => {
   const workflow = readWorkflow('ci.yml');
   const toolchain = workflow.indexOf(
@@ -321,6 +350,35 @@ test('core CI validates affected installed CLI packages on its existing runner',
   assert.ok(toolchain >= 0);
   assert.ok(toolchain < pack);
   assert.match(workflow, /run: npm run release:cli:smoke/u);
+});
+
+test('Rust build caches publish immutable source generations only from the default branch', () => {
+  const workflows = readdirSync(WORKFLOW_DIR)
+    .filter((name) => name.endsWith('.yml'))
+    .map((name) => [name, readWorkflow(name)])
+    .filter(([, workflow]) => workflow.includes('tool: kache@0.16.0'));
+
+  assert.equal(workflows.length, 5);
+  for (const [name, workflow] of workflows) {
+    assert.match(workflow, /echo "revision=\$\(git rev-parse HEAD\)"/u, name);
+    const primaryKeys = [...workflow.matchAll(/^\s+key: (kache-[^\n]+)$/gmu)].map(([, key]) => key);
+    assert.ok(primaryKeys.length > 0, name);
+    const restoreKeys = [...workflow.matchAll(/^\s+(kache-[^\n]+-)$/gmu)].map(([, key]) => key);
+    assert.equal(restoreKeys.length, primaryKeys.length, name);
+    primaryKeys.forEach((key) => {
+      assert.match(key, /\$\{\{ steps\.[^.]+\.outputs\.revision \}\}$/u, name);
+      assert.ok(
+        restoreKeys.includes(key.replace(/\$\{\{ steps\.[^.]+\.outputs\.revision \}\}$/u, '')),
+        name,
+      );
+    });
+    assert.match(
+      workflow,
+      /name: Save [^\n]*Rust build cache\n\s+if: [^\n]*github\.event\.repository\.default_branch/u,
+      name,
+    );
+    assert.doesNotMatch(workflow, /kache report [^\n]*--since/u, name);
+  }
 });
 
 test('release contracts run against built CLI outputs', () => {
@@ -630,8 +688,8 @@ test('Windows recovery executes the complete Skill catalog suite', () => {
   assert.match(recovery, /skill-catalog-repository\.test\.js/u);
   assert.match(recovery, /skill-catalog-transaction\.test\.js/u);
   assert.match(recovery, /skill-catalog-two-client-uds\.test\.js/u);
-  assert.match(recovery, /# tests 90/u);
-  assert.match(recovery, /# pass 90/u);
+  assert.match(recovery, /# tests 91/u);
+  assert.match(recovery, /# pass 91/u);
   assert.match(recovery, /# skipped 0/u);
 });
 

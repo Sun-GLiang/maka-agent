@@ -29,6 +29,24 @@ import {
   type ProjectRowActions,
   type SessionRowActions,
 } from '../session-history-list.js';
+import { SessionRailProvider, type SessionRailData } from '../session-rail-context.js';
+
+/**
+ * The list reads its rows from `SessionRailData`, so a case states the reading
+ * it is about and nothing else.
+ */
+function Rail(props: Partial<SessionRailData> & { sessions: readonly SessionSummary[] }) {
+  const data: SessionRailData = {
+    groupVariant: 'conversation',
+    onSelectSession: () => undefined,
+    ...props,
+  };
+  return (
+    <SessionRailProvider data={data}>
+      <SessionHistoryList />
+    </SessionRailProvider>
+  );
+}
 
 const session: SessionSummary = {
   id: 'session-1',
@@ -90,10 +108,36 @@ function assertNoNestedButtons(markup: string): void {
   }
 }
 
+function assertDescriptionReferencesResolve(markup: string): void {
+  const { document } = parseHTML(markup);
+  for (const element of document.querySelectorAll<HTMLElement>(
+    'button.astryx-side-nav-item[aria-describedby]',
+  )) {
+    const describedBy = element.getAttribute('aria-describedby');
+    assert.ok(describedBy);
+    for (const id of describedBy.split(/\s+/)) {
+      const description = document.getElementById(id);
+      assert.ok(
+        description,
+        `aria-describedby token ${JSON.stringify(id)} must resolve while the card is closed`,
+      );
+      assert.equal(
+        description.textContent,
+        '',
+        'the stable description must not duplicate session or project content into DOM text queries',
+      );
+      assert.ok(
+        description.getAttribute('aria-label'),
+        'the stable description keeps its accessible text through aria-label',
+      );
+    }
+  }
+}
+
 test('renders session navigation and row actions as sibling controls', () => {
   const markup = renderToStaticMarkup(
     <LocaleProvider locale="en">
-      <SessionHistoryList
+      <Rail
         sessions={[session]}
         onSelectSession={() => undefined}
         rowActions={rowActions}
@@ -113,7 +157,7 @@ test('renders a scan-friendly compact timestamp in the session rail', () => {
   try {
     const markup = renderToStaticMarkup(
       <LocaleProvider locale="en">
-        <SessionHistoryList
+        <Rail
           sessions={[{ ...session, lastMessageAt: now - 46 * 60_000 }]}
           onSelectSession={() => undefined}
         />
@@ -127,11 +171,30 @@ test('renders a scan-friendly compact timestamp in the session rail', () => {
   }
 });
 
+test('wires the session navigation control to its hover card description', () => {
+  const markup = renderToStaticMarkup(
+    <LocaleProvider locale="en">
+      <Rail
+        sessions={[session]}
+        onSelectSession={() => undefined}
+      />
+    </LocaleProvider>,
+  );
+  const { document } = parseHTML(markup);
+  const navigation = document.querySelector<HTMLButtonElement>(
+    '.maka-session-row .astryx-side-nav-item',
+  );
+
+  assert.ok(navigation);
+  assert.ok(navigation.getAttribute('aria-describedby'));
+  assertDescriptionReferencesResolve(markup);
+});
+
 test('renders Runtime Host live runs without requiring renderer-local streaming', () => {
   const hostRunning = { ...session, runningTurnIds: ['turn-live'] };
   const markup = renderToStaticMarkup(
     <LocaleProvider locale="en">
-      <SessionHistoryList
+      <Rail
         sessions={[hostRunning]}
         onSelectSession={() => undefined}
         rowActions={rowActions}
@@ -150,7 +213,7 @@ for (const [status, attentionLabel] of [
     const awaitingUser = { ...session, status, runningTurnIds: ['turn-live'] };
     const markup = renderToStaticMarkup(
       <LocaleProvider locale="en">
-        <SessionHistoryList
+        <Rail
           sessions={[awaitingUser]}
           streamingSessionIds={new Set([awaitingUser.id])}
           onSelectSession={() => undefined}
@@ -168,7 +231,7 @@ test('keeps known-empty idle unless renderer-local streaming is newer', () => {
   const knownEmpty = { ...session, status: 'running' as const, runningTurnIds: [] as string[] };
   const idleMarkup = renderToStaticMarkup(
     <LocaleProvider locale="en">
-      <SessionHistoryList
+      <Rail
         sessions={[knownEmpty]}
         onSelectSession={() => undefined}
         rowActions={rowActions}
@@ -177,7 +240,7 @@ test('keeps known-empty idle unless renderer-local streaming is newer', () => {
   );
   const locallyStreamingMarkup = renderToStaticMarkup(
     <LocaleProvider locale="en">
-      <SessionHistoryList
+      <Rail
         sessions={[knownEmpty]}
         streamingSessionIds={new Set([knownEmpty.id])}
         onSelectSession={() => undefined}
@@ -194,7 +257,7 @@ test('keeps known-empty idle unless renderer-local streaming is newer', () => {
 test('renders collapsible project navigation and row actions as sibling controls', () => {
   const markup = renderToStaticMarkup(
     <LocaleProvider locale="en">
-      <SessionHistoryList
+      <Rail
         sessions={[session]}
         groups={[{ id: project.id, label: project.name, project, sessions: [session] }]}
         groupVariant="project"
@@ -235,5 +298,42 @@ test('renders collapsible project navigation and row actions as sibling controls
     'project navigation precedes its auxiliary action',
   );
   assert.equal(projectButtons.indexOf(action), 1, 'project action precedes nested tasks');
+  assert.ok(navigation.getAttribute('aria-describedby'));
+  assertDescriptionReferencesResolve(markup);
   assertNoNestedButtons(markup);
+});
+
+test('keeps project running totals aligned with renderer-local task streaming', () => {
+  const locallyStreaming = {
+    ...session,
+    status: 'active' as const,
+    runningTurnIds: [] as string[],
+  };
+  const markup = renderToStaticMarkup(
+    <LocaleProvider locale="en">
+      <Rail
+        sessions={[locallyStreaming]}
+        groups={[
+          {
+            id: project.id,
+            label: project.name,
+            project,
+            sessions: [locallyStreaming],
+          },
+        ]}
+        groupVariant="project"
+        streamingSessionIds={new Set([locallyStreaming.id])}
+      />
+    </LocaleProvider>,
+  );
+  const { document } = parseHTML(markup);
+  const projectNavigation = document.querySelector<HTMLButtonElement>(
+    '.maka-project-row > div > .astryx-side-nav-item',
+  );
+  const descriptionId = projectNavigation?.getAttribute('aria-describedby');
+  const description = descriptionId ? document.getElementById(descriptionId) : null;
+
+  assert.match(markup, /aria-label="Responding"/);
+  assert.ok(description);
+  assert.match(description.getAttribute('aria-label') ?? '', /1 running/);
 });
