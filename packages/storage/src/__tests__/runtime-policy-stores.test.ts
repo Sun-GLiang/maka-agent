@@ -3516,7 +3516,7 @@ describe('runtime policy stores', () => {
       });
       assert.equal(policy.kind, 'committed');
 
-      assert.deepEqual(await stores.operations.resolveWebFetchExecution(), {
+      assert.deepEqual(await stores.operations.resolveHostOutboundExecution(), {
         kind: 'privacy_mode',
       });
     });

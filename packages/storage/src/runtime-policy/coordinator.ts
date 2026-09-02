@@ -138,7 +138,7 @@ import {
   type ResolveExecutionConnectionResult,
   type ResolveNetworkProxyExecutionInput,
   type ResolveNetworkProxyExecutionResult,
-  type ResolveWebFetchExecutionResult,
+  type ResolveHostOutboundExecutionResult,
   type ResolveWebSearchExecutionInput,
   type ResolveWebSearchExecutionResult,
   type ReplaceConnectionRequestHeadersResult,
@@ -1131,7 +1131,7 @@ export class RuntimePolicyCoordinator {
     });
   }
 
-  resolveWebFetchExecution(): Promise<ResolveWebFetchExecutionResult> {
+  resolveHostOutboundExecution(): Promise<ResolveHostOutboundExecutionResult> {
     return this.inLane(async (root) => {
       const policy = (await this.policy.read(root)).policy;
       if (policy.privacy.incognitoActive) {

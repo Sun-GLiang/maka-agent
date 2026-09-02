@@ -397,13 +397,15 @@ describe('Maka Pi TUI runner', () => {
     // The driver's raw error text is not product copy; the TUI reports the
     // failure with its own localized notice (#2672).
     await waitFor(() =>
-      plainTerminalOutput(terminal.output()).includes('Could not start a new session'),
+      plainTerminalOutput(terminal.output()).includes('a local command could not be stopped'),
     );
 
     // Identity untouched…
     assert.equal(driver.getSessionId(), 'session-1');
     // …and the transcript was not wiped by the aborted /new.
-    assert.match(plainTerminalOutput(terminal.screenOutput()), /Could not start a new session/);
+    const screen = plainTerminalOutput(terminal.screenOutput());
+    assert.match(screen, /a local command could not be stopped/u);
+    assert.match(screen, /Press Ctrl\+C to stop it/u);
     assert.doesNotMatch(plainTerminalOutput(terminal.screenOutput()), /host_draining/);
     assert.ok(transcriptBefore.length > 0);
 
@@ -8184,6 +8186,122 @@ describe('Maka Pi TUI runner', () => {
     assert.equal(exits[0]?.code, 1);
     assert.match(exits[0]?.error?.message ?? '', /Could not resume session remote-session/);
   });
+
+  test('/copy writes the last reply to the clipboard via OSC 52', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new CopyReplyDriver();
+    const run = runMakaPiTui({
+      title: 'Maka',
+      locale: 'en',
+      driver,
+      cwd: '/repo',
+      model: 'claude-sonnet-4-5',
+      connectionSlug: 'claude-subscription',
+      permissionMode: 'ask',
+      terminal,
+    });
+
+    await waitForTuiPaint(terminal);
+    terminal.input('hi');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.output()).includes('COPY-ME-REPLY'));
+    // /copy refuses mid-turn, so wait for the turn to settle before copying.
+    await waitFor(() => terminal.progressStates.at(-1) === false);
+
+    terminal.input('/copy');
+    terminal.input('\r');
+
+    // The base64 payload is the stable part of the OSC 52 sequence to assert on.
+    const payload = Buffer.from('COPY-ME-REPLY', 'utf8').toString('base64');
+    await waitFor(() => terminal.output().includes(`;c;${payload}`));
+    await waitFor(() =>
+      plainTerminalOutput(terminal.output()).includes('Sent the last reply to the terminal'),
+    );
+
+    exitMaka(terminal);
+    await Promise.race([
+      run,
+      delay(CLOSE_BUDGET_MS).then(() => {
+        throw new Error('TUI did not close during test cleanup');
+      }),
+    ]);
+  });
+
+  test('/copy all writes the whole conversation with role labels via OSC 52', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new CopyReplyDriver();
+    const run = runMakaPiTui({
+      title: 'Maka',
+      locale: 'en',
+      driver,
+      cwd: '/repo',
+      model: 'claude-sonnet-4-5',
+      connectionSlug: 'claude-subscription',
+      permissionMode: 'ask',
+      terminal,
+    });
+
+    await waitForTuiPaint(terminal);
+    terminal.input('hi');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.output()).includes('COPY-ME-REPLY'));
+    await waitFor(() => terminal.progressStates.at(-1) === false);
+
+    terminal.input('/copy all');
+    terminal.input('\r');
+
+    // Exercises copiedAll + the roleUser/roleAssistant labels end to end: the
+    // serialized transcript is the user turn and the reply under their labels.
+    const payload = Buffer.from('You:\nhi\n\nMaka:\nCOPY-ME-REPLY', 'utf8').toString('base64');
+    await waitFor(() => terminal.output().includes(`;c;${payload}`));
+    await waitFor(() =>
+      plainTerminalOutput(terminal.output()).includes('Sent the conversation to the terminal'),
+    );
+
+    exitMaka(terminal);
+    await Promise.race([
+      run,
+      delay(CLOSE_BUDGET_MS).then(() => {
+        throw new Error('TUI did not close during test cleanup');
+      }),
+    ]);
+  });
+
+  test('/copy is refused mid-turn instead of copying the half-written reply', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new SteeringTurnDriver();
+    const run = runMakaPiTui({
+      title: 'Maka',
+      locale: 'en',
+      driver,
+      cwd: '/repo',
+      model: 'm',
+      connectionSlug: 'c',
+      permissionMode: 'bypass',
+      terminal,
+    });
+
+    terminal.input('start the work');
+    terminal.input('\r');
+    await waitFor(() => terminal.progressStates.at(-1) === true);
+
+    terminal.input('/copy');
+    terminal.input('\r');
+    await waitFor(() =>
+      plainTerminalOutput(terminal.output()).includes('Cannot run /copy while a turn is running'),
+    );
+    // It was refused, not steered into the running turn, and wrote no clipboard.
+    assert.deepEqual(driver.steered, []);
+    assert.equal(terminal.output().includes('\x1b]52;'), false);
+
+    terminal.input('\x1b');
+    terminal.input('\x1b');
+    await waitFor(() => terminal.progressStates.at(-1) === false);
+    terminal.input('\x03');
+    terminal.input('/exit');
+    terminal.input('\r');
+    await run;
+  });
 });
 
 function editorInputText(terminal: FakeTerminal): string | undefined {
@@ -8948,6 +9066,26 @@ class StreamingPastViewportDriver extends ToolOutputDriver {
       id: 'event-complete',
       turnId: 'turn-1',
       ts: 3,
+      stopReason: 'end_turn',
+    };
+  }
+}
+
+class CopyReplyDriver extends ToolOutputDriver {
+  override async *promptEvents(_prompt: string): AsyncIterable<SessionEvent> {
+    yield {
+      type: 'text_delta',
+      id: 'event-text-1',
+      turnId: 'turn-1',
+      ts: 1,
+      messageId: 'message-1',
+      text: 'COPY-ME-REPLY',
+    };
+    yield {
+      type: 'complete',
+      id: 'event-complete',
+      turnId: 'turn-1',
+      ts: 2,
       stopReason: 'end_turn',
     };
   }
