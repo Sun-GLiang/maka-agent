@@ -269,6 +269,8 @@ test('retains the Model overlay while a partial Host catalog still has the prior
       knownProfileIds: ['profile-a', 'profile-b'],
     },
   );
+  assert.equal(partialCatalog.find((session) => session.id === 'session-a')?.revision, 1);
+  assert.equal(partialCatalog.find((session) => session.id === 'session-b')?.revision, 2);
   await render(1, partialCatalog);
   assert.equal(controller!.overlays.modelConfiguration['session-a']?.modelTarget.model, 'model-c');
 
@@ -280,6 +282,7 @@ test('retains the Model overlay while a partial Host catalog still has the prior
     completeHostIds: ['host-a', 'host-b'],
     knownProfileIds: ['profile-a', 'profile-b'],
   });
+  assert.equal(caughtUpCatalog.find((session) => session.id === 'session-a')?.revision, 2);
   await render(2, caughtUpCatalog);
   assert.equal(controller!.overlays.modelConfiguration['session-a'], undefined);
 });
