@@ -125,7 +125,7 @@ export async function showFatalStartupError(
 
 export async function showMainRendererProcessGoneDialog(
   deps: DiagnosticDialogDeps,
-): Promise<'relaunch' | 'exit'> {
+): Promise<'recover' | 'exit'> {
   const copy = getNativeDiagnosticDialogCopy(deps.locale).rendererGone;
   const result = await showMessageBoxWithDiagnostics(
     {
@@ -133,14 +133,14 @@ export async function showMainRendererProcessGoneDialog(
       title: copy.title,
       message: copy.message,
       detail: copy.detail,
-      buttons: [copy.relaunch, copy.exit],
+      buttons: [copy.recover, copy.exit],
       defaultId: 0,
       cancelId: 1,
       noLink: true,
     },
     deps,
   );
-  return result.response === 0 ? 'relaunch' : 'exit';
+  return result.response === 0 ? 'recover' : 'exit';
 }
 
 export async function showRuntimeHostStartupRecoveryDialog(
@@ -162,7 +162,7 @@ export async function showRuntimeHostStartupRecoveryDialog(
       message: copy.message,
       detail,
       buttons: [input.activeTasks ? copy.repairAndRestart : copy.repair, copy.exit],
-      defaultId: 0,
+      defaultId: input.activeTasks || input.repairError ? 1 : 0,
       cancelId: 1,
       noLink: true,
     },

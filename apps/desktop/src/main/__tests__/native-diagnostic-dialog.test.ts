@@ -49,7 +49,7 @@ const diagnosticEnvironment = () => ({
   processUptimeSeconds: 3,
 });
 
-test('copies diagnostics as an auxiliary native-dialog action', async () => {
+test('copies diagnostics as an auxiliary dialog action', async () => {
   const shown: MessageBoxOptions[] = [];
   const responses = [2, 1];
   let copies = 0;
@@ -182,9 +182,10 @@ test('main Renderer loss keeps Copy Diagnostics auxiliary to recovery', async ()
     },
   });
 
-  assert.equal(decision, 'relaunch');
-  assert.deepEqual(shown[0]?.buttons, ['Relaunch', 'Exit', 'Copy Diagnostics']);
-  assert.deepEqual(shown[1]?.buttons, ['Relaunch', 'Exit', 'Copy Again']);
+  assert.equal(decision, 'recover');
+  assert.deepEqual(shown[0]?.buttons, ['Recover Interface', 'Exit', 'Copy Diagnostics']);
+  assert.deepEqual(shown[1]?.buttons, ['Recover Interface', 'Exit', 'Copy Again']);
+  assert.match(shown[0]?.detail ?? '', /without restarting Maka/);
   assert.match(clipboard, /Surface: renderer_process_gone/);
   assert.match(clipboard, /Reason: oom/);
   assert.match(clipboard, /Exit code: 137/);
@@ -216,9 +217,29 @@ test('managed Host recovery preserves the workspace and confirms active-work int
     'Exit',
     'Copy Diagnostics',
   ]);
+  assert.equal(shown?.defaultId, shown?.cancelId);
   assert.match(shown?.detail ?? '', /workspace, Host identity, credentials, and settings/);
   assert.match(shown?.detail ?? '', /automatic update compatibility cannot be confirmed/);
   assert.match(shown?.detail ?? '', /interrupt that work/);
   assert.match(shown?.detail ?? '', /Copy diagnostics to inspect the details/);
   assert.doesNotMatch(shown?.detail ?? '', /service update failed/);
+
+  let unknownShown: MessageBoxOptions | undefined;
+  const unknownDecision = await showRuntimeHostStartupRecoveryDialog(
+    {
+      startupError: new Error('managed service unavailable'),
+      repairError: new Error('safe repair could not verify Host activity'),
+      activeTasks: false,
+    },
+    {
+      locale: 'en',
+      copyDiagnostics() {},
+      showMessageBox: async (options): Promise<MessageBoxReturnValue> => {
+        unknownShown = options;
+        return { response: 1, checkboxChecked: false };
+      },
+    },
+  );
+  assert.equal(unknownDecision, 'exit');
+  assert.equal(unknownShown?.defaultId, unknownShown?.cancelId);
 });
