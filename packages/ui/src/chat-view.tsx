@@ -265,7 +265,7 @@ export function ChatView(props: {
    */
   scrollTargetTurn?: { turnId: string; nonce: number };
   /** Runtime-only reading position restored without search focus or highlight. */
-  restoreTargetTurn?: { turnId: string };
+  restoreTargetTurn?: { turnId: string; unavailable?: boolean };
   onReadingAnchorChange?(turnId?: string): void;
   scrollBehavior: ScrollBehavior;
   hasOlderHistory?: boolean;

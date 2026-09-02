@@ -41,7 +41,7 @@ export function useChatScroll(input: {
   sessionId?: string;
   messages: readonly StoredMessage[];
   target?: { turnId: string; nonce: number };
-  restoreTarget?: { turnId: string };
+  restoreTarget?: { turnId: string; unavailable?: boolean };
   onReadingAnchorChange?(turnId?: string): void;
   behavior: ScrollBehavior;
   hasOlderHistory?: boolean;
@@ -59,16 +59,24 @@ export function useChatScroll(input: {
   const reportedAnchor = useRef<{ sessionId?: string; turnId?: string } | undefined>(undefined);
   const activation = useRef<{ sessionId?: string; restoreTurnId?: string } | undefined>(undefined);
   if (activation.current?.sessionId !== input.sessionId) {
+    handledTarget.current = null;
     activation.current = {
       sessionId: input.sessionId,
       restoreTurnId: input.restoreTarget?.turnId,
     };
   }
+  const restoreUnavailable =
+    input.restoreTarget?.turnId === activation.current?.restoreTurnId
+    && input.restoreTarget?.unavailable === true;
   const commandTarget = useRef<string | null>(null);
   commandTarget.current = input.target?.turnId
     ? `search:${input.sessionId ?? ''}:${input.target.turnId}:${input.target.nonce}`
     : activation.current?.restoreTurnId
-      ? `restore:${input.sessionId ?? ''}:${activation.current.restoreTurnId}`
+      ? restoreCommandKey(
+          input.sessionId,
+          activation.current.restoreTurnId,
+          restoreUnavailable,
+        )
       : null;
 
   // A passive effect, not a layout one: the scroller is Astryx's layout root,
@@ -178,7 +186,11 @@ export function useChatScroll(input: {
       : undefined;
     const restoreTurnId = activation.current?.restoreTurnId;
     const target = explicitTarget ?? (restoreTurnId
-      ? { kind: 'restore' as const, turnId: restoreTurnId }
+      ? {
+          kind: 'restore' as const,
+          turnId: restoreTurnId,
+          unavailable: restoreUnavailable,
+        }
       : undefined);
     if (!target) return;
     if (explicitTarget) activation.current = { sessionId: input.sessionId };
@@ -188,14 +200,21 @@ export function useChatScroll(input: {
     // a reader who had already scrolled back to it.
     const chosen = target.kind === 'search'
       ? `search:${input.sessionId ?? ''}:${target.turnId}:${target.nonce}`
-      : `restore:${input.sessionId ?? ''}:${target.turnId}`;
+      : restoreCommandKey(input.sessionId, target.turnId, target.unavailable);
     if (handledTarget.current === chosen) return;
     authority.releasePin();
     const frame = window.requestAnimationFrame(() => {
       const root = input.scrollRef.current;
       if (!root) return;
       const element = root.querySelector(`[data-turn-id="${CSS.escape(target.turnId)}"]`);
-      if (!element || !('scrollIntoView' in element)) return;
+      if (!element || !('scrollIntoView' in element)) {
+        if (target.kind !== 'restore' || !target.unavailable) return;
+        handledTarget.current = chosen;
+        activation.current = { sessionId: input.sessionId };
+        if (!firstVisibleTurnId(root)) authority.pinToTail();
+        reportReadingAnchor.current?.();
+        return;
+      }
       handledTarget.current = chosen;
       const targetElement = element as HTMLElement;
       targetElement.scrollIntoView({
@@ -224,6 +243,7 @@ export function useChatScroll(input: {
     input.target?.turnId,
     input.target?.nonce,
     input.restoreTarget?.turnId,
+    input.restoreTarget?.unavailable,
     input.behavior,
     input.sessionId,
     input.messages,
@@ -241,4 +261,12 @@ function firstVisibleTurnId(root: HTMLElement | null): string | undefined {
   return [...root.querySelectorAll<HTMLElement>('[data-turn-id]')]
     .find((turn) => turn.getBoundingClientRect().bottom > rootTop)
     ?.dataset.turnId;
+}
+
+function restoreCommandKey(
+  sessionId: string | undefined,
+  turnId: string,
+  unavailable: boolean,
+): string {
+  return `restore:${sessionId ?? ''}:${turnId}:${unavailable ? 'unavailable' : 'pending'}`;
 }

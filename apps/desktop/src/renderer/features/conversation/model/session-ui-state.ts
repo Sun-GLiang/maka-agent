@@ -34,6 +34,7 @@ export interface AppShellSessionUiState {
   shellRunUpdatesBySession: ShellRunUpdatesBySession;
   interactionBySession: InteractionQueues;
   messageQueueBySession: Record<string, MessageQueueUiState>;
+  transcriptRestoreUnavailableBySession: Record<string, string>;
 }
 
 // The pending plate keeps the Host revision beside its entries so edits can
@@ -70,6 +71,7 @@ const SESSION_UI_MAP_KEYS = [
   'shellRunUpdatesBySession',
   'interactionBySession',
   'messageQueueBySession',
+  'transcriptRestoreUnavailableBySession',
 ] as const satisfies readonly AppShellSessionUiStateMapKey[];
 
 type MissingSessionUiMapKey = Exclude<AppShellSessionUiStateMapKey, typeof SESSION_UI_MAP_KEYS[number]>;
@@ -215,6 +217,12 @@ export function createAppShellSessionUiStateController(
     setMessageQueueBySession: createMapSetter('messageQueueBySession'),
     setSessionEventHealthBySession: sessionEventHealthBySession.update,
     setTranscriptReadingAnchor: transcriptReadingAnchors.set,
+    setTranscriptRestoreUnavailable: (sessionId: string, turnId: string | undefined) => {
+      updateMap('transcriptRestoreUnavailableBySession', (current) => {
+        if (!turnId) return omitSessionKey(current, sessionId);
+        return current[sessionId] === turnId ? current : { ...current, [sessionId]: turnId };
+      });
+    },
     /**
      * The authority said something about `turnId` — it started, failed to
      * start, or ended. Drop that arm's `unconfirmed` claim so a session list

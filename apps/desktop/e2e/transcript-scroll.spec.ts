@@ -299,7 +299,7 @@ test('switching Sessions restores a Turn anchor while a tail Session follows bac
   // model upgrades it onto the E2E Runtime Host before this test starts a Turn.
   const modelSwitcher = page.locator('.maka-model-switcher-trigger');
   await modelSwitcher.click();
-  await page.getByRole('menuitem', { name: 'glm-4.5', exact: true }).click();
+  await page.getByRole('menuitemradio', { name: 'glm-4.5', exact: true }).click();
   await expect(modelSwitcher).toContainText('glm-4.5');
 
   await page.evaluate((sessionId) => {

@@ -554,6 +554,7 @@ function AppShellContent({
     stopPendingBySession,
     interactionBySession,
     messageQueueBySession,
+    transcriptRestoreUnavailableBySession,
     streamingSessionIds,
     activeLiveTurnSnapshot,
   } = useAppShellSessionUiReads(sessionUiController, activeId);
@@ -2403,6 +2404,9 @@ function AppShellContent({
       activeIdRef.current === sessionId && transcriptRangeRef.current === controller,
     setMessages,
     setReadingAnchor: sessionUiController.setTranscriptReadingAnchor,
+    onRestoreUnavailable: (sessionId, turnId) => {
+      sessionUiController.setTranscriptRestoreUnavailable(sessionId, turnId);
+    },
     onError: (error, sessionId) => {
       sessionUiController.setMessageLoadErrorBySession((current) => ({
         ...current,
@@ -2570,11 +2574,17 @@ function AppShellContent({
   const activeTranscriptReadingAnchor = activeId
     ? sessionUiController.transcriptReadingAnchorBySessionRef.current[activeId]
     : undefined;
+  const activeUnavailableTranscriptRestore = activeId
+    ? transcriptRestoreUnavailableBySession[activeId]
+    : undefined;
   const activeTranscriptRange = transcriptReadingPosition.currentRange(
     transcriptRangeRef.current,
     activeId,
   );
   function handleTranscriptReadingAnchorChange(turnId?: string) {
+    if (activeId && activeUnavailableTranscriptRestore) {
+      sessionUiController.setTranscriptRestoreUnavailable(activeId, undefined);
+    }
     transcriptReadingPosition.captureAnchor({
       sessionId: activeId,
       currentSessionId: activeIdRef.current,
@@ -3128,8 +3138,15 @@ function AppShellContent({
                     : undefined
                 }
                 restoreTargetTurn={activeTranscriptReadingAnchor
-                  ? { turnId: activeTranscriptReadingAnchor.turnId }
-                  : undefined}
+                  ? {
+                      turnId: activeTranscriptReadingAnchor.turnId,
+                      unavailable:
+                        activeUnavailableTranscriptRestore
+                        === activeTranscriptReadingAnchor.turnId,
+                    }
+                  : activeUnavailableTranscriptRestore
+                    ? { turnId: activeUnavailableTranscriptRestore, unavailable: true }
+                    : undefined}
                 onReadingAnchorChange={activeId
                   ? handleTranscriptReadingAnchorChange
                   : undefined}

@@ -172,19 +172,26 @@ test('a session switch restores a Turn anchor after async fill and preserves tai
   };
 
   const anchors = new Map<string, string>();
+  const unavailableRestores = new Map<string, string>();
   let authority: TranscriptScrollAuthority | undefined;
   let messageRevision = 0;
   let target: { turnId: string; nonce: number } | undefined;
   function Harness({ sessionId }: { sessionId: string }) {
     const scrollRef = useRef<HTMLElement | null>(scroller);
     authority = useTranscriptScrollAuthority();
+    const unavailableTurnId = unavailableRestores.get(sessionId);
+    const restoreTurnId = unavailableTurnId ?? anchors.get(sessionId);
+    const restoreTarget = restoreTurnId
+      ? { turnId: restoreTurnId, unavailable: unavailableTurnId === restoreTurnId }
+      : undefined;
     useChatScroll({
       scrollRef,
       sessionId,
       messages: [{ id: `message-${messageRevision}` }] as StoredMessage[],
       target,
-      restoreTarget: anchors.has(sessionId) ? { turnId: anchors.get(sessionId)! } : undefined,
+      restoreTarget,
       onReadingAnchorChange: (turnId) => {
+        unavailableRestores.delete(sessionId);
         if (turnId) anchors.set(sessionId, turnId);
         else anchors.delete(sessionId);
       },
@@ -248,6 +255,29 @@ test('a session switch restores a Turn anchor after async fill and preserves tai
   assert.equal(scroller.scrollTop, 1_800);
   assert.equal(authority?.getSnapshot().pinned, true);
 
+  // The same restore key can be handled successfully on one activation and
+  // become unavailable on the next. The earlier success must not swallow the
+  // later terminal result.
+  collapseTranscript();
+  await renderSession('session-a');
+  installTranscript(2_000, [{ id: 'turn-a-visible', start: 0, height: 2_000 }]);
+  await renderSession('session-a');
+  await flushFrames();
+  assert.equal(anchors.get('session-a'), 'turn-a-2');
+
+  unavailableRestores.set('session-a', 'turn-a-2');
+  await renderSession('session-a');
+  await flushFrames();
+  assert.equal(anchors.get('session-a'), 'turn-a-visible');
+  assert.equal(unavailableRestores.has('session-a'), false);
+
+  collapseTranscript();
+  await renderSession('session-b');
+  installTranscript(2_400, [{ id: 'turn-b-1', start: 0, height: 2_400 }]);
+  deliverResize();
+  assert.equal(scroller.scrollTop, 1_800);
+  assert.equal(authority?.getSnapshot().pinned, true);
+
   // A command can land without producing a scroll event when layout or native
   // anchoring already put the Turn at the requested offset. Its semantic
   // reading position must still be reported before the user switches away.
@@ -256,4 +286,19 @@ test('a session switch restores a Turn anchor after async fill and preserves tai
   await renderSession('session-b');
   await flushFrames();
   assert.equal(anchors.get('session-b'), 'turn-b-1');
+
+  target = undefined;
+  // With no resident Turn to re-anchor to, abandoning the restore falls back
+  // to the default tail intent and clears the stale reading anchor.
+  anchors.set('session-b', 'turn-b-never-renders');
+  collapseTranscript();
+  await renderSession('session-c');
+  collapseTranscript();
+  await renderSession('session-b');
+  assert.equal(authority?.getSnapshot().pinned, false);
+  unavailableRestores.set('session-b', 'turn-b-never-renders');
+  await renderSession('session-b');
+  await flushFrames();
+  assert.equal(authority?.getSnapshot().pinned, true);
+  assert.equal(anchors.has('session-b'), false);
 });

@@ -110,6 +110,7 @@ export function restoreSessionTranscriptRange<Message>(options: {
     sessionId: string,
     anchor: TranscriptReadingAnchor | undefined,
   ) => void;
+  readonly onRestoreUnavailable?: (sessionId: string, turnId: string) => void;
   readonly onError: (error: unknown, sessionId: string) => void;
 }): (() => void) | undefined {
   const { controller, sessionId } = options;
@@ -118,7 +119,9 @@ export function restoreSessionTranscriptRange<Message>(options: {
   if (readingAnchor && readingAnchor.sequence === undefined) {
     const { turnId } = readingAnchor;
     try {
-      const sequence = controller.store.sequenceForTurn(turnId);
+      const sequence = controller.store.range().sessionId === sessionId
+        ? controller.store.sequenceForTurn(turnId)
+        : null;
       if (sequence !== null) {
         readingAnchor = { turnId, sequence };
         options.setReadingAnchor(sessionId, readingAnchor);
@@ -127,20 +130,46 @@ export function restoreSessionTranscriptRange<Message>(options: {
       // A stale range cannot enrich the anchor, but also cannot invalidate it.
     }
   }
-  const target = options.searchTarget?.sessionId === sessionId
+  const searchTarget = options.searchTarget?.sessionId === sessionId
     ? options.searchTarget
-    : readingAnchor;
-  if (!target || target.sequence === undefined) return;
+    : undefined;
+  const target = searchTarget ?? readingAnchor;
+  if (!target || (searchTarget && target.sequence === undefined)) return;
+  const restoringReadingAnchor = searchTarget === undefined && readingAnchor !== undefined;
   let disposed = false;
   const current = (): boolean => !disposed && options.isCurrent(sessionId, controller);
   void controller.ready()
     .then(async () => {
-      if (!current() || controller.store.sequenceForTurn(target.turnId) !== null) return false;
-      await controller.loadAround(target.sequence!);
-      return true;
+      if (!current() || controller.store.range().sessionId !== sessionId) {
+        return { loaded: false, unavailable: false };
+      }
+      const residentSequence = controller.store.sequenceForTurn(target.turnId);
+      if (residentSequence !== null) {
+        if (restoringReadingAnchor && readingAnchor?.sequence === undefined) {
+          options.setReadingAnchor(sessionId, { turnId: target.turnId, sequence: residentSequence });
+        }
+        return { loaded: false, unavailable: false };
+      }
+      if (target.sequence === undefined) {
+        return { loaded: false, unavailable: restoringReadingAnchor };
+      }
+      await controller.loadAround(target.sequence);
+      if (!current() || controller.store.range().sessionId !== sessionId) {
+        return { loaded: false, unavailable: false };
+      }
+      return {
+        loaded: true,
+        unavailable: restoringReadingAnchor
+          && controller.store.sequenceForTurn(target.turnId) === null,
+      };
     })
-    .then((loaded) => {
-      if (loaded && current()) options.setMessages([...controller.store.snapshot().messages]);
+    .then(({ loaded, unavailable }) => {
+      if (!current()) return;
+      if (loaded) options.setMessages([...controller.store.snapshot().messages]);
+      if (unavailable) {
+        options.setReadingAnchor(sessionId, undefined);
+        options.onRestoreUnavailable?.(sessionId, target.turnId);
+      }
     })
     .catch((error) => {
       if (current()) options.onError(error, sessionId);
