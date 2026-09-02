@@ -61,6 +61,7 @@ test('CLI Runtime Host bootstrap launches the execution composition', async () =
     closed: new Promise<void>(() => {}),
     status: async () => ({ state: 'ready' }),
     subscribeConfigurationChanges: () => () => {},
+    subscribeConnectionCatalogChanges: () => () => {},
     subscribeProjectCatalogChanges: () => () => {},
     subscribeSessionCatalogChanges: () => () => {},
     subscribeScheduledTaskChanges: () => () => {},
@@ -247,6 +248,7 @@ test('remote CLI profiles pin root identity and resolve credential outside the p
     closed: new Promise<void>(() => {}),
     status: async () => ({ state: 'ready' }),
     subscribeConfigurationChanges: () => () => {},
+    subscribeConnectionCatalogChanges: () => () => {},
     subscribeProjectCatalogChanges: () => () => {},
     subscribeSessionCatalogChanges: () => () => {},
     subscribeScheduledTaskChanges: () => () => {},
@@ -301,6 +303,9 @@ test('remote CLI profiles pin root identity and resolve credential outside the p
         rebindIfCurrent: async () => {
           throw new Error('unexpected write');
         },
+        updateRemoteProfileIfCurrent: async () => {
+          throw new Error('unexpected write');
+        },
         mutateRemoteProfileIfCurrent: async () => {
           throw new Error('unexpected write');
         },
@@ -347,6 +352,7 @@ test('remote CLI profile state and Client identity use the explicit Client Data 
     closed: new Promise<void>(() => {}),
     status: async () => ({ state: 'ready' }),
     subscribeConfigurationChanges: () => () => {},
+    subscribeConnectionCatalogChanges: () => () => {},
     subscribeProjectCatalogChanges: () => () => {},
     subscribeSessionCatalogChanges: () => () => {},
     subscribeScheduledTaskChanges: () => () => {},
@@ -425,6 +431,7 @@ test('remote CLI enables SSH prompts only for an explicitly interactive TTY', as
             closed: new Promise<void>(() => {}),
             status: async () => ({ state: 'ready' }),
             subscribeConfigurationChanges: () => () => {},
+            subscribeConnectionCatalogChanges: () => () => {},
             subscribeProjectCatalogChanges: () => () => {},
             subscribeSessionCatalogChanges: () => () => {},
             subscribeScheduledTaskChanges: () => () => {},
@@ -569,6 +576,7 @@ function singleRemoteProfileCatalog(profile: RemoteRuntimeHostProfile): RuntimeH
     remove: async () => assert.fail('unexpected write'),
     removeIfCurrent: async () => assert.fail('unexpected write'),
     rebindIfCurrent: async () => assert.fail('unexpected write'),
+    updateRemoteProfileIfCurrent: async () => assert.fail('unexpected write'),
     mutateRemoteProfileIfCurrent: async () => assert.fail('unexpected write'),
     readRemoteProfileIfCurrent: async () => assert.fail('unexpected read'),
   };

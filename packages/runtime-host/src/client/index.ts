@@ -136,6 +136,8 @@ export {
   readRuntimeHostProjects,
   readRuntimeHostSessions,
   readRuntimeHostSkillCatalog,
+  type RuntimeHostConnectionCatalogEntry,
+  type RuntimeHostConnectionCatalogSnapshot,
 } from './catalog-reader.js';
 export {
   connectOrSpawnRuntimeHost,
@@ -166,6 +168,9 @@ export { consumeAccessCredentialDelivery } from '../control/access-credential-de
 export {
   decodeRuntimeHostOwnerConnectionCode,
   encodeRuntimeHostOwnerConnectionCode,
+  issueRuntimeHostOwnerConnectionCode,
+  REMOTE_DESKTOP_OWNER_ACCESS_POLICY,
+  type IssueRuntimeHostOwnerConnectionCodeInput,
   type RuntimeHostOwnerConnectionCode,
 } from './owner-connection-code.js';
 export { ensureRuntimeHostPeerIdentity } from '../transport/peer-native.js';

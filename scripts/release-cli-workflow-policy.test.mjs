@@ -48,52 +48,75 @@ test('validation consumers download the artifact produced by the build job', () 
 
 test('CLI validation qualifies exact published State Roots without weakening artifact identity', () => {
   const workflow = readWorkflow('cli-package-validation.yml');
+  // The predecessor is resolved on the job that already waits on the addon
+  // builds, so the exported identity comes from `build` rather than a job of
+  // its own. The exported names are the contract callers hold.
   assert.match(
     workflow,
-    /release_predecessor_version:[\s\S]*?value: \$\{\{ jobs\.release-predecessor\.outputs\.version \}\}/u,
+    /release_predecessor_version:[\s\S]*?value: \$\{\{ jobs\.build\.outputs\.release_predecessor_version \}\}/u,
   );
   assert.match(
     workflow,
-    /release-predecessor:[\s\S]*?resolve-nightly-predecessor "\$GITHUB_OUTPUT"/u,
+    /release_predecessor_integrity:[\s\S]*?jobs\.build\.outputs\.release_predecessor_integrity/u,
   );
   assert.match(
     workflow,
-    /release_predecessor_integrity:[\s\S]*?jobs\.release-predecessor\.outputs\.integrity/u,
+    /id: predecessor\n\s+run: node scripts\/release-cli-publication\.mjs resolve-nightly-predecessor "\$GITHUB_OUTPUT"/u,
   );
+  assert.match(workflow, /state-root-qualification:\n[\s\S]*?needs: build\n/u);
+
+  // Both frozen transitions keep their exact digests and the epoch relation
+  // each one exists to prove. They are positional arguments now, so anchor on
+  // the digest immediately preceding the relation rather than on a YAML key.
+  assert.match(workflow, /^\s+[a-f0-9]{64} different$/mu);
+  assert.match(workflow, /^\s+[a-f0-9]{64} same$/mu);
   assert.match(
     workflow,
-    /state-root-qualification:\n[\s\S]*?needs: \[build, release-predecessor\]/u,
+    /"\$PREDECESSOR_TARBALL_URL" '' "\$PREDECESSOR_INTEGRITY" \\\n\s+candidate/u,
   );
-  assert.match(workflow, /source_sha256: [a-f0-9]{64}/u);
-  assert.match(workflow, /target_sha256: [a-f0-9]{64}/u);
-  assert.match(workflow, /epoch_relation: different/u);
-  assert.match(workflow, /epoch_relation: same/u);
+
+  // The env those two names come from. Without this the third transition would
+  // still be spelled correctly while pointing at nothing, which is how the
+  // `tarball_url` binding lost its only assertion when the predecessor moved
+  // off its own job. `release_predecessor_tarball_url` is also a declared
+  // `workflow_call` output, so callers hold it too.
+  assert.match(
+    workflow,
+    /release_predecessor_tarball_url:[\s\S]*?value: \$\{\{ jobs\.build\.outputs\.release_predecessor_tarball_url \}\}/u,
+  );
+  for (const name of ['tarball_url', 'integrity']) {
+    assert.match(
+      workflow,
+      new RegExp(
+        `PREDECESSOR_${name.toUpperCase()}: \\$\\{\\{ needs\\.build\\.outputs\\.release_predecessor_${name} \\}\\}`,
+        'u',
+      ),
+      name,
+    );
+  }
+
   const steps = workflowSteps(workflow);
   const sandbox = namedStep(steps, 'Require the account-isolation sandbox');
   assert.match(sandbox, /apt-get install --yes bubblewrap/u);
-  const qualify = namedStep(steps, 'Qualify the released State Root transition');
+  const qualify = namedStep(steps, 'Qualify the released State Root transitions');
   assert.match(qualify, /release:cli:qualify-state-root/u);
   assert.match(qualify, /MAKA_QUALIFICATION_BWRAP_USE_SUDO:\s*'1'/u);
   assert.match(qualify, /--source-sha256/u);
   assert.match(qualify, /--target-sha256/u);
   assert.match(qualify, /--expect-epoch-relation/u);
-  assert.match(qualify, /set -o pipefail/u);
+  // `| tee` would otherwise report the exit code of tee, not the qualifier.
+  assert.match(qualify, /set -euo pipefail/u);
   assert.match(qualify, /npm run --silent/u);
-  const prepare = namedStep(steps, 'Prepare exact source and target artifacts');
-  assert.match(prepare, /--max-filesize 67108864/gu);
-  assert.match(prepare, /SOURCE_INTEGRITY/u);
-  assert.match(prepare, /createHash\('sha512'\)/u);
-  assert.match(prepare, /source_sha256="\$\(sha256sum/u);
-  const preserve = namedStep(steps, 'Preserve the qualification report');
+  assert.match(qualify, /--max-filesize 67108864/u);
+  assert.match(qualify, /source_integrity/u);
+  assert.match(qualify, /createHash\('sha512'\)/u);
+  assert.match(qualify, /source_sha256="\$\(sha256sum/u);
+  const preserve = namedStep(steps, 'Preserve the qualification reports');
   assert.match(preserve, /if-no-files-found: error/u);
   const freshness = namedStep(steps, 'Require the qualified Nightly predecessor to remain current');
   assert.match(freshness, /assert-nightly-predecessor/u);
-  assert.match(freshness, /needs\.release-predecessor\.outputs\.version/u);
+  assert.match(freshness, /needs\.build\.outputs\.release_predecessor_version/u);
   assert.ok(steps.indexOf(freshness) > steps.indexOf(preserve));
-  assert.match(
-    workflow,
-    /source_url: \$\{\{ needs\.release-predecessor\.outputs\.tarball_url \}\}/u,
-  );
 });
 
 test('npm mutations revalidate the exact qualified Nightly predecessor', () => {
@@ -227,6 +250,34 @@ test('finalize preserves npm evidence and owns the single product publication bo
   assert.match(verify, /gh attestation verify/u);
   assert.match(verify, /@refs\/heads\/main/u);
   assert.doesNotMatch(workflow.slice(workflow.indexOf('\n  publish:')), /\$\{\{ inputs\./u);
+});
+
+test('finalize consumes the normalized release assets the publish job hands off', () => {
+  // The runner uploads still carry the per-architecture macOS feeds that the
+  // Release publish job merges into the one feed clients read. Reassembling
+  // them here would attest and check a set the release never carries, so
+  // Finalize takes the single artifact holding the verified published bytes.
+  const finalize = readWorkflow('release-cli-finalize.yml');
+  const steps = workflowSteps(finalize);
+  const download = namedStep(steps, 'Download the exact verified Release run artifacts');
+  const [, artifact] =
+    /\n\s+name: (\S+)-\$\{\{ needs\.inspect\.outputs\.release_run_attempt \}\}/u.exec(download);
+  assert.doesNotMatch(download, /pattern:|merge-multiple:/u);
+  assert.match(
+    readWorkflow('release.yml'),
+    new RegExp(
+      `\\n\\s+name: ${artifact}-\\$\\{\\{ github\\.run_attempt \\}\\}\\n\\s+path: release-assets\\n`,
+      'u',
+    ),
+  );
+
+  // Everything downstream reads the one directory that download populates.
+  const attest = steps.find((step) => step.includes('uses: actions/attest@'));
+  assert.match(attest, /subject-path: \$\{\{ runner\.temp \}\}\/product-release\/\*/u);
+  const preflight = namedStep(steps, 'Verify the exact publication input');
+  assert.match(preflight, /"\$RUNNER_TEMP\/product-release"/u);
+  const verify = namedStep(steps, 'Verify the issued provenance');
+  assert.match(verify, /find "\$RUNNER_TEMP\/product-release"/u);
 });
 
 test('release workflows select npm from the root packageManager authority', () => {

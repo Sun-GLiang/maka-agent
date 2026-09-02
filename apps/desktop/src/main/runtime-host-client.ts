@@ -33,7 +33,6 @@ import {
 import type { UsageProvenance } from "@maka/core/usage-ledger-merge";
 
 import type {
-  ConnectionCatalogSnapshot,
   ConnectionVersionBasis,
   CredentialLocator,
   CredentialStatus,
@@ -59,6 +58,7 @@ import {
   prepareConnectedRuntimeHostRetirement,
   readRuntimeHostAgentGraphEpochs,
   readRuntimeHostConnectionCatalog,
+  type RuntimeHostConnectionCatalogSnapshot,
   readRuntimeHostInvocableSkills,
   readRuntimeHostResources,
   readRuntimeHostProjectDetails,
@@ -85,6 +85,7 @@ import {
   type MemoryQueryInput,
   type MemoryQueryResult,
   type GoalControlAction,
+  type HostStatusResult,
   type GoalProjection,
   type OperationInput,
   type OperationOutput,
@@ -303,6 +304,10 @@ export class DesktopRuntimeHostClient {
   }
 
   get hostId(): string {
+    return this.rootId;
+  }
+
+  get rootId(): string {
     return this.connection.rootId;
   }
 
@@ -312,6 +317,10 @@ export class DesktopRuntimeHostClient {
 
   get lifecycleState(): 'ready' | 'unavailable' {
     return this.#connectionClosed || this.#closeTask ? 'unavailable' : 'ready';
+  }
+
+  status(): Promise<HostStatusResult> {
+    return this.connection.status();
   }
 
   finalizeAccessCredential(
@@ -350,8 +359,11 @@ export class DesktopRuntimeHostClient {
     return this.request('collaboration.turn-request.create', { intent });
   }
 
-  queryCollaborationTurnRequests(sessionId: string): Promise<CollaborationTurnRequestQueryResult> {
-    return this.request('collaboration.turn-request.query', { sessionId });
+  queryCollaborationTurnRequests(sessionId?: string): Promise<CollaborationTurnRequestQueryResult> {
+    return this.request(
+      'collaboration.turn-request.query',
+      sessionId === undefined ? {} : { sessionId },
+    );
   }
 
   acknowledgeCollaborationTurnRequest(
@@ -375,6 +387,11 @@ export class DesktopRuntimeHostClient {
     return this.connection.subscribeConfigurationChanges(listener);
   }
 
+  subscribeConnectionCatalogChanges(listener: (revision: number) => void): () => void {
+    this.#assertOpen();
+    return this.connection.subscribeConnectionCatalogChanges(listener);
+  }
+
   subscribeProjectCatalogChanges(listener: (revision: number) => void): () => void {
     this.#assertOpen();
     return this.connection.subscribeProjectCatalogChanges(listener);
@@ -394,7 +411,7 @@ export class DesktopRuntimeHostClient {
     return this.connection.subscribeScheduledTaskChanges(listener);
   }
 
-  async loadConnectionCatalog(): Promise<ConnectionCatalogSnapshot> {
+  async loadConnectionCatalog(): Promise<RuntimeHostConnectionCatalogSnapshot> {
     this.#assertOpen();
     try {
       return await readRuntimeHostConnectionCatalog(this.connection);
@@ -431,6 +448,12 @@ export class DesktopRuntimeHostClient {
       if (result.kind === "committed") return this.queryRuntimePolicy();
     }
     throw revisionConflict("Runtime Policy update", "workspace");
+  }
+
+  updateNetworkProxy(
+    input: OperationInput<"runtime.policy.network-proxy.update">,
+  ): Promise<OperationOutput<"runtime.policy.network-proxy.update">> {
+    return this.request("runtime.policy.network-proxy.update", input);
   }
 
   queryMemory(input: MemoryQueryInput): Promise<MemoryQueryResult> {
@@ -513,6 +536,18 @@ export class DesktopRuntimeHostClient {
       connectionId,
       modelId: modelId ?? null,
     });
+  }
+
+  verifyConnectionOnboarding(
+    input: OperationInput<"connection.onboarding.verify">,
+  ): Promise<OperationOutput<"connection.onboarding.verify">> {
+    return this.request("connection.onboarding.verify", input);
+  }
+
+  saveConnectionOnboarding(
+    input: OperationInput<"connection.onboarding.save">,
+  ): Promise<OperationOutput<"connection.onboarding.save">> {
+    return this.request("connection.onboarding.save", input);
   }
 
   startOAuthLogin(

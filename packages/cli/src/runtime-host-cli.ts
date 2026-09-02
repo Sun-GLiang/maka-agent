@@ -233,6 +233,7 @@ export type RuntimeHostCliCommand =
       expectedTarget: RuntimeHostManagedServiceTarget;
       expectedHost?: RuntimeHostExpectedHost;
       selector?: RuntimeHostUpdateSelector;
+      allowManualUpdate?: true;
       allowInterruptActiveTasks?: true;
     }
   | {
@@ -287,6 +288,13 @@ export type RuntimeHostCliCommand =
       framed: boolean;
     }
   | {
+      kind: 'runtime-host-access-connection-code';
+      rootPath?: string;
+      expectedRootId?: string;
+      name?: string;
+      framed: boolean;
+    }
+  | {
       kind: 'runtime-host-access-revoke';
       rootPath?: string;
       expectedRootId?: string;
@@ -300,6 +308,26 @@ export type RuntimeHostCliCommand =
       rootPath?: string;
       path: string;
       prefer: boolean;
+    }
+  | {
+      kind: 'runtime-host-plugin';
+      rootPath?: string;
+      action:
+        | 'status'
+        | 'list'
+        | 'inspect'
+        | 'failures'
+        | 'install'
+        | 'uninstall'
+        | 'reload'
+        | 'export'
+        | 'apply'
+        | 'reconcile';
+      subject?: string;
+      targetPath?: string;
+      rootId?: string;
+      cursor?: string;
+      limit?: number;
     }
   | {
       kind: 'runtime-host-capability-provider-serve';
@@ -360,6 +388,7 @@ export function parseRuntimeHostCommand(argv: string[]): RuntimeHostCliCommand {
   if (argv[0] === 'service') return parseServiceManagementCommand(argv.slice(1));
   if (argv[0] === 'access') return parseAccessCommand(argv.slice(1));
   if (argv[0] === 'project') return parseProjectCommand(argv.slice(1));
+  if (argv[0] === 'plugin') return parsePluginCommand(argv.slice(1));
   if (argv[0] === 'capability-provider') {
     return parseCapabilityProviderCommand(argv.slice(1));
   }
@@ -367,7 +396,7 @@ export function parseRuntimeHostCommand(argv: string[]): RuntimeHostCliCommand {
   return error(
     argv[0]
       ? `Unexpected runtime-host command: ${argv[0]}`
-      : 'runtime-host requires the activate, connect, serve, setup, service, access, project, profile, or capability-provider command',
+      : 'runtime-host requires the activate, connect, serve, setup, service, access, project, plugin, profile, or capability-provider command',
   );
 }
 
@@ -788,6 +817,7 @@ function parseServiceManagementCommand(argv: string[]): RuntimeHostCliCommand {
 
   let retainManagedDeployment = false;
   let allowInterruptActiveTasks = false;
+  let allowManualUpdate = false;
   let clientDataRoot: string | undefined;
   let updateTarget: string | undefined;
   let expectedHost: RuntimeHostExpectedHost | undefined;
@@ -806,7 +836,7 @@ function parseServiceManagementCommand(argv: string[]): RuntimeHostCliCommand {
             allowInterruptActiveTasks = true;
           },
         }
-      : action === 'restart' || action === 'retire' || action === 'update' || action === 'configure'
+      : action === 'update'
         ? {
             '--allow-interrupt-active-tasks': () => {
               if (allowInterruptActiveTasks) {
@@ -814,8 +844,21 @@ function parseServiceManagementCommand(argv: string[]): RuntimeHostCliCommand {
               }
               allowInterruptActiveTasks = true;
             },
+            '--allow-manual-update': () => {
+              if (allowManualUpdate) return error('Duplicate --allow-manual-update');
+              allowManualUpdate = true;
+            },
           }
-        : {};
+        : action === 'restart' || action === 'retire' || action === 'configure'
+          ? {
+              '--allow-interrupt-active-tasks': () => {
+                if (allowInterruptActiveTasks) {
+                  return error('Duplicate --allow-interrupt-active-tasks');
+                }
+                allowInterruptActiveTasks = true;
+              },
+            }
+          : {};
   const options = parseManagedServiceOptions(argv.slice(1), {
     allowConfiguration: action === 'install' || action === 'configure',
     allowFramed: true,
@@ -932,6 +975,16 @@ function parseServiceManagementCommand(argv: string[]): RuntimeHostCliCommand {
     const selector =
       updateTarget === undefined ? undefined : parseUpdateSelector(updateTarget, 'update');
     if (selector && 'kind' in selector && selector.kind === 'error') return selector;
+    if (
+      allowManualUpdate &&
+      (selector?.kind !== 'exact' ||
+        !options.managedRootId ||
+        !options.expectedTarget?.deploymentId)
+    ) {
+      return error(
+        '--allow-manual-update requires an exact --target, --managed-root-id, and --expected-deployment-id',
+      );
+    }
     return {
       kind: 'runtime-host-service-update',
       json: options.json,
@@ -944,6 +997,7 @@ function parseServiceManagementCommand(argv: string[]): RuntimeHostCliCommand {
       expectedTarget: options.expectedTarget!,
       ...(expectedHost ? { expectedHost } : {}),
       ...(selector ? { selector } : {}),
+      ...(allowManualUpdate ? { allowManualUpdate: true } : {}),
       ...(allowInterruptActiveTasks ? { allowInterruptActiveTasks: true } : {}),
     };
   }
@@ -1545,6 +1599,88 @@ function parseProjectCommand(argv: string[]): RuntimeHostCliCommand {
   };
 }
 
+function parsePluginCommand(argv: string[]): RuntimeHostCliCommand {
+  const action = argv[0];
+  const actions = [
+    'status',
+    'list',
+    'inspect',
+    'failures',
+    'install',
+    'uninstall',
+    'reload',
+    'export',
+    'apply',
+    'reconcile',
+  ] as const;
+  if (!actions.includes(action as (typeof actions)[number])) {
+    return error(
+      action
+        ? `Unexpected runtime-host plugin command: ${action}`
+        : 'runtime-host plugin requires an action',
+    );
+  }
+  let rootPath: string | undefined;
+  let rootId: string | undefined;
+  let cursor: string | undefined;
+  let limit: number | undefined;
+  const positional: string[] = [];
+  for (let index = 1; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (
+      argument === '--root' ||
+      argument === '--scope' ||
+      argument === '--cursor' ||
+      argument === '--limit'
+    ) {
+      const parsed = optionValue(argv, index, argument);
+      if (typeof parsed !== 'string') return parsed;
+      if (argument === '--root') rootPath = parsed;
+      else if (argument === '--scope') rootId = parsed;
+      else if (argument === '--cursor') cursor = parsed;
+      else {
+        const numeric = Number(parsed);
+        if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric < 1 || numeric > 64) {
+          return error('--limit requires an integer between 1 and 64');
+        }
+        limit = numeric;
+      }
+      index += 1;
+      continue;
+    }
+    positional.push(argument ?? '');
+  }
+  const selected = action as (typeof actions)[number];
+  const expected =
+    selected === 'export'
+      ? 2
+      : ['install', 'uninstall', 'reload', 'apply'].includes(selected)
+        ? 1
+        : 0;
+  if (positional.length !== expected) {
+    return error(
+      `runtime-host plugin ${selected} requires ${expected} target${expected === 1 ? '' : 's'}`,
+    );
+  }
+  if (rootId && selected !== 'inspect') return error('--scope is only valid for plugin inspect');
+  if (
+    (cursor !== undefined || limit !== undefined) &&
+    !['list', 'inspect', 'failures'].includes(selected)
+  ) {
+    return error('--cursor and --limit require a paged Plugin query');
+  }
+  return {
+    kind: 'runtime-host-plugin',
+    action: selected,
+    ...(rootPath ? { rootPath } : {}),
+    ...(positional[0] ? { subject: positional[0] } : {}),
+    ...(positional[1] ? { targetPath: positional[1] } : {}),
+    ...(rootId ? { rootId } : {}),
+    ...(cursor ? { cursor } : {}),
+    ...(limit === undefined ? {} : { limit }),
+  };
+}
+
 function parseProfileCommand(argv: string[]): RuntimeHostCliCommand {
   const action = argv[0];
   if (action === 'list') {
@@ -2110,11 +2246,17 @@ function projectRootValid(
 
 function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
   const action = argv[0];
-  if (action !== 'list' && action !== 'issue' && action !== 'prepare' && action !== 'revoke') {
+  if (
+    action !== 'list' &&
+    action !== 'issue' &&
+    action !== 'prepare' &&
+    action !== 'revoke' &&
+    action !== 'connection-code'
+  ) {
     return error(
       action
         ? `Unexpected runtime-host access command: ${action}`
-        : 'runtime-host access requires list, issue, prepare, or revoke',
+        : 'runtime-host access requires connection-code, list, issue, prepare, or revoke',
     );
   }
   let rootPath: string | undefined;
@@ -2126,6 +2268,7 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
   let credentialId: string | undefined;
   let capabilityOwnerCredentialId: string | undefined;
   let currentCredentialFingerprint: string | undefined;
+  let name: string | undefined;
   const operationGrants: string[] = [];
   let canPublishClientCapabilities = false;
   let canUseHostPaths = false;
@@ -2148,6 +2291,7 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
     if (
       argument === '--root' ||
       argument === '--expected-root' ||
+      argument === '--name' ||
       argument === '--kind' ||
       argument === '--preset' ||
       argument === '--principal' ||
@@ -2160,6 +2304,7 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
       if (typeof parsed !== 'string') return parsed;
       if (argument === '--root') rootPath = parsed;
       if (argument === '--expected-root') expectedRootId = parsed;
+      if (argument === '--name') name = parsed;
       if (argument === '--kind') {
         if (parsed !== 'remote-owner' && parsed !== 'capability-provider') {
           return error('--kind must be remote-owner or capability-provider');
@@ -2186,7 +2331,7 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
   if (expectedRootId && !/^[a-f0-9]{64}$/u.test(expectedRootId)) {
     return error('--expected-root must be a Runtime Host root identity');
   }
-  if (action === 'list') {
+  if (action === 'connection-code') {
     if (
       principalId ||
       principalKindSpecified ||
@@ -2197,6 +2342,29 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
       credentialId ||
       capabilityOwnerCredentialId ||
       currentCredentialFingerprint
+    ) {
+      return error('Credential management options are not valid for access connection-code');
+    }
+    return {
+      kind: 'runtime-host-access-connection-code',
+      ...(rootPath ? { rootPath } : {}),
+      ...(expectedRootId ? { expectedRootId } : {}),
+      ...(name ? { name } : {}),
+      framed,
+    };
+  }
+  if (action === 'list') {
+    if (
+      principalId ||
+      principalKindSpecified ||
+      operationGrants.length > 0 ||
+      canPublishClientCapabilities ||
+      canUseHostPaths ||
+      preset ||
+      credentialId ||
+      capabilityOwnerCredentialId ||
+      currentCredentialFingerprint ||
+      name
     ) {
       return error('Credential mutation options are not valid for access list');
     }
@@ -2221,7 +2389,8 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
       canUseHostPaths ||
       preset ||
       credentialId ||
-      capabilityOwnerCredentialId
+      capabilityOwnerCredentialId ||
+      name
     ) {
       return error('Credential issue options are not valid for access prepare');
     }
@@ -2235,7 +2404,7 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
   if (action === 'issue') {
     if (framed) return error('--framed is only valid for access management');
     if (!principalId) return error('--principal is required');
-    if (credentialId || currentCredentialFingerprint) {
+    if (credentialId || currentCredentialFingerprint || name) {
       return error('Credential target options are only valid for access revoke');
     }
     if (
@@ -2308,7 +2477,8 @@ function parseAccessCommand(argv: string[]): RuntimeHostCliCommand {
     operationGrants.length > 0 ||
     canPublishClientCapabilities ||
     canUseHostPaths ||
-    preset
+    preset ||
+    name
   ) {
     return error('Issue-only access options are not valid for revoke');
   }
