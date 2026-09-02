@@ -19,8 +19,8 @@
 
 import {
   app,
+  type BrowserWindow,
   clipboard,
-  dialog,
   ipcMain,
   nativeTheme,
   powerSaveBlocker,
@@ -81,6 +81,11 @@ import { readFileCapped, resolvePickedAttachments } from "./attachment-ingest.js
 import { registerBrowserIpc } from "./browser-ipc-main.js";
 import { browserViewHost } from "./browser/browser-host.js";
 import { releaseBrowserSession } from "./browser/session.js";
+import {
+  isBrowserMessageBoxPresentationActive,
+  showBrowserMessageBox,
+  type BrowserMessageBoxAppearance,
+} from "./browser-message-box.js";
 import { createE2eFixtureBotOnboardingAdapters } from "./bot-onboarding-e2e-fixture.js";
 import { resolveBuildInfo } from "./build-info.js";
 import { computerUseServiceHealth } from "./computer-use-host.js";
@@ -99,6 +104,7 @@ import {
   seedE2eFixture,
 } from "./e2e-fixture.js";
 import { createKeepSystemAwakeController } from "./keep-system-awake.js";
+import { isDarkAppearance } from "./theme-source.js";
 import {
   readWithFallback,
   type ReconnectableReadIpcMain,
@@ -270,6 +276,9 @@ if (runtimeHostPeerConfiguration) {
       ...runtimeHostPeerConfiguration,
       dataRoot: join(userDataDir, 'peer-mesh'),
       endpointKind: 'client',
+      onBackgroundReconcileError: (error) => {
+        console.error('[runtime-host] Peer Mesh background synchronization failed:', error);
+      },
     });
     runtimeHostPeerClient = runtimeHostPeerOwner.client;
     runtimeHostPeerMesh = runtimeHostPeerOwner.mesh;
@@ -332,6 +341,19 @@ const desktopDiagnostics: DesktopDiagnosticsDeps = {
   resolveRuntimeHost: resolveRuntimeHostDiagnostics,
   writeClipboard: (report) => clipboard.writeText(report),
 };
+let resolveBrowserDialogParent = (): BrowserWindow | undefined => undefined;
+let resolveBrowserDialogAppearance = async (): Promise<BrowserMessageBoxAppearance> => ({
+  locale: resolveSystemUiLocale(app.getPreferredSystemLanguages()),
+  palette: "default",
+});
+
+async function showDesktopMessageBox(
+  options: MessageBoxOptions,
+  override?: Partial<BrowserMessageBoxAppearance>,
+): Promise<MessageBoxReturnValue> {
+  const appearance = { ...(await resolveBrowserDialogAppearance()), ...override };
+  return showBrowserMessageBox(options, resolveBrowserDialogParent(), appearance);
+}
 
 function showStartupDiagnosticDialog(
   options: MessageBoxOptions,
@@ -340,7 +362,7 @@ function showStartupDiagnosticDialog(
 ): Promise<MessageBoxReturnValue> {
   return showMessageBoxWithDiagnostics(options, {
     locale,
-    showMessageBox: (next) => dialog.showMessageBox(next),
+    showMessageBox: (nextOptions) => showDesktopMessageBox(nextOptions, { locale }),
     copyDiagnostics: () =>
       copyDesktopDiagnosticReport(
         desktopDiagnostics,
@@ -379,6 +401,21 @@ const desktopLocale = createDesktopLocaleAuthority({
   readSettings: () => settingsStore.get(),
   preferredSystemLanguages: () => app.getPreferredSystemLanguages(),
 });
+resolveBrowserDialogAppearance = async () => {
+  try {
+    const settings = await settingsStore.get();
+    return {
+      locale: desktopLocale.observe(settings),
+      palette: settings.appearance.palette,
+      dark: isDarkAppearance(
+        e2eFixture?.theme ?? settings.appearance.theme,
+        nativeTheme.shouldUseDarkColors,
+      ),
+    };
+  } catch {
+    return { locale: desktopLocale.current(), palette: "default" };
+  }
+};
 const mcpConfigStore = createMcpConfigStore(workspaceRoot);
 const workBoardStore = createWorkBoardStore(workspaceRoot);
 const mcpManager = new McpClientManager({
@@ -432,16 +469,24 @@ const mainWindowController = createMainWindowController({
       description: `Reason: ${details.reason}`,
       details: `Exit code: ${details.exitCode}`,
     });
-    const decision = await showMainRendererProcessGoneDialog({
-      locale: desktopLocale.current(),
-      copyDiagnostics: () =>
-        copyDesktopDiagnosticReport(desktopDiagnostics, diagnosticInput),
-      showMessageBox: (options) => dialog.showMessageBox(options),
-    });
-    if (decision === "relaunch") app.relaunch();
+    for (;;) {
+      const locale = await desktopLocale.resolve();
+      const decision = await showMainRendererProcessGoneDialog({
+        locale,
+        copyDiagnostics: () =>
+          copyDesktopDiagnosticReport(desktopDiagnostics, diagnosticInput),
+        // showBrowserMessageBox attaches only to a visible, non-minimized
+        // parent. A pre-first-paint crash therefore gets a standalone window.
+        showMessageBox: (options) => showDesktopMessageBox(options, { locale }),
+      });
+      if (decision !== "recover") break;
+      if (await mainWindowController.reloadMainRenderer()) return;
+      if (!mainWindowController.browserWindow()) break;
+    }
     app.quit();
   },
 });
+resolveBrowserDialogParent = () => mainWindowController.browserWindow();
 const runtimeHostSshTerminal = createDesktopRuntimeHostSshTerminal({
   ipcMain,
   send: (channel, event) => mainWindowController.send(channel, event),
@@ -532,7 +577,7 @@ const runtimeHostProfileService = createDesktopRuntimeHostProfileService({
 });
 const guestSessionMountService = createDesktopGuestSessionMountService({
   store: createGuestSessionMountStore(runtimeHostCredentialStore),
-  mount: async (target, signal, onConnectionPhase) => {
+  mount: async (target, signal, onConnectionPhase, onPeerEndpoint) => {
     if (target.profile.kind !== 'remote' || !target.credential) {
       throw new Error('A shared Session requires a remote Guest target');
     }
@@ -541,6 +586,9 @@ const guestSessionMountService = createDesktopGuestSessionMountService({
       { profile: target.profile, credential: target.credential },
       signal,
       onConnectionPhase,
+      (status) => {
+        if (status.peerEndpoint) onPeerEndpoint?.(status.peerEndpoint);
+      },
     );
   },
   finalizeAccess: async (mountId, signal) => {
@@ -761,16 +809,20 @@ const clientSettingsTools = buildClientSettingsTools({
     return settings;
   },
   confirm: async (changes) => {
-    const copy = clientSettingsConfirmation(changes, await desktopLocale.resolve());
-    const result = await dialog.showMessageBox({
-      type: "question",
-      message: copy.message,
-      detail: copy.detail,
-      buttons: copy.buttons,
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true,
-    });
+    const locale = await desktopLocale.resolve();
+    const copy = clientSettingsConfirmation(changes, locale);
+    const result = await showDesktopMessageBox(
+      {
+        type: "question",
+        message: copy.message,
+        detail: copy.detail,
+        buttons: copy.buttons,
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      },
+      { locale },
+    );
     return result.response === 0;
   },
 });
@@ -1128,9 +1180,10 @@ runtimeHostManager = await startDesktopRuntimeHostWithRecovery({
       repairError: input.repairError,
       activeTasks: input.activeTasks,
     });
+    const locale = await desktopLocale.resolve();
     return showRuntimeHostStartupRecoveryDialog(input, {
-      locale: desktopLocale.current(),
-      showMessageBox: (options) => dialog.showMessageBox(options),
+      locale,
+      showMessageBox: (options) => showDesktopMessageBox(options, { locale }),
       copyDiagnostics: () =>
         copyDesktopDiagnosticReport(
           desktopDiagnostics,
@@ -1603,7 +1656,11 @@ function registerPersistentClientIpc(): void {
   });
   registerMarkdownSaveIpc({ ipcMain, mainWindowController });
   registerDesktopRuntimeHostProfileIpc(ipcMain, runtimeHostProfileService);
-  registerDesktopGuestSessionMountIpc(ipcMain, guestSessionMountService);
+  registerDesktopGuestSessionMountIpc(
+    ipcMain,
+    guestSessionMountService,
+    () => clipboard.readText(),
+  );
   registerClientSettingsIpc({
     ipcMain,
     settingsStore,
@@ -1829,7 +1886,7 @@ function wireLifecycle(): void {
   app.on("window-all-closed", () => {
     native.computerUseOverlay.destroyAll();
     native.computerUsePip.destroyAll();
-    if (process.platform !== "darwin") app.quit();
+    if (process.platform !== "darwin" && !isBrowserMessageBoxPresentationActive()) app.quit();
   });
   app.on("before-quit", quitCoordinator.handleBeforeQuit);
   quitCoordinator.focusOrCreateWindow();
@@ -1847,7 +1904,7 @@ async function prepareRuntimeHostDesktopQuit(): Promise<void> {
 
 async function showRuntimeHostQuitFailure(error: unknown): Promise<void> {
   const locale = await desktopLocale.resolve();
-  await dialog.showMessageBox(buildRuntimeHostQuitFailureDialog(error, locale));
+  await showDesktopMessageBox(buildRuntimeHostQuitFailureDialog(error, locale), { locale });
 }
 
 async function closeRuntimeHostDesktop(): Promise<void> {
@@ -1937,7 +1994,7 @@ async function promptForDefaultRuntimeHostRecovery(input: {
   readonly profileName: string;
   readonly error: Error;
 }): Promise<"retry" | "use_local" | "keep_offline"> {
-  const locale = resolveSystemUiLocale(app.getPreferredSystemLanguages());
+  const locale = await desktopLocale.resolve();
   const dialogInput = defaultRuntimeHostRecoveryDialog({ ...input, locale });
   const { response } = await showStartupDiagnosticDialog(
     dialogInput.options,
