@@ -40,7 +40,7 @@ npm run build --workspace @maka/runtime-host       # passed
 
 ## Commit
 
-To be filled after commit.
+`8a105574f` — `fix(desktop): preserve session revisions in projections`
 
 ## Concerns
 
