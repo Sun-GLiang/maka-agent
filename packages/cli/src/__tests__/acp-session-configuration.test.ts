@@ -1,0 +1,83 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import type { SessionConfigOption, SetSessionConfigOptionRequest } from '@agentclientprotocol/sdk';
+import type { SessionCatalogProjection } from '@maka/runtime-host/protocol';
+import {
+  AcpSessionConfigInputError,
+  createAcpSessionConfigPatch,
+  projectAcpSessionConfigOptions,
+  validateAcpSessionConfigOptionRequest,
+} from '../acp/session-configuration.js';
+
+function selectOption(id: string, name: string, category: string, currentValue: string, options: readonly [string, string][]): SessionConfigOption {
+  return { type: 'select', id, name, category, currentValue, options: options.map(([value, optionName]) => ({ value, name: optionName })) };
+}
+
+function sessionProjection(overrides: Partial<SessionCatalogProjection> = {}): SessionCatalogProjection {
+  return {
+    id: 'session-1', revision: 1,
+    workspace: { target: { kind: 'host_path', path: '/tmp' }, hostCwd: '/tmp' },
+    createdAt: 1, activityAt: 2, name: 'Session', isFlagged: false, isArchived: false,
+    labels: [], labelsTruncated: false, hasUnread: false, status: 'active', backend: 'ai-sdk',
+    llmConnectionId: 'connection-1', llmConnectionSlug: 'openai-main', connectionLocked: true,
+    model: 'gpt-5', permissionMode: 'ask', collaborationMode: 'agent', orchestrationMode: 'default',
+    ...overrides,
+  } as SessionCatalogProjection;
+}
+
+test('projects the ordered ACP configuration options', () => {
+  assert.deepEqual(projectAcpSessionConfigOptions(sessionProjection()), [
+    selectOption('permission_mode', 'Permission mode', '_maka/permission_mode', 'ask', [['explore', 'Explore'], ['ask', 'Ask'], ['bypass', 'Bypass']]),
+    selectOption('thinking_level', 'Thinking level', 'thought_level', 'default', [['default', 'Default'], ['off', 'Off'], ['minimal', 'Minimal'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra high'], ['max', 'Max']]),
+    selectOption('collaboration_mode', 'Collaboration mode', 'mode', 'agent', [['agent', 'Agent'], ['plan', 'Plan']]),
+    selectOption('orchestration_mode', 'Orchestration mode', '_maka/orchestration_mode', 'default', [['default', 'Default'], ['swarm', 'Swarm'], ['graph', 'Graph']]),
+  ]);
+});
+
+test('projects every supported value and normalizes absent thinking level', () => {
+  for (const [configId, values, field] of [
+    ['permission_mode', ['explore', 'ask', 'bypass'], 'permissionMode'],
+    ['thinking_level', ['default', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'], 'thinkingLevel'],
+    ['collaboration_mode', ['agent', 'plan'], 'collaborationMode'],
+    ['orchestration_mode', ['default', 'swarm', 'graph'], 'orchestrationMode'],
+  ] as const) {
+    for (const value of values) {
+      const overrides: Partial<SessionCatalogProjection> = field === 'thinkingLevel'
+        ? { thinkingLevel: value === 'default' ? undefined : (value as SessionCatalogProjection['thinkingLevel']) }
+        : field === 'permissionMode' ? { permissionMode: value as SessionCatalogProjection['permissionMode'] }
+        : field === 'collaborationMode' ? { collaborationMode: value as SessionCatalogProjection['collaborationMode'] }
+        : { orchestrationMode: value as SessionCatalogProjection['orchestrationMode'] };
+      const option = projectAcpSessionConfigOptions(sessionProjection(overrides))[configId === 'permission_mode' ? 0 : configId === 'thinking_level' ? 1 : configId === 'collaboration_mode' ? 2 : 3];
+      assert.equal(option.currentValue, value);
+    }
+  }
+  assert.equal(projectAcpSessionConfigOptions(sessionProjection({ thinkingLevel: 'off' }))[1].currentValue, 'off');
+});
+
+test('validates requests and creates exact one-field patches', () => {
+  const cases = [
+    ['permission_mode', 'explore', { permissionMode: 'explore' }], ['permission_mode', 'ask', { permissionMode: 'ask' }], ['permission_mode', 'bypass', { permissionMode: 'bypass' }],
+    ['thinking_level', 'default', { thinkingLevel: null }], ['thinking_level', 'off', { thinkingLevel: 'off' }], ['thinking_level', 'minimal', { thinkingLevel: 'minimal' }], ['thinking_level', 'low', { thinkingLevel: 'low' }], ['thinking_level', 'medium', { thinkingLevel: 'medium' }], ['thinking_level', 'high', { thinkingLevel: 'high' }], ['thinking_level', 'xhigh', { thinkingLevel: 'xhigh' }], ['thinking_level', 'max', { thinkingLevel: 'max' }],
+    ['collaboration_mode', 'agent', { collaborationMode: 'agent' }], ['collaboration_mode', 'plan', { collaborationMode: 'plan' }],
+    ['orchestration_mode', 'default', { orchestrationMode: 'default' }], ['orchestration_mode', 'swarm', { orchestrationMode: 'swarm' }], ['orchestration_mode', 'graph', { orchestrationMode: 'graph' }],
+  ] as const;
+  for (const [configId, value, patch] of cases) {
+    const request = { sessionId: 'session-1', configId, value } as SetSessionConfigOptionRequest;
+    validateAcpSessionConfigOptionRequest(request);
+    assert.deepEqual(createAcpSessionConfigPatch(request), patch);
+  }
+});
+
+test('rejects unsupported config ids, boolean values, and unsupported strings', () => {
+  for (const [request, field, reason] of [
+    [{ sessionId: 'session-1', configId: 'unknown', value: 'ask' }, 'configId', 'unsupported'],
+    [{ sessionId: 'session-1', configId: 'permission_mode', type: 'boolean', value: true }, 'value', 'invalid_type'],
+    [{ sessionId: 'session-1', configId: 'permission_mode', value: 'invalid' }, 'value', 'unsupported'],
+  ] as const) {
+    assert.throws(() => validateAcpSessionConfigOptionRequest(request as SetSessionConfigOptionRequest), (error: unknown) => {
+      assert.ok(error instanceof AcpSessionConfigInputError);
+      if (!(error instanceof AcpSessionConfigInputError)) return false;
+      assert.equal(error.field, field); assert.equal(error.reason, reason); return true;
+    });
+  }
+});
