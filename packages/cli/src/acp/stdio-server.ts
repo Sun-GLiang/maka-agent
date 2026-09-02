@@ -53,9 +53,6 @@ export async function runMakaAcpStdioServer(
         request: context.connection.request.bind(
           context.connection,
         ) as RuntimeHostConnection['request'],
-        openSessionSubscriptionOnce: context.connection.openSessionSubscriptionOnce.bind(
-          context.connection,
-        ),
         close: () => context.close(),
       };
     },

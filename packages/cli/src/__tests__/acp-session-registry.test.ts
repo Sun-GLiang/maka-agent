@@ -23,25 +23,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { RequestError, type NewSessionRequest } from '@agentclientprotocol/sdk';
-import {
-  RuntimeHostOperationError,
-  RuntimeHostRequestInterruptedError,
-  RuntimeHostSubscriptionError,
-} from '@maka/runtime-host/client';
-import {
-  SESSION_CATALOG_CWD_MAX_BYTES,
-  SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS,
-  SESSION_CONTINUITY_SCHEMA_VERSION,
-  type SessionContinuitySnapshot,
-  type SubscriptionFrame,
-} from '@maka/runtime-host/protocol';
+import { RuntimeHostOperationError } from '@maka/runtime-host/client';
+import { SESSION_CATALOG_CWD_MAX_BYTES } from '@maka/runtime-host/protocol';
 import { AcpSessionRegistry, type AcpSessionRegistryConnection } from '../acp/session-registry.js';
 
 const SESSION_REVISION = `sha256:${'a'.repeat(64)}` as const;
 const NEW_SESSION_REVISION = `sha256:${'b'.repeat(64)}` as const;
-type TestableSubscription = Awaited<
-  ReturnType<AcpSessionRegistryConnection['openSessionSubscriptionOnce']>
->;
 
 describe('ACP Session registry', () => {
   test('does not connect when disposed before a Session method is used', async () => {
@@ -57,6 +44,29 @@ describe('ACP Session registry', () => {
     await registry.dispose();
 
     assert.equal(connectCalls, 0);
+  });
+
+  test('reports the requested Session operation after disposal', async () => {
+    const registry = new AcpSessionRegistry({
+      connect: async () => fakeConnection(),
+    });
+    await registry.dispose();
+
+    for (const [operation, request] of [
+      ['session.create', () => registry.create({ cwd: '/workspace', mcpServers: [] })],
+      ['session.catalog.query', () => registry.list({})],
+    ] as const) {
+      await assert.rejects(request(), (error: unknown) => {
+        assert.ok(error instanceof RequestError);
+        assert.equal(error.code, -32603);
+        assert.deepEqual(error.data, {
+          source: 'runtime_host',
+          operation,
+          code: 'registry_closed',
+        });
+        return true;
+      });
+    }
   });
 
   test('does not start a queued connection after disposal begins', async () => {
@@ -206,190 +216,40 @@ describe('ACP Session registry', () => {
     assert.equal(closeCalls, 1);
   });
 
-  test('creates exact Host sessions and continuously tracks isolated subscription snapshots', async () => {
-    const subscriptions = new Map<string, TestSubscription>();
-    const requests: Array<{ operation: string; input: unknown }> = [];
-    let nextId = 0;
-    const registry = new AcpSessionRegistry({
-      connect: async () =>
-        fakeConnection({
-          request: async (operation, input) => {
-            requests.push({ operation, input });
-            return { kind: 'unsupported_legacy_record' };
-          },
-          open: async ({ sessionId }) => {
-            const subscription = new TestSubscription(sessionId);
-            subscriptions.set(sessionId, subscription);
-            return subscription;
-          },
-        }),
-      newSessionId: () => `session-${++nextId}`,
-    });
-
-    assert.deepEqual(
-      await registry.create({
-        cwd: '/workspace/one',
-        mcpServers: [],
-        additionalDirectories: [],
-        _meta: { projectId: 'must-be-ignored' },
-      }),
-      { sessionId: 'session-1' },
-    );
-    assert.deepEqual(await registry.create({ cwd: '/workspace/two', mcpServers: [] }), {
-      sessionId: 'session-2',
-    });
-    assert.deepEqual(requests, [
-      {
-        operation: 'session.create',
-        input: {
-          sessionId: 'session-1',
-          workspace: { kind: 'host_path', path: '/workspace/one' },
-          modelTarget: { kind: 'default' },
-        },
-      },
-      {
-        operation: 'session.create',
-        input: {
-          sessionId: 'session-2',
-          workspace: { kind: 'host_path', path: '/workspace/two' },
-          modelTarget: { kind: 'default' },
-        },
-      },
-    ]);
-
-    const first = subscriptions.get('session-1')!;
-    const second = subscriptions.get('session-2')!;
-    for (let revision = 2; revision <= 40; revision += 1) {
-      first.push(projectionFrame(first, snapshot('session-1', revision), revision));
-    }
-    second.push(projectionFrame(second, snapshot('session-2', 7), 2));
-    await waitFor(() => registry.inspect('session-1')?.snapshot.projectionRevision === 40);
-    await waitFor(() => registry.inspect('session-2')?.snapshot.projectionRevision === 7);
-
-    const inspection = registry.inspect('session-1')!;
-    assert.equal(inspection.failure, undefined);
-    inspection.snapshot.session.status = 'running';
-    assert.equal(registry.inspect('session-1')?.snapshot.session.status, 'active');
-    assert.equal(first.nextCalls >= 40, true, 'the consumer keeps an iterator read pending');
-
-    await registry.dispose();
-    await registry.dispose();
-    assert.equal(first.closeCalls, 1);
-    assert.equal(second.closeCalls, 1);
-  });
-
-  test('records subscription failures without producing an unhandled rejection', async () => {
-    const subscription = new TestSubscription('session-1');
-    const registry = new AcpSessionRegistry({
-      connect: async () => fakeConnection({ open: async () => subscription }),
-      newSessionId: () => 'session-1',
-    });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
-
-    subscription.fail(
-      new RuntimeHostSubscriptionError('slow_consumer', 'consumer exceeded its queue'),
-    );
-    await waitFor(() => registry.inspect('session-1')?.failure !== undefined);
-    assert.deepEqual(registry.inspect('session-1')?.failure, {
-      source: 'runtime_host',
-      operation: 'subscription.consume',
-      code: 'subscription_failure',
-      reason: 'slow_consumer',
-    });
-
-    await registry.dispose();
-  });
-
-  test('rejects a concurrent create before persistence when subscription capacity is exhausted', async () => {
+  test('creates more than the Host subscription limit without opening a subscription', async () => {
+    const sessionCount = 17;
     const createdSessionIds: string[] = [];
-    const openedSessionIds: string[] = [];
+    let subscriptionOpens = 0;
     let nextId = 0;
     const registry = new AcpSessionRegistry({
-      connect: async () =>
-        fakeConnection({
+      connect: async () => {
+        const connection = fakeConnection({
           request: async (operation, input) => {
-            if (operation === 'session.create') {
-              createdSessionIds.push((input as { sessionId: string }).sessionId);
-            }
+            assert.equal(operation, 'session.create');
+            createdSessionIds.push((input as { sessionId: string }).sessionId);
             return {};
           },
-          open: async ({ sessionId }) => {
-            openedSessionIds.push(sessionId);
-            return new TestSubscription(sessionId);
+        });
+        return {
+          ...connection,
+          openSessionSubscriptionOnce: async () => {
+            subscriptionOpens += 1;
+            throw new Error('PR 2 must not open a subscription');
           },
-        }),
-      newSessionId: () => `session-capacity-${++nextId}`,
+        } as AcpSessionRegistryConnection;
+      },
+      newSessionId: () => `session-unattached-${++nextId}`,
     });
 
-    const results = await Promise.allSettled(
-      Array.from({ length: SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS + 1 }, () =>
+    const creates = await Promise.all(
+      Array.from({ length: sessionCount }, () =>
         registry.create({ cwd: '/workspace', mcpServers: [] }),
       ),
     );
 
-    assert.equal(
-      results.filter((result) => result.status === 'fulfilled').length,
-      SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS,
-    );
-    const rejected = results.find((result) => result.status === 'rejected');
-    assert.ok(rejected && rejected.status === 'rejected');
-    assert.ok(rejected.reason instanceof RequestError);
-    assert.equal(rejected.reason.code, -32603);
-    assert.deepEqual(rejected.reason.data, {
-      source: 'runtime_host',
-      operation: 'subscription.open',
-      code: 'subscription_capacity_exhausted',
-      maxSubscriptions: SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS,
-    });
-    assert.equal(createdSessionIds.length, SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS);
-    assert.equal(openedSessionIds.length, SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS);
-    await registry.dispose();
-  });
-
-  test('reuses subscription capacity after the Runtime Host releases a slot', async () => {
-    const subscriptions = new Map<string, TestSubscription>();
-    let nextId = 0;
-    const registry = new AcpSessionRegistry({
-      connect: async () =>
-        fakeConnection({
-          open: async ({ sessionId }) => {
-            const subscription = new TestSubscription(sessionId);
-            subscriptions.set(sessionId, subscription);
-            return subscription;
-          },
-        }),
-      newSessionId: () => `session-reuse-${++nextId}`,
-    });
-
-    for (let index = 0; index < SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS; index += 1) {
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
-    }
-    subscriptions.get('session-reuse-1')?.end();
-    await waitFor(
-      () => registry.inspect('session-reuse-1')?.failure?.code === 'subscription_closed',
-    );
-
-    assert.deepEqual(await registry.create({ cwd: '/workspace', mcpServers: [] }), {
-      sessionId: `session-reuse-${SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS + 1}`,
-    });
-    await registry.dispose();
-  });
-
-  test('records an unexpected clean subscription end as a failure', async () => {
-    const subscription = new TestSubscription('session-1');
-    const registry = new AcpSessionRegistry({
-      connect: async () => fakeConnection({ open: async () => subscription }),
-      newSessionId: () => 'session-1',
-    });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
-
-    subscription.end();
-    await waitFor(() => registry.inspect('session-1')?.failure !== undefined);
-    assert.deepEqual(registry.inspect('session-1')?.failure, {
-      source: 'runtime_host',
-      operation: 'subscription.consume',
-      code: 'subscription_closed',
-    });
+    assert.equal(creates.length, sessionCount);
+    assert.equal(createdSessionIds.length, sessionCount);
+    assert.equal(subscriptionOpens, 0);
     await registry.dispose();
   });
 
@@ -443,61 +303,16 @@ describe('ACP Session registry', () => {
     await registry.dispose();
   });
 
-  test('reports a durable session identity when subscription opening fails without rollback', async () => {
-    const operations: string[] = [];
-    const registry = new AcpSessionRegistry({
-      connect: async () =>
-        fakeConnection({
-          request: async (operation) => {
-            operations.push(operation);
-            return {};
-          },
-          open: async () => {
-            throw new RuntimeHostOperationError(
-              'subscription.open',
-              'operation_unavailable',
-              'subscription unavailable',
-            );
-          },
-        }),
-      newSessionId: () => 'session-durable',
-    });
-
-    await assert.rejects(
-      registry.create({ cwd: '/workspace', mcpServers: [] }),
-      (error: unknown) => {
-        assert.ok(error instanceof RequestError);
-        assert.equal(error.code, -32603);
-        assert.deepEqual(error.data, {
-          source: 'runtime_host',
-          operation: 'subscription.open',
-          code: 'operation_unavailable',
-          sessionId: 'session-durable',
-          durableSessionCreated: true,
-        });
-        return true;
-      },
-    );
-    assert.equal(registry.inspect('session-durable'), undefined);
-    assert.deepEqual(operations, ['session.create']);
-    await registry.dispose();
-  });
-
-  test('keeps failed and outcome-unknown creates distinct from known durable sessions', async () => {
+  test('keeps failed and outcome-unknown creates distinct', async () => {
     for (const [hostCode, acpCode] of [
       ['invalid_request', -32602],
       ['commit_outcome_unknown', -32603],
     ] as const) {
-      let opens = 0;
       const registry = new AcpSessionRegistry({
         connect: async () =>
           fakeConnection({
             request: async () => {
               throw new RuntimeHostOperationError('session.create', hostCode, 'create failed');
-            },
-            open: async ({ sessionId }) => {
-              opens += 1;
-              return new TestSubscription(sessionId);
             },
           }),
         newSessionId: () => `session-${hostCode}`,
@@ -517,136 +332,8 @@ describe('ACP Session registry', () => {
           return true;
         },
       );
-      assert.equal(opens, 0);
       await registry.dispose();
     }
-  });
-
-  test('closes a subscription that opens after disposal starts and never registers it', async () => {
-    const opening = deferred<TestableSubscription>();
-    const subscription = new TestSubscription('session-race');
-    let opens = 0;
-    const registry = new AcpSessionRegistry({
-      connect: async () =>
-        fakeConnection({
-          open: async () => {
-            opens += 1;
-            return opening.promise;
-          },
-        }),
-      newSessionId: () => 'session-race',
-    });
-
-    const create = registry.create({ cwd: '/workspace', mcpServers: [] });
-    await waitFor(() => opens === 1);
-    const dispose = registry.dispose();
-    opening.resolve(subscription);
-
-    await assert.rejects(
-      create,
-      (error: unknown) =>
-        error instanceof RequestError &&
-        error.code === -32603 &&
-        (error.data as { code?: string }).code === 'registry_closed',
-    );
-    await dispose;
-    assert.equal(subscription.closeCalls, 1);
-    assert.equal(registry.inspect('session-race'), undefined);
-  });
-
-  test('connection cleanup interrupts an in-flight open before disposal waits for it', async () => {
-    const opening = deferred<TestableSubscription>();
-    let opens = 0;
-    let connectionCloses = 0;
-    const interruption = new RuntimeHostRequestInterruptedError(
-      'subscription.open',
-      'control',
-      'not_dispatched',
-      'connection_lost',
-    );
-    const registry = new AcpSessionRegistry({
-      connect: async () =>
-        fakeConnection({
-          open: async () => {
-            opens += 1;
-            return opening.promise;
-          },
-          close: async () => {
-            connectionCloses += 1;
-            opening.reject(interruption);
-          },
-        }),
-      newSessionId: () => 'session-race',
-    });
-
-    const create = registry.create({ cwd: '/workspace', mcpServers: [] });
-    const createRejected = assert.rejects(create, RequestError);
-    await waitFor(() => opens === 1);
-    const dispose = registry.dispose();
-    try {
-      await waitFor(() => connectionCloses === 1);
-    } finally {
-      opening.reject(interruption);
-      await Promise.allSettled([createRejected, dispose]);
-    }
-    await createRejected;
-    await dispose;
-    assert.equal(connectionCloses, 1);
-  });
-
-  test('connection cleanup terminates a raced subscription that cannot close', async () => {
-    const opening = deferred<TestableSubscription>();
-    const subscription = new TestSubscription('session-race');
-    subscription.closeError = new Error('subscription close failed');
-    let opens = 0;
-    let connectionCloses = 0;
-    const registry = new AcpSessionRegistry({
-      connect: async () =>
-        fakeConnection({
-          open: async () => {
-            opens += 1;
-            return opening.promise;
-          },
-          close: async () => {
-            connectionCloses += 1;
-            subscription.end();
-          },
-        }),
-      newSessionId: () => 'session-race',
-    });
-
-    const create = registry.create({ cwd: '/workspace', mcpServers: [] });
-    await waitFor(() => opens === 1);
-    const dispose = registry.dispose();
-    opening.resolve(subscription);
-
-    await assert.rejects(create, RequestError);
-    await dispose;
-    assert.equal(subscription.closeCalls, 1);
-    assert.equal(connectionCloses, 1);
-  });
-
-  test('connection cleanup terminates a registered subscription that cannot close', async () => {
-    const subscription = new TestSubscription('session-1');
-    subscription.closeError = new Error('subscription close failed');
-    let connectionCloses = 0;
-    const registry = new AcpSessionRegistry({
-      connect: async () =>
-        fakeConnection({
-          open: async () => subscription,
-          close: async () => {
-            connectionCloses += 1;
-            subscription.end();
-          },
-        }),
-      newSessionId: () => 'session-1',
-    });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
-
-    await registry.dispose();
-    assert.equal(subscription.closeCalls, 1);
-    assert.equal(connectionCloses, 1);
-    assert.equal(registry.inspect('session-1'), undefined);
   });
 
   test('maps one filtered Host catalog page per ACP page and carries cwd across pages', async (t) => {
@@ -754,19 +441,39 @@ describe('ACP Session registry', () => {
   });
 
   test('rejects malformed and oversized ACP cursors as invalid params', async () => {
+    let requests = 0;
     const registry = new AcpSessionRegistry({
-      connect: async () => fakeConnection(),
+      connect: async () =>
+        fakeConnection({
+          request: async () => {
+            requests += 1;
+            return {};
+          },
+        }),
     });
     const invalidRevisionCursor = Buffer.from(
       JSON.stringify({
-        v: 1,
         revision: 'sha256:bad',
         cursor: 'page-2',
         cwd: null,
       }),
       'utf8',
     ).toString('base64url');
-    for (const cursor of ['not-a-cursor', 'x'.repeat(8 * 1024 + 1), invalidRevisionCursor]) {
+    const versionedCursor = Buffer.from(
+      JSON.stringify({
+        v: 1,
+        revision: SESSION_REVISION,
+        cursor: 'page-2',
+        cwd: null,
+      }),
+      'utf8',
+    ).toString('base64url');
+    for (const cursor of [
+      'not-a-cursor',
+      'x'.repeat(8 * 1024 + 1),
+      invalidRevisionCursor,
+      versionedCursor,
+    ]) {
       await assert.rejects(
         registry.list({ cursor }),
         (error: unknown) =>
@@ -775,6 +482,7 @@ describe('ACP Session registry', () => {
           (error.data as { reason?: string }).reason === 'invalid_cursor',
       );
     }
+    assert.equal(requests, 0);
     await registry.dispose();
   });
 
@@ -855,117 +563,16 @@ describe('ACP Session registry', () => {
   });
 });
 
-class TestSubscription implements TestableSubscription {
-  readonly hostEpoch = 'host-1';
-  readonly subscriptionId: string;
-  readonly snapshot: SessionContinuitySnapshot;
-  readonly #frames: SubscriptionFrame[] = [];
-  #waiting: ReturnType<typeof deferred<IteratorResult<SubscriptionFrame>>> | undefined;
-  #failure: Error | undefined;
-  #done = false;
-  closeError: Error | undefined;
-  closeCalls = 0;
-  nextCalls = 0;
-
-  constructor(sessionId: string) {
-    this.subscriptionId = `subscription-${sessionId}`;
-    this.snapshot = snapshot(sessionId, 1);
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<SubscriptionFrame> {
-    return { next: () => this.next() };
-  }
-
-  next(): Promise<IteratorResult<SubscriptionFrame>> {
-    this.nextCalls += 1;
-    const frame = this.#frames.shift();
-    if (frame) return Promise.resolve({ done: false, value: frame });
-    if (this.#failure) return Promise.reject(this.#failure);
-    if (this.#done) return Promise.resolve({ done: true, value: undefined });
-    assert.equal(this.#waiting, undefined, 'only one iterator read may be pending');
-    this.#waiting = deferred<IteratorResult<SubscriptionFrame>>();
-    return this.#waiting.promise;
-  }
-
-  push(frame: SubscriptionFrame): void {
-    if (this.#waiting) {
-      const waiting = this.#waiting;
-      this.#waiting = undefined;
-      waiting.resolve({ done: false, value: frame });
-      return;
-    }
-    this.#frames.push(frame);
-  }
-
-  fail(error: Error): void {
-    this.#failure = error;
-    this.#waiting?.reject(error);
-    this.#waiting = undefined;
-  }
-
-  end(): void {
-    this.#done = true;
-    this.#waiting?.resolve({ done: true, value: undefined });
-    this.#waiting = undefined;
-  }
-
-  async close(): Promise<void> {
-    this.closeCalls += 1;
-    if (this.closeError) throw this.closeError;
-    this.end();
-  }
-}
-
 function fakeConnection(
   overrides: {
     request?: (operation: string, input: unknown) => Promise<unknown>;
-    open?: (input: { sessionId: string }) => Promise<TestableSubscription>;
     close?: () => Promise<void>;
   } = {},
 ): AcpSessionRegistryConnection {
   return {
     request: overrides.request ?? (async () => ({})),
-    openSessionSubscriptionOnce:
-      overrides.open ?? (async ({ sessionId }) => new TestSubscription(sessionId)),
     close: overrides.close ?? (async () => undefined),
   } as AcpSessionRegistryConnection;
-}
-
-function snapshot(sessionId: string, projectionRevision: number): SessionContinuitySnapshot {
-  return {
-    schemaVersion: SESSION_CONTINUITY_SCHEMA_VERSION,
-    session: {
-      sessionId,
-      metadataRevision: 1,
-      status: 'active',
-      createdAt: 1,
-      isArchived: false,
-    },
-    projectionRevision,
-    rootTurn: null,
-    goal: null,
-    queue: {
-      hostEpoch: 'host-1',
-      queueRevision: 0,
-      steering: [],
-      followup: [],
-    },
-    interactions: { pending: [] },
-  };
-}
-
-function projectionFrame(
-  subscription: TestSubscription,
-  next: SessionContinuitySnapshot,
-  sequence: number,
-): SubscriptionFrame {
-  return {
-    kind: 'subscription.session_projection',
-    hostEpoch: subscription.hostEpoch,
-    subscriptionId: subscription.subscriptionId,
-    sequence,
-    snapshot: next,
-  };
 }
 
 function catalogSession(id: string, cwd: string, name: string, activityAt: number) {

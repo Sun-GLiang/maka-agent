@@ -33,33 +33,21 @@ import {
   RuntimeHostOperationError,
   RuntimeHostRequestInterruptedError,
   RuntimeHostSessionCatalogRevisionChangedError,
-  RuntimeHostSubscriptionError,
   type RuntimeHostConnection,
   type RuntimeHostSessionCatalogPageCursor,
 } from '@maka/runtime-host/client';
 import {
-  SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS,
   SESSION_CATALOG_CURSOR_MAX_BYTES,
   SESSION_CATALOG_CWD_MAX_BYTES,
-  type SessionContinuitySnapshot,
-  type SubscriptionFrame,
-  type SubscriptionOpenInput,
 } from '@maka/runtime-host/protocol';
 
-const ACP_SESSION_CURSOR_VERSION = 1 as const;
 const ACP_SESSION_CURSOR_MAX_BYTES = 8 * 1024;
 
-interface AcpSessionSubscription extends AsyncIterable<SubscriptionFrame> {
-  readonly snapshot: SessionContinuitySnapshot;
-  close(): Promise<void>;
-}
+type AcpSessionRegistryOperation = 'session.create' | 'session.catalog.query';
+type AcpSessionRegistryLifecycleOperation = 'connect' | AcpSessionRegistryOperation;
 
 export interface AcpSessionRegistryConnection {
   readonly request: RuntimeHostConnection['request'];
-  openSessionSubscriptionOnce(
-    input: SubscriptionOpenInput,
-    timeoutMs?: number,
-  ): Promise<AcpSessionSubscription>;
   close(): Promise<void>;
 }
 
@@ -68,38 +56,14 @@ export interface AcpSessionRegistryOptions {
   readonly newSessionId?: () => string;
 }
 
-export interface AcpSessionRegistryFailure {
-  readonly source: 'runtime_host';
-  readonly operation: 'subscription.consume';
-  readonly code: string;
-  readonly reason?: string;
-}
-
-export interface AcpSessionRegistryInspection {
-  readonly snapshot: SessionContinuitySnapshot;
-  readonly failure?: AcpSessionRegistryFailure;
-}
-
-interface AcpSessionRecord {
-  readonly sessionId: string;
-  readonly subscription: AcpSessionSubscription;
-  snapshot: SessionContinuitySnapshot;
-  failure?: AcpSessionRegistryFailure;
-  consumerTask: Promise<void>;
-  closing: boolean;
-}
-
 /** Owns all Runtime Host resources associated with one ACP connection. */
 export class AcpSessionRegistry {
   readonly #connect: (signal: AbortSignal) => Promise<AcpSessionRegistryConnection>;
   readonly #newSessionId: () => string;
-  readonly #records = new Map<string, AcpSessionRecord>();
   readonly #inFlightOperations = new Set<Promise<unknown>>();
   #connection: AcpSessionRegistryConnection | undefined;
   #connectTask: Promise<AcpSessionRegistryConnection> | undefined;
   #connectAbortController: AbortController | undefined;
-  #activeSubscriptions = 0;
-  #pendingSubscriptionOpens = 0;
   #closing = false;
   #connectionCloseTask: Promise<void> | undefined;
   #disposeTask: Promise<void> | undefined;
@@ -110,23 +74,14 @@ export class AcpSessionRegistry {
   }
 
   async create(params: NewSessionRequest): Promise<NewSessionResponse> {
-    this.#assertOpen();
+    this.#assertOpen('session.create');
     validateNewSessionParams(params);
     return this.#track(this.#create(params));
   }
 
   async list(params: ListSessionsRequest): Promise<ListSessionsResponse> {
-    this.#assertOpen();
+    this.#assertOpen('session.catalog.query');
     return this.#track(this.#list(params));
-  }
-
-  inspect(sessionId: string): AcpSessionRegistryInspection | undefined {
-    const record = this.#records.get(sessionId);
-    if (!record) return undefined;
-    return {
-      snapshot: structuredClone(record.snapshot),
-      ...(record.failure ? { failure: { ...record.failure } } : {}),
-    };
   }
 
   dispose(): Promise<void> {
@@ -137,110 +92,18 @@ export class AcpSessionRegistry {
   }
 
   async #create(params: NewSessionRequest): Promise<NewSessionResponse> {
-    const connection = await this.#getConnection();
-    this.#reserveSubscriptionCapacity();
+    const connection = await this.#getConnection('session.create');
+    const sessionId = this.#newSessionId();
     try {
-      const sessionId = this.#newSessionId();
-      try {
-        await connection.request('session.create', {
-          sessionId,
-          workspace: { kind: 'host_path', path: params.cwd },
-          modelTarget: { kind: 'default' },
-        });
-      } catch (error) {
-        throw requestErrorFromRuntimeHost(error, 'session.create', { sessionId });
-      }
-
-      let subscription: AcpSessionSubscription;
-      try {
-        subscription = await connection.openSessionSubscriptionOnce({
-          sessionId,
-          transcript: { kind: 'none' },
-        });
-      } catch (error) {
-        throw RequestError.internalError(
-          {
-            ...runtimeHostErrorData(error, 'subscription.open'),
-            sessionId,
-            durableSessionCreated: true,
-          },
-          'Runtime Host subscription could not be opened for the durable session',
-        );
-      }
-
-      if (this.#closing) {
-        try {
-          await subscription.close();
-        } catch {
-          await this.#closeOwnedConnection();
-        }
-        throw RequestError.internalError(
-          {
-            source: 'runtime_host',
-            operation: 'subscription.open',
-            code: 'registry_closed',
-            sessionId,
-            durableSessionCreated: true,
-          },
-          'ACP connection closed while the durable session was being attached',
-        );
-      }
-
-      const record: AcpSessionRecord = {
+      await connection.request('session.create', {
         sessionId,
-        subscription,
-        snapshot: structuredClone(subscription.snapshot),
-        consumerTask: Promise.resolve(),
-        closing: false,
-      };
-      this.#records.set(sessionId, record);
-      this.#activeSubscriptions += 1;
-      record.consumerTask = this.#consume(record);
-      return { sessionId };
-    } finally {
-      this.#pendingSubscriptionOpens -= 1;
-    }
-  }
-
-  #reserveSubscriptionCapacity(): void {
-    if (
-      this.#activeSubscriptions + this.#pendingSubscriptionOpens >=
-      SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS
-    ) {
-      throw RequestError.internalError(
-        {
-          source: 'runtime_host',
-          operation: 'subscription.open',
-          code: 'subscription_capacity_exhausted',
-          maxSubscriptions: SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS,
-        },
-        'ACP connection subscription capacity is exhausted',
-      );
-    }
-    this.#pendingSubscriptionOpens += 1;
-  }
-
-  async #consume(record: AcpSessionRecord): Promise<void> {
-    try {
-      for await (const frame of record.subscription) {
-        if (frame.kind === 'subscription.session_projection') {
-          record.snapshot = structuredClone(frame.snapshot);
-        }
-      }
-      if (!record.closing) {
-        record.failure = {
-          source: 'runtime_host',
-          operation: 'subscription.consume',
-          code: 'subscription_closed',
-        };
-      }
+        workspace: { kind: 'host_path', path: params.cwd },
+        modelTarget: { kind: 'default' },
+      });
     } catch (error) {
-      if (!record.closing) {
-        record.failure = runtimeHostSubscriptionFailure(error);
-      }
-    } finally {
-      this.#activeSubscriptions -= 1;
+      throw requestErrorFromRuntimeHost(error, 'session.create', { sessionId });
     }
+    return { sessionId };
   }
 
   async #list(params: ListSessionsRequest): Promise<ListSessionsResponse> {
@@ -253,7 +116,7 @@ export class AcpSessionRegistry {
       );
     }
     const cwd = requestedCwd ?? cursor?.cwd ?? null;
-    const connection = await this.#getConnection();
+    const connection = await this.#getConnection('session.catalog.query');
     let page;
     try {
       page = await readRuntimeHostSessionCatalogPage(
@@ -291,16 +154,9 @@ export class AcpSessionRegistry {
   }
 
   async #dispose(): Promise<void> {
-    const records = [...this.#records.values()];
-    for (const record of records) record.closing = true;
-    const subscriptionCloses = records.map((record) =>
-      Promise.resolve().then(() => record.subscription.close()),
-    );
     const connectionClose = this.#closeOwnedConnection();
-    await Promise.allSettled([...subscriptionCloses, connectionClose]);
+    await Promise.allSettled([connectionClose]);
     await Promise.allSettled([...this.#inFlightOperations]);
-    await Promise.allSettled(records.map((record) => record.consumerTask));
-    this.#records.clear();
   }
 
   #closeOwnedConnection(): Promise<void> {
@@ -316,8 +172,10 @@ export class AcpSessionRegistry {
     return this.#connectionCloseTask;
   }
 
-  async #getConnection(): Promise<AcpSessionRegistryConnection> {
-    this.#assertOpen();
+  async #getConnection(
+    operation: AcpSessionRegistryOperation,
+  ): Promise<AcpSessionRegistryConnection> {
+    this.#assertOpen(operation);
     if (this.#connection) return this.#connection;
     let connectController = this.#connectAbortController;
     if (!this.#connectTask) {
@@ -368,13 +226,13 @@ export class AcpSessionRegistry {
     }
   }
 
-  #assertOpen(): void {
+  #assertOpen(operation: AcpSessionRegistryOperation): void {
     if (!this.#closing) return;
-    throw registryClosedError('subscription.open');
+    throw registryClosedError(operation);
   }
 }
 
-function registryClosedError(operation: 'connect' | 'subscription.open'): RequestError {
+function registryClosedError(operation: AcpSessionRegistryLifecycleOperation): RequestError {
   return RequestError.internalError(
     { source: 'runtime_host', operation, code: 'registry_closed' },
     'ACP session registry is closed',
@@ -399,7 +257,7 @@ function validateNewSessionParams(params: NewSessionRequest): void {
 
 function requestErrorFromRuntimeHost(
   error: unknown,
-  operation: 'session.create' | 'session.catalog.query',
+  operation: AcpSessionRegistryOperation,
   extra: Record<string, unknown> = {},
 ): RequestError {
   const data = { ...runtimeHostErrorData(error, operation), ...extra };
@@ -426,14 +284,6 @@ function runtimeHostErrorData(error: unknown, operation: string): Record<string,
       dispatch: error.dispatch,
     };
   }
-  if (error instanceof RuntimeHostSubscriptionError) {
-    return {
-      source: 'runtime_host',
-      operation,
-      code: 'subscription_failure',
-      reason: error.reason,
-    };
-  }
   if (error instanceof RuntimeHostCatalogReadError) {
     return {
       source: 'runtime_host',
@@ -445,34 +295,14 @@ function runtimeHostErrorData(error: unknown, operation: string): Record<string,
   return { source: 'runtime_host', operation, code: 'internal_failure' };
 }
 
-function runtimeHostSubscriptionFailure(error: unknown): AcpSessionRegistryFailure {
-  if (error instanceof RuntimeHostSubscriptionError) {
-    return {
-      source: 'runtime_host',
-      operation: 'subscription.consume',
-      code: 'subscription_failure',
-      reason: error.reason,
-    };
-  }
-  return {
-    source: 'runtime_host',
-    operation: 'subscription.consume',
-    code: 'internal_failure',
-  };
-}
-
 interface AcpSessionCursor extends RuntimeHostSessionCatalogPageCursor {
-  readonly v: typeof ACP_SESSION_CURSOR_VERSION;
   readonly cwd: string | null;
 }
 
 function encodeAcpSessionCursor(
   cursor: RuntimeHostSessionCatalogPageCursor & { readonly cwd: string | null },
 ): string {
-  const encoded = Buffer.from(
-    JSON.stringify({ v: ACP_SESSION_CURSOR_VERSION, ...cursor }),
-    'utf8',
-  ).toString('base64url');
+  const encoded = Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
   if (Buffer.byteLength(encoded, 'utf8') > ACP_SESSION_CURSOR_MAX_BYTES) {
     throw RequestError.internalError(
       {
@@ -499,8 +329,7 @@ function decodeAcpSessionCursor(encoded: string): AcpSessionCursor {
     }
     const record = value as Record<string, unknown>;
     if (
-      Object.keys(record).length !== 4 ||
-      record.v !== ACP_SESSION_CURSOR_VERSION ||
+      Object.keys(record).length !== 3 ||
       typeof record.revision !== 'string' ||
       !/^sha256:[0-9a-f]{64}$/.test(record.revision) ||
       typeof record.cursor !== 'string' ||
@@ -511,7 +340,6 @@ function decodeAcpSessionCursor(encoded: string): AcpSessionCursor {
       throw new Error('cursor fields are invalid');
     }
     return {
-      v: ACP_SESSION_CURSOR_VERSION,
       revision: record.revision as RuntimeHostSessionCatalogPageCursor['revision'],
       cursor: record.cursor,
       cwd: record.cwd,

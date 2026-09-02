@@ -157,6 +157,31 @@ test('waits out a burst of Session catalog revisions', async () => {
   assert.equal(starts, 4);
 });
 
+test('retries when the first Session catalog page reports a revision change', async () => {
+  let starts = 0;
+  const connection = fakeConnection(async (operation, input) => {
+    assert.equal(operation, 'session.catalog.query');
+    assert.equal(input.kind, 'list_start');
+    starts += 1;
+    if (starts === 1) {
+      return {
+        kind: 'revision_changed',
+        expectedRevision: 'sha256:old',
+        actualRevision: 'sha256:new',
+      };
+    }
+    return {
+      kind: 'page',
+      revision: 'sha256:new',
+      sessions: [],
+      nextCursor: null,
+    };
+  });
+
+  assert.deepEqual(await readRuntimeHostSessions(connection), []);
+  assert.equal(starts, 2);
+});
+
 test('rejects a repeated Skill catalog cursor instead of looping forever', async () => {
   const connection = fakeConnection(async (operation, input) => {
     assert.equal(operation, 'skill.catalog.query');

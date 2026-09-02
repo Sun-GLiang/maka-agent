@@ -255,11 +255,6 @@ export interface RuntimeHostConnection {
     input: SubscriptionOpenInput,
     timeoutMs?: number,
   ): Promise<RuntimeHostSessionSubscription>;
-  /** Opens on this concrete connection without retrying on a replacement Host. */
-  openSessionSubscriptionOnce(
-    input: SubscriptionOpenInput,
-    timeoutMs?: number,
-  ): Promise<RuntimeHostSessionSubscription>;
   close(): Promise<void>;
   replaceClientCapabilities(
     provider: ClientCapabilityProvider,
@@ -625,13 +620,6 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       },
       'connection',
     );
-  }
-
-  openSessionSubscriptionOnce(
-    input: SubscriptionOpenInput,
-    timeoutMs?: number,
-  ): Promise<RuntimeHostSessionSubscription> {
-    return this.openSessionSubscription(input, timeoutMs);
   }
 
   async close(): Promise<void> {

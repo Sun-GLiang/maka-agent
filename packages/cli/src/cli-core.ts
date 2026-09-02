@@ -133,7 +133,7 @@ function helpText(cliCommand: string): string {
     '',
     'Commands:',
     `  ${cliCommand}              Start the TUI`,
-    `  ${cliCommand} --acp      Serve ACP v1 over stdio (initialize only; session support in progress)`,
+    `  ${cliCommand} --acp      Serve ACP v1 over stdio (initialize, session/new, session/list)`,
     `  ${cliCommand} run ...      Run one non-interactive model turn`,
     `  ${cliCommand} activate ... Run one Cloud Session activation and emit JSONL`,
     `  ${cliCommand} -p ...       Alias for ${cliCommand} run`,

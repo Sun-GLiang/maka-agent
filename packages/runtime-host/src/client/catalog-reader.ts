@@ -209,17 +209,20 @@ export async function readRuntimeHostInvocableSkills(
 export async function readRuntimeHostSessions(
   connection: RuntimeHostCatalogConnection,
 ): Promise<SessionCatalogItem[]> {
+  const readPageOrRestart = async (
+    cursor?: RuntimeHostSessionCatalogPageCursor,
+  ): Promise<RuntimeHostSessionCatalogPage | null> => {
+    try {
+      return await readRuntimeHostSessionCatalogPage(connection, cursor);
+    } catch (error) {
+      if (error instanceof RuntimeHostSessionCatalogRevisionChangedError) return null;
+      throw error;
+    }
+  };
   const { pages } = await collectStablePages(
     'session',
-    () => readRuntimeHostSessionCatalogPage(connection),
-    async (_revision, cursor) => {
-      try {
-        return await readRuntimeHostSessionCatalogPage(connection, cursor);
-      } catch (error) {
-        if (error instanceof RuntimeHostSessionCatalogRevisionChangedError) return null;
-        throw error;
-      }
-    },
+    () => readPageOrRestart(),
+    (_revision, cursor) => readPageOrRestart(cursor),
   );
   return pages.flatMap((page) => page.sessions);
 }

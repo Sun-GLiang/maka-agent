@@ -23,7 +23,6 @@ import { realpath } from 'node:fs/promises';
 import { PassThrough } from 'node:stream';
 import { describe, test } from 'node:test';
 import { RequestError, methods } from '@agentclientprotocol/sdk';
-import { SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS } from '@maka/runtime-host/protocol';
 import {
   pipeCapturedStdout,
   StdoutCaptureBridge,
@@ -199,7 +198,7 @@ describe('Maka ACP child process', () => {
     );
   });
 
-  test('rejects the seventeenth Session before persistence on a real Runtime Host', {
+  test('creates more than sixteen Sessions without attaching on a real Runtime Host', {
     timeout: 30_000,
   }, async () => {
     await withAcpChildProcessHarness(
@@ -207,31 +206,13 @@ describe('Maka ACP child process', () => {
         await harness.withClient(async ({ context }) => {
           await context.request(methods.agent.initialize, { protocolVersion: 1 });
           const createdSessionIds: string[] = [];
-          for (let index = 0; index < SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS; index += 1) {
+          for (let index = 0; index < 17; index += 1) {
             const created = await context.request(methods.agent.session.new, {
               cwd: harness.workspaceRoot,
               mcpServers: [],
             });
             createdSessionIds.push(created.sessionId);
           }
-
-          await assert.rejects(
-            context.request(methods.agent.session.new, {
-              cwd: harness.workspaceRoot,
-              mcpServers: [],
-            }),
-            (error: unknown) => {
-              assert.ok(error instanceof RequestError);
-              assert.equal(error.code, -32603);
-              assert.deepEqual(error.data, {
-                source: 'runtime_host',
-                operation: 'subscription.open',
-                code: 'subscription_capacity_exhausted',
-                maxSubscriptions: SESSION_CONNECTION_SUBSCRIPTION_MAX_ITEMS,
-              });
-              return true;
-            },
-          );
 
           const listed = await context.request(methods.agent.session.list, {
             cwd: harness.workspaceRoot,

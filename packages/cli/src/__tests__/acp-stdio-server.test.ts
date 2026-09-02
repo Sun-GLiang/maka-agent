@@ -20,11 +20,7 @@
 import assert from 'node:assert/strict';
 import { Readable, Writable } from 'node:stream';
 import { describe, test } from 'node:test';
-import type {
-  RuntimeHostConnection,
-  RuntimeHostSessionSubscription,
-} from '@maka/runtime-host/client';
-import { SESSION_CONTINUITY_SCHEMA_VERSION } from '@maka/runtime-host/protocol';
+import type { RuntimeHostConnection } from '@maka/runtime-host/client';
 import { runMakaAcpStdioServer } from '../acp/stdio-server.js';
 
 describe('Maka ACP stdio server', () => {
@@ -82,12 +78,13 @@ describe('Maka ACP stdio server', () => {
     await assert.rejects(harness.run(), (error: unknown) => error === transportError);
   });
 
-  test('disposes ACP subscriptions before closing the lazily acquired Host connection', async () => {
+  test('creates a Session without requiring a subscription-capable Host connection', async () => {
     const lifecycle: string[] = [];
     const connection = {
-      request: async () => ({ kind: 'unsupported_legacy_record' }),
-      openSessionSubscriptionOnce: async ({ sessionId }: { sessionId: string }) =>
-        closingSubscription(sessionId, lifecycle),
+      request: async (operation: string) => {
+        lifecycle.push(operation);
+        return {};
+      },
       close: async () => {
         lifecycle.push('connection.close');
       },
@@ -107,24 +104,17 @@ describe('Maka ACP stdio server', () => {
           params: { cwd: '/workspace', mcpServers: [] },
         })}\n`,
       ],
-      {
-        connection,
-      },
+      { connection },
     );
 
     assert.equal(await harness.run(), 0);
     const response = harness
       .stdoutMessages()
       .find((message) => (message as { id?: unknown }).id === 2) as {
-      jsonrpc?: unknown;
-      id?: unknown;
       result?: { sessionId?: unknown };
     };
-    assert.equal(response.jsonrpc, '2.0');
-    assert.equal(response.id, 2);
     assert.equal(typeof response.result?.sessionId, 'string');
-    assert.equal(harness.connectCalls(), 1);
-    assert.deepEqual(lifecycle, ['subscription.close', 'connection.close']);
+    assert.deepEqual(lifecycle, ['session.create', 'connection.close']);
   });
 
   test('returns a Host connection failure from the Session request and keeps serving ACP', async () => {
@@ -217,9 +207,6 @@ function createHarness(
     options.connection ??
     ({
       request: async () => ({ kind: 'unsupported_legacy_record' }),
-      openSessionSubscriptionOnce: async () => {
-        throw new Error('subscription is not available in this fixture');
-      },
       close: async () => undefined,
     } as unknown as RuntimeHostConnection);
   const stdoutChunks: Buffer[] = [];
@@ -259,47 +246,4 @@ function createHarness(
         .filter(Boolean)
         .map((line) => JSON.parse(line) as unknown),
   };
-}
-
-function closingSubscription(
-  sessionId: string,
-  lifecycle: string[],
-): RuntimeHostSessionSubscription {
-  let finish!: () => void;
-  const closed = new Promise<void>((resolve) => {
-    finish = resolve;
-  });
-  return {
-    hostEpoch: 'host-1',
-    subscriptionId: `subscription-${sessionId}`,
-    snapshot: {
-      schemaVersion: SESSION_CONTINUITY_SCHEMA_VERSION,
-      session: {
-        sessionId,
-        metadataRevision: 1,
-        status: 'active',
-        createdAt: 1,
-        isArchived: false,
-      },
-      projectionRevision: 1,
-      rootTurn: null,
-      goal: null,
-      queue: { hostEpoch: 'host-1', queueRevision: 0, steering: [], followup: [] },
-      interactions: { pending: [] },
-    },
-    activeAssistantStreams: [],
-    transcriptBootstrap: null,
-    [Symbol.asyncIterator]() {
-      return {
-        next: async () => {
-          await closed;
-          return { done: true, value: undefined };
-        },
-      };
-    },
-    close: async () => {
-      lifecycle.push('subscription.close');
-      finish();
-    },
-  } as unknown as RuntimeHostSessionSubscription;
 }

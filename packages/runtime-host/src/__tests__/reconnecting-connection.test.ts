@@ -264,85 +264,6 @@ test('a Session observation reopens safely after its first connection starts dra
   await connection.close();
 });
 
-test('a one-shot Session observation preserves the first open failure without reconnecting', async () => {
-  const first = connectionHarness(
-    'first',
-    () => undefined,
-    async () => {
-      throw new RuntimeHostOperationError(
-        'subscription.open',
-        'host_draining',
-        'Runtime Host is draining',
-      );
-    },
-  );
-  const replacement = connectionHarness(
-    'replacement',
-    () => undefined,
-    async () => ({ subscriptionId: 'replacement-subscription' }),
-  );
-  let reconnectAttempts = 0;
-  const connection = await createRuntimeHostReconnectingConnection({
-    initialConnection: first.connection,
-    connect: async () => {
-      reconnectAttempts += 1;
-      return replacement.connection;
-    },
-  });
-
-  await assert.rejects(
-    connection.openSessionSubscriptionOnce({
-      sessionId: 'session-1',
-      transcript: { kind: 'none' },
-    }),
-    (error: unknown) =>
-      error instanceof RuntimeHostOperationError && error.code === 'host_draining',
-  );
-  assert.equal(first.openedSubscriptions, 1);
-  assert.equal(replacement.openedSubscriptions, 0);
-  assert.equal(reconnectAttempts, 0);
-  await connection.close();
-});
-
-test('a one-shot Session observation composes through a decorated connection', async () => {
-  const expected = new RuntimeHostOperationError(
-    'subscription.open',
-    'host_draining',
-    'Runtime Host is draining',
-  );
-  const base = connectionHarness('base', () => undefined);
-  let retryCapableCalls = 0;
-  let oneShotCalls = 0;
-  const decorated = {
-    ...base.connection,
-    openSessionSubscription: async () => {
-      retryCapableCalls += 1;
-      throw new Error('retry-capable open must not be selected');
-    },
-    openSessionSubscriptionOnce: async () => {
-      oneShotCalls += 1;
-      throw expected;
-    },
-  } as RuntimeHostConnection;
-  const connection = await createRuntimeHostReconnectingConnection({
-    initialConnection: decorated,
-    connect: async () => {
-      throw new Error('reconnect must not be attempted');
-    },
-  });
-
-  await assert.rejects(
-    connection.openSessionSubscriptionOnce({
-      sessionId: 'session-1',
-      transcript: { kind: 'none' },
-    }),
-    (error: unknown) => error === expected,
-  );
-  assert.equal(retryCapableCalls, 0);
-  assert.equal(oneShotCalls, 1);
-  await connection.close();
-});
-
 test('a reconnecting Client rejects a different Host composition permanently', async () => {
   const first = connectionHarness('first', () => undefined);
   const replacement = connectionHarness('replacement', () => undefined, undefined, {
@@ -718,10 +639,6 @@ function connectionHarness(
       return request(operation, input);
     },
     openSessionSubscription: async () => {
-      openedSubscriptions += 1;
-      return openSubscription();
-    },
-    openSessionSubscriptionOnce: async () => {
       openedSubscriptions += 1;
       return openSubscription();
     },
