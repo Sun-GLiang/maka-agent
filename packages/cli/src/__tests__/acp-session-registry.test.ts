@@ -991,6 +991,71 @@ describe('ACP Session registry', () => {
     assert.equal(closeCalls, 1);
   });
 
+  test('does not reread after a held update conflicts during disposal', async () => {
+    const heldUpdate = deferred<{
+      kind: 'revision_conflict';
+      expectedRevision: number;
+      actualRevision: number;
+    }>();
+    let catalogReads = 0;
+    let updates = 0;
+    let closeCalls = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession('session-conflict-closing');
+            if (operation === 'session.catalog.query') {
+              catalogReads += 1;
+              if (catalogReads === 1) {
+                return {
+                  kind: 'session',
+                  session: catalogSession('session-conflict-closing'),
+                };
+              }
+              throw new RuntimeHostRequestInterruptedError(
+                'session.catalog.query',
+                'query',
+                'dispatched',
+                'connection_lost',
+              );
+            }
+            updates += 1;
+            return heldUpdate.promise;
+          },
+          close: async () => {
+            closeCalls += 1;
+          },
+        }),
+      newSessionId: () => 'session-conflict-closing',
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    const update = registry.setConfigOption({
+      sessionId: 'session-conflict-closing',
+      configId: 'permission_mode',
+      value: 'bypass',
+    });
+    await waitFor(() => updates === 1);
+
+    const dispose = registry.dispose();
+    heldUpdate.resolve({ kind: 'revision_conflict', expectedRevision: 1, actualRevision: 2 });
+
+    await assert.rejects(update, (error: unknown) => {
+      assert.ok(error instanceof RequestError);
+      assert.equal(error.code, -32603);
+      assert.deepEqual(error.data, {
+        source: 'runtime_host',
+        operation: 'session.configuration.update',
+        code: 'registry_closed',
+      });
+      return true;
+    });
+    await dispose;
+    assert.equal(catalogReads, 1);
+    assert.equal(updates, 1);
+    assert.equal(closeCalls, 1);
+  });
+
   test('rejects unsupported creation inputs before touching Runtime Host', async () => {
     let requests = 0;
     const registry = new AcpSessionRegistry({

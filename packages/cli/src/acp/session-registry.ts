@@ -147,6 +147,7 @@ export class AcpSessionRegistry {
   ): Promise<SetSessionConfigOptionResponse> {
     const connection = await this.#getConnection('session.configuration.update');
     for (let attempt = 0; attempt < ACP_SESSION_CONFIGURATION_MAX_ATTEMPTS; attempt += 1) {
+      if (this.#closing) throw registryClosedError('session.configuration.update');
       const current = await this.#getConfigurableSession(connection, params.sessionId);
       if (this.#closing) throw registryClosedError('session.configuration.update');
       let result;
