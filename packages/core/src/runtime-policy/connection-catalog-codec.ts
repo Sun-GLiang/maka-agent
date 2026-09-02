@@ -18,13 +18,20 @@
  */
 
 import {
+  isModelModality,
   isRelayProviderType,
+  effectiveBaseUrl,
   PROVIDER_REGISTRY,
   providerDefaultsOf,
   validateSlug,
+  type ModelModality,
   type ProviderType,
 } from '../llm-connections.js';
-import { MAX_PREPENDED_FALLBACK_MODELS } from '../model-catalog.js';
+import {
+  CONNECTION_MODEL_DESCRIPTION_MAX_LENGTH,
+  CONNECTION_MODEL_DISPLAY_NAME_MAX_LENGTH,
+  MAX_PREPENDED_FALLBACK_MODELS,
+} from '../model-catalog.js';
 import {
   DECLARABLE_RELAY_THINKING_LEVELS,
   isThinkingLevel,
@@ -33,6 +40,7 @@ import {
 } from '../model-thinking.js';
 import type {
   ConnectionCatalogEntry,
+  ConnectionCredentialTarget,
   ConnectionCatalogEntryDraft,
   ConnectionCatalogEntryUpdate,
   ConnectionModel,
@@ -480,6 +488,67 @@ export function decodeConnectionVersionBasis(value: unknown): ConnectionVersionB
   };
 }
 
+export function canonicalConnectionEffectiveBaseUrl(
+  connection: Pick<ConnectionCatalogEntry, 'providerType' | 'baseUrl'>,
+): string {
+  const endpoint = effectiveBaseUrl(connection);
+  try {
+    return new URL(endpoint).toString();
+  } catch {
+    throw domainError('connection has an invalid effective base URL');
+  }
+}
+
+export function connectionCredentialTarget(
+  connection: Pick<
+    ConnectionCatalogEntry,
+    'connectionId' | 'revision' | 'slug' | 'providerType' | 'baseUrl'
+  >,
+): ConnectionCredentialTarget {
+  return {
+    connectionId: connection.connectionId,
+    revision: connection.revision,
+    slug: connection.slug,
+    providerType: connection.providerType,
+    effectiveBaseUrl: canonicalConnectionEffectiveBaseUrl(connection),
+  };
+}
+
+export function decodeConnectionCredentialTarget(value: unknown): ConnectionCredentialTarget {
+  const item = exactRecord(value, 'connection credential target', [
+    'connectionId',
+    'revision',
+    'slug',
+    'providerType',
+    'effectiveBaseUrl',
+  ]);
+  const version = decodeConnectionVersionBasis({
+    connectionId: item.connectionId,
+    revision: item.revision,
+  });
+  const providerType = decodeProviderType(item.providerType);
+  const effectiveBaseUrl = stringValue(
+    item.effectiveBaseUrl,
+    'connection credential target effective base URL',
+    2_048,
+  );
+  let canonical: string;
+  try {
+    canonical = new URL(effectiveBaseUrl).toString();
+  } catch {
+    throw domainError('connection credential target effective base URL must be valid');
+  }
+  if (canonical !== effectiveBaseUrl) {
+    throw domainError('connection credential target effective base URL must be canonical');
+  }
+  return {
+    ...version,
+    slug: decodeConnectionSlug(item.slug),
+    providerType,
+    effectiveBaseUrl,
+  };
+}
+
 export function decodeConnectionTarget(value: unknown): ConnectionTarget {
   const item = exactRecord(value, 'connection target', ['connectionId', 'modelId']);
   return {
@@ -546,10 +615,22 @@ export function decodeConnectionModel(value: unknown): ConnectionModel {
     id: decodeConnectionModelId(item.id),
     ...(item.displayName === undefined
       ? {}
-      : { displayName: stringValue(item.displayName, 'model display name', 512) }),
+      : {
+          displayName: stringValue(
+            item.displayName,
+            'model display name',
+            CONNECTION_MODEL_DISPLAY_NAME_MAX_LENGTH,
+          ),
+        }),
     ...(item.description === undefined
       ? {}
-      : { description: stringValue(item.description, 'model description', 2048) }),
+      : {
+          description: stringValue(
+            item.description,
+            'model description',
+            CONNECTION_MODEL_DESCRIPTION_MAX_LENGTH,
+          ),
+        }),
     ...(item.apiProtocol === undefined ? {} : { apiProtocol: item.apiProtocol }),
     ...(item.contextWindow === undefined
       ? {}
@@ -600,23 +681,18 @@ function decodeModelModalities(value: unknown): NonNullable<ConnectionModel['mod
   if (!Array.isArray(item.input) || !Array.isArray(item.output)) {
     throw domainError('connection model modalities must contain input and output arrays');
   }
-  const input = Array.from(item.input, (entry) => decodeModelInputModality(entry));
-  const output = Array.from(item.output, (entry) => decodeModelOutputModality(entry));
+  const input = Array.from(item.input, (entry) => decodeModelModality(entry, 'input'));
+  const output = Array.from(item.output, (entry) => decodeModelModality(entry, 'output'));
   return { input, output };
 }
 
-function decodeModelInputModality(value: unknown): 'text' | 'image' | 'audio' | 'pdf' {
-  const modality = stringValue(value, 'connection model input modality', 16);
-  if (modality !== 'text' && modality !== 'image' && modality !== 'audio' && modality !== 'pdf') {
-    throw domainError('connection model input modality is invalid');
-  }
-  return modality;
-}
-
-function decodeModelOutputModality(value: unknown): 'text' | 'image' | 'audio' {
-  const modality = stringValue(value, 'connection model output modality', 16);
-  if (modality !== 'text' && modality !== 'image' && modality !== 'audio') {
-    throw domainError('connection model output modality is invalid');
+// Both directions accept the same set. models.dev declares video on either
+// side and pdf on both, so splitting them again only invites one direction to
+// drift behind the catalog it decodes.
+function decodeModelModality(value: unknown, direction: 'input' | 'output'): ModelModality {
+  const modality = stringValue(value, `connection model ${direction} modality`, 16);
+  if (!isModelModality(modality)) {
+    throw domainError(`connection model ${direction} modality is invalid`);
   }
   return modality;
 }

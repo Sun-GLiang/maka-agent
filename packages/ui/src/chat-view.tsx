@@ -185,7 +185,6 @@ export function ChatView(props: {
    *  avoid bringing the full provider SVG library into @maka/ui. */
   renderProviderMark?(type: ProviderType): ReactNode;
   modelChoices?: ChatModelChoice[];
-  modelChangePending?: boolean;
   onModelChange?(input: {
     llmConnectionId: string;
     llmConnectionSlug: string;

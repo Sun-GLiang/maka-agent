@@ -726,6 +726,7 @@ function connectionHarness(
       return openSubscription();
     },
     subscribeConfigurationChanges: () => () => {},
+    subscribeConnectionCatalogChanges: () => () => {},
     subscribeProjectCatalogChanges: () => () => {},
     subscribeSessionCatalogChanges: () => () => {},
     subscribeScheduledTaskChanges: () => () => {},

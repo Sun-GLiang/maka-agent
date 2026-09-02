@@ -22,6 +22,7 @@ export * from './assistant-stream.js';
 export * from './chat-empty-hero.js';
 export * from './chat-model-helpers.js';
 export * from './use-mounted-ref.js';
+export * from './session-setting-intent.js';
 export * from './components.js';
 export type { ComposerProps } from './components.js';
 export type { SandboxBoundaryPromptProps } from './sandbox-boundary-prompt.js';
@@ -64,6 +65,7 @@ export * from './toast.js';
 export * from './tool-output-stream.js';
 export * from './ui.js';
 export * from './utils.js';
+export * from './platform-shortcut-text.js';
 
 // Maka-owned product assets and compositions remain public only where they do
 // not duplicate a published Astryx component authority.
