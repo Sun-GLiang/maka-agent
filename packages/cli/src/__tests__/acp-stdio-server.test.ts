@@ -155,9 +155,7 @@ describe('Maka ACP stdio server', () => {
     };
     assert.equal(createdResponse.result?.sessionId, created?.id);
     assert.deepEqual(
-      createdResponse.result?.configOptions?.map((option) =>
-        (option as { id?: unknown }).id,
-      ),
+      createdResponse.result?.configOptions?.map((option) => (option as { id?: unknown }).id),
       ['permission_mode', 'thinking_level', 'collaboration_mode', 'orchestration_mode'],
     );
     const configuredResponse = responses.get(3) as {
@@ -165,17 +163,20 @@ describe('Maka ACP stdio server', () => {
         configOptions?: Array<{ id?: unknown; currentValue?: unknown }>;
       };
     };
-    assert.deepEqual(configuredResponse.result?.configOptions?.find(({ id }) => id === 'collaboration_mode'), {
-      type: 'select',
-      id: 'collaboration_mode',
-      name: 'Collaboration mode',
-      category: 'mode',
-      currentValue: 'plan',
-      options: [
-        { value: 'agent', name: 'Agent' },
-        { value: 'plan', name: 'Plan' },
-      ],
-    });
+    assert.deepEqual(
+      configuredResponse.result?.configOptions?.find(({ id }) => id === 'collaboration_mode'),
+      {
+        type: 'select',
+        id: 'collaboration_mode',
+        name: 'Collaboration mode',
+        category: 'mode',
+        currentValue: 'plan',
+        options: [
+          { value: 'agent', name: 'Agent' },
+          { value: 'plan', name: 'Plan' },
+        ],
+      },
+    );
     assert.deepEqual(lifecycle, [
       'session.create',
       'session.catalog.query',
@@ -184,10 +185,12 @@ describe('Maka ACP stdio server', () => {
     ]);
     assert.equal('subscribe' in connection, false);
     assert.ok(lifecycle.every((operation) => operation !== 'session.catalog.subscribe'));
-    assert.ok(harness.stdoutMessages().every((message) => {
-      const record = message as { jsonrpc?: unknown };
-      return record.jsonrpc === '2.0';
-    }));
+    assert.ok(
+      harness.stdoutMessages().every((message) => {
+        const record = message as { jsonrpc?: unknown };
+        return record.jsonrpc === '2.0';
+      }),
+    );
   });
 
   test('returns a Host connection failure from the Session request and keeps serving ACP', async () => {
