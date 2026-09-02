@@ -154,6 +154,29 @@ describe('Maka ACP child process', () => {
             cwd: harness.workspaceRoot,
             mcpServers: [],
           });
+          assert.deepEqual(
+            (first.configOptions ?? []).map((option) => [option.id, option.currentValue]),
+            [
+              ['permission_mode', 'ask'],
+              ['thinking_level', 'default'],
+              ['collaboration_mode', 'agent'],
+              ['orchestration_mode', 'default'],
+            ],
+          );
+          const configured = await context.request(methods.agent.session.setConfigOption, {
+            sessionId: first.sessionId,
+            configId: 'collaboration_mode',
+            value: 'plan',
+          });
+          assert.deepEqual(
+            (configured.configOptions ?? []).map((option) => [option.id, option.currentValue]),
+            [
+              ['permission_mode', 'ask'],
+              ['thinking_level', 'default'],
+              ['collaboration_mode', 'plan'],
+              ['orchestration_mode', 'default'],
+            ],
+          );
           const second = await context.request(methods.agent.session.new, {
             cwd: harness.workspaceRoot,
             mcpServers: [],
