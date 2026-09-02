@@ -100,6 +100,72 @@ test('channels keep independent workers and overlays for the same session', asyn
   });
 });
 
+test('revision-aware commits retire only after the target session observes that revision', async () => {
+  const { document, window } = parseHTML('<div id="root"></div>');
+  Object.assign(globalThis, {
+    document,
+    window,
+    HTMLElement: window.HTMLElement,
+    Node: window.Node,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  const container = document.querySelector('#root');
+  assert.ok(container);
+  const root = createRoot(container);
+  mountedRoot = root;
+
+  let controller: Controller | undefined;
+  const render = (catalogRevision: number, sessionRevision: number) => {
+    root.render(createElement(RevisionHarness, {
+      capture: (next) => {
+        controller = next;
+      },
+      catalogRevision,
+      sessionRevision,
+    }));
+  };
+
+  await act(async () => render(0, 0));
+  await act(async () => {
+    assert.equal(await controller!.request('model', 'session-1', 'model-b'), true);
+  });
+  assert.equal(controller!.overlayByChannel.model['session-1'], 'model-b');
+
+  await act(async () => render(1, 1));
+  assert.equal(controller!.overlayByChannel.model['session-1'], 'model-b');
+
+  await act(async () => render(2, 2));
+  assert.equal(controller!.overlayByChannel.model['session-1'], undefined);
+});
+
+function RevisionHarness({
+  capture,
+  catalogRevision,
+  sessionRevision,
+}: {
+  capture(controller: Controller): void;
+  catalogRevision: number;
+  sessionRevision: number;
+}) {
+  const controller = useSessionSettingIntent<Channels>({
+    catalogRevision,
+    refreshCatalog: async () => {},
+    channels: {
+      model: {
+        write: async () => ({ committed: true, sessionRevision: 2 }),
+        catalogSessionRevision: () => sessionRevision,
+        onWriteError: () => {},
+      },
+      permission: {
+        write: async () => true,
+        onWriteError: () => {},
+      },
+    },
+  });
+  capture(controller);
+  return null;
+}
+
 function Harness({
   capture,
   modelWrite,
