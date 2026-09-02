@@ -28,6 +28,8 @@ import {
   type SessionSettingsServices,
   useSessionSettingIntent,
 } from '../../renderer/features/session-settings/index.js';
+import { reconcileRuntimeHostSessionCatalog } from '../../preload/runtime-host-session-catalog.js';
+import type { DesktopSessionSummary } from '../../shared/desktop-session-projection.js';
 
 type Controller = ReturnType<typeof useSessionSettingIntent<{ sessionId?: string }>>;
 
@@ -112,7 +114,8 @@ test('persists a model selection as one compound configuration and saves its def
           llmConnectionSlug: input.llmConnectionSlug,
           model: input.model,
           thinkingLevel: input.thinkingLevel,
-        } as SessionSummary;
+          revision: 1,
+        } as DesktopSessionSummary;
       },
     }),
     saveComposerDefaults: (model) => savedDefaults.push(model),
@@ -153,7 +156,8 @@ test('persists a thinking selection through the same compound configuration serv
       llmConnectionId: 'connection-1',
       llmConnectionSlug: 'openai',
       model: 'gpt-5',
-    } as SessionSummary],
+      revision: 1,
+    } as DesktopSessionSummary],
     services: createServices({
       setModelConfiguration: async (sessionId, input) => {
         writes.push({ sessionId, input });
@@ -162,7 +166,8 @@ test('persists a thinking selection through the same compound configuration serv
           llmConnectionSlug: input.llmConnectionSlug,
           model: input.model,
           thinkingLevel: input.thinkingLevel,
-        } as SessionSummary;
+          revision: 2,
+        } as DesktopSessionSummary;
       },
     }),
     saveComposerDefaults: (model) => savedDefaults.push(model),
@@ -186,10 +191,103 @@ test('persists a thinking selection through the same compound configuration serv
   assert.deepEqual(savedDefaults, []);
 });
 
+test('retains the Model overlay while a partial Host catalog still has the prior Session revision', async () => {
+  const { document, window } = parseHTML('<div id="root"></div>');
+  Object.assign(globalThis, {
+    document,
+    window,
+    HTMLElement: window.HTMLElement,
+    Node: window.Node,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  const container = document.querySelector('#root');
+  assert.ok(container);
+  const root = createRoot(container);
+  mountedRoot = root;
+
+  const targetBeforeWrite = desktopSession({
+    id: 'session-a',
+    runtimeHostId: 'host-a',
+    profileId: 'profile-a',
+    revision: 1,
+    activityAt: 10,
+    model: 'model-a',
+  });
+  const otherHostSession = desktopSession({
+    id: 'session-b',
+    runtimeHostId: 'host-b',
+    profileId: 'profile-b',
+    revision: 1,
+    activityAt: 9,
+    model: 'model-b',
+  });
+  const targetAfterWrite = {
+    ...targetBeforeWrite,
+    revision: 2,
+    llmConnectionId: 'connection-c',
+    llmConnectionSlug: 'openai',
+    model: 'model-c',
+  };
+  let controller: Controller | undefined;
+  const render = async (catalogRevision: number, sessions: readonly DesktopSessionSummary[]) => {
+    await act(async () => {
+      root.render(createElement(
+        SessionSettingsServicesProvider,
+        {
+          services: createServices({
+            setModelConfiguration: async () => targetAfterWrite,
+          }),
+        },
+        createElement(CausalRetirementHarness, {
+          capture: (next) => {
+            controller = next;
+          },
+          catalogRevision,
+          sessions,
+        }),
+      ));
+    });
+  };
+
+  await render(0, [targetBeforeWrite, otherHostSession]);
+  await act(async () => {
+    assert.equal(await controller!.setSessionModel('session-a', {
+      llmConnectionId: 'connection-c',
+      llmConnectionSlug: 'openai',
+      model: 'model-c',
+    }), true);
+  });
+  assert.equal(controller!.overlays.modelConfiguration['session-a']?.modelTarget.model, 'model-c');
+
+  // Host B advances the renderer-wide catalog while unavailable Host A retains
+  // its old row. That global advance is not evidence that Host A observed the write.
+  const partialCatalog = reconcileRuntimeHostSessionCatalog(
+    [targetBeforeWrite, otherHostSession],
+    {
+      sessions: [{ ...otherHostSession, revision: 2, activityAt: 20 }],
+      completeHostIds: ['host-b'],
+      knownProfileIds: ['profile-a', 'profile-b'],
+    },
+  );
+  await render(1, partialCatalog);
+  assert.equal(controller!.overlays.modelConfiguration['session-a']?.modelTarget.model, 'model-c');
+
+  const caughtUpCatalog = reconcileRuntimeHostSessionCatalog(partialCatalog, {
+    sessions: [
+      { ...otherHostSession, revision: 2, activityAt: 20 },
+      { ...targetAfterWrite, activityAt: 21 },
+    ],
+    completeHostIds: ['host-a', 'host-b'],
+    knownProfileIds: ['profile-a', 'profile-b'],
+  });
+  await render(2, caughtUpCatalog);
+  assert.equal(controller!.overlays.modelConfiguration['session-a'], undefined);
+});
+
 async function mountController(overrides: {
   services?: SessionSettingsServices;
   owner?: { sessionId?: string };
-  sessions?: readonly SessionSummary[];
+  sessions?: readonly DesktopSessionSummary[];
   setNewTaskPermissionMode?(mode: 'ask' | 'bypass'): void;
   confirmBypass?(): Promise<boolean>;
   saveComposerDefaults?(model: {
@@ -240,7 +338,7 @@ async function mountController(overrides: {
 function Harness(props: {
   capture(controller: Controller): void;
   owner: { sessionId?: string };
-  sessions: readonly SessionSummary[];
+  sessions: readonly DesktopSessionSummary[];
   setNewTaskPermissionMode(mode: 'ask' | 'bypass'): void;
   confirmBypass(): Promise<boolean>;
   saveComposerDefaults(model: {
@@ -268,11 +366,57 @@ function Harness(props: {
   return null;
 }
 
+function CausalRetirementHarness(props: {
+  capture(controller: Controller): void;
+  catalogRevision: number;
+  sessions: readonly DesktopSessionSummary[];
+}) {
+  const controller = useSessionSettingIntent({
+    catalogRevision: props.catalogRevision,
+    isActiveSession: () => true,
+    sessions: props.sessions,
+    newTaskPermissionMode: 'ask',
+    refreshCatalog: async () => {},
+    saveComposerDefaults: () => {},
+    writeFailureCopy: () => ({ title: 'failed', description: 'failed' }),
+    showSessionError: () => {},
+    planMode: { write: async () => true },
+    captureOwner: () => ({}),
+    isOwnerActive: () => true,
+    setNewTaskPermissionMode: () => {},
+    confirmBypass: async () => true,
+  });
+  props.capture(controller);
+  return null;
+}
+
+function desktopSession(input: {
+  id: string;
+  runtimeHostId: string;
+  profileId: string;
+  revision: number;
+  activityAt: number;
+  model: string;
+}): DesktopSessionSummary {
+  return {
+    id: input.id,
+    runtimeHostId: input.runtimeHostId,
+    profileId: input.profileId,
+    profileName: input.profileId,
+    profileKind: 'local',
+    revision: input.revision,
+    activityAt: input.activityAt,
+    llmConnectionId: 'connection-a',
+    llmConnectionSlug: 'openai',
+    model: input.model,
+  } as DesktopSessionSummary;
+}
+
 function createServices(
   overrides: Partial<SessionSettingsServices> = {},
 ): SessionSettingsServices {
   return {
-    setModelConfiguration: async () => ({} as SessionSummary),
+    setModelConfiguration: async () => ({} as DesktopSessionSummary),
     setPermissionMode: async () => ({} as SessionSummary),
     setOrchestrationMode: async () => ({} as SessionSummary),
     ...overrides,
