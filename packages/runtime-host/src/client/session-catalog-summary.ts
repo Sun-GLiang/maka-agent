@@ -22,10 +22,9 @@ import type { SessionCatalogProjection } from '../protocol/session-catalog.js';
 
 export function projectSessionCatalogSummary(
   session: SessionCatalogProjection,
-): SessionCatalogSummary & { readonly revision: number } {
+): SessionCatalogSummary {
   return {
     id: session.id,
-    revision: session.revision,
     cwd: session.workspace.hostCwd,
     ...(session.workspace.target.kind === 'project'
       ? { projectId: session.workspace.target.projectId }

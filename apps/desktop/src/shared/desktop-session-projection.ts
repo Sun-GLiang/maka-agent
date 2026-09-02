@@ -47,6 +47,8 @@ export interface DesktopSessionSummary extends SessionSummary {
   readonly shared?: true;
 }
 
+export type DesktopSessionSummaryInput = SessionSummary & { readonly revision: number };
+
 export interface DesktopSessionHost extends DesktopHostRef {
   readonly profileId: string;
   readonly profileName: string;
@@ -201,11 +203,11 @@ export function projectDesktopTurnRecord(
 
 export function projectDesktopSessionSummary(
   host: DesktopSessionHost,
-  session: SessionSummary & { readonly revision?: number },
+  session: DesktopSessionSummaryInput,
 ): DesktopSessionSummary {
   return {
     ...session,
-    revision: session.revision ?? 0,
+    revision: session.revision,
     id: projectSessionId(host, session.id),
     ...(session.parentSessionId === undefined
       ? {}

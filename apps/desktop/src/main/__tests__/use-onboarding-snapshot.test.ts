@@ -265,7 +265,7 @@ describe('onboarding mounted snapshot handoff', () => {
           profileId: 'local',
           profileName: 'Local',
           profileKind: 'local',
-          revision: 0,
+          revision: 1,
           id: 'created-during-bootstrap',
           name: 'New session',
           isFlagged: false,
