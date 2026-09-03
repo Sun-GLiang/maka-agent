@@ -19,7 +19,7 @@
 
 import { PROMPT_RAIL_PROMPT_COUNT } from '../src/main/e2e-fixture/seed-helpers';
 import { DESKTOP_TRANSCRIPT_ACTIVE_RANGE_MAX_TURNS } from '../src/preload/transcript-contract';
-import { ensureSidebarExpanded, expect, test } from './fixtures';
+import { COMPOSER_INPUT, ensureSidebarExpanded, expect, test } from './fixtures';
 import type { Page } from '@playwright/test';
 
 const MAX_PROMPT_RAIL_TICKS = 64;
@@ -418,6 +418,78 @@ test('manual transcript scrolling keeps exactly the visible prompt current', asy
   });
   expect(currentCounts.length).toBeGreaterThan(1);
   expect(currentCounts.every((count) => count === 1), currentCounts.join(',')).toBe(true);
+});
+
+test('streaming deltas do not reconstruct the prompt rail observer', async ({
+  window: page,
+}) => {
+  const composer = page.locator(COMPOSER_INPUT);
+  const sendAndSettle = async (prompt: string, expectedTurns: number): Promise<void> => {
+    await composer.fill(prompt);
+    await composer.press('Enter');
+    await expect(page.getByRole('button', { name: '重新生成' })).toHaveCount(expectedTurns, {
+      timeout: 20_000,
+    });
+  };
+  await sendAndSettle('First prompt rail observer seed', 1);
+  await sendAndSettle('Second prompt rail observer seed', 2);
+
+  await page.evaluate(() => {
+    const NativeIntersectionObserver = window.IntersectionObserver;
+    const state: {
+      constructions: number;
+      initialConstructions: number | null;
+    } = { constructions: 0, initialConstructions: null };
+    window.IntersectionObserver = class extends NativeIntersectionObserver {
+      constructor(
+        callback: IntersectionObserverCallback,
+        options?: IntersectionObserverInit,
+      ) {
+        super(callback, options);
+        if (
+          options?.root === document.querySelector('[data-chat-scroll-container="true"]')
+          && options.rootMargin === '0px 0px -66% 0px'
+        ) {
+          state.constructions += 1;
+          state.initialConstructions ??= state.constructions;
+        }
+      }
+    };
+    Object.assign(window, { __makaPromptRailObserverProbe: state });
+  });
+
+  const streamingPrompt = Array.from(
+    { length: 40 },
+    (_, index) => `Observer stability line ${index + 1}`,
+  ).join('\n');
+  await composer.fill(streamingPrompt);
+  await composer.press('Enter');
+
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & {
+      __makaPromptRailObserverProbe?: { constructions: number };
+    }
+  ).__makaPromptRailObserverProbe?.constructions ?? 0), {
+    message: 'the third Turn creates the prompt rail observer',
+  }).toBeGreaterThan(0);
+
+  // The fake backend emits nine characters per delta, so reaching the last
+  // line proves many same-Turn text updates landed after observer creation.
+  await expect(page.getByRole('log').getByText(
+    /Fake backend received:[\s\S]*Observer stability line 40/,
+  )).toBeVisible({
+    timeout: 20_000,
+  });
+
+  const settled = await page.evaluate(() => ({ ...(
+    window as Window & {
+      __makaPromptRailObserverProbe: {
+        constructions: number;
+        initialConstructions: number | null;
+      };
+    }
+  ).__makaPromptRailObserverProbe }));
+  expect(settled.constructions).toBe(settled.initialConstructions);
 });
 
 test('active transcript Turns keep stable DOM identities while scrolling', async ({
