@@ -17,8 +17,6 @@
  * under the License.
  */
 
-import { truncateUtf8 } from '@maka/core/diagnostic-log';
-import { redactSecrets } from '@maka/core/redaction';
 import type { RootTurnAdmissionAuthorization } from '@maka/storage/execution-stores';
 import {
   HOST_OPERATION_SPECS,
@@ -57,6 +55,7 @@ import { PLAN_OPERATION_SPECS } from '../protocol/plan.js';
 import { PROJECT_CATALOG_OPERATION_SPECS } from '../protocol/project-catalog.js';
 import { RUNTIME_POLICY_OPERATION_SPECS } from '../protocol/runtime-policy.js';
 import { RUNTIME_RESOURCE_OPERATION_SPECS } from '../protocol/runtime-resource.js';
+import { boundedFailureDiagnostic } from './failure-diagnostic.js';
 import { SCHEDULED_TASK_OPERATION_SPECS } from '../protocol/scheduled-task.js';
 import { SESSION_CATALOG_OPERATION_SPECS } from '../protocol/session-catalog.js';
 import { SESSION_CONTINUITY_OPERATION_SPECS } from '../protocol/session-continuity.js';
@@ -365,7 +364,7 @@ async function dispatchTypedOperation<K extends OperationKey>(
     outcome = decodeOperationOutcome(request.operation, await handler(request.input, context));
   } catch (error) {
     console.error(
-      `[runtime-host] unexpected ${request.operation} failure: ${boundedUnexpectedFailure(error)}`,
+      `[runtime-host] unexpected ${request.operation} failure: ${boundedFailureDiagnostic(error)}`,
     );
     return operationFailureResponse(
       request as RequestFrame,
@@ -386,10 +385,4 @@ async function dispatchTypedOperation<K extends OperationKey>(
         ok: false,
         error: outcome.error,
       };
-}
-
-function boundedUnexpectedFailure(error: unknown): string {
-  const details =
-    error instanceof Error ? error.stack || `${error.name}: ${error.message}` : String(error);
-  return truncateUtf8(redactSecrets(details), 8 * 1024, '\n<diagnostic truncated>');
 }

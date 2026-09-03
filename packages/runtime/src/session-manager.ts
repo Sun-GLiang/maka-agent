@@ -3585,9 +3585,11 @@ export class SessionManager {
     const hostedAuthority = isRuntimeHostedRootAuthority(this.deps.messageAuthority)
       ? this.deps.messageAuthority
       : undefined;
-    const ownStop = hostedAuthority
-      ? hostedAuthority.stopSession(sessionId, input)
-      : this.runtimeKernel.stopSession(sessionId, input);
+    const ownStop = observeSettlement(
+      hostedAuthority
+        ? hostedAuthority.stopSession(sessionId, input)
+        : this.runtimeKernel.stopSession(sessionId, input),
+    );
     let childStops: PromiseSettledResult<void>[] = [];
     let childLookupError: unknown;
     try {
@@ -3604,7 +3606,8 @@ export class SessionManager {
     } catch (error) {
       childLookupError = error;
     }
-    await ownStop;
+    const ownStopResult = await ownStop;
+    if (ownStopResult.status === 'rejected') throw ownStopResult.reason;
     const childStopError = childStops.find(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     )?.reason;
@@ -5558,6 +5561,13 @@ function boundAgentOutputCollections(
 function tail<T>(items: readonly T[], max: number): T[] {
   if (items.length <= max) return [...items];
   return items.slice(items.length - max);
+}
+
+function observeSettlement<T>(promise: Promise<T>): Promise<PromiseSettledResult<T>> {
+  return promise.then(
+    (value) => ({ status: 'fulfilled', value }),
+    (reason: unknown) => ({ status: 'rejected', reason }),
+  );
 }
 
 function shellRunBashToolCallIds(messages: readonly StoredMessage[]): Set<string> {

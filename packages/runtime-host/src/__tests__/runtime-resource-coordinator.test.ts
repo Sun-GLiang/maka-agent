@@ -227,7 +227,8 @@ describe('Host Runtime Resource coordinator', () => {
     assert.equal(!revoked.ok && revoked.error.code, 'not_found');
   });
 
-  test('drains for canonical state failure but keeps projection failure scoped to its query', async () => {
+  test('drains for canonical state failure but keeps projection failure scoped to its query', async (t) => {
+    t.mock.method(console, 'error', () => {});
     const harness = createHarness();
     harness.updates = [
       resourceUpdate(0, {
@@ -255,6 +256,64 @@ describe('Host Runtime Resource coordinator', () => {
     assert.equal(!unavailable.ok && unavailable.error.code, 'internal_failure');
     assert.equal(harness.drainCount, 1);
     assert.equal(harness.terminateCount, 0);
+  });
+
+  test('requests a canonical state drain only after leaving Session admission', async (t) => {
+    t.mock.method(console, 'error', () => {});
+    let drainAdmission: Promise<void> | undefined;
+    let harness!: ReturnType<typeof createHarness>;
+    harness = createHarness({
+      requestDrain: () => {
+        harness.drainCount += 1;
+        drainAdmission = harness.sessionAdmission.run(SESSION_ID, async () => {});
+        void drainAdmission.catch(() => {});
+      },
+    });
+    harness.stateReadFailure = new Error('canonical state unavailable');
+
+    const result = await harness.coordinator.handlers['runtime.resource.query'](
+      { kind: 'list_start', sessionId: SESSION_ID },
+      connection('connection-1'),
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(!result.ok && result.error.code, 'internal_failure');
+    assert.equal(harness.drainCount, 1);
+    assert.ok(drainAdmission, 'the canonical read failure requests a drain');
+    await assert.doesNotReject(drainAdmission);
+  });
+
+  test('logs a bounded redacted canonical state failure before draining', async (t) => {
+    const logs: string[] = [];
+    let drainCount = 0;
+    let logCountAtDrain = 0;
+    t.mock.method(console, 'error', (...args: unknown[]) => {
+      logs.push(args.map(String).join(' '));
+    });
+    const harness = createHarness({
+      requestDrain: () => {
+        drainCount += 1;
+        logCountAtDrain = logs.length;
+      },
+    });
+    harness.stateReadFailure = new Error(
+      `canonical state unavailable api_key=sk-secretvalue123 ${'x'.repeat(16 * 1024)}`,
+    );
+
+    const result = await harness.coordinator.handlers['runtime.resource.query'](
+      { kind: 'list_start', sessionId: SESSION_ID },
+      connection('connection-1'),
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(!result.ok && result.error.code, 'internal_failure');
+    assert.equal(drainCount, 1);
+    assert.equal(logCountAtDrain, 1);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0] ?? '', /canonical state unavailable/);
+    assert.match(logs[0] ?? '', /\[redacted\]/i);
+    assert.doesNotMatch(logs[0] ?? '', /sk-secretvalue123/);
+    assert.ok(Buffer.byteLength(logs[0] ?? '', 'utf8') < 9 * 1024);
   });
 
   test('fences PTY control by connection and retains only exact sequence retries', async () => {
@@ -705,9 +764,11 @@ describe('Host Runtime Resource coordinator', () => {
 });
 
 function createHarness(
-  options: Pick<
-    HostRuntimeResourceCoordinatorInput,
-    'resolveShell' | 'sessionAccessAuthority'
+  options: Partial<
+    Pick<
+      HostRuntimeResourceCoordinatorInput,
+      'requestDrain' | 'resolveShell' | 'sessionAccessAuthority'
+    >
   > = {},
 ) {
   let backgroundCompletion: ShellRunBashInput['onCompletion'];
