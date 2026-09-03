@@ -290,14 +290,23 @@ export function selectPromptRailTickForMountedTurn(input: {
   if (direct) return direct.turnId;
   const activeIndex = input.mountedTurnIds.indexOf(input.activeTurnId);
   if (activeIndex === -1) return fallbackRailTurnId;
-  const mountedLandmarks = input.mountedTurnIds.flatMap((turnId, mountedIndex) => {
+  const mountedRailTurns = input.mountedTurnIds.flatMap((turnId, mountedIndex) => {
     const railIndex = input.railTurns.findIndex((turn) => turn.turnId === turnId);
-    const sequence = railIndex === -1 ? undefined : input.railTurns[railIndex]?.sequence;
-    return railIndex === -1 || sequence === undefined
-      ? []
-      : [{ mountedIndex, railIndex, sequence }];
+    return railIndex === -1 ? [] : [{ mountedIndex, railIndex }];
   });
-  const sequenceAnchors = [...mountedLandmarks]
+  const nearestMountedRailTurn = [...mountedRailTurns]
+    .sort((left, right) =>
+      Math.abs(left.mountedIndex - activeIndex) - Math.abs(right.mountedIndex - activeIndex)
+      || left.mountedIndex - right.mountedIndex,
+    )[0];
+  const nearestMountedRailTurnId = nearestMountedRailTurn
+    ? input.railTurns[nearestMountedRailTurn.railIndex]?.turnId ?? null
+    : null;
+  const sequenceAnchors = mountedRailTurns
+    .flatMap(({ mountedIndex, railIndex }) => {
+      const sequence = input.railTurns[railIndex]?.sequence;
+      return sequence === undefined ? [] : [{ mountedIndex, railIndex, sequence }];
+    })
     .sort((left, right) =>
       Math.abs(left.mountedIndex - activeIndex) - Math.abs(right.mountedIndex - activeIndex)
       || left.mountedIndex - right.mountedIndex,
@@ -308,7 +317,7 @@ export function selectPromptRailTickForMountedTurn(input: {
   if (!firstAnchor || !secondAnchor) {
     return firstAnchor
       ? input.railTurns[firstAnchor.railIndex]?.turnId ?? null
-      : fallbackRailTurnId;
+      : nearestMountedRailTurnId ?? fallbackRailTurnId;
   }
   const activeSequence = firstAnchor.sequence
     + (secondAnchor.sequence - firstAnchor.sequence)
@@ -458,7 +467,6 @@ export const PromptAnchorRail = memo(function PromptAnchorRail({ turns, scrollRe
     const mountedTurnList = messageList?.firstElementChild;
     if (!root || !mountedTurnList || orderedTurnIds.length === 0) return;
 
-    let observer: IntersectionObserver;
     const idByElement = new Map<Element, string>();
     let mountedTurnIndexById = new Map<string, number>();
     const readingBandTurnIds = new Set<string>();
@@ -537,46 +545,27 @@ export const PromptAnchorRail = memo(function PromptAnchorRail({ turns, scrollRe
       if (active !== null) markActiveTurn(active);
     };
 
-    const createReadingBandObserver = (rootHeight: number): IntersectionObserver =>
-      new IntersectionObserver((entries) => {
-        for (const entry of entries) {
-          const turnId = idByElement.get(entry.target);
-          if (!turnId) continue;
-          if (entry.intersectionRect.height > 0) readingBandTurnIds.add(turnId);
-          else readingBandTurnIds.delete(turnId);
-        }
-        resolveActive();
-      }, {
-        root,
-        // IntersectionObserver resolves percentage root margins against the
-        // root width. A pixel margin derived from its height is what makes this
-        // the same top-34% band as the synchronous geometry path.
-        rootMargin: `0px 0px -${rootHeight * 0.66}px 0px`,
-        // The positive threshold delivers a callback when an overlap becomes
-        // a zero-area boundary touch, which the strict geometry rule excludes.
-        threshold: [0, POSITIVE_INTERSECTION_RATIO],
-      });
-    let observerRootHeight = root.getBoundingClientRect().height;
-    observer = createReadingBandObserver(observerRootHeight);
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const turnId = idByElement.get(entry.target);
+        if (!turnId) continue;
+        if (entry.intersectionRect.height > 0) readingBandTurnIds.add(turnId);
+        else readingBandTurnIds.delete(turnId);
+      }
+      resolveActive();
+    }, {
+      root,
+      rootMargin: '0px 0px -66% 0px',
+      // The positive threshold delivers a callback when an overlap becomes
+      // a zero-area boundary touch, which the strict geometry rule excludes.
+      threshold: [0, POSITIVE_INTERSECTION_RATIO],
+    });
     for (const element of mountedTurnList.querySelectorAll('[data-transcript-turn-id]')) {
       observeElement(element);
     }
     refreshMountedTurnOrder();
     seedReadingBandFromGeometry();
     resolveActive();
-
-    const rootResizeObserver = new ResizeObserver(() => {
-      const nextRootHeight = root.getBoundingClientRect().height;
-      if (nextRootHeight === observerRootHeight) return;
-      observerRootHeight = nextRootHeight;
-      observer.disconnect();
-      readingBandTurnIds.clear();
-      observer = createReadingBandObserver(observerRootHeight);
-      for (const element of idByElement.keys()) observer.observe(element);
-      seedReadingBandFromGeometry();
-      resolveActive();
-    });
-    rootResizeObserver.observe(root);
 
     let membershipFrame = 0;
     let membershipFramesLeft = 0;
@@ -618,7 +607,6 @@ export const PromptAnchorRail = memo(function PromptAnchorRail({ turns, scrollRe
 
     return () => {
       observer.disconnect();
-      rootResizeObserver.disconnect();
       mutationObserver.disconnect();
       root.removeEventListener('scroll', onScroll);
       if (membershipFrame !== 0) cancelAnimationFrame(membershipFrame);

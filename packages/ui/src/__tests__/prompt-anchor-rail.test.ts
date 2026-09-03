@@ -318,6 +318,18 @@ test('one-sided sequence extrapolation cannot skip past the adjacent tick', () =
   }), 'turn-a');
 });
 
+test('a prompt-less mounted tail uses the nearest loaded prompt before the index arrives', () => {
+  assert.equal(selectPromptRailTickForMountedTurn({
+    activeTurnId: 'active',
+    mountedTurnIds: ['turn-a', 'turn-b', 'active'],
+    railTurns: [
+      { turnId: 'turn-a', label: '' },
+      { turnId: 'turn-b', label: '' },
+    ],
+    previousRailTurnId: null,
+  }), 'turn-b');
+});
+
 test('a window without a sampled wrapper preserves its previous current tick', () => {
   assert.equal(selectPromptRailTickForMountedTurn({
     activeTurnId: 'active',

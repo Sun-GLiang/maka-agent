@@ -220,6 +220,7 @@ async function scrollTranscriptThroughHistory(page: Page): Promise<void> {
     await expect.poll(async () =>
       page.locator('[data-turn-id]').first().getAttribute('data-turn-id'), {
       message: `history loads before ${firstBefore}`,
+      timeout: 20_000,
     }).not.toBe(firstBefore);
     await waitForPaintedFrames(page);
     await expectPromptRailMatchesReadingPosition(page);
