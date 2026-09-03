@@ -19,7 +19,6 @@
 
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import type { SessionSummary } from '@maka/core/session';
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { parseHTML } from 'linkedom';
@@ -58,7 +57,7 @@ test('rejects non-chat permission modes before confirmation or persistence', asy
     services: createServices({
       setPermissionMode: async () => {
         permissionWrites += 1;
-        return {} as SessionSummary;
+        return {} as DesktopSessionSummary;
       },
     }),
     setNewTaskPermissionMode: () => {
@@ -88,7 +87,7 @@ test('rejects non-chat permission modes before writing an existing Session', asy
     services: createServices({
       setPermissionMode: async () => {
         permissionWrites += 1;
-        return {} as SessionSummary;
+        return {} as DesktopSessionSummary;
       },
     }),
   });
@@ -287,6 +286,128 @@ test('retains the Model overlay while a partial Host catalog still has the prior
   assert.equal(controller!.overlays.modelConfiguration['session-a'], undefined);
 });
 
+test('retires Permission and Orchestration overlays by their committed Session revisions', async () => {
+  const { document, window } = parseHTML('<div id="root"></div>');
+  Object.assign(globalThis, {
+    document,
+    window,
+    HTMLElement: window.HTMLElement,
+    Node: window.Node,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  const container = document.querySelector('#root');
+  assert.ok(container);
+  const root = createRoot(container);
+  mountedRoot = root;
+
+  const targetBeforeWrite = {
+    ...desktopSession({
+      id: 'session-a',
+      runtimeHostId: 'host-a',
+      profileId: 'profile-a',
+      revision: 1,
+      activityAt: 10,
+      model: 'model-a',
+    }),
+    permissionMode: 'ask' as const,
+    orchestrationMode: 'default' as const,
+  };
+  const otherHostSession = desktopSession({
+    id: 'session-b',
+    runtimeHostId: 'host-b',
+    profileId: 'profile-b',
+    revision: 1,
+    activityAt: 9,
+    model: 'model-b',
+  });
+  const targetAfterPermission = {
+    ...targetBeforeWrite,
+    revision: 2,
+    permissionMode: 'bypass' as const,
+  };
+  const targetAfterOrchestration = {
+    ...targetAfterPermission,
+    revision: 3,
+    orchestrationMode: 'swarm' as const,
+  };
+  let controller: Controller | undefined;
+  const render = async (catalogRevision: number, sessions: readonly DesktopSessionSummary[]) => {
+    await act(async () => {
+      root.render(createElement(
+        SessionSettingsServicesProvider,
+        {
+          services: createServices({
+            setPermissionMode: async () => targetAfterPermission,
+            setOrchestrationMode: async () => targetAfterOrchestration,
+          }),
+        },
+        createElement(CausalRetirementHarness, {
+          capture: (next) => {
+            controller = next;
+          },
+          catalogRevision,
+          sessions,
+        }),
+      ));
+    });
+  };
+
+  await render(0, [targetBeforeWrite, otherHostSession]);
+  await act(async () => {
+    assert.equal(await controller!.setPermissionMode('bypass'), true);
+    assert.equal(await controller!.setOrchestrationMode('session-a', 'swarm'), true);
+  });
+  assert.equal(controller!.overlays.permissionMode['session-a'], 'bypass');
+  assert.equal(controller!.overlays.orchestrationMode['session-a'], 'swarm');
+
+  const partialCatalog = reconcileRuntimeHostSessionCatalog(
+    [targetBeforeWrite, otherHostSession],
+    {
+      sessions: [{ ...otherHostSession, revision: 2, activityAt: 20 }],
+      completeHostIds: ['host-b'],
+      knownProfileIds: ['profile-a', 'profile-b'],
+    },
+  );
+  await render(1, partialCatalog);
+  assert.equal(controller!.overlays.permissionMode['session-a'], 'bypass');
+  assert.equal(controller!.overlays.orchestrationMode['session-a'], 'swarm');
+
+  await render(2, [targetAfterPermission, otherHostSession]);
+  assert.equal(controller!.overlays.permissionMode['session-a'], undefined);
+  assert.equal(controller!.overlays.orchestrationMode['session-a'], 'swarm');
+
+  await render(3, [targetAfterOrchestration, otherHostSession]);
+  assert.equal(controller!.overlays.orchestrationMode['session-a'], undefined);
+});
+
+test('rejects an Orchestration write whose returned summary has a different mode', async () => {
+  const session = {
+    ...desktopSession({
+      id: 'session-1',
+      runtimeHostId: 'host-a',
+      profileId: 'profile-a',
+      revision: 1,
+      activityAt: 10,
+      model: 'model-a',
+    }),
+    orchestrationMode: 'default' as const,
+  };
+  const { controller } = await mountController({
+    sessions: [session],
+    services: createServices({
+      setOrchestrationMode: async () => ({ ...session, revision: 2 }),
+    }),
+  });
+
+  let accepted = true;
+  await act(async () => {
+    accepted = await controller().setOrchestrationMode('session-1', 'swarm');
+  });
+
+  assert.equal(accepted, false);
+  assert.equal(controller().overlays.orchestrationMode['session-1'], undefined);
+});
+
 async function mountController(overrides: {
   services?: SessionSettingsServices;
   owner?: { sessionId?: string };
@@ -384,7 +505,7 @@ function CausalRetirementHarness(props: {
     writeFailureCopy: () => ({ title: 'failed', description: 'failed' }),
     showSessionError: () => {},
     planMode: { write: async () => true },
-    captureOwner: () => ({}),
+    captureOwner: () => ({ sessionId: 'session-a' }),
     isOwnerActive: () => true,
     setNewTaskPermissionMode: () => {},
     confirmBypass: async () => true,
@@ -420,8 +541,8 @@ function createServices(
 ): SessionSettingsServices {
   return {
     setModelConfiguration: async () => ({} as DesktopSessionSummary),
-    setPermissionMode: async () => ({} as SessionSummary),
-    setOrchestrationMode: async () => ({} as SessionSummary),
+    setPermissionMode: async () => ({} as DesktopSessionSummary),
+    setOrchestrationMode: async () => ({} as DesktopSessionSummary),
     ...overrides,
   };
 }

@@ -207,7 +207,6 @@ export function projectDesktopSessionSummary(
 ): DesktopSessionSummary {
   return {
     ...session,
-    revision: session.revision,
     id: projectSessionId(host, session.id),
     ...(session.parentSessionId === undefined
       ? {}

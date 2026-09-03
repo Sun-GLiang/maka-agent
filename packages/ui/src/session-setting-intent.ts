@@ -29,16 +29,33 @@ interface SettingIntent<Value> {
   resolveCompletion(succeeded: boolean): void;
 }
 
+export interface SessionSettingIntentRevisionWriteResult {
+  readonly committed: boolean;
+  readonly sessionRevision: number;
+}
+
 export type SessionSettingIntentWriteResult =
   | boolean
-  | { readonly committed: boolean; readonly sessionRevision: number };
+  | SessionSettingIntentRevisionWriteResult;
 
-export interface SessionSettingIntentChannel<Value> {
+interface SessionSettingIntentChannelBase<Value> {
   isEqual?(left: Value, right: Value): boolean;
-  write(sessionId: string, value: Value): Promise<SessionSettingIntentWriteResult>;
-  catalogSessionRevision?(sessionId: string): number | undefined;
   onWriteError(sessionId: string, error: unknown, attempted: Value): void;
 }
+
+export type SessionSettingIntentChannel<Value> = SessionSettingIntentChannelBase<Value> & (
+  | {
+      write(sessionId: string, value: Value): Promise<boolean>;
+      catalogSessionRevision?: never;
+    }
+  | {
+      write(
+        sessionId: string,
+        value: Value,
+      ): Promise<SessionSettingIntentRevisionWriteResult>;
+      catalogSessionRevision(sessionId: string): number | undefined;
+    }
+);
 
 export interface SessionSettingIntentOptions<Values extends object> {
   catalogRevision: number;
