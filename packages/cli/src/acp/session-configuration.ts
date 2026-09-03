@@ -18,6 +18,11 @@
  */
 
 import type { SessionConfigOption, SetSessionConfigOptionRequest } from '@agentclientprotocol/sdk';
+import { COLLABORATION_MODES, type CollaborationMode } from '@maka/core/collaboration';
+import { THINKING_LEVELS, type ThinkingLevel } from '@maka/core/model-thinking';
+import { ORCHESTRATION_MODES, type OrchestrationMode } from '@maka/core/orchestration';
+import type { PermissionMode } from '@maka/core/permission';
+import { CHAT_DEFAULT_PERMISSION_MODES } from '@maka/core/settings';
 import type {
   SessionCatalogProjection,
   SessionConfigurationPatch,
@@ -30,49 +35,57 @@ interface AcpSessionConfigSpec {
   readonly options: readonly (readonly [string, string])[];
 }
 
+const PERMISSION_NAMES: Readonly<Record<PermissionMode, string>> = {
+  explore: 'Explore',
+  ask: 'Ask',
+  bypass: 'Bypass',
+};
+
+const THINKING_NAMES: Readonly<Record<ThinkingLevel | 'default', string>> = {
+  default: 'Default',
+  off: 'Off',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+};
+
+const COLLABORATION_NAMES: Readonly<Record<CollaborationMode, string>> = {
+  agent: 'Agent',
+  plan: 'Plan',
+};
+
+const ORCHESTRATION_NAMES: Readonly<Record<OrchestrationMode, string>> = {
+  default: 'Default',
+  swarm: 'Swarm',
+  graph: 'Graph',
+};
+
 const PERMISSION_SPEC = {
   id: 'permission_mode',
   name: 'Permission mode',
   category: '_maka/permission_mode',
-  options: [
-    ['explore', 'Explore'],
-    ['ask', 'Ask'],
-    ['bypass', 'Bypass'],
-  ],
+  options: namedOptions(CHAT_DEFAULT_PERMISSION_MODES, PERMISSION_NAMES),
 } as const satisfies AcpSessionConfigSpec;
 const THINKING_SPEC = {
   id: 'thinking_level',
   name: 'Thinking level',
   category: 'thought_level',
-  options: [
-    ['default', 'Default'],
-    ['off', 'Off'],
-    ['minimal', 'Minimal'],
-    ['low', 'Low'],
-    ['medium', 'Medium'],
-    ['high', 'High'],
-    ['xhigh', 'Extra high'],
-    ['max', 'Max'],
-  ],
+  options: namedOptions(['default', ...THINKING_LEVELS], THINKING_NAMES),
 } as const satisfies AcpSessionConfigSpec;
 const COLLABORATION_SPEC = {
   id: 'collaboration_mode',
   name: 'Collaboration mode',
   category: 'mode',
-  options: [
-    ['agent', 'Agent'],
-    ['plan', 'Plan'],
-  ],
+  options: namedOptions(COLLABORATION_MODES, COLLABORATION_NAMES),
 } as const satisfies AcpSessionConfigSpec;
 const ORCHESTRATION_SPEC = {
   id: 'orchestration_mode',
   name: 'Orchestration mode',
   category: '_maka/orchestration_mode',
-  options: [
-    ['default', 'Default'],
-    ['swarm', 'Swarm'],
-    ['graph', 'Graph'],
-  ],
+  options: namedOptions(ORCHESTRATION_MODES, ORCHESTRATION_NAMES),
 } as const satisfies AcpSessionConfigSpec;
 
 const CONFIG_SPECS = [
@@ -84,13 +97,31 @@ const CONFIG_SPECS = [
 
 export function projectAcpSessionConfigOptions(
   session: SessionCatalogProjection,
+  thinkingLevels: readonly ThinkingLevel[],
 ): SessionConfigOption[] {
   return [
     configOption(PERMISSION_SPEC, session.permissionMode),
-    configOption(THINKING_SPEC, session.thinkingLevel ?? 'default'),
+    ...(thinkingLevels.length === 0
+      ? []
+      : [
+          configOption(
+            {
+              ...THINKING_SPEC,
+              options: namedOptions(['default', ...thinkingLevels], THINKING_NAMES),
+            },
+            session.thinkingLevel ?? 'default',
+          ),
+        ]),
     configOption(COLLABORATION_SPEC, session.collaborationMode),
     configOption(ORCHESTRATION_SPEC, session.orchestrationMode),
   ];
+}
+
+function namedOptions<Value extends string>(
+  values: readonly Value[],
+  names: Readonly<Record<Value, string>>,
+): readonly (readonly [Value, string])[] {
+  return values.map((value) => [value, names[value]] as const);
 }
 
 function configOption(spec: AcpSessionConfigSpec, currentValue: string): SessionConfigOption {

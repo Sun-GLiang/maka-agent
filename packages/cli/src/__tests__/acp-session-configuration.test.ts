@@ -74,21 +74,16 @@ function sessionProjection(
 }
 
 test('projects the ordered ACP configuration options', () => {
-  assert.deepEqual(projectAcpSessionConfigOptions(sessionProjection()), [
+  assert.deepEqual(projectAcpSessionConfigOptions(sessionProjection(), ['off', 'low', 'high']), [
     selectOption('permission_mode', 'Permission mode', '_maka/permission_mode', 'ask', [
-      ['explore', 'Explore'],
       ['ask', 'Ask'],
       ['bypass', 'Bypass'],
     ]),
     selectOption('thinking_level', 'Thinking level', 'thought_level', 'default', [
       ['default', 'Default'],
       ['off', 'Off'],
-      ['minimal', 'Minimal'],
       ['low', 'Low'],
-      ['medium', 'Medium'],
       ['high', 'High'],
-      ['xhigh', 'Extra high'],
-      ['max', 'Max'],
     ]),
     selectOption('collaboration_mode', 'Collaboration mode', 'mode', 'agent', [
       ['agent', 'Agent'],
@@ -108,52 +103,59 @@ test('projects the ordered ACP configuration options', () => {
   ]);
 });
 
-test('projects every supported value and normalizes absent thinking level', () => {
+test('projects canonical values and keeps reserved explore as a current value only', () => {
   for (const [configId, values, field] of [
     ['permission_mode', ['explore', 'ask', 'bypass'], 'permissionMode'],
-    [
-      'thinking_level',
-      ['default', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
-      'thinkingLevel',
-    ],
     ['collaboration_mode', ['agent', 'plan'], 'collaborationMode'],
     ['orchestration_mode', ['default', 'swarm', 'graph'], 'orchestrationMode'],
   ] as const) {
     for (const value of values) {
       const overrides: Partial<SessionCatalogProjection> =
-        field === 'thinkingLevel'
-          ? {
-              thinkingLevel:
-                value === 'default'
-                  ? undefined
-                  : (value as SessionCatalogProjection['thinkingLevel']),
-            }
-          : field === 'permissionMode'
-            ? { permissionMode: value as SessionCatalogProjection['permissionMode'] }
-            : field === 'collaborationMode'
-              ? { collaborationMode: value as SessionCatalogProjection['collaborationMode'] }
-              : { orchestrationMode: value as SessionCatalogProjection['orchestrationMode'] };
-      const option = projectAcpSessionConfigOptions(sessionProjection(overrides))[
-        configId === 'permission_mode'
-          ? 0
-          : configId === 'thinking_level'
-            ? 1
-            : configId === 'collaboration_mode'
-              ? 2
-              : 3
+        field === 'permissionMode'
+          ? { permissionMode: value as SessionCatalogProjection['permissionMode'] }
+          : field === 'collaborationMode'
+            ? { collaborationMode: value as SessionCatalogProjection['collaborationMode'] }
+            : { orchestrationMode: value as SessionCatalogProjection['orchestrationMode'] };
+      const option = projectAcpSessionConfigOptions(sessionProjection(overrides), ['low'])[
+        configId === 'permission_mode' ? 0 : configId === 'collaboration_mode' ? 2 : 3
       ];
       assert.equal(option.currentValue, value);
     }
   }
-  assert.equal(
-    projectAcpSessionConfigOptions(sessionProjection({ thinkingLevel: 'off' }))[1].currentValue,
-    'off',
+  const permission = projectAcpSessionConfigOptions(
+    sessionProjection({ permissionMode: 'explore' }),
+    ['low'],
+  )[0];
+  assert.equal(permission.currentValue, 'explore');
+  assert.deepEqual(permission.options, [
+    { value: 'ask', name: 'Ask' },
+    { value: 'bypass', name: 'Bypass' },
+  ]);
+});
+
+test('projects only the current model thinking levels and omits the switch when empty', () => {
+  const levels = ['minimal', 'high', 'max'] as const;
+  const option = projectAcpSessionConfigOptions(
+    sessionProjection({ thinkingLevel: 'high' }),
+    levels,
+  )[1];
+  assert.deepEqual(
+    option,
+    selectOption('thinking_level', 'Thinking level', 'thought_level', 'high', [
+      ['default', 'Default'],
+      ['minimal', 'Minimal'],
+      ['high', 'High'],
+      ['max', 'Max'],
+    ]),
+  );
+  assert.deepEqual(
+    projectAcpSessionConfigOptions(sessionProjection(), []).map(({ id }) => id),
+    ['permission_mode', 'collaboration_mode', 'orchestration_mode'],
   );
 });
 
 test('validates requests and creates exact one-field patches', () => {
   const cases = [
-    ['permission_mode', 'explore', { permissionMode: 'explore' }],
     ['permission_mode', 'ask', { permissionMode: 'ask' }],
     ['permission_mode', 'bypass', { permissionMode: 'bypass' }],
     ['thinking_level', 'default', { thinkingLevel: null }],
@@ -187,6 +189,11 @@ test('rejects unsupported config ids, boolean values, and unsupported strings', 
     ],
     [
       { sessionId: 'session-1', configId: 'permission_mode', value: 'invalid' },
+      'value',
+      'unsupported',
+    ],
+    [
+      { sessionId: 'session-1', configId: 'permission_mode', value: 'explore' },
       'value',
       'unsupported',
     ],

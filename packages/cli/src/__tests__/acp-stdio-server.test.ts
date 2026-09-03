@@ -90,6 +90,7 @@ describe('Maka ACP stdio server', () => {
           created = sessionProjection({ id: sessionId });
           return created;
         }
+        if (operation === 'connection.catalog.query') return connectionCatalogPage();
         if (operation === 'session.catalog.query') {
           assert.ok(created);
           return { kind: 'session', session: created };
@@ -179,8 +180,10 @@ describe('Maka ACP stdio server', () => {
     );
     assert.deepEqual(lifecycle, [
       'session.create',
+      'connection.catalog.query',
       'session.catalog.query',
       'session.configuration.update',
+      'connection.catalog.query',
       'connection.close',
     ]);
     assert.equal('subscribe' in connection, false);
@@ -321,6 +324,49 @@ function createHarness(
         .split('\n')
         .filter(Boolean)
         .map((line) => JSON.parse(line) as unknown),
+  };
+}
+
+function connectionCatalogPage() {
+  return {
+    kind: 'page' as const,
+    revision: 1,
+    defaultTarget: { connectionId: 'connection-1', model: 'default' },
+    connectionCount: 1,
+    items: [
+      {
+        kind: 'connection' as const,
+        connectionIndex: 0,
+        connectionId: 'connection-1',
+        revision: 1,
+        slug: 'default',
+        name: 'Default',
+        providerType: 'openai' as const,
+        enabled: true,
+        enabledModelIdCount: 1,
+        modelCount: 0,
+        catalogEntryCount: 1,
+      },
+      {
+        kind: 'enabled_model_id' as const,
+        connectionIndex: 0,
+        itemIndex: 0,
+        modelId: 'default',
+      },
+      {
+        kind: 'catalog_entry' as const,
+        connectionIndex: 0,
+        itemIndex: 0,
+        entry: {
+          id: 'default',
+          canUseAsChatDefault: true,
+          isDefault: true,
+          supportsVision: false,
+          thinkingLevels: ['low', 'high'] as const,
+        },
+      },
+    ],
+    nextCursor: null,
   };
 }
 

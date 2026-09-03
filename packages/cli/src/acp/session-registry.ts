@@ -26,10 +26,12 @@ import {
   type ListSessionsResponse,
   type NewSessionRequest,
   type NewSessionResponse,
+  type SessionConfigOption,
   type SetSessionConfigOptionRequest,
   type SetSessionConfigOptionResponse,
 } from '@agentclientprotocol/sdk';
 import {
+  readRuntimeHostConnectionCatalog,
   readRuntimeHostSessionCatalogPage,
   RuntimeHostCatalogReadError,
   RuntimeHostOperationError,
@@ -41,9 +43,13 @@ import {
 import {
   SESSION_CATALOG_CURSOR_MAX_BYTES,
   SESSION_CATALOG_CWD_MAX_BYTES,
-  type SessionCatalogItem,
   type SessionCatalogProjection,
 } from '@maka/runtime-host/protocol';
+import {
+  RuntimeHostSessionUpdateError,
+  requireRuntimeHostSessionProjection,
+  updateRuntimeHostSession,
+} from '../runtime-host-session-update.js';
 import {
   AcpSessionConfigInputError,
   createAcpSessionConfigPatch,
@@ -52,9 +58,9 @@ import {
 } from './session-configuration.js';
 
 const ACP_SESSION_CURSOR_MAX_BYTES = 8 * 1024;
-const ACP_SESSION_CONFIGURATION_MAX_ATTEMPTS = 3;
 
 type AcpSessionRegistryOperation =
+  | 'connection.catalog.query'
   | 'session.create'
   | 'session.catalog.query'
   | 'session.configuration.update';
@@ -137,75 +143,58 @@ export class AcpSessionRegistry {
     } catch (error) {
       throw requestErrorFromRuntimeHost(error, 'session.create', { sessionId });
     }
-    const created = requireConfigurableSession(result, 'session.create');
+    let created: SessionCatalogProjection;
+    try {
+      created = requireRuntimeHostSessionProjection(result, 'session.create');
+    } catch (error) {
+      throw requestErrorFromSessionUpdate(error, 'session.create', { sessionId });
+    }
+    const configOptions = await this.#projectConfigOptions(connection, created);
     this.#ownedSessionIds.add(sessionId);
-    return { sessionId, configOptions: projectAcpSessionConfigOptions(created) };
+    return { sessionId, configOptions };
   }
 
   async #setConfigOption(
     params: SetSessionConfigOptionRequest & { readonly value: string },
   ): Promise<SetSessionConfigOptionResponse> {
     const connection = await this.#getConnection('session.configuration.update');
-    for (let attempt = 0; attempt < ACP_SESSION_CONFIGURATION_MAX_ATTEMPTS; attempt += 1) {
-      if (this.#closing) throw registryClosedError('session.configuration.update');
-      const current = await this.#getConfigurableSession(connection, params.sessionId);
-      if (this.#closing) throw registryClosedError('session.configuration.update');
-      let result;
-      try {
-        result = await connection.request('session.configuration.update', {
-          sessionId: params.sessionId,
-          expectedRevision: current.revision,
-          patch: createAcpSessionConfigPatch(params),
-        });
-      } catch (error) {
-        throw requestErrorFromRuntimeHost(error, 'session.configuration.update');
-      }
-      if (result.kind === 'committed') {
-        const committed = requireConfigurableSession(
-          result.session,
-          'session.configuration.update',
-        );
-        return { configOptions: projectAcpSessionConfigOptions(committed) };
-      }
+    let committed: SessionCatalogProjection;
+    try {
+      committed = await updateRuntimeHostSession(
+        connection,
+        params.sessionId,
+        (current) =>
+          connection.request('session.configuration.update', {
+            sessionId: params.sessionId,
+            expectedRevision: current.revision,
+            patch: createAcpSessionConfigPatch(params),
+          }),
+        {
+          operation: 'session.configuration.update',
+          assertRequestAllowed: () => this.#assertOpen('session.configuration.update'),
+        },
+      );
+    } catch (error) {
+      throw requestErrorFromSessionUpdate(error, 'session.configuration.update');
     }
-    throw RequestError.internalError(
-      {
-        source: 'runtime_host',
-        operation: 'session.configuration.update',
-        code: 'revision_conflict',
-        attempts: ACP_SESSION_CONFIGURATION_MAX_ATTEMPTS,
-      },
-      'Session configuration kept changing',
-    );
+    return { configOptions: await this.#projectConfigOptions(connection, committed) };
   }
 
-  async #getConfigurableSession(
+  async #projectConfigOptions(
     connection: AcpSessionRegistryConnection,
-    sessionId: string,
-  ): Promise<SessionCatalogProjection> {
-    let result;
+    session: SessionCatalogProjection,
+  ): Promise<SessionConfigOption[]> {
+    let catalog;
     try {
-      result = await connection.request('session.catalog.query', { kind: 'get', sessionId });
+      catalog = await readRuntimeHostConnectionCatalog(connection);
     } catch (error) {
-      throw requestErrorFromRuntimeHost(error, 'session.catalog.query');
+      throw requestErrorFromRuntimeHost(error, 'connection.catalog.query');
     }
-    if (result.kind !== 'session') {
-      throw requestErrorFromRuntimeHost(
-        new RuntimeHostCatalogReadError('session', 'invalid_projection'),
-        'session.catalog.query',
-      );
-    }
-    if (result.session === null) {
-      throw RequestError.invalidParams(
-        {
-          source: 'runtime_host',
-          operation: 'session.catalog.query',
-          code: 'not_found',
-        },
-        'Runtime Host Session was not found',
-      );
-    }
-    return requireConfigurableSession(result.session, 'session.catalog.query');
+    const selectedConnection = catalog.connections.find(
+      ({ connectionId }) => connectionId === session.llmConnectionId,
+    );
+    const selectedModel = selectedConnection?.catalogEntries.find(({ id }) => id === session.model);
+    return projectAcpSessionConfigOptions(session, selectedModel?.thinkingLevels ?? []);
   }
 
   async #list(params: ListSessionsRequest): Promise<ListSessionsResponse> {
@@ -375,19 +364,38 @@ function requestErrorFromConfigInput(error: unknown): RequestError {
   );
 }
 
-function requireConfigurableSession(
-  session: SessionCatalogItem,
+function requestErrorFromSessionUpdate(
+  error: unknown,
   operation: AcpSessionRegistryOperation,
-): SessionCatalogProjection {
-  if (!('kind' in session)) return session;
-  throw RequestError.internalError(
-    {
-      source: 'runtime_host',
-      operation,
-      code: 'unsupported_session_projection',
-    },
-    'Runtime Host Session cannot be represented in ACP',
-  );
+  extra: Record<string, unknown> = {},
+): RequestError {
+  if (error instanceof RequestError) return error;
+  if (!(error instanceof RuntimeHostSessionUpdateError)) {
+    return requestErrorFromRuntimeHost(error, operation, extra);
+  }
+  const common = { source: 'runtime_host', operation: error.operation, ...extra };
+  switch (error.reason) {
+    case 'not_found':
+      return RequestError.invalidParams(
+        { ...common, code: 'not_found' },
+        'Runtime Host Session was not found',
+      );
+    case 'invalid_projection':
+      return RequestError.internalError(
+        { ...common, code: 'catalog_read_failure', reason: 'invalid_projection' },
+        'Runtime Host returned an invalid Session lookup',
+      );
+    case 'unsupported_session_projection':
+      return RequestError.internalError(
+        { ...common, code: 'unsupported_session_projection' },
+        'Runtime Host Session cannot be represented in ACP',
+      );
+    case 'revision_conflict':
+      return RequestError.internalError(
+        { ...common, code: 'revision_conflict', attempts: error.attempts },
+        'Session configuration kept changing',
+      );
+  }
 }
 
 function requestErrorFromRuntimeHost(

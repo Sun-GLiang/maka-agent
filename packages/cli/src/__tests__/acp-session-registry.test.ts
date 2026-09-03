@@ -28,6 +28,7 @@ import {
   type SessionConfigOption,
   type SetSessionConfigOptionRequest,
 } from '@agentclientprotocol/sdk';
+import { THINKING_LEVELS, type ThinkingLevel } from '@maka/core/model-thinking';
 import {
   RuntimeHostOperationError,
   RuntimeHostRequestInterruptedError,
@@ -49,7 +50,6 @@ const DEFAULT_CONFIG_OPTIONS: Array<Extract<SessionConfigOption, { type: 'select
     category: '_maka/permission_mode',
     currentValue: 'ask',
     options: [
-      { value: 'explore', name: 'Explore' },
       { value: 'ask', name: 'Ask' },
       { value: 'bypass', name: 'Bypass' },
     ],
@@ -344,6 +344,7 @@ describe('ACP Session registry', () => {
     const registry = new AcpSessionRegistry({
       connect: async () => {
         const connection = fakeConnection({
+          thinkingLevels: ['low', 'high'],
           request: async (operation, input) => {
             requests.push({ operation, input });
             return created;
@@ -364,12 +365,15 @@ describe('ACP Session registry', () => {
 
     assert.deepEqual(response, {
       sessionId: 'session-configured',
-      configOptions: configOptions({
-        permission_mode: 'explore',
-        thinking_level: 'high',
-        collaboration_mode: 'plan',
-        orchestration_mode: 'swarm',
-      }),
+      configOptions: configOptions(
+        {
+          permission_mode: 'explore',
+          thinking_level: 'high',
+          collaboration_mode: 'plan',
+          orchestration_mode: 'swarm',
+        },
+        ['low', 'high'],
+      ),
     });
     assert.deepEqual(requests, [
       {
@@ -382,6 +386,28 @@ describe('ACP Session registry', () => {
       },
     ]);
     assert.equal(subscriptionOpens, 0);
+    await registry.dispose();
+  });
+
+  test('omits thinking configuration when the selected model declares no levels', async () => {
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          thinkingLevels: [],
+          request: async (operation) => {
+            assert.equal(operation, 'session.create');
+            return catalogSession('session-no-thinking');
+          },
+        }),
+      newSessionId: () => 'session-no-thinking',
+    });
+
+    const response = await registry.create({ cwd: '/workspace', mcpServers: [] });
+
+    assert.deepEqual(
+      response.configOptions?.map(({ id }) => id),
+      ['permission_mode', 'collaboration_mode', 'orchestration_mode'],
+    );
     await registry.dispose();
   });
 
@@ -592,7 +618,7 @@ describe('ACP Session registry', () => {
                   kind: 'committed',
                   session: catalogSession('session-retry', '/workspace', {
                     revision: 3,
-                    permissionMode: 'explore',
+                    permissionMode: 'bypass',
                     collaborationMode: 'plan',
                   }),
                 };
@@ -605,7 +631,7 @@ describe('ACP Session registry', () => {
     await registry.setConfigOption({
       sessionId: 'session-retry',
       configId: 'permission_mode',
-      value: 'explore',
+      value: 'bypass',
     });
 
     assert.deepEqual(
@@ -620,7 +646,7 @@ describe('ACP Session registry', () => {
     assert.deepEqual(requests[4]?.input, {
       sessionId: 'session-retry',
       expectedRevision: 2,
-      patch: { permissionMode: 'explore' },
+      patch: { permissionMode: 'bypass' },
     });
     await registry.dispose();
   });
@@ -1374,12 +1400,59 @@ function fakeConnection(
   overrides: {
     request?: (operation: string, input: unknown) => Promise<unknown>;
     close?: () => Promise<void>;
+    thinkingLevels?: readonly ThinkingLevel[];
   } = {},
 ): AcpSessionRegistryConnection {
   return {
-    request: overrides.request ?? (async () => ({})),
+    request: async (operation, input) =>
+      operation === 'connection.catalog.query'
+        ? connectionCatalogPage(overrides.thinkingLevels ?? THINKING_LEVELS)
+        : (overrides.request?.(operation, input) ?? {}),
     close: overrides.close ?? (async () => undefined),
   } as AcpSessionRegistryConnection;
+}
+
+function connectionCatalogPage(thinkingLevels: readonly ThinkingLevel[]) {
+  return {
+    kind: 'page' as const,
+    revision: 1,
+    defaultTarget: { connectionId: 'connection-1', model: 'default' },
+    connectionCount: 1,
+    items: [
+      {
+        kind: 'connection' as const,
+        connectionIndex: 0,
+        connectionId: 'connection-1',
+        revision: 1,
+        slug: 'default',
+        name: 'Default',
+        providerType: 'openai' as const,
+        enabled: true,
+        enabledModelIdCount: 1,
+        modelCount: 0,
+        catalogEntryCount: 1,
+      },
+      {
+        kind: 'enabled_model_id' as const,
+        connectionIndex: 0,
+        itemIndex: 0,
+        modelId: 'default',
+      },
+      {
+        kind: 'catalog_entry' as const,
+        connectionIndex: 0,
+        itemIndex: 0,
+        entry: {
+          id: 'default',
+          canUseAsChatDefault: true,
+          isDefault: true,
+          supportsVision: false,
+          thinkingLevels,
+        },
+      },
+    ],
+    nextCursor: null,
+  };
 }
 
 function catalogSession(
@@ -1419,8 +1492,18 @@ function configOptions(
       string
     >
   >,
+  thinkingLevels: readonly ThinkingLevel[] = THINKING_LEVELS,
 ): SessionConfigOption[] {
   const options: SessionConfigOption[] = structuredClone(DEFAULT_CONFIG_OPTIONS);
+  const thinking = options.find(({ id }) => id === 'thinking_level');
+  if (thinking?.type === 'select') {
+    thinking.options = thinking.options.flatMap((option) =>
+      'value' in option &&
+      (option.value === 'default' || thinkingLevels.includes(option.value as ThinkingLevel))
+        ? [option]
+        : [],
+    );
+  }
   for (const option of options) {
     if (option.type !== 'select') continue;
     option.currentValue = values[option.id as keyof typeof values] ?? option.currentValue;

@@ -158,7 +158,6 @@ describe('Maka ACP child process', () => {
             (first.configOptions ?? []).map((option) => [option.id, option.currentValue]),
             [
               ['permission_mode', 'ask'],
-              ['thinking_level', 'default'],
               ['collaboration_mode', 'agent'],
               ['orchestration_mode', 'default'],
             ],
@@ -172,7 +171,6 @@ describe('Maka ACP child process', () => {
             (configured.configOptions ?? []).map((option) => [option.id, option.currentValue]),
             [
               ['permission_mode', 'ask'],
-              ['thinking_level', 'default'],
               ['collaboration_mode', 'plan'],
               ['orchestration_mode', 'default'],
             ],
@@ -218,6 +216,76 @@ describe('Maka ACP child process', () => {
         }
       },
       { startRuntimeHost: true },
+    );
+  });
+
+  test('configures every advertised option for a reasoning model through a real Runtime Host', {
+    timeout: 30_000,
+  }, async () => {
+    await withAcpChildProcessHarness(
+      async (harness) => {
+        await harness.withClient(async ({ context }) => {
+          await context.request(methods.agent.initialize, { protocolVersion: 1 });
+          const created = await context.request(methods.agent.session.new, {
+            cwd: harness.workspaceRoot,
+            mcpServers: [],
+          });
+          assert.deepEqual(
+            (created.configOptions ?? []).map(({ id, currentValue }) => [id, currentValue]),
+            [
+              ['permission_mode', 'ask'],
+              ['thinking_level', 'default'],
+              ['collaboration_mode', 'agent'],
+              ['orchestration_mode', 'default'],
+            ],
+          );
+          const permission = created.configOptions?.find(({ id }) => id === 'permission_mode');
+          assert.ok(permission?.type === 'select');
+          assert.deepEqual(
+            permission.options.flatMap((option) => ('value' in option ? [option.value] : [])),
+            ['ask', 'bypass'],
+          );
+          const thinking = created.configOptions?.find(({ id }) => id === 'thinking_level');
+          assert.ok(thinking?.type === 'select');
+          assert.deepEqual(
+            thinking.options.flatMap((option) => ('value' in option ? [option.value] : [])),
+            ['default', 'low', 'high'],
+          );
+
+          let configuredOptions = created.configOptions;
+          for (const [configId, value] of [
+            ['permission_mode', 'bypass'],
+            ['thinking_level', 'high'],
+            ['collaboration_mode', 'plan'],
+            ['orchestration_mode', 'swarm'],
+          ] as const) {
+            configuredOptions = (
+              await context.request(methods.agent.session.setConfigOption, {
+                sessionId: created.sessionId,
+                configId,
+                value,
+              })
+            ).configOptions;
+          }
+          assert.deepEqual(
+            (configuredOptions ?? []).map(({ id, currentValue }) => [id, currentValue]),
+            [
+              ['permission_mode', 'bypass'],
+              ['thinking_level', 'high'],
+              ['collaboration_mode', 'plan'],
+              ['orchestration_mode', 'swarm'],
+            ],
+          );
+        });
+
+        await harness.closeStdin();
+        assert.deepEqual(await harness.waitForExit(), { code: 0, signal: null });
+        assert.equal(harness.stderr, '');
+      },
+      {
+        startRuntimeHost: true,
+        model: { id: 'relay-reasoner', thinkingLevels: ['low', 'high'] },
+      },
     );
   });
 
