@@ -281,11 +281,14 @@ export function selectPromptRailTickForMountedTurn(input: {
   mountedTurnIds: readonly string[];
   railTurns: readonly PromptAnchorRailTurn[];
   previousRailTurnId: string | null;
+  atEnd: boolean;
 }): string | null {
   const previousRailTurnId = input.railTurns.some(
     (turn) => turn.turnId === input.previousRailTurnId,
   ) ? input.previousRailTurnId : null;
-  const fallbackRailTurnId = previousRailTurnId ?? input.railTurns[0]?.turnId ?? null;
+  const fallbackRailTurnId = input.atEnd
+    ? input.railTurns.at(-1)?.turnId ?? null
+    : previousRailTurnId ?? input.railTurns[0]?.turnId ?? null;
   const direct = input.railTurns.find((turn) => turn.turnId === input.activeTurnId);
   if (direct) return direct.turnId;
   const activeIndex = input.mountedTurnIds.indexOf(input.activeTurnId);
@@ -368,15 +371,21 @@ export function selectPromptRailTickForMountedTurn(input: {
 /** Right-edge rail: bounded prompt landmarks that scroll to `[data-turn-id]`. */
 export const PromptAnchorRail = memo(function PromptAnchorRail({ turns, scrollRef, onNavigateFallback, onNavigateStart }: PromptAnchorRailProps): React.ReactElement | null {
   const copy = getConversationCopy(useUiLocale()).sessions;
-  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
+  const [activeSelection, setActiveSelection] = useState<{
+    turnId: string;
+    atEnd: boolean;
+  } | null>(null);
+  const activeTurnId = activeSelection?.turnId ?? null;
   const [mountedTurnIds, setMountedTurnIds] = useState<readonly string[]>([]);
   const [safeArea, setSafeArea] = useState<{ scrollport: number; dock: number } | null>(null);
   const railRef = useRef<HTMLElement | null>(null);
   const previousActiveRailTurnIdRef = useRef<string | null>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const activeVisibilityFrame = useRef(0);
-  const markActiveTurn = useCallback((turnId: string) => {
-    setActiveTurnId((current) => current === turnId ? current : turnId);
+  const markActiveTurn = useCallback((turnId: string, atEnd = false) => {
+    setActiveSelection((current) =>
+      current?.turnId === turnId && current.atEnd === atEnd ? current : { turnId, atEnd },
+    );
   }, []);
   // Identified by a sequence number rather than a boolean so a second click
   // during a jump starts its own claim instead of inheriting what is left of
@@ -429,6 +438,7 @@ export const PromptAnchorRail = memo(function PromptAnchorRail({ turns, scrollRe
       mountedTurnIds,
       railTurns,
       previousRailTurnId: previousActiveRailTurnIdRef.current,
+      atEnd: activeSelection?.atEnd ?? false,
     });
   })();
   const activeRailTurnId = mappedActiveRailTurnId
@@ -542,7 +552,7 @@ export const PromptAnchorRail = memo(function PromptAnchorRail({ turns, scrollRe
           : [],
         turnIndexById: mountedTurnIndexById,
       });
-      if (active !== null) markActiveTurn(active);
+      if (active !== null) markActiveTurn(active, atEnd);
     };
 
     const observer = new IntersectionObserver((entries) => {

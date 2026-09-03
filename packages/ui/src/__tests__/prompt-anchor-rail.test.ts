@@ -285,6 +285,7 @@ test('an unsampled mounted Turn maps through the two nearest durable landmarks',
     mountedTurnIds: ['turn-66', 'turn-67', 'turn-68', 'turn-69'],
     railTurns,
     previousRailTurnId: 'turn-67',
+    atEnd: false,
   }), 'turn-65');
 });
 
@@ -300,6 +301,7 @@ test('uneven sequence gaps choose a nearby real landmark instead of a linear tic
     mountedTurnIds: ['turn-b', 'active', 'turn-c'],
     railTurns,
     previousRailTurnId: 'turn-b',
+    atEnd: false,
   }), 'turn-c');
 });
 
@@ -315,6 +317,7 @@ test('one-sided sequence extrapolation cannot skip past the adjacent tick', () =
     mountedTurnIds: ['active', 'turn-b', 'turn-c'],
     railTurns,
     previousRailTurnId: 'turn-d',
+    atEnd: false,
   }), 'turn-a');
 });
 
@@ -327,6 +330,20 @@ test('a prompt-less mounted tail uses the nearest loaded prompt before the index
       { turnId: 'turn-b', label: '' },
     ],
     previousRailTurnId: null,
+    atEnd: true,
+  }), 'turn-b');
+});
+
+test('a prompt-less tail without a mounted landmark uses the final rail tick', () => {
+  assert.equal(selectPromptRailTickForMountedTurn({
+    activeTurnId: 'active',
+    mountedTurnIds: ['active'],
+    railTurns: [
+      { turnId: 'turn-a', label: '', sequence: 0 },
+      { turnId: 'turn-b', label: '', sequence: 10 },
+    ],
+    previousRailTurnId: null,
+    atEnd: true,
   }), 'turn-b');
 });
 
@@ -339,6 +356,7 @@ test('a window without a sampled wrapper preserves its previous current tick', (
       { turnId: 'turn-b', label: '', sequence: 10 },
     ],
     previousRailTurnId: 'turn-a',
+    atEnd: false,
   }), 'turn-a');
 });
 
@@ -351,6 +369,7 @@ test('a window without landmarks replaces a stale current with a current rail ti
       { turnId: 'turn-b', label: '', sequence: 10 },
     ],
     previousRailTurnId: 'stale-turn',
+    atEnd: false,
   }), 'turn-a');
 });
 
