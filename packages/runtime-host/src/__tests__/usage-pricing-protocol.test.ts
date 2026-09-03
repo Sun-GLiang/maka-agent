@@ -41,6 +41,7 @@ import {
   decodeUsageSnapshotReleaseInput,
   decodeUsageSnapshotReleaseResult,
   decodeUsageQueryInput,
+  decodeUsageQueryResult,
   encodePricingQueryResult,
   encodeProtocolMessage,
   PRICING_PAGE_MAX_BYTES,
@@ -50,6 +51,7 @@ import {
   USAGE_PAGE_MAX_BYTES,
   USAGE_PAGE_MAX_ITEMS,
   USAGE_PROJECTION_TEXT_MAX_BYTES,
+  USAGE_SNAPSHOT_ACTIVITY_MAX_ITEMS,
   type EffectivePricingEntry,
   type LlmUsageLogProjection,
   type ToolUsageLogProjection,
@@ -244,6 +246,23 @@ describe('Usage/Pricing protocol', () => {
     ]) {
       assert.throws(() => usageResponse(result), invalidFrame);
     }
+  });
+
+  test('rejects Usage snapshot totals above the activity maximum', () => {
+    assert.throws(
+      () =>
+        decodeUsageQueryResult({
+          kind: 'snapshot_logs',
+          revision: 'snapshot-revision-1',
+          source: 'llm',
+          rows: [validLog()],
+          offset: 0,
+          total: USAGE_SNAPSHOT_ACTIVITY_MAX_ITEMS + 1,
+          nextOffset: 1,
+          truncated: true,
+        }),
+      invalidFrame,
+    );
   });
 
   test('decodes revision-pinned Usage snapshot start, log, and pricing pages', () => {

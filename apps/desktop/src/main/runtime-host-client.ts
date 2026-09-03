@@ -155,6 +155,7 @@ import {
   type ToolUsageLogProjection,
   PRICING_PAGE_MAX_ITEMS,
   USAGE_PAGE_MAX_ITEMS,
+  USAGE_SNAPSHOT_ACTIVITY_MAX_ITEMS,
   type WorkspaceProjection,
 } from "@maka/runtime-host/protocol";
 
@@ -164,7 +165,7 @@ const MAX_OPTIMISTIC_ATTEMPTS = 3;
 const MAX_SESSION_REVISION_ATTEMPTS = 8;
 const MAX_PRICING_SNAPSHOT_ATTEMPTS = 3;
 const MAX_USAGE_SNAPSHOT_ATTEMPTS = 3;
-const MAX_USAGE_SNAPSHOT_ACTIVITY_RECORDS = 50_000;
+const USAGE_SNAPSHOT_RETRY_DELAY_MS = 50;
 
 export type DesktopSessionConfigurationPatch = SessionConfigurationPatch;
 
@@ -1385,12 +1386,25 @@ export class DesktopRuntimeHostClient {
 
   async loadUsageSnapshot(range: TimeRange): Promise<DesktopUsageSnapshot> {
     for (let attempt = 0; attempt < MAX_USAGE_SNAPSHOT_ATTEMPTS; attempt += 1) {
-      const snapshot = await this.#readUsageSnapshot(range);
-      if (snapshot) return snapshot;
+      try {
+        const snapshot = await this.#readUsageSnapshot(range);
+        if (snapshot) return snapshot;
+      } catch (error) {
+        if (
+          !(error instanceof RuntimeHostOperationError) ||
+          error.operation !== "usage.query" ||
+          error.code !== "operation_conflict"
+        ) {
+          throw error;
+        }
+      }
+      if (attempt + 1 < MAX_USAGE_SNAPSHOT_ATTEMPTS) {
+        await new Promise<void>((resolve) => setTimeout(resolve, USAGE_SNAPSHOT_RETRY_DELAY_MS));
+      }
     }
     throw new DesktopRuntimeHostClientError(
       "usage_unstable",
-      "Usage snapshot kept expiring while Desktop read it",
+      "Usage snapshot stayed unavailable across bounded retries",
     );
   }
 
@@ -1813,7 +1827,7 @@ export class DesktopRuntimeHostClient {
         page.source !== source ||
         page.offset !== offset ||
         page.rows.length > USAGE_PAGE_MAX_ITEMS ||
-        page.total > MAX_USAGE_SNAPSHOT_ACTIVITY_RECORDS
+        page.total > USAGE_SNAPSHOT_ACTIVITY_MAX_ITEMS
       ) {
         throw invalidProjection("Usage snapshot logs");
       }

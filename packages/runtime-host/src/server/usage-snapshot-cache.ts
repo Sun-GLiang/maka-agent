@@ -20,16 +20,19 @@
 import { randomUUID } from 'node:crypto';
 import type { UsageSummaryV2 } from '@maka/core/usage-stats/types';
 import type { UsageProvenance } from '@maka/core/usage-ledger-merge';
-import type {
-  EffectivePricingEntry,
-  LlmUsageLogProjection,
-  ToolUsageLogProjection,
+import {
+  USAGE_SNAPSHOT_ACTIVITY_MAX_ITEMS,
+  type EffectivePricingEntry,
+  type LlmUsageLogProjection,
+  type ToolUsageLogProjection,
 } from '../protocol/index.js';
 
 export const USAGE_SNAPSHOT_TTL_MS = 5 * 60 * 1_000;
 export const USAGE_SNAPSHOT_HARD_TTL_MS = 30 * 60 * 1_000;
 export const USAGE_SNAPSHOT_CAPACITY = 4;
-export const USAGE_SNAPSHOT_ACTIVITY_LIMIT = 50_000;
+// Admit one current and one replacement load without letting one connection
+// occupy every globally available lease.
+const USAGE_SNAPSHOT_CONNECTION_CAPACITY = 2;
 
 export class UsageSnapshotCapacityError extends Error {
   constructor() {
@@ -89,6 +92,7 @@ export class UsageSnapshotCache {
   readonly #ttlMs: number;
   readonly #hardTtlMs: number;
   readonly #capacity: number;
+  readonly #connectionCapacity: number;
   readonly #entries = new Map<string, CacheEntry>();
 
   constructor(options: UsageSnapshotCacheOptions = {}) {
@@ -97,7 +101,8 @@ export class UsageSnapshotCache {
     this.#ttlMs = options.ttlMs ?? USAGE_SNAPSHOT_TTL_MS;
     this.#hardTtlMs = options.hardTtlMs ?? USAGE_SNAPSHOT_HARD_TTL_MS;
     this.#capacity = options.capacity ?? USAGE_SNAPSHOT_CAPACITY;
-    this.activityLimit = options.activityLimit ?? USAGE_SNAPSHOT_ACTIVITY_LIMIT;
+    this.#connectionCapacity = Math.min(USAGE_SNAPSHOT_CONNECTION_CAPACITY, this.#capacity);
+    this.activityLimit = options.activityLimit ?? USAGE_SNAPSHOT_ACTIVITY_MAX_ITEMS;
     if (
       !Number.isSafeInteger(this.#ttlMs) ||
       this.#ttlMs <= 0 ||
@@ -106,27 +111,23 @@ export class UsageSnapshotCache {
       !Number.isSafeInteger(this.#capacity) ||
       this.#capacity <= 0 ||
       !Number.isSafeInteger(this.activityLimit) ||
-      this.activityLimit <= 0
+      this.activityLimit <= 0 ||
+      this.activityLimit > USAGE_SNAPSHOT_ACTIVITY_MAX_ITEMS
     ) {
       throw new TypeError('Invalid Usage snapshot cache limits');
-    }
-  }
-
-  retain(connectionId: string, contents: UsageSnapshotContents): RetainedUsageSnapshot {
-    const reservation = this.reserve(connectionId);
-    try {
-      const retained = this.finalize(connectionId, reservation.revision, contents);
-      if (!retained) throw new Error('Usage snapshot reservation is no longer active');
-      return retained;
-    } catch (error) {
-      this.abort(connectionId, reservation.revision);
-      throw error;
     }
   }
 
   reserve(connectionId: string): UsageSnapshotReservation {
     const now = this.#now();
     this.#pruneExpired(now);
+    let connectionEntries = 0;
+    for (const entry of this.#entries.values()) {
+      if (entry.connectionId === connectionId) connectionEntries += 1;
+    }
+    if (connectionEntries >= this.#connectionCapacity) {
+      throw new UsageSnapshotCapacityError();
+    }
     if (this.#entries.size >= this.#capacity) throw new UsageSnapshotCapacityError();
     const revision = this.#createRevision();
     if (revision.length === 0 || revision.length > 128 || this.#entries.has(revision)) {

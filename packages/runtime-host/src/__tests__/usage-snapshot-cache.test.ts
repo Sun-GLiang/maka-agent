@@ -24,6 +24,7 @@ import {
   UsageSnapshotCapacityError,
   type UsageSnapshotContents,
 } from '../server/usage-snapshot-cache.js';
+import { USAGE_SNAPSHOT_ACTIVITY_MAX_ITEMS } from '../protocol/index.js';
 
 const CONTENTS: UsageSnapshotContents = {
   summary: {
@@ -63,6 +64,13 @@ const CONTENTS: UsageSnapshotContents = {
   pricingEntries: [],
 };
 
+test('rejects an activity limit above the protocol maximum', () => {
+  assert.throws(
+    () => new UsageSnapshotCache({ activityLimit: USAGE_SNAPSHOT_ACTIVITY_MAX_ITEMS + 1 }),
+    TypeError,
+  );
+});
+
 test('preserves four owned leases at capacity instead of evicting an active revision', () => {
   let revision = 0;
   const cache = new UsageSnapshotCache({
@@ -70,11 +78,11 @@ test('preserves four owned leases at capacity instead of evicting an active revi
     createRevision: () => `revision-${++revision}`,
   });
   const retained = Array.from({ length: 4 }, (_, index) =>
-    cache.retain(`connection-${index}`, CONTENTS),
+    completeReservation(cache, `connection-${index}`),
   );
 
   assert.throws(
-    () => cache.retain('connection-5', CONTENTS),
+    () => completeReservation(cache, 'connection-5'),
     (error: unknown) =>
       error instanceof UsageSnapshotCapacityError &&
       error.message === 'Usage snapshot capacity is occupied',
@@ -84,26 +92,42 @@ test('preserves four owned leases at capacity instead of evicting an active revi
   }
 });
 
+test('limits one connection to two leases without consuming global capacity', () => {
+  let revision = 0;
+  const cache = new UsageSnapshotCache({
+    capacity: 4,
+    createRevision: () => `revision-${++revision}`,
+  });
+
+  cache.reserve('connection-a');
+  cache.reserve('connection-a');
+  assert.throws(() => cache.reserve('connection-a'), UsageSnapshotCapacityError);
+
+  assert.doesNotThrow(() => cache.reserve('connection-b'));
+  assert.doesNotThrow(() => cache.reserve('connection-b'));
+  assert.throws(() => cache.reserve('connection-c'), UsageSnapshotCapacityError);
+});
+
 test('enforces ownership and reclaims capacity on release and connection teardown', () => {
   let revision = 0;
   const cache = new UsageSnapshotCache({
     capacity: 2,
     createRevision: () => `revision-${++revision}`,
   });
-  const first = cache.retain('connection-a', CONTENTS);
-  cache.retain('connection-b', CONTENTS);
+  const first = completeReservation(cache, 'connection-a');
+  completeReservation(cache, 'connection-b');
 
   assert.equal(cache.get('connection-b', first.revision), undefined);
   cache.release('connection-b', first.revision);
   assert.equal(cache.get('connection-a', first.revision)?.revision, first.revision);
-  assert.throws(() => cache.retain('connection-c', CONTENTS), UsageSnapshotCapacityError);
+  assert.throws(() => completeReservation(cache, 'connection-c'), UsageSnapshotCapacityError);
 
   cache.release('connection-a', first.revision);
-  const third = cache.retain('connection-c', CONTENTS);
+  const third = completeReservation(cache, 'connection-c');
   assert.equal(cache.get('connection-c', third.revision)?.revision, third.revision);
 
   cache.releaseConnection('connection-b');
-  const fourth = cache.retain('connection-d', CONTENTS);
+  const fourth = completeReservation(cache, 'connection-d');
   assert.equal(cache.get('connection-d', fourth.revision)?.revision, fourth.revision);
 });
 
@@ -115,7 +139,7 @@ test('renews idle lifetime on owner access without extending the hard deadline',
     hardTtlMs: 250,
     createRevision: () => 'revision-1',
   });
-  const retained = cache.retain('connection-a', CONTENTS);
+  const retained = completeReservation(cache, 'connection-a');
 
   now = 90;
   assert.equal(cache.get('connection-a', retained.revision)?.revision, retained.revision);
@@ -135,7 +159,7 @@ test('expires an idle lease before its hard deadline', () => {
     hardTtlMs: 250,
     createRevision: () => 'revision-1',
   });
-  const retained = cache.retain('connection-a', CONTENTS);
+  const retained = completeReservation(cache, 'connection-a');
 
   now = 100;
   assert.equal(cache.get('connection-a', retained.revision), undefined);
@@ -213,3 +237,10 @@ test('finalization never revives a wrong, released, or expired reservation', () 
   assert.equal(cache.finalize('connection-a', expiring.revision, CONTENTS), undefined);
   assert.equal(cache.get('connection-a', expiring.revision), undefined);
 });
+
+function completeReservation(cache: UsageSnapshotCache, connectionId: string) {
+  const reservation = cache.reserve(connectionId);
+  const retained = cache.finalize(connectionId, reservation.revision, CONTENTS);
+  assert.ok(retained);
+  return retained;
+}

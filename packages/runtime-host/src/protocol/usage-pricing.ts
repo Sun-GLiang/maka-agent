@@ -40,6 +40,7 @@ import { defineOperation } from './operation-spec.js';
 
 export const USAGE_PAGE_MAX_ITEMS = 100;
 export const USAGE_PAGE_MAX_BYTES = 48 * 1024;
+export const USAGE_SNAPSHOT_ACTIVITY_MAX_ITEMS = 50_000;
 export const USAGE_PROJECTION_TEXT_MAX_BYTES = 1024;
 export const PRICING_PAGE_MAX_ITEMS = 128;
 export const PRICING_PAGE_MAX_BYTES = 48 * 1024;
@@ -1022,12 +1023,16 @@ function decodeUsageSnapshotLogPage(
     throw invalidProtocolFrame('Invalid usage snapshot truncation flag');
   }
   const rows = rawItems.map(decodeItem);
+  const page = decodeUsagePagePosition(result, rows.length);
+  if (page.total > USAGE_SNAPSHOT_ACTIVITY_MAX_ITEMS) {
+    throw invalidProtocolFrame('Usage snapshot exceeds activity limit');
+  }
   const decoded = {
     kind: 'snapshot_logs',
     revision: requireId(result.revision, 'usage snapshot revision'),
     source,
     rows,
-    ...decodeUsagePagePosition(result, rows.length),
+    ...page,
     truncated: result.truncated,
   } as Extract<UsageQueryResult, { kind: 'snapshot_logs' }>;
   assertJsonBytes(decoded, USAGE_PAGE_MAX_BYTES, 'Usage snapshot page');

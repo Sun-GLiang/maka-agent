@@ -516,7 +516,7 @@ function createWriterFacade(
           try {
             const snapshot = snapshotLease.transaction('write', () => {
               const repair = catchUpModelCallProjectionInTransaction(snapshotLease.database);
-              return snapshotLease.transaction('read', () => ({
+              return {
                 legacySummary: telemetry.summary(input.query),
                 legacyLlmLogs: telemetry.logs(input.query, 0, input.activityLimit),
                 toolLogs: telemetry.toolLogs(
@@ -530,7 +530,7 @@ function createWriterFacade(
                 canonical: modelCalls.read(resolveRange(input.query.range), input.query.sessionId),
                 repair,
                 pricing: pricing.snapshot(),
-              }));
+              };
             });
             for (const sessionId of snapshot.repair.changedSessionIds) {
               publishSessionUsageChange(sessionId);

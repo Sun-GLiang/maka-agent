@@ -19,7 +19,10 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { RuntimeHostConnection } from '@maka/runtime-host/client';
+import {
+  type RuntimeHostConnection,
+  RuntimeHostOperationError,
+} from '@maka/runtime-host/client';
 import type { OperationInput, OperationKey } from '@maka/runtime-host/protocol';
 import {
   DesktopRuntimeHostClient,
@@ -148,6 +151,56 @@ test('discards every partial Usage result and restarts after revision_changed', 
   assert.deepEqual(snapshot.llmLogs.map((row) => row.id), ['fresh-llm']);
   assert.deepEqual(snapshot.toolLogs.map((row) => row.id), ['fresh-tool']);
   assert.deepEqual(released, ['revision-1', 'revision-2']);
+});
+
+test('retries Usage snapshot capacity conflicts as whole loads', async () => {
+  let starts = 0;
+  const client = usageClient(async (operation, input) => {
+    if (operation === 'usage.snapshot.release') return { released: true };
+    if (input.kind === 'snapshot_start') {
+      starts += 1;
+      if (starts < 3) {
+        throw new RuntimeHostOperationError(
+          'usage.query',
+          'operation_conflict',
+          'Usage snapshot capacity is occupied',
+        );
+      }
+      return started('revision-3', 0);
+    }
+    if (input.kind === 'snapshot_logs') {
+      return logPage('revision-3', input.source, [], 0, 0, null, false);
+    }
+    if (input.kind === 'snapshot_pricing') {
+      return pricingPage('revision-3', [], 0, 0, null);
+    }
+    throw new Error('Unexpected Usage request');
+  });
+
+  const snapshot = await client.loadUsageSnapshot('all');
+  assert.equal(snapshot.revision, 'revision-3');
+  assert.equal(starts, 3);
+});
+
+test('bounds repeated Usage snapshot capacity conflicts', async () => {
+  let starts = 0;
+  const client = usageClient(async (operation, input) => {
+    assert.equal(operation, 'usage.query');
+    assert.equal(input.kind, 'snapshot_start');
+    starts += 1;
+    throw new RuntimeHostOperationError(
+      'usage.query',
+      'operation_conflict',
+      'Usage snapshot capacity is occupied',
+    );
+  });
+
+  await assert.rejects(
+    () => client.loadUsageSnapshot('all'),
+    (error: unknown) =>
+      error instanceof DesktopRuntimeHostClientError && error.code === 'usage_unstable',
+  );
+  assert.equal(starts, 3);
 });
 
 test('releases an acquired Usage revision when a page reader throws without replacing its error', async () => {
