@@ -121,7 +121,6 @@
     "src/renderer/session-read-state.ts",
     "src/renderer/session-status-presentation.ts",
     "src/renderer/session-trace-refresh.ts",
-    "src/renderer/session-turn-request-composer.tsx",
     "src/renderer/session-workspace-actions.ts",
     "src/renderer/session-workspace-errors.ts",
     "src/renderer/settings/about-settings-page.tsx",
@@ -176,7 +175,6 @@
     "src/renderer/settings/runtime-host-onboarding-dialog.tsx",
     "src/renderer/settings/runtime-host-profiles-section.tsx",
     "src/renderer/settings/runtime-host-project-directory-editor.tsx",
-    "src/renderer/settings/runtime-host-settings-bridge.ts",
     "src/renderer/settings/runtime-host-settings-target.tsx",
     "src/renderer/settings/runtime-host-ssh-terminal-dialog.tsx",
     "src/renderer/settings/settings-error-copy.ts",
@@ -353,7 +351,7 @@
           "@maka/ui": 1
         },
         "importSpecifiers": 39,
-        "nonTriviaTokens": 4278
+        "nonTriviaTokens": 4089
       },
       "src/renderer/app-shell-chrome-actions.tsx": {
         "importDeclarations": 5,
@@ -763,7 +761,7 @@
           "@maka/ui": 1
         },
         "importSpecifiers": 10,
-        "nonTriviaTokens": 654
+        "nonTriviaTokens": 650
       },
       "src/renderer/app-shell-turn-view-model.ts": {
         "importDeclarations": 7,
@@ -787,10 +785,10 @@
           "react": 1
         },
         "importSpecifiers": 18,
-        "nonTriviaTokens": 1425
+        "nonTriviaTokens": 1410
       },
       "src/renderer/app-shell.tsx": {
-        "importDeclarations": 105,
+        "importDeclarations": 103,
         "bridgePaths": {
           "window.maka.app.installUpdate": 1,
           "window.maka.app.retryUpdateDownload": 1,
@@ -923,7 +921,6 @@
           "./live-content-seed": 1,
           "./live-turn-reconciler": 1,
           "./locales/conversation-copy": 1,
-          "./locales/session-collaboration-copy": 1,
           "./locales/shell-copy": 1,
           "./locales/shell-remaining-copy.js": 1,
           "./model-connection-errors": 1,
@@ -933,7 +930,6 @@
           "./plan-mode-panel": 1,
           "./scroll-motion-policy": 1,
           "./session-collaboration-dialog": 1,
-          "./session-turn-request-composer.js": 1,
           "./session-workspace-errors": 1,
           "./settings/provider-brand-marks": 1,
           "./settings/provider-display": 1,
@@ -983,8 +979,8 @@
           "@maka/ui/icons": 1,
           "react": 1
         },
-        "importSpecifiers": 186,
-        "nonTriviaTokens": 15725
+        "importSpecifiers": 184,
+        "nonTriviaTokens": 15692
       },
       "src/renderer/use-app-shell-composer-quotes.ts": {
         "importDeclarations": 3,
@@ -2386,8 +2382,8 @@
         "unresolvedDependencies": 0,
         "actionFactories": [],
         "dependencyPaths": {
+          "./features/session-collaboration": 1,
           "./locales/session-collaboration-copy.js": 1,
-          "./session-turn-request-composer.js": 1,
           "@astryxdesign/core": 1,
           "@astryxdesign/core/Dialog": 1,
           "@astryxdesign/core/Layout": 1,
@@ -2500,33 +2496,6 @@
         "actionFactories": [],
         "dependencyPaths": {
           "@maka/core/events": 1
-        }
-      },
-      "src/renderer/session-turn-request-composer.tsx": {
-        "bridgePaths": {
-          "window.maka.sessionCollaboration.acknowledgeTurnRequest": 1,
-          "window.maka.sessionCollaboration.getTurnRequests": 2,
-          "window.maka.sessionCollaboration.requestTurn": 1
-        },
-        "environmentCapabilities": {
-          "window.clearTimeout": 1,
-          "window.setTimeout": 1
-        },
-        "hookCalls": {
-          "useEffect": 1,
-          "useRef": 2,
-          "useState": 6,
-          "useToast": 1,
-          "useUiLocale": 1
-        },
-        "lifecycleMethods": {},
-        "unresolvedDependencies": 0,
-        "actionFactories": [],
-        "dependencyPaths": {
-          "./locales/session-collaboration-copy.js": 1,
-          "@maka/runtime-host/protocol": 1,
-          "@maka/ui": 1,
-          "react": 1
         }
       },
       "src/renderer/session-workspace-actions.ts": {
@@ -3439,21 +3408,17 @@
         }
       },
       "src/renderer/settings/provider-connection-detail.tsx": {
-        "bridgePaths": {
-          "window.maka.githubCopilotSubscription.connectExistingLogin": 1
-        },
+        "bridgePaths": {},
         "environmentCapabilities": {},
         "hookCalls": {
-          "useActionGuard": 1,
           "useConnectionDetail": 1,
           "useEffect": 2,
-          "useMountedRef": 3,
+          "useMountedRef": 2,
           "useOAuthLoginFlow": 1,
-          "useRuntimeHostSettingsErrorReporter": 3,
-          "useRuntimeHostSettingsTarget": 1,
+          "useRuntimeHostSettingsErrorReporter": 2,
           "useState": 8,
           "useToast": 2,
-          "useUiLocale": 4
+          "useUiLocale": 3
         },
         "lifecycleMethods": {},
         "unresolvedDependencies": 0,
@@ -3470,7 +3435,6 @@
           "./runtime-host-settings-target.js": 1,
           "./settings-expandable-row": 1,
           "./settings-section": 1,
-          "./use-action-guard": 1,
           "./use-connection-detail": 1,
           "./use-oauth-login-flow": 1,
           "@astryxdesign/core": 1,
@@ -3550,23 +3514,13 @@
         }
       },
       "src/renderer/settings/provider-oauth-section.tsx": {
-        "bridgePaths": {
-          "window.maka.githubCopilotSubscription.connectExistingLogin": 1,
-          "window.maka.githubCopilotSubscription.getAccountState": 2,
-          "window.maka.githubCopilotSubscription.logout": 1,
-          "window.maka.githubCopilotSubscription.refreshTokens": 1,
-          "window.maka.openAiCodex": 1,
-          "window.maka.xaiOAuth": 1
-        },
+        "bridgePaths": {},
         "environmentCapabilities": {},
         "hookCalls": {
-          "useEffect": 1,
           "useMountedRef": 1,
           "useOAuthLoginFlow": 2,
-          "useRef": 1,
           "useRuntimeHostSettingsGenerationKey": 1,
-          "useRuntimeHostSettingsTarget": 3,
-          "useState": 2,
+          "useState": 1,
           "useUiLocale": 3
         },
         "lifecycleMethods": {},
@@ -3575,7 +3529,6 @@
         "dependencyPaths": {
           "../../preload/bridge-contract.js": 1,
           "../features/connection-settings": 1,
-          "./runtime-host-settings-bridge.js": 1,
           "./runtime-host-settings-target.js": 1,
           "./use-oauth-login-flow": 1,
           "@astryxdesign/core": 1,
@@ -3798,18 +3751,6 @@
           "../locales/settings-projects-copy.js": 1,
           "@maka/runtime-host/protocol": 1,
           "@maka/ui": 1
-        }
-      },
-      "src/renderer/settings/runtime-host-settings-bridge.ts": {
-        "bridgePaths": {},
-        "environmentCapabilities": {},
-        "hookCalls": {},
-        "lifecycleMethods": {},
-        "unresolvedDependencies": 0,
-        "actionFactories": [],
-        "dependencyPaths": {
-          "../../preload/bridge-contract.js": 1,
-          "./use-oauth-login-flow.js": 1
         }
       },
       "src/renderer/settings/runtime-host-settings-target.tsx": {
@@ -4265,10 +4206,7 @@
         }
       },
       "src/renderer/settings/use-connection-detail.ts": {
-        "bridgePaths": {
-          "window.maka.openAiCodex": 1,
-          "window.maka.xaiOAuth": 1
-        },
+        "bridgePaths": {},
         "environmentCapabilities": {},
         "hookCalls": {
           "useEffect": 6,
@@ -4276,7 +4214,6 @@
           "useMountedRef": 1,
           "useRef": 4,
           "useRuntimeHostSettingsErrorReporter": 1,
-          "useRuntimeHostSettingsTarget": 1,
           "useState": 14,
           "useToast": 1,
           "useUiLocale": 1
@@ -4285,13 +4222,11 @@
         "unresolvedDependencies": 0,
         "actionFactories": [],
         "dependencyPaths": {
-          "../../preload/bridge-contract.js": 1,
           "../features/connection-settings": 1,
           "./connection-name-draft.js": 1,
           "./provider-connection-status": 1,
           "./relay-profile-draft": 1,
           "./relay-thinking-bulk": 1,
-          "./runtime-host-settings-bridge.js": 1,
           "./runtime-host-settings-target.js": 1,
           "./use-action-guard": 1,
           "./use-oauth-login-flow": 1,

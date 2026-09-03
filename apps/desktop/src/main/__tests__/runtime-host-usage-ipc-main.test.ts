@@ -321,6 +321,7 @@ function usageSummary(totalRequests: number) {
     cacheHitRequests: 10,
     cacheCreateRequests: 5,
     errorRequests: 2,
+    totalDurationMs: 0,
   };
 }
 

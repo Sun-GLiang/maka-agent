@@ -43,6 +43,7 @@ const CONTENTS: UsageSnapshotContents = {
     cacheHitRequests: 0,
     cacheCreateRequests: 0,
     errorRequests: 0,
+    totalDurationMs: 0,
   },
   provenance: {
     coverage: {

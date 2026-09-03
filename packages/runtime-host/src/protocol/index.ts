@@ -100,10 +100,24 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 101 as const;
-// 101: `usage.query` adds connection-owned, revision-pinned snapshot start,
-// activity, and pricing pages plus explicit `usage.snapshot.release`. Epoch-100
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 106 as const;
+// 106: `usage.query` adds connection-owned, revision-pinned snapshot start,
+// activity, and pricing pages plus explicit `usage.snapshot.release`. Epoch-105
 // peers reject these closed variants, so mixed peers must fail the handshake.
+// 105: Usage summaries may carry the recorded call-time total and per-Session
+// tool-invocation totals. Older Clients reject the unknown fields, so a newer
+// Host's usage summary is unreadable to them.
+// 104: WorkHub Coordination actions add closed direct-stop proposals,
+// confirmations, expected-state preconditions, and outcomes. Older peers
+// reject these strict shapes.
+// 103: `github-copilot` joins `OAUTH_LOGIN_PROVIDERS`, the Host answers the
+// closed `oauth.enrollment.query`, and `connection.onboarding.save` admits
+// canonical OAuth material with an empty enable-all-discovered selection.
+// Older peers reject these wire values, so incompatible pairs must fail the
+// handshake. Re-derived from current `main`; epoch 102 is claimed by open PRs.
+// 101: Session Turn requests can carry regeneration intents and Guests can
+// atomically withdraw pending requests. Older peers do not share this command
+// vocabulary or the expanded Guest operation grant.
 // 100: `session.branch.create` makes `sourceTurnId` optional, so a side
 // conversation can fork with an empty context (no copied messages, no
 // fabricated `branchOfTurnId`) instead of requiring a settled turn. An older
