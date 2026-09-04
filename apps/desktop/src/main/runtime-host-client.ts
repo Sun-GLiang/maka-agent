@@ -167,6 +167,7 @@ const MAX_SESSION_REVISION_ATTEMPTS = 8;
 const MAX_PRICING_SNAPSHOT_ATTEMPTS = 3;
 const MAX_USAGE_SNAPSHOT_ATTEMPTS = 3;
 const USAGE_SNAPSHOT_RETRY_DELAY_MS = 50;
+const RUNTIME_HOST_RETIREMENT_TIMEOUT_MS = 5_000;
 
 export type DesktopSessionConfigurationPatch = SessionConfigurationPatch;
 
@@ -997,11 +998,7 @@ export class DesktopRuntimeHostClient {
     return this.request("workhub.coordination.act", input);
   }
 
-  answerWorkHubCoordination(
-    input: OperationInput<"workhub.coordination.answer">,
-  ): Promise<OperationOutput<"workhub.coordination.answer">> {
-    return this.request("workhub.coordination.answer", input);
-  }
+
 
   recordWorkHubCoordination(
     input: OperationInput<"workhub.coordination.record">,
@@ -1346,7 +1343,11 @@ export class DesktopRuntimeHostClient {
   prepareHostRetirement(
     mode: RuntimeHostRetirementMode,
   ): Promise<RuntimeHostRetirementPreparation> {
-    return prepareConnectedRuntimeHostRetirement(this.connection, mode);
+    return prepareConnectedRuntimeHostRetirement(
+      this.connection,
+      mode,
+      RUNTIME_HOST_RETIREMENT_TIMEOUT_MS,
+    );
   }
 
   stopTurn(

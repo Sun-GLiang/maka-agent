@@ -231,7 +231,6 @@ import type { ModelCallAttempt, ModelCallKind } from '@maka/core/model-call-atte
 import {
   ProviderRequestTracker,
   type ModelCallAccountingInput,
-  type PreparedRequestArtifactInput,
   type ProviderRequestUsage,
   type ResolvedModelCallCost,
 } from './provider-request-telemetry.js';
@@ -758,10 +757,6 @@ export interface AiSdkBackendInput extends AiSdkCompactionCapabilities {
   readChildAgentOutput?: ToolRuntimeInput['readChildAgentOutput'];
   /** Optional diagnostic trace hook for explaining a runtime turn without changing renderer events. */
   recordRunTrace?: RunTraceRecorder;
-  /** Optional private artifact sink for the secret-free prepared request. */
-  persistPreparedRequestArtifact?: (
-    input: PreparedRequestArtifactInput,
-  ) => Promise<{ artifactId: string }>;
   /**
    * Commits one settled provider request: the canonical attempt and, when it
    * is the completed main call, the derived latest-context row it authorises.
@@ -1943,7 +1938,7 @@ export class AiSdkBackend implements AgentBackend {
             projectionCheckpoint,
             compatibleProviderReasoningReplayEventIds(
               replayEvents,
-              input.runtimeContextRunHeaders,
+              input.runtimeContextInvocations,
               this.input.providerStateIdentity,
               this.input.modelId,
               scope.runId,
@@ -3509,9 +3504,8 @@ export class AiSdkBackend implements AgentBackend {
    * this backend. Callers receive a ready tracker rather than the ingredients:
    * a half-wired tracker is what produces records nothing can attribute.
    *
-   * Absent only when there is nothing to feed: no artifact sink, canonical
-   * sink, or dispatch gate. Metering deliberately does not depend on artifact
-   * persistence: the observation is created in memory for every tracked call.
+   * Absent only when there is nothing to feed: no canonical sink and no
+   * dispatch gate.
    */
   private createProviderRequestTracker(input: {
     turnId: string;
@@ -3525,7 +3519,6 @@ export class AiSdkBackend implements AgentBackend {
      */
     runId: string | undefined;
   }): ProviderRequestTracker | undefined {
-    const persistArtifact = this.input.persistPreparedRequestArtifact;
     const accounting = this.modelCallAccounting(input.callKind, {
       modelId: input.modelId,
       ...(input.runId ? { runId: input.runId } : {}),
@@ -3542,14 +3535,13 @@ export class AiSdkBackend implements AgentBackend {
               runId,
             })
         : undefined;
-    if (!persistArtifact && !accounting && !beforeDispatch) return undefined;
+    if (!accounting && !beforeDispatch) return undefined;
     return new ProviderRequestTracker({
       traceId: this.newId(),
       turnId: input.turnId,
       contextWindow: resolveSelectedModelContextWindow(this.input.connection, input.modelId),
       now: this.now,
       newId: this.newId,
-      ...(persistArtifact ? { persistArtifact } : {}),
       ...(beforeDispatch ? { beforeDispatch } : {}),
       ...(accounting ? { accounting } : {}),
     });
@@ -3670,7 +3662,7 @@ export class AiSdkBackend implements AgentBackend {
     const priorRuntimeContext = preparedContextBudget.events;
     const providerReasoningReplayEventIds = compatibleProviderReasoningReplayEventIds(
       priorRuntimeContext,
-      input.runtimeContextRunHeaders,
+      input.runtimeContextInvocations,
       this.input.providerStateIdentity,
       this.input.modelId,
     );
@@ -3899,6 +3891,10 @@ export class AiSdkBackend implements AgentBackend {
     >();
     const reasoningByStep = new Map<string, ThinkingItem[]>();
     const textByStep = new Map<string, TextItem>();
+    const pendingStepOrder = new Set<string>();
+    const rememberPendingStep = (stepId: string) => {
+      pendingStepOrder.add(stepId);
+    };
 
     const replaySupport = this.modelAdapter.runtimeEventReplaySupport();
     const reasoningReplay = (item: ThinkingItem): ReplayReasoning | undefined => {
@@ -4157,6 +4153,7 @@ export class AiSdkBackend implements AgentBackend {
         if (stepId !== undefined) {
           reasoningByStep.delete(stepId);
           textByStep.delete(stepId);
+          pendingStepOrder.delete(stepId);
         }
         await emitStep(reasoning, text, group);
         group = [];
@@ -4173,18 +4170,28 @@ export class AiSdkBackend implements AgentBackend {
       bufferedCalls = [];
       await emitGroupedCalls(calls);
     };
+    const flushPendingStep = async (stepId: string) => {
+      const text = textByStep.get(stepId);
+      const reasoning = reasoningByStep.get(stepId);
+      textByStep.delete(stepId);
+      reasoningByStep.delete(stepId);
+      pendingStepOrder.delete(stepId);
+      await emitStep(reasoning, text, []);
+    };
+    const flushPendingStepsBefore = async (stepId: string | undefined) => {
+      const pendingStepIds = [...pendingStepOrder];
+      const lastPendingStepId = pendingStepIds.at(-1);
+      const earlierStepIds =
+        stepId !== undefined && lastPendingStepId === stepId
+          ? pendingStepIds.slice(0, -1)
+          : pendingStepIds;
+      if (earlierStepIds.length === 0) return;
+      await flushLooseCalls();
+      for (const pendingStepId of earlierStepIds) await flushPendingStep(pendingStepId);
+    };
     const flushPendingSteps = async () => {
       await flushLooseCalls();
-      for (const [stepId, text] of textByStep) {
-        textByStep.delete(stepId);
-        const reasoning = reasoningByStep.get(stepId);
-        reasoningByStep.delete(stepId);
-        await emitStep(reasoning, text, []);
-      }
-      for (const [stepId, reasoning] of reasoningByStep) {
-        reasoningByStep.delete(stepId);
-        await emitStep(reasoning, undefined, []);
-      }
+      for (const stepId of [...pendingStepOrder]) await flushPendingStep(stepId);
     };
 
     for (const item of admitProviderReasoningReplayItems(
@@ -4193,6 +4200,7 @@ export class AiSdkBackend implements AgentBackend {
     )) {
       switch (item.kind) {
         case 'tool_call':
+          await flushPendingStepsBefore(item.stepId);
           if (item.toolName !== 'apply_patch') {
             bufferedCalls.push(item);
             break;
@@ -4248,6 +4256,7 @@ export class AiSdkBackend implements AgentBackend {
                 ts: downgradedCall.ts,
               });
             }
+            rememberPendingStep(downgradedCall.stepId);
           } else {
             await flushPendingSteps();
             push({ role: 'assistant', content: [{ type: 'text', text: replayFact }] }, [
@@ -4262,6 +4271,7 @@ export class AiSdkBackend implements AgentBackend {
             const stepReasoning = reasoningByStep.get(item.stepId) ?? [];
             stepReasoning.push(item);
             reasoningByStep.set(item.stepId, stepReasoning);
+            rememberPendingStep(item.stepId);
           } else {
             // Legacy standalone reasoning (pure-reasoning turn): emit on its own.
             await flushPendingSteps();
@@ -4297,11 +4307,13 @@ export class AiSdkBackend implements AgentBackend {
             if (thisCalls.length > 0) {
               await emitStep(reasoningByStep.get(stepId), item, thisCalls);
               reasoningByStep.delete(stepId);
+              pendingStepOrder.delete(stepId);
             } else {
               // Runtime-owned settlement persists assistant facts before the
               // matching tool calls. Hold the step closer until those calls
               // arrive; a terminal text-only step flushes below.
               textByStep.set(stepId, item);
+              rememberPendingStep(stepId);
             }
           } else {
             // Legacy per-turn assistant text: standalone after any tool block.
