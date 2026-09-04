@@ -192,7 +192,7 @@ export function AgentGraphPanel(props: {
     pending: false,
     error: false,
   });
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState<boolean>();
   const [dismissedBySession, setDismissedBySession] = useState<AgentGraphPanelDismissals>({});
   const contentId = useId();
   const refreshRef = useRef<AgentGraphRefreshScheduler>(noopAgentGraphRefreshScheduler);
@@ -220,7 +220,7 @@ export function AgentGraphPanel(props: {
       pending: false,
       error: false,
     });
-    setCollapsed(false);
+    setCollapsed(undefined);
     setLoading(props.enabled);
     let cachedDirectory: AgentGraphEpochDirectory | undefined;
 
@@ -256,6 +256,7 @@ export function AgentGraphPanel(props: {
           setEpochs(nextEpochs);
           setEpochsTruncated(directory.truncated);
           setSelectedGraphId(graphId);
+          setCollapsed((current) => current ?? next.status === 'completed');
           setSnapshot(next);
           setError(false);
         }
