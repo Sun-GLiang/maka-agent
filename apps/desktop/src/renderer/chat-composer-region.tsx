@@ -23,7 +23,9 @@ import {
   Button,
   ClientCapabilityPrompt,
   Composer,
+  type ComposerInteraction,
   ComposerGoalProjectionConsumer,
+  FormInteractionPrompt,
   SandboxBoundaryPrompt,
   UserQuestionPrompt,
 } from '@maka/ui';
@@ -61,14 +63,9 @@ interface BoundaryUnreadableNotice {
   onRetry(): void;
 }
 
-type ComposerInteraction =
-  | ComponentProps<typeof SandboxBoundaryPrompt>['request']
-  | ComponentProps<typeof ClientCapabilityPrompt>['request']
-  | ComponentProps<typeof UserQuestionPrompt>['request'];
-
 /**
  * The composer region of the chat surface (issue #1043): the composer
- * interaction slot (permission / user-question prompts) plus the always-mounted
+ * interaction slot (boundary / question / form prompts) plus the always-mounted
  * Composer itself.
  *
  * AppShell renders this as a stable sibling of the section switch, so it is
@@ -112,6 +109,7 @@ interface ChatComposerRegionProps
   respondToSandboxBoundary: ComponentProps<typeof SandboxBoundaryPrompt>['onRespond'];
   respondToClientCapability: ComponentProps<typeof ClientCapabilityPrompt>['onRespond'];
   respondToUserQuestion: ComponentProps<typeof UserQuestionPrompt>['onRespond'];
+  respondToUserForm: ComponentProps<typeof FormInteractionPrompt>['onRespond'];
   stop: ComponentProps<typeof UserQuestionPrompt>['onStop'];
   boundaryUnreadableNotice?: BoundaryUnreadableNotice;
   /**
@@ -190,6 +188,7 @@ export function ChatComposerRegion({
   respondToSandboxBoundary,
   respondToClientCapability,
   respondToUserQuestion,
+  respondToUserForm,
   stop,
   boundaryUnreadableNotice,
   latestRequestUsageTokens,
@@ -203,6 +202,7 @@ export function ChatComposerRegion({
   const activeClientCapability =
     activeInteraction?.type === 'client_capability_request' ? activeInteraction : undefined;
   const activeQuestion = activeInteraction?.type === 'user_question_request' ? activeInteraction : undefined;
+  const activeForm = activeInteraction?.type === 'form_request' ? activeInteraction : undefined;
   const activeModelChoice = composerRest.activeModel
     ? composerRest.modelChoices?.find(
         (choice) =>
@@ -318,6 +318,12 @@ export function ChatComposerRegion({
             onRespond={respondToUserQuestion}
             onStop={stop}
             stopPending={activeId ? stopPendingBySession[activeId] === true : false}
+          />
+        )}
+        {activeForm && (
+          <FormInteractionPrompt
+            request={activeForm}
+            onRespond={respondToUserForm}
           />
         )}
       </div>

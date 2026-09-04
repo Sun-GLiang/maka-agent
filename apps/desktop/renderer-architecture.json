@@ -308,7 +308,7 @@
         "nonTriviaTokens": 92
       },
       "src/renderer/app-shell-chat-actions.ts": {
-        "importDeclarations": 26,
+        "importDeclarations": 25,
         "bridgePaths": {
           "window.maka.newTasks.create": 1,
           "window.maka.sessions.remove": 1,
@@ -324,7 +324,7 @@
           "createAppShellChatActions"
         ],
         "dependencyPaths": {
-          "../preload/bridge-contract.js": 2,
+          "../preload/bridge-contract.js": 1,
           "./app-shell-copy.js": 1,
           "./app-shell-session-ui-state.js": 1,
           "./attachment-preflight.js": 1,
@@ -350,8 +350,8 @@
           "@maka/runtime/skill-invocation": 1,
           "@maka/ui": 1
         },
-        "importSpecifiers": 39,
-        "nonTriviaTokens": 4089
+        "importSpecifiers": 38,
+        "nonTriviaTokens": 4086
       },
       "src/renderer/app-shell-chrome-actions.tsx": {
         "importDeclarations": 5,
@@ -785,7 +785,7 @@
           "react": 1
         },
         "importSpecifiers": 18,
-        "nonTriviaTokens": 1410
+        "nonTriviaTokens": 1408
       },
       "src/renderer/app-shell.tsx": {
         "importDeclarations": 102,
@@ -980,7 +980,7 @@
           "react": 1
         },
         "importSpecifiers": 184,
-        "nonTriviaTokens": 15687
+        "nonTriviaTokens": 15686
       },
       "src/renderer/use-app-shell-composer-quotes.ts": {
         "importDeclarations": 3,

@@ -124,6 +124,7 @@ async function mountRegion(): Promise<{
               respondToSandboxBoundary: () => {},
               respondToClientCapability: () => {},
               respondToUserQuestion: () => {},
+              respondToUserForm: () => {},
               stop: () => {},
               onSend: () => {},
               onStop: () => {},
