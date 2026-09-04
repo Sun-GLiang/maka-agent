@@ -34,7 +34,10 @@ import {
   HostRuntimeResourceCoordinator,
   type HostRuntimeResourceCoordinatorInput,
 } from '../server/runtime-resource-coordinator.js';
-import { SessionAdmissionGate } from '../server/session-admission-gate.js';
+import {
+  runAfterCurrentSessionAdmission,
+  SessionAdmissionGate,
+} from '../server/session-admission-gate.js';
 
 const SESSION_ID = 'session-1';
 const RUNTIME_REF = 'maka://runtime/background-tasks/shell-1';
@@ -264,9 +267,11 @@ describe('Host Runtime Resource coordinator', () => {
     let harness!: ReturnType<typeof createHarness>;
     harness = createHarness({
       requestDrain: () => {
-        harness.drainCount += 1;
-        drainAdmission = harness.sessionAdmission.run(SESSION_ID, async () => {});
-        void drainAdmission.catch(() => {});
+        runAfterCurrentSessionAdmission(() => {
+          harness.drainCount += 1;
+          drainAdmission = harness.sessionAdmission.run(SESSION_ID, async () => {});
+          void drainAdmission.catch(() => {});
+        });
       },
     });
     harness.stateReadFailure = new Error('canonical state unavailable');
@@ -458,6 +463,7 @@ describe('Host Runtime Resource coordinator', () => {
     assert.equal(started.ok, false);
     assert.ok(harness.lastBackgroundInput);
     assert.equal(harness.stopCount, 1);
+    assert.equal(harness.drainCount, 1);
     harness.finishBackground({ successful: false });
   });
 
@@ -761,6 +767,21 @@ describe('Host Runtime Resource coordinator', () => {
     assert.equal(!missing.ok && missing.error.code, 'not_found');
     assert.equal(harness.stopCount, 0);
   });
+
+  test('drains when the admitted mutable Session read fails', async () => {
+    const harness = createHarness();
+    harness.sessionReadFailureAt = 2;
+
+    const started = await harness.coordinator.handlers['runtime.resource.start'](
+      { sessionId: SESSION_ID, launchId: 'session-read-failure' },
+      connection('connection-1'),
+    );
+
+    assert.equal(started.ok, false);
+    assert.equal(!started.ok && started.error.code, 'internal_failure');
+    assert.equal(harness.drainCount, 1);
+    assert.equal(harness.lastBackgroundInput, undefined);
+  });
 });
 
 function createHarness(
@@ -777,6 +798,8 @@ function createHarness(
   const state = {
     updates: [resourceUpdate(0)],
     sessionState: 'active' as 'active' | 'archived' | 'missing',
+    sessionReadCount: 0,
+    sessionReadFailureAt: undefined as number | undefined,
     writeCount: 0,
     stopCount: 0,
     terminateCount: 0,
@@ -890,6 +913,10 @@ function createHarness(
     },
     sessionHeaders: {
       readHeader: async (sessionId) => {
+        state.sessionReadCount += 1;
+        if (state.sessionReadCount === state.sessionReadFailureAt) {
+          throw new Error('Session state unavailable');
+        }
         if (state.sessionState === 'missing') throw new SessionNotFoundError(sessionId);
         return {
           cwd: '/workspace',

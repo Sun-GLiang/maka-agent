@@ -55,7 +55,6 @@ import { PLAN_OPERATION_SPECS } from '../protocol/plan.js';
 import { PROJECT_CATALOG_OPERATION_SPECS } from '../protocol/project-catalog.js';
 import { RUNTIME_POLICY_OPERATION_SPECS } from '../protocol/runtime-policy.js';
 import { RUNTIME_RESOURCE_OPERATION_SPECS } from '../protocol/runtime-resource.js';
-import { boundedFailureDiagnostic } from './failure-diagnostic.js';
 import { SCHEDULED_TASK_OPERATION_SPECS } from '../protocol/scheduled-task.js';
 import { SESSION_CATALOG_OPERATION_SPECS } from '../protocol/session-catalog.js';
 import { SESSION_CONTINUITY_OPERATION_SPECS } from '../protocol/session-continuity.js';
@@ -71,6 +70,7 @@ import { USAGE_PRICING_OPERATION_SPECS } from '../protocol/usage-pricing.js';
 import { WEB_SEARCH_OPERATION_SPECS } from '../protocol/web-search.js';
 import { WORKHUB_COORDINATION_OPERATION_SPECS } from '../protocol/workhub-coordination.js';
 import { PLUGIN_PLATFORM_OPERATION_SPECS } from '../protocol/plugin-platform.js';
+import { boundedFailureDiagnostic } from './failure-diagnostic.js';
 import { createPeerMeshOperationHandlers } from './peer-mesh-authority.js';
 import type { RuntimeHostConnectionAuthority } from './connection-authority.js';
 
