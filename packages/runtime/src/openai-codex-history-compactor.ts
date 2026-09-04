@@ -30,7 +30,6 @@ import {
 } from './history-compact-checkpoint.js';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { ModelMessage } from './model-protocol.js';
-import { fitHistoryCompactMessages } from './history-compact-input-fit.js';
 import {
   admitProviderReasoningReplayItems,
   buildRuntimeEventModelReplayPlan,
@@ -39,7 +38,7 @@ import {
 } from './model-history.js';
 import { withProviderStreamTracking } from './provider-request-telemetry.js';
 import { effectiveReplayToolResultOutput } from './durable-tool-result-projection.js';
-import { providerFailureDiagnostic } from './provider-error-classification.js';
+import { classifyError, providerFailureDiagnostic } from './provider-error-classification.js';
 
 export interface BuildOpenAiCodexHistoryCompactorOptions {
   resolveModel: () => unknown;
@@ -79,7 +78,7 @@ export function buildOpenAiCodexHistoryCompactor(options: BuildOpenAiCodexHistor
         : input.source.foldedRuntimeEvents;
       const providerReasoningReplayEventIds = compatibleProviderReasoningReplayEventIds(
         events,
-        input.source.runHeaders,
+        input.source.invocations,
         options.providerStateIdentity,
         options.modelId,
         input.runId,
@@ -91,10 +90,9 @@ export function buildOpenAiCodexHistoryCompactor(options: BuildOpenAiCodexHistor
       if (canContinuePrevious) {
         projectedMessages.unshift(historyCompactCheckpointToModelMessage(previous));
       }
-      const messages = fitHistoryCompactMessages(projectedMessages, {
-        maxInputEstimatedTokens: input.inputBudget?.maxEstimatedTokens,
-        charsPerToken: input.inputBudget?.charsPerToken,
-      });
+      // Whether this input fits the compaction endpoint is its own answer;
+      // nothing is trimmed on a local estimate beforehand (#4559).
+      const messages = projectedMessages;
 
       const providerRequestTracker = input.providerRequestTracker;
       const ai = await loadAiSdkModule();
@@ -133,6 +131,9 @@ export function buildOpenAiCodexHistoryCompactor(options: BuildOpenAiCodexHistor
       return state;
     } catch (error) {
       if (error instanceof HistoryCompactSummarizerError) throw error;
+      if (classifyError(error) === 'ContextLength') {
+        throw new HistoryCompactSummarizerError('input_too_large', { cause: error });
+      }
       throw new HistoryCompactSummarizerError('provider_error', { cause: error });
     }
   };
@@ -203,7 +204,7 @@ function openAiCodexCompactionMessages(
     text?: Text;
   };
   type TimelineEntry =
-    | { kind: 'step'; stepId: string }
+    | { kind: 'step'; stepId: string; value: Step }
     | { kind: 'legacy_call'; call: ToolCall }
     | { kind: 'text'; item: Text }
     | { kind: 'thinking'; item: Thinking };
@@ -217,15 +218,12 @@ function openAiCodexCompactionMessages(
     if (item.kind === 'tool_result') results.set(item.toolCallId, item);
   }
 
-  const steps = new Map<string, Step>();
   const timeline: TimelineEntry[] = [];
   const step = (stepId: string): Step => {
-    let value = steps.get(stepId);
-    if (!value) {
-      value = { calls: [], reasoning: [] };
-      steps.set(stepId, value);
-      timeline.push({ kind: 'step', stepId });
-    }
+    const last = timeline.at(-1);
+    if (last?.kind === 'step' && last.stepId === stepId) return last.value;
+    const value = { calls: [], reasoning: [] };
+    timeline.push({ kind: 'step', stepId, value });
     return value;
   };
   for (const item of items) {
@@ -321,7 +319,7 @@ function openAiCodexCompactionMessages(
 
   for (const entry of timeline) {
     if (entry.kind === 'step') {
-      pushStep(steps.get(entry.stepId)!);
+      pushStep(entry.value);
     } else if (entry.kind === 'legacy_call') {
       pushStep({ calls: [entry.call], reasoning: [] });
     } else if (entry.kind === 'thinking') {

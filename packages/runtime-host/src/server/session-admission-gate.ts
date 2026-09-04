@@ -102,6 +102,27 @@ export class SessionAdmissionGate {
     return this.#runQueued([sessionId], operation);
   }
 
+  /**
+   * Start work that outlives the admission that reserved it.
+   *
+   * A drained Turn is not admission work: it runs for as long as the Turn does
+   * and takes admissions of its own along the way. Started plainly it inherits
+   * the admission context of the caller, and whether its first admission is
+   * rejected then comes down to which finishes first — the admission, or the
+   * Turn reaching its own. Leaving the context here settles that by saying so.
+   */
+  detach<T>(operation: () => T): T {
+    const context = this.#context.getStore();
+    return this.#context.exit(() => {
+      const inheritedAdmissions = currentSessionAdmissions.getStore() ?? [];
+      if (!context || !inheritedAdmissions.includes(context)) return operation();
+      return currentSessionAdmissions.run(
+        inheritedAdmissions.filter((admission) => admission !== context),
+        operation,
+      );
+    });
+  }
+
   runAdmitted<T>(
     sessionId: string,
     lease: SessionAdmissionLease,

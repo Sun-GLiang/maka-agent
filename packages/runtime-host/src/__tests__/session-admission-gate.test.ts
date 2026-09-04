@@ -217,3 +217,45 @@ test('tracks admitted work started outside the owning async chain until release'
   await Promise.all([active, queued]);
   assert.deepEqual(order, ['active:start', 'admitted', 'active:end', 'after-release', 'queued']);
 });
+
+test('work detached from an admission takes admissions of its own', async () => {
+  const gate = new SessionAdmissionGate();
+  const release = deferred();
+  const order: string[] = [];
+  let detached!: Promise<void>;
+
+  // The detached work starts inside the admission and admits before the
+  // admission ends, which is the order a drained Turn reaches its first
+  // admission in. Inherited context would reject it as re-entry.
+  await gate.run('session', async () => {
+    order.push('active:start');
+    detached = gate.detach(async () => {
+      await gate.run('session', () => {
+        order.push('detached:admitted');
+      });
+    });
+    await Promise.resolve();
+    order.push('active:end');
+    release.resolve();
+  });
+  await release.promise;
+  await detached;
+  assert.deepEqual(order, ['active:start', 'active:end', 'detached:admitted']);
+});
+
+test('treats detached work as outside the current admission', async () => {
+  const gate = new SessionAdmissionGate();
+  const order: string[] = [];
+
+  await gate.run('session', async () => {
+    order.push('active:start');
+    await gate.detach(async () => {
+      runAfterCurrentSessionAdmission(() => {
+        order.push('detached:outside');
+      });
+    });
+    order.push('active:end');
+  });
+
+  assert.deepEqual(order, ['active:start', 'detached:outside', 'active:end']);
+});
