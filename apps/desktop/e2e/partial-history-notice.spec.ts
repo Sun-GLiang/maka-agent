@@ -54,6 +54,11 @@ test('bounded transcript ranges expose only their truthful boundary gaps', async
   const loadNewer = newerGap.getByRole('button', { name: '加载较新消息' });
   await loadNewer.click();
   await expect(page.locator('[data-turn-id="turn-partial-history-2"]')).toBeVisible();
+  await page.evaluate(async () => {
+    for (let frame = 0; frame < 30; frame += 1) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
+  });
   await expect(olderGap).toBeVisible();
   await expect(newerGap).toBeVisible();
   await expect(loadNewer).toBeEnabled();

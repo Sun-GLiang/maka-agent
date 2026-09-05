@@ -2547,7 +2547,7 @@ function AppShellContent({
     if (!controller || !sessionId || historyLoadPendingRef.current) return;
     historyLoadPendingRef.current = true;
     setHistoryLoadPendingSessionId(sessionId);
-    if (target === 'latest') handleTranscriptReadingAnchorChange();
+    if (target !== 'earlier') handleTranscriptReadingAnchorChange();
     try {
       await transcriptReadingPosition.loadRange(
         controller,
