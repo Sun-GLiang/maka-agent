@@ -1604,6 +1604,7 @@ function AppShellContent({
     modelChoices: chatModelChoices,
     reportError: reportWorkbarError,
   });
+  const { commands, selectors, LiveContextUsageProbe } = workbar;
 
   const exitWorkHub = useCallback(() => setWorkHubActive(false), []);
   const selectSessionSurface = useCallback(
@@ -1648,7 +1649,7 @@ function AppShellContent({
     sessions,
     activeSessionId: activeId,
     activeSession,
-    hiddenSessionIds: workbar.selectors.hiddenSessionIds,
+    hiddenSessionIds: selectors.hiddenSessionIds,
   });
   const visibleSessions = sessionRail.sessions;
   const sessionListCollapsed = railLayout.collapsed;
@@ -1727,9 +1728,9 @@ function AppShellContent({
     setSearchModalOpen,
     setSessionListCollapsed: sessionRailLayoutStore.setCollapsed,
     workbar: {
-      rightCollapsed: workbar.selectors.rightCollapsed,
-      toggleRight: workbar.commands.toggleRight,
-      openTool: workbar.commands.openTool,
+      rightCollapsed: selectors.rightCollapsed,
+      toggleRight: commands.toggleRight,
+      openTool: commands.openTool,
     },
     setThemePref,
     setUiLocaleOverride,
@@ -1764,7 +1765,7 @@ function AppShellContent({
     setInteractionBySession: sessionUiController.setInteractionBySession,
     onInteractionChanged: markInteractionChanged,
     onExecutionBoundaryChanged: reloadActiveExecutionBoundary,
-    respondToUserForm: workbar.commands.respondToUserForm,
+    respondToUserForm: commands.respondToUserForm,
     showModelSetupToast,
     toastApi,
     newChatModel: newChatModel ?? null,
@@ -1992,7 +1993,7 @@ function AppShellContent({
         );
         return false;
       }
-      workbar.commands.openTool('side-chat', 'right', {
+      commands.openTool('side-chat', 'right', {
         ...(slashCommand.command.prompt
           ? { initialPrompt: slashCommand.command.prompt }
           : {}),
@@ -2594,7 +2595,7 @@ function AppShellContent({
     },
     openProjectFolder,
     openSessionInChat,
-    openSideConversation: () => workbar.commands.openTool('side-chat'),
+    openSideConversation: () => commands.openTool('side-chat'),
     openSettings,
     openSettingsSection,
     openSkillsFolder,
@@ -2654,24 +2655,14 @@ function AppShellContent({
          readers at all — and three writers of the same value is three chances
          for them to disagree. */
       data-sidebar-state={sessionListCollapsed ? 'collapsed' : 'expanded'}
-      /* Published here for the same reason `data-sidebar-state` is: the frame is
-         the only ancestor shared by the sidebar column and the titlebar strip,
-         and both need this number. The column is this wide; the titlebar's
-         session breadcrumb opens at that edge rather than straddling the seam
-         between the columns.
-
-         Only the EXPANDED width, and only as an inline style, because that is
-         the half of the answer this component owns — the user's dragged width.
-         The collapsed width is a constant, so shell-layout.css states it off
-         `data-sidebar-state`. Writing both here would duplicate the constant;
-         writing this one unconditionally would bury the other, since an inline
-         custom property outranks any rule that redefines it. */
+      /* The frame is the shared owner for dimensions consumed by both shell
+         columns and titlebar chrome. CSS clears the titlebar reserve when the
+         responsive layout moves the workbar below the conversation. */
       style={
-        sessionListCollapsed
-          ? undefined
-          : ({
-              '--maka-sidenav-width': `${sessionListWidth}px`,
-            } as CSSProperties)
+        ({
+          '--maka-session-workbar-width': `${workbar.host.rightWidth}px`,
+          '--maka-sidenav-width': sessionListCollapsed ? 0 : `${sessionListWidth}px`,
+        } as CSSProperties)
       }
     >
       <LiveTurnReconciler
@@ -2747,8 +2738,8 @@ function AppShellContent({
             {!sharedSessionActive && !VIEWS_WITHOUT_WORKSPACE_ACTIONS.has(agentsView) && (
               <WorkbarTitlebarActions
                 available={workbarAvailable}
-                collapsed={workbar.selectors.rightCollapsed}
-                onToggle={workbar.commands.toggleRight}
+                collapsed={selectors.rightCollapsed}
+                onToggle={commands.toggleRight}
               />
             )}
           </>
@@ -2893,7 +2884,7 @@ function AppShellContent({
                   newTaskSendPending={newTaskSendPending}
                   stopPendingBySession={stopPendingBySession}
                   respondToSandboxBoundary={respondToSandboxBoundary}
-                  respondToClientCapability={workbar.commands.respondToClientCapability}
+                  respondToClientCapability={commands.respondToClientCapability}
                   respondToUserQuestion={respondToUserQuestion}
                   respondToUserForm={respondToUserForm}
                   stop={stop}
@@ -2959,8 +2950,8 @@ function AppShellContent({
                   activeModelLabel={activeModelLabel}
                   activeProviderType={activeConnection?.providerType}
                   latestRequestUsageTokens={selectLatestRequestUsage(messages, activeTranscriptRange, activeModel, activeSessionForModelControls)}
-                  onOpenContextUsage={() => workbar.commands.openTool('inspector')}
-                  LiveContextUsageProbe={workbar.LiveContextUsageProbe}
+                  onOpenContextUsage={() => commands.openTool('inspector')}
+                  LiveContextUsageProbe={LiveContextUsageProbe}
                   modelChoices={chatModelChoices}
                   modelSwitchHasHistory={modelSwitchHasHistory}
                   hideUnavailableCurrentModel={sessionHealthNotice?.onClickTarget === 'model_picker'}
@@ -3137,7 +3128,7 @@ function AppShellContent({
                           text: input.text,
                           sourceTurnId: input.turnId,
                         };
-                        workbar.commands.openSideChatWithQuote(quote);
+                        commands.openSideChatWithQuote(quote);
                       }
                     : undefined
                 }
