@@ -42,7 +42,7 @@ describe('Maka ACP stdio server', () => {
         id: 1,
         result: {
           protocolVersion: 1,
-          agentCapabilities: { sessionCapabilities: { list: {} } },
+          agentCapabilities: { sessionCapabilities: { list: {}, close: {} } },
           authMethods: [],
           agentInfo: { name: 'maka', title: 'Maka', version: '0.2.0' },
         },
@@ -239,12 +239,12 @@ describe('Maka ACP stdio server', () => {
     const methodFailure = responses.get(3) as {
       error?: { code?: unknown; data?: unknown };
     };
-    assert.equal(methodFailure.error?.code, -32601);
-    assert.deepEqual(methodFailure.error?.data, { method: 'session/close' });
+    assert.equal(methodFailure.error?.code, -32602);
+    assert.deepEqual(methodFailure.error?.data, { reason: 'unknown_session' });
     assert.equal(harness.connectCalls(), 1);
   });
 
-  test('keeps an unimplemented Session method Host-independent', async () => {
+  test('keeps close for an unknown Session Host-independent', async () => {
     const harness = createHarness([
       `${JSON.stringify({
         jsonrpc: '2.0',
@@ -266,8 +266,8 @@ describe('Maka ACP stdio server', () => {
       .find((message) => (message as { id?: unknown }).id === 2) as {
       error?: { code?: unknown; data?: unknown };
     };
-    assert.equal(response.error?.code, -32601);
-    assert.deepEqual(response.error?.data, { method: 'session/close' });
+    assert.equal(response.error?.code, -32602);
+    assert.deepEqual(response.error?.data, { reason: 'unknown_session' });
     assert.equal(harness.connectCalls(), 0);
   });
 });
@@ -306,9 +306,24 @@ function createHarness(
             connects += 1;
             if (options.connectError) throw options.connectError;
             return {
-              connection,
+              connection: {
+                ...connection,
+                reconnecting: true,
+                hostEpoch: connection.hostEpoch ?? 'host-1',
+                openSessionSubscription:
+                  connection.openSessionSubscription?.bind(connection) ??
+                  (async () => {
+                    throw new Error('Unexpected Session attachment');
+                  }),
+                openSessionSubscriptionOnce:
+                  connection.openSessionSubscription?.bind(connection) ??
+                  (async () => {
+                    throw new Error('Unexpected Session attachment');
+                  }),
+                subscribeConnectionAvailability: () => () => undefined,
+              },
               close: () => connection.close(),
-            } as Awaited<
+            } as unknown as Awaited<
               ReturnType<
                 typeof import('../runtime-host-cli-context.js').connectRuntimeHostCliConnection
               >
