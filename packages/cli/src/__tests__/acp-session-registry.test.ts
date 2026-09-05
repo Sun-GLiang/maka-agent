@@ -25,9 +25,12 @@ import { describe, test } from 'node:test';
 import {
   RequestError,
   type NewSessionRequest,
+  type SessionNotification,
   type SessionConfigOption,
   type SetSessionConfigOptionRequest,
 } from '@agentclientprotocol/sdk';
+import type { SessionEvent } from '@maka/core/events';
+import type { StoredMessage } from '@maka/core/session';
 import { THINKING_LEVELS, type ThinkingLevel } from '@maka/core/model-thinking';
 import {
   RuntimeHostOperationError,
@@ -35,9 +38,16 @@ import {
 } from '@maka/runtime-host/client';
 import {
   SESSION_CATALOG_CWD_MAX_BYTES,
+  SESSION_CONTINUITY_SCHEMA_VERSION,
   type SessionCatalogProjection,
+  type SessionContinuitySnapshot,
 } from '@maka/runtime-host/protocol';
-import { AcpSessionRegistry, type AcpSessionRegistryConnection } from '../acp/session-registry.js';
+import {
+  AcpSessionRegistry,
+  type AcpSessionAttachment,
+  type AcpSessionAttachmentOpenInput,
+  type AcpSessionRegistryConnection,
+} from '../acp/session-registry.js';
 
 const SESSION_REVISION = `sha256:${'a'.repeat(64)}` as const;
 const NEW_SESSION_REVISION = `sha256:${'b'.repeat(64)}` as const;
@@ -130,6 +140,15 @@ describe('ACP Session registry', () => {
             value: 'bypass',
           }),
       ],
+      [
+        'turn.start',
+        () =>
+          registry.prompt(
+            { sessionId: 'session-closed', prompt: [{ type: 'text', text: 'hello' }] },
+            promptContext([]),
+          ),
+      ],
+      ['session.close', () => registry.close({ sessionId: 'session-closed' })],
     ] as const) {
       await assert.rejects(request(), (error: unknown) => {
         assert.ok(error instanceof RequestError);
@@ -330,6 +349,420 @@ describe('ACP Session registry', () => {
     assert.equal(createdSessionIds.length, sessionCount);
     assert.equal(subscriptionOpens, 0);
     await registry.dispose();
+  });
+
+  test('rejects unsupported prompt content before attaching or starting a Turn', async () => {
+    let attachmentOpens = 0;
+    const turnRequests: string[] = [];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            turnRequests.push(operation);
+            return catalogSession('session-prompt-validation');
+          },
+        }),
+      newSessionId: () => 'session-prompt-validation',
+      openSessionAttachment: async () => {
+        attachmentOpens += 1;
+        return new FakeAcpSessionAttachment('session-prompt-validation');
+      },
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    turnRequests.length = 0;
+
+    await assertInvalidParams(
+      registry.prompt(
+        {
+          sessionId: 'session-prompt-validation',
+          prompt: [{ type: 'image', data: '', mimeType: 'image/png' }],
+        },
+        promptContext([]),
+      ),
+      { field: 'prompt', reason: 'unsupported_content_type' },
+    );
+
+    assert.equal(attachmentOpens, 0);
+    assert.deepEqual(turnRequests, []);
+    await registry.dispose();
+  });
+
+  test('shares a concurrent first attachment and starts event consumption before turn.start', async () => {
+    const notifications: SessionNotification[] = [];
+    const attachment = new FakeAcpSessionAttachment('session-concurrent-prompt');
+    const attachGate = deferred<AcpSessionAttachment>();
+    let attachmentOpens = 0;
+    const startedTurnIds: string[] = [];
+    const turnIds = ['turn-a', 'turn-b'];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession('session-concurrent-prompt');
+            if (operation === 'turn.start') {
+              const turnId = (input as { turnId: string }).turnId;
+              assert.equal(attachment.nextCalls(turnId), 1);
+              startedTurnIds.push(turnId);
+              queueMicrotask(() => {
+                attachment.emit(
+                  turnId,
+                  sessionEvent(turnId, {
+                    type: 'text_complete',
+                    messageId: `message-${turnId}`,
+                    text: turnId,
+                  }),
+                );
+                attachment.emit(
+                  turnId,
+                  sessionEvent(turnId, { type: 'complete', stopReason: 'end_turn' }),
+                );
+                attachment.finish(turnId);
+              });
+              return {
+                kind: 'started',
+                turn: {
+                  sessionId: 'session-concurrent-prompt',
+                  turnId,
+                  runId: `run-${turnId}`,
+                  status: 'running',
+                },
+                skillInvocation: { loaded: [], failed: [], receipts: [] },
+              };
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+        }),
+      newSessionId: () => 'session-concurrent-prompt',
+      newTurnId: () => turnIds.shift()!,
+      openSessionAttachment: async () => {
+        attachmentOpens += 1;
+        return attachGate.promise;
+      },
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+
+    const first = registry.prompt(
+      { sessionId: 'session-concurrent-prompt', prompt: [{ type: 'text', text: 'one' }] },
+      promptContext(notifications),
+    );
+    const second = registry.prompt(
+      { sessionId: 'session-concurrent-prompt', prompt: [{ type: 'text', text: 'two' }] },
+      promptContext(notifications),
+    );
+    await waitFor(() => attachmentOpens === 1);
+    attachGate.resolve(attachment);
+
+    assert.deepEqual(await Promise.all([first, second]), [
+      { stopReason: 'end_turn' },
+      { stopReason: 'end_turn' },
+    ]);
+    assert.deepEqual(new Set(startedTurnIds), new Set(['turn-a', 'turn-b']));
+    assert.equal(attachmentOpens, 1);
+    assert.deepEqual(
+      new Set(
+        notifications.flatMap(({ update }) =>
+          update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text'
+            ? [update.content.text]
+            : [],
+        ),
+      ),
+      new Set(['turn-a', 'turn-b']),
+    );
+    await registry.dispose();
+    assert.equal(attachment.closeCalls, 1);
+  });
+
+  test('latches cancellation while the initial attachment is pending and never dispatches', async () => {
+    const attachment = new FakeAcpSessionAttachment('session-cancel-before-attach');
+    const attachGate = deferred<AcpSessionAttachment>();
+    let turnStarts = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create')
+              return catalogSession('session-cancel-before-attach');
+            if (operation === 'turn.start') turnStarts += 1;
+            return {};
+          },
+        }),
+      newSessionId: () => 'session-cancel-before-attach',
+      newTurnId: () => 'turn-cancelled',
+      openSessionAttachment: async () => attachGate.promise,
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    const prompt = registry.prompt(
+      {
+        sessionId: 'session-cancel-before-attach',
+        prompt: [{ type: 'text', text: 'cancel me' }],
+      },
+      promptContext([]),
+    );
+    await registry.cancel({ sessionId: 'session-cancel-before-attach' });
+    attachGate.resolve(attachment);
+
+    assert.deepEqual(await prompt, { stopReason: 'cancelled' });
+    assert.equal(turnStarts, 0);
+    await registry.dispose();
+  });
+
+  test('waits for the live root identity before issuing exactly one turn.stop', async () => {
+    const attachment = new FakeAcpSessionAttachment('session-cancel-live');
+    const startGate = deferred<unknown>();
+    const stopInputs: unknown[] = [];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession('session-cancel-live');
+            if (operation === 'turn.start') return startGate.promise;
+            if (operation === 'turn.stop') {
+              stopInputs.push(input);
+              return {
+                sessionId: 'session-cancel-live',
+                turnId: 'turn-live',
+                runId: 'run-live',
+                status: 'cancelled',
+                terminalEventId: 'terminal-live',
+                abortSource: 'user',
+              };
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+        }),
+      newSessionId: () => 'session-cancel-live',
+      newTurnId: () => 'turn-live',
+      openSessionAttachment: async (input) => attachment.bind(input),
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    const prompt = registry.prompt(
+      { sessionId: 'session-cancel-live', prompt: [{ type: 'text', text: 'run' }] },
+      promptContext([]),
+    );
+    await waitFor(() => attachment.nextCalls('turn-live') === 1);
+    const cancel = registry.cancel({ sessionId: 'session-cancel-live' });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(stopInputs, []);
+
+    attachment.setRoot({
+      sessionId: 'session-cancel-live',
+      turnId: 'turn-live',
+      runId: 'run-live',
+      status: 'running',
+    });
+    startGate.resolve({
+      kind: 'started',
+      turn: {
+        sessionId: 'session-cancel-live',
+        turnId: 'turn-live',
+        runId: 'run-live',
+        status: 'running',
+      },
+      skillInvocation: { loaded: [], failed: [], receipts: [] },
+    });
+    await cancel;
+    await registry.cancel({ sessionId: 'session-cancel-live' });
+    assert.deepEqual(await prompt, { stopReason: 'cancelled' });
+    assert.deepEqual(stopInputs, [
+      { sessionId: 'session-cancel-live', turnId: 'turn-live', runId: 'run-live' },
+    ]);
+    await registry.dispose();
+  });
+
+  test('close removes ownership immediately and still closes attachment after stop failure', async () => {
+    const attachment = new FakeAcpSessionAttachment('session-close-live');
+    const stopFailure = new Error('stop failed');
+    let turnStarted = false;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession('session-close-live');
+            if (operation === 'turn.start') {
+              turnStarted = true;
+              return {
+                kind: 'started',
+                turn: {
+                  sessionId: 'session-close-live',
+                  turnId: 'turn-close',
+                  runId: 'run-close',
+                  status: 'running',
+                },
+                skillInvocation: { loaded: [], failed: [], receipts: [] },
+              };
+            }
+            if (operation === 'turn.stop') throw stopFailure;
+            if (operation === 'session.catalog.query') {
+              return {
+                kind: 'page',
+                revision: SESSION_REVISION,
+                sessions: [catalogSession('session-close-live')],
+                nextCursor: null,
+              };
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+        }),
+      newSessionId: () => 'session-close-live',
+      newTurnId: () => 'turn-close',
+      openSessionAttachment: async (input) => attachment.bind(input),
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    const prompt = registry
+      .prompt(
+        { sessionId: 'session-close-live', prompt: [{ type: 'text', text: 'run' }] },
+        promptContext([]),
+      )
+      .catch((error: unknown) => error);
+    await waitFor(() => turnStarted);
+    attachment.setRoot({
+      sessionId: 'session-close-live',
+      turnId: 'turn-close',
+      runId: 'run-close',
+      status: 'running',
+    });
+
+    const firstClose = registry.close({ sessionId: 'session-close-live' });
+    const concurrentClose = registry.close({ sessionId: 'session-close-live' });
+    await assertInvalidParams(
+      registry.prompt(
+        { sessionId: 'session-close-live', prompt: [{ type: 'text', text: 'late' }] },
+        promptContext([]),
+      ),
+      { reason: 'unknown_session' },
+    );
+    const closeOutcomes = await Promise.allSettled([firstClose, concurrentClose]);
+    assert.deepEqual(
+      closeOutcomes.map((outcome) =>
+        outcome.status === 'rejected' ? outcome.reason : outcome.value,
+      ),
+      [stopFailure, stopFailure],
+    );
+    assert.deepEqual(await prompt, { stopReason: 'cancelled' });
+    assert.equal(attachment.closeCalls, 1);
+    assert.deepEqual(await registry.list({}), {
+      sessions: [
+        {
+          sessionId: 'session-close-live',
+          cwd: '/workspace',
+          title: 'session-close-live',
+          updatedAt: '1970-01-01T00:00:00.001Z',
+        },
+      ],
+    });
+    await assertInvalidParams(registry.close({ sessionId: 'session-close-live' }), {
+      reason: 'unknown_session',
+    });
+    await registry.dispose();
+  });
+
+  test('retires a failed attachment so the next prompt opens a fresh one', async () => {
+    const first = new FakeAcpSessionAttachment('session-reattach');
+    const second = new FakeAcpSessionAttachment('session-reattach');
+    let attachmentOpens = 0;
+    let starts = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession('session-reattach');
+            if (operation !== 'turn.start') throw new Error(`Unexpected operation ${operation}`);
+            starts += 1;
+            const turnId = (input as { turnId: string }).turnId;
+            const attachment = starts === 1 ? first : second;
+            queueMicrotask(() => {
+              if (starts === 1) {
+                attachment.failAttachment(new Error('subscription failed'));
+              } else {
+                attachment.emit(
+                  turnId,
+                  sessionEvent(turnId, { type: 'complete', stopReason: 'end_turn' }),
+                );
+                attachment.finish(turnId);
+              }
+            });
+            return {
+              kind: 'started',
+              turn: {
+                sessionId: 'session-reattach',
+                turnId,
+                runId: `run-${turnId}`,
+                status: 'running',
+              },
+              skillInvocation: { loaded: [], failed: [], receipts: [] },
+            };
+          },
+        }),
+      newSessionId: () => 'session-reattach',
+      newTurnId: (() => {
+        const ids = ['turn-first', 'turn-second'];
+        return () => ids.shift()!;
+      })(),
+      openSessionAttachment: async (input) => {
+        attachmentOpens += 1;
+        return (attachmentOpens === 1 ? first : second).bind(input);
+      },
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+
+    await assert.rejects(
+      registry.prompt(
+        { sessionId: 'session-reattach', prompt: [{ type: 'text', text: 'first' }] },
+        promptContext([]),
+      ),
+      /subscription failed/u,
+    );
+    assert.deepEqual(
+      await registry.prompt(
+        { sessionId: 'session-reattach', prompt: [{ type: 'text', text: 'second' }] },
+        promptContext([]),
+      ),
+      { stopReason: 'end_turn' },
+    );
+    assert.equal(attachmentOpens, 2);
+    await registry.dispose();
+  });
+
+  test('shutdown cancels active prompts and closes attachments before the shared Host', async () => {
+    const lifecycle: string[] = [];
+    const startGate = deferred<unknown>();
+    const attachment = new FakeAcpSessionAttachment('session-shutdown', () => {
+      lifecycle.push('attachment.close');
+    });
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession('session-shutdown');
+            if (operation === 'turn.start') return startGate.promise;
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          close: async () => {
+            lifecycle.push('connection.close');
+            startGate.reject(new Error('connection closed'));
+          },
+        }),
+      newSessionId: () => 'session-shutdown',
+      newTurnId: () => 'turn-shutdown',
+      openSessionAttachment: async (input) => attachment.bind(input),
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    const prompt = registry.prompt(
+      { sessionId: 'session-shutdown', prompt: [{ type: 'text', text: 'run' }] },
+      promptContext([]),
+    );
+    await waitFor(() => attachment.nextCalls('turn-shutdown') === 1);
+
+    await registry.dispose();
+
+    assert.deepEqual(await prompt, { stopReason: 'cancelled' });
+    assert.deepEqual(lifecycle, ['attachment.close', 'connection.close']);
+    await assert.rejects(
+      registry.list({}),
+      (error: unknown) =>
+        error instanceof RequestError &&
+        (error.data as { code?: string }).code === 'registry_closed',
+    );
   });
 
   test('returns projected configuration and owns only a representable successful create', async () => {
@@ -1404,12 +1837,159 @@ function fakeConnection(
   } = {},
 ): AcpSessionRegistryConnection {
   return {
+    hostEpoch: 'host-1',
     request: async (operation, input) =>
       operation === 'connection.catalog.query'
         ? connectionCatalogPage(overrides.thinkingLevels ?? THINKING_LEVELS)
         : (overrides.request?.(operation, input) ?? {}),
+    openSessionSubscription: async () => {
+      throw new Error('Unexpected recoverable subscription open');
+    },
+    openSessionSubscriptionOnce: async () => {
+      throw new Error('Unexpected initial subscription open');
+    },
     close: overrides.close ?? (async () => undefined),
   } as AcpSessionRegistryConnection;
+}
+
+function promptContext(notifications: SessionNotification[]) {
+  return {
+    signal: new AbortController().signal,
+    notify: async (notification: SessionNotification) => void notifications.push(notification),
+  };
+}
+
+class FakeAcpSessionAttachment implements AcpSessionAttachment {
+  snapshot: SessionContinuitySnapshot;
+  closeCalls = 0;
+  #callbacks: AcpSessionAttachmentOpenInput | undefined;
+  readonly #streams = new Map<string, FakeEventStream>();
+
+  constructor(
+    readonly sessionId: string,
+    readonly onClose: () => void = () => undefined,
+  ) {
+    this.snapshot = continuitySnapshot(sessionId);
+  }
+
+  bind(input: AcpSessionAttachmentOpenInput): this {
+    this.#callbacks = input;
+    return this;
+  }
+
+  eventsForTurn(turnId: string): AsyncIterable<SessionEvent> {
+    return this.#stream(turnId);
+  }
+
+  failTurn(turnId: string, error: unknown): void {
+    this.#stream(turnId).fail(error);
+  }
+
+  failAttachment(error: Error): void {
+    this.#callbacks?.onFailed(error);
+    for (const stream of this.#streams.values()) stream.fail(error);
+  }
+
+  emit(turnId: string, event: SessionEvent): void {
+    this.#stream(turnId).push(event);
+  }
+
+  finish(turnId: string): void {
+    this.#stream(turnId).finish();
+  }
+
+  nextCalls(turnId: string): number {
+    return this.#streams.get(turnId)?.nextCalls ?? 0;
+  }
+
+  setRoot(rootTurn: SessionContinuitySnapshot['rootTurn']): void {
+    this.snapshot = {
+      ...this.snapshot,
+      projectionRevision: this.snapshot.projectionRevision + 1,
+      rootTurn,
+    };
+    this.#callbacks?.onSnapshotChanged(this.snapshot);
+  }
+
+  async close(): Promise<void> {
+    this.closeCalls += 1;
+    this.onClose();
+    for (const stream of this.#streams.values()) stream.finish();
+  }
+
+  #stream(turnId: string): FakeEventStream {
+    let stream = this.#streams.get(turnId);
+    if (!stream) {
+      stream = new FakeEventStream();
+      this.#streams.set(turnId, stream);
+    }
+    return stream;
+  }
+}
+
+class FakeEventStream implements AsyncIterable<SessionEvent>, AsyncIterator<SessionEvent> {
+  readonly #events: SessionEvent[] = [];
+  readonly #waiters: Array<{
+    resolve(value: IteratorResult<SessionEvent>): void;
+    reject(error: unknown): void;
+  }> = [];
+  nextCalls = 0;
+  #done = false;
+
+  [Symbol.asyncIterator](): AsyncIterator<SessionEvent> {
+    return this;
+  }
+
+  next(): Promise<IteratorResult<SessionEvent>> {
+    this.nextCalls += 1;
+    const event = this.#events.shift();
+    if (event) return Promise.resolve({ done: false, value: event });
+    if (this.#done) return Promise.resolve({ done: true, value: undefined });
+    return new Promise((resolve, reject) => this.#waiters.push({ resolve, reject }));
+  }
+
+  push(event: SessionEvent): void {
+    const waiter = this.#waiters.shift();
+    if (waiter) waiter.resolve({ done: false, value: event });
+    else this.#events.push(event);
+  }
+
+  fail(error: unknown): void {
+    this.#done = true;
+    for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
+  }
+
+  finish(): void {
+    this.#done = true;
+    for (const waiter of this.#waiters.splice(0)) {
+      waiter.resolve({ done: true, value: undefined });
+    }
+  }
+}
+
+function continuitySnapshot(sessionId: string): SessionContinuitySnapshot {
+  return {
+    schemaVersion: SESSION_CONTINUITY_SCHEMA_VERSION,
+    session: {
+      sessionId,
+      metadataRevision: 1,
+      status: 'active',
+      createdAt: 1,
+      isArchived: false,
+    },
+    projectionRevision: 1,
+    rootTurn: null,
+    goal: null,
+    queue: { hostEpoch: 'host-1', queueRevision: 0, steering: [], followup: [] },
+    interactions: { pending: [] },
+  };
+}
+
+function sessionEvent<T extends Omit<SessionEvent, 'id' | 'turnId' | 'ts'>>(
+  turnId: string,
+  value: T,
+): SessionEvent {
+  return { id: `event-${turnId}`, turnId, ts: 1, ...value } as unknown as SessionEvent;
 }
 
 function connectionCatalogPage(thinkingLevels: readonly ThinkingLevel[]) {
