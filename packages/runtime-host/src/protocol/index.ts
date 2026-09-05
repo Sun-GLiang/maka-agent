@@ -75,6 +75,7 @@ export * from './configuration-change.js';
 export * from './connection-catalog-change.js';
 export * from './goal.js';
 export * from './hosted-execution.js';
+export * from './host-resources.js';
 export * from './plan.js';
 export * from './peer-mesh.js';
 export * from './project-catalog.js';
@@ -100,10 +101,14 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 111 as const;
-// 111: `usage.query` adds connection-owned, revision-pinned snapshot start,
-// activity, and pricing pages plus explicit `usage.snapshot.release`. Epoch-110
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 113 as const;
+// 113: `usage.query` adds connection-owned, revision-pinned snapshot start,
+// activity, and pricing pages plus explicit `usage.snapshot.release`. Epoch-112
 // peers reject these closed variants, so mixed peers must fail the handshake.
+// 112: Owners can query the Host execution environment through an extensible,
+// bounded resource-envelope contract. Older Hosts do not implement the query.
+// 111: Client Capability tool schemas may use draft-07 tuple additionalItems.
+// Older Hosts reject the keyword, so peers must agree before capabilities are admitted.
 // 110: Runtime Host is the sole schema-migration authority for its State Root.
 // Epoch 109 Desktop builds could migrate the event-only AgentRun schema while
 // an older service Host still held the root, leaving that Host querying a
