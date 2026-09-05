@@ -130,6 +130,32 @@ export function TranscriptGapRow({
   isPending,
   onActivate,
 }: TranscriptGapRowProps) {
+  const actionRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusAfterPendingRef = useRef(false);
+  const activationReachedPendingRef = useRef(false);
+  const isPendingRef = useRef(isPending);
+  isPendingRef.current = isPending;
+
+  useEffect(() => {
+    if (isPending) {
+      activationReachedPendingRef.current = restoreFocusAfterPendingRef.current;
+      return;
+    }
+    if (!activationReachedPendingRef.current) return;
+
+    activationReachedPendingRef.current = false;
+    const shouldRestore = restoreFocusAfterPendingRef.current;
+    restoreFocusAfterPendingRef.current = false;
+    const action = actionRef.current;
+    if (
+      shouldRestore
+      && action?.isConnected
+      && document.activeElement === document.body
+    ) {
+      action.focus({ preventScroll: true });
+    }
+  }, [isPending]);
+
   return (
     <HStack
       className="maka-transcript-gap-row"
@@ -144,11 +170,16 @@ export function TranscriptGapRow({
     >
       <Text type="supporting" color="secondary">{description}</Text>
       <Button
+        ref={actionRef}
         label={actionLabel}
         variant="ghost"
         size="sm"
         isLoading={isPending}
+        onBlur={() => {
+          if (!isPendingRef.current) restoreFocusAfterPendingRef.current = false;
+        }}
         onClick={() => {
+          restoreFocusAfterPendingRef.current = document.activeElement === actionRef.current;
           void onActivate();
         }}
       />
