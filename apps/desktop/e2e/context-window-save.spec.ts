@@ -20,7 +20,7 @@
 import { expect, test } from './fixtures';
 import { getProviderSettingsCopy } from '../src/renderer/features/connection-settings';
 
-const copy = getProviderSettingsCopy('zh').detail;
+const copy = getProviderSettingsCopy('zh-CN').detail;
 const MODEL_ID = 'custom-reasoner';
 
 test('one save persists a context window that is still focused', async ({
