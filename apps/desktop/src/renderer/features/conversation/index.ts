@@ -20,17 +20,19 @@
 import {
   captureTranscriptReadingAnchor,
   currentTranscriptRange,
-  loadTranscriptRange,
+  loadTranscriptHistory,
   newestDurablePromptSequence,
   refreshTranscriptTurnLandmarks,
   restoreSessionTranscriptRange,
+  transcriptHistoryLoadView,
   transcriptRestoreTarget,
 } from './controller/transcript-reading-position.js';
 
 export const transcriptReadingPosition = {
   captureAnchor: captureTranscriptReadingAnchor,
   currentRange: currentTranscriptRange,
-  loadRange: loadTranscriptRange,
+  loadHistory: loadTranscriptHistory,
+  loadView: transcriptHistoryLoadView,
   newestDurablePromptSequence,
   refreshLandmarks: refreshTranscriptTurnLandmarks,
   restoreRange: restoreSessionTranscriptRange,

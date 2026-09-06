@@ -449,11 +449,10 @@ function AppShellContent({
   const [newChatOrchestrationMode, setNewChatOrchestrationMode] = useState<OrchestrationMode>('default');
   const [newTaskPermissionChoice, setNewTaskPermissionChoice, clearNewTaskPermissionChoice] =
     useNewTaskChoice<ChatDefaultPermissionMode>(currentNewTaskDraftKey);
-  const [historyLoadPendingSessionId, setHistoryLoadPendingSessionId] = useState<string>();
-  // The state above is what the transcript renders; this is what the guard
-  // reads. A scroller can ask twice in one task — two scroll events before
-  // React has re-rendered anything — and a state read is still the old value
-  // for both of them.
+  const [historyLoadPending, setHistoryLoadPending] = useState<{
+    sessionId: string;
+    target: 'earlier' | 'newer' | 'latest';
+  }>();
   const historyLoadPendingRef = useRef(false);
   const [transcriptTurnIndex, setTranscriptTurnIndex] = useState<{
     sessionId: string;
@@ -2538,42 +2537,30 @@ function AppShellContent({
       setAnchor: sessionUiController.setTranscriptReadingAnchor,
     });
   }
-  async function loadTranscriptHistory(
-    target: 'earlier' | 'newer' | 'latest',
-    anchorTurnId?: string,
-  ) {
-    const controller = transcriptRangeRef.current;
-    const sessionId = activeId;
-    if (!controller || !sessionId || historyLoadPendingRef.current) return;
-    historyLoadPendingRef.current = true;
-    setHistoryLoadPendingSessionId(sessionId);
-    if (target !== 'earlier') handleTranscriptReadingAnchorChange();
-    try {
-      await transcriptReadingPosition.loadRange(
-        controller,
-        target,
-        DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES,
-        anchorTurnId,
-      );
-    } catch (error) {
-      if (
-        activeIdRef.current === sessionId &&
-        transcriptRangeRef.current === controller
-      )
-        showSessionError(
-          sessionId,
-          desktopConversationCopy.actions.messageReadFailedTitle,
-          localizedShellErrorMessage(
-            error,
-            desktopConversationCopy.actions.operationFailedFallback,
-            uiLocale,
-          ),
-        );
-    } finally {
-      historyLoadPendingRef.current = false;
-      setHistoryLoadPendingSessionId((current) => current === sessionId ? undefined : current);
-    }
+  function loadTranscriptHistory(target: 'earlier' | 'newer' | 'latest', anchorTurnId?: string) {
+    return transcriptReadingPosition.loadHistory({
+      controller: transcriptRangeRef.current,
+      sessionId: activeId,
+      target,
+      maxBytes: DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES,
+      anchorTurnId,
+      loading: historyLoadPendingRef,
+      setPending: setHistoryLoadPending,
+      onReadingAnchorChange: handleTranscriptReadingAnchorChange,
+      isCurrent: (sessionId, controller) =>
+        activeIdRef.current === sessionId && transcriptRangeRef.current === controller,
+      onError: (error, sessionId) => showSessionError(
+        sessionId,
+        desktopConversationCopy.actions.messageReadFailedTitle,
+        localizedShellErrorMessage(
+          error,
+          desktopConversationCopy.actions.operationFailedFallback,
+          uiLocale,
+        ),
+      ),
+    });
   }
+  const historyLoadView = transcriptReadingPosition.loadView(historyLoadPending, activeId);
   const homeSurfaceActive =
     navSelection.section === 'sessions' &&
     messages.length === 0 &&
@@ -2856,7 +2843,9 @@ function AppShellContent({
                 scrollToBottomLabel={
                   desktopConversationCopy.actions.scrollMainToBottom
                 }
-                onReturnToTail={() => loadTranscriptHistory('latest')}
+                onReturnToTail={activeTranscriptRange?.hasNewer === true
+                  ? () => loadTranscriptHistory('latest')
+                  : undefined}
                 hidden={navSelection.section !== 'sessions'}
                 composer={
                   <>
@@ -3063,10 +3052,11 @@ function AppShellContent({
                 activeSessionId={activeId}
                 hasOlderHistory={activeTranscriptRange?.hasOlder === true}
                 hasNewerHistory={activeTranscriptRange?.hasNewer === true}
-                historyLoadPending={historyLoadPendingSessionId === activeId}
+                historyLoadPending={historyLoadView.pendingDirection}
+                historyLoadBlocked={historyLoadView.blocked}
                 onLoadEarlierHistory={(anchorTurnId) =>
-                  loadTranscriptHistory('earlier', anchorTurnId)}
-                onLoadNewerHistory={() => loadTranscriptHistory('newer')}
+                  void loadTranscriptHistory('earlier', anchorTurnId)}
+                onLoadNewerHistory={() => void loadTranscriptHistory('newer')}
                 liveContentSeedRevision={liveContent.liveContentSeedRevision(activeEventSeed, activeId)}
                 messages={messages}
                 transientMessages={transientMessages}

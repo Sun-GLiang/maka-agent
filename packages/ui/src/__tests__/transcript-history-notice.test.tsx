@@ -20,15 +20,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { TranscriptGapRow } from '../chat-view.js';
+import { transcriptGapLoadState, TranscriptGapRow } from '../chat-view.js';
 
-function renderGap(direction: 'older' | 'newer', isPending: boolean): string {
+function renderGap(
+  direction: 'older' | 'newer',
+  isPending: boolean,
+  isDisabled = false,
+): string {
   return renderToStaticMarkup(
     <TranscriptGapRow
       direction={direction}
       description={direction === 'older' ? 'Earlier messages are not loaded.' : 'Newer messages are not loaded.'}
       actionLabel={direction === 'older' ? 'Load earlier messages' : 'Load newer messages'}
       isPending={isPending}
+      isDisabled={isDisabled}
       onActivate={() => undefined}
     />,
   );
@@ -56,4 +61,23 @@ test('keeps a newer boundary gap visible while its shared loader is pending', ()
   assert.match(markup, /Load newer messages/);
   assert.match(markup, /disabled/);
   assert.match(markup, /aria-busy="true"/);
+});
+
+test('only the active gap spins while the shared range load blocks both actions', () => {
+  assert.deepEqual(transcriptGapLoadState('older', 'older'), {
+    isPending: true,
+    isDisabled: true,
+  });
+  assert.deepEqual(transcriptGapLoadState('newer', 'older'), {
+    isPending: false,
+    isDisabled: true,
+  });
+  assert.deepEqual(transcriptGapLoadState('newer', undefined, true), {
+    isPending: false,
+    isDisabled: true,
+  });
+
+  const inactiveGap = renderGap('newer', false, true);
+  assert.match(inactiveGap, /disabled/);
+  assert.doesNotMatch(inactiveGap, /aria-busy="true"/);
 });

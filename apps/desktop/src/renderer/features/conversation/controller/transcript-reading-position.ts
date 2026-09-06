@@ -34,11 +34,44 @@ interface TranscriptRangeController<Message> {
 
 interface TranscriptHistoryController {
   readonly store: {
-    range(): { readonly hasNewer: boolean; readonly newestSequence: number | null };
+    range(): {
+      readonly sessionId: string;
+      readonly hasOlder: boolean;
+      readonly hasNewer: boolean;
+      readonly newestSequence: number | null;
+    };
   };
   loadBefore(maxBytes?: number, anchorTurnId?: string): Promise<void>;
   loadAround(sequence: number): Promise<void>;
   loadLatest(): Promise<void>;
+}
+
+export type TranscriptHistoryLoadTarget = 'earlier' | 'newer' | 'latest';
+
+export interface TranscriptHistoryLoadPending {
+  readonly sessionId: string;
+  readonly target: TranscriptHistoryLoadTarget;
+}
+
+export function transcriptRangeNeedsLoad(
+  range: { readonly hasOlder: boolean; readonly hasNewer: boolean } | undefined,
+  target: TranscriptHistoryLoadTarget,
+): boolean {
+  return target === 'earlier'
+    ? range?.hasOlder === true
+    : range?.hasNewer === true;
+}
+
+export function transcriptHistoryLoadView(
+  pending: TranscriptHistoryLoadPending | undefined,
+  activeSessionId: string | undefined,
+): { readonly blocked: boolean; readonly pendingDirection: 'older' | 'newer' | undefined } {
+  return {
+    blocked: pending !== undefined,
+    pendingDirection: pending && pending.sessionId === activeSessionId
+      ? pending.target === 'earlier' ? 'older' : 'newer'
+      : undefined,
+  };
 }
 
 interface SearchTarget {
@@ -74,7 +107,7 @@ export function newestDurablePromptSequence<Message>(
 
 export async function loadTranscriptRange(
   controller: TranscriptHistoryController,
-  target: 'earlier' | 'newer' | 'latest',
+  target: TranscriptHistoryLoadTarget,
   maxBytes: number,
   anchorTurnId?: string,
 ): Promise<void> {
@@ -84,6 +117,46 @@ export async function loadTranscriptRange(
   if (range.hasNewer && range.newestSequence !== null) {
     await controller.loadAround(range.newestSequence + 1);
   }
+}
+
+export function loadTranscriptHistory(options: {
+  readonly controller: TranscriptHistoryController | undefined;
+  readonly sessionId: string | undefined;
+  readonly target: TranscriptHistoryLoadTarget;
+  readonly maxBytes: number;
+  readonly anchorTurnId?: string;
+  readonly loading: { current: boolean };
+  readonly setPending: (pending: TranscriptHistoryLoadPending | undefined) => void;
+  readonly onReadingAnchorChange: () => void;
+  readonly isCurrent: (
+    sessionId: string,
+    controller: TranscriptHistoryController,
+  ) => boolean;
+  readonly onError: (error: unknown, sessionId: string) => void;
+}): boolean {
+  const { controller, sessionId, target } = options;
+  if (
+    !controller ||
+    !sessionId ||
+    options.loading.current ||
+    !options.isCurrent(sessionId, controller)
+  ) return false;
+  const range = currentTranscriptRange(controller, sessionId);
+  if (!range) return false;
+  if (!transcriptRangeNeedsLoad(range, target)) return true;
+  options.loading.current = true;
+  options.setPending({ sessionId, target });
+  if (target !== 'earlier') options.onReadingAnchorChange();
+  void loadTranscriptRange(controller, target, options.maxBytes, options.anchorTurnId)
+    .catch((error) => {
+      if (options.isCurrent(sessionId, controller)) options.onError(error, sessionId);
+    })
+    .finally(() => {
+      options.loading.current = false;
+      options.setPending(undefined);
+    })
+    .catch(() => undefined);
+  return true;
 }
 
 export function transcriptRestoreTarget(
