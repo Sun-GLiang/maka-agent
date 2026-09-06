@@ -32,11 +32,17 @@ export { SessionRailProvider } from './session-rail-context.js';
 export type {
   SessionRailChrome,
   SessionRailData,
-  SessionRailRowSelection,
   SessionRailSelection,
+  SessionRailSelectionCommands,
+  SessionRowPick,
   SessionViewMode,
 } from './session-rail-context.js';
 export type { SidebarUpdateReminder } from './session-sidebar-nav.js';
+export {
+  SidebarUpdateProjectionProvider,
+  useSidebarUpdateProjection,
+  type SidebarUpdateProjection,
+} from './sidebar-update-projection-context.js';
 export type { BundledSkillCatalogEntry, DailyReviewMarkdownActionInput, ManagedSkillSourceEntry, ManagedSkillUpdatePreview, SkillEntry, SkillGovernanceDetails } from './module-panel-types.js';
 export { describeLoadToolResult, formatRedactedJson, formatToolIntent, loadToolDisplayName } from './tool-format.js';
 export { formatBytes, ToolCallDetail, ToolTrow } from './tool-activity.js';

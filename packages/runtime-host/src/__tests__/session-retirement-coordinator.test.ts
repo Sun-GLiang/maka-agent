@@ -22,6 +22,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
+import { openInteractiveArtifactStoreForWrite } from '@maka/storage/artifact-stores';
+import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
+import { createHostExecutionArtifactServices } from '../server/execution-artifacts.js';
 import { describe, test } from 'node:test';
 import type { AgentGraphOperatorProvisionRequest } from '@maka/core/agent-graph-topology';
 import type { CreateSessionInput } from '@maka/core/runtime-inputs';
@@ -41,6 +46,7 @@ import type { ConnectionContext } from '../server/operation-dispatcher.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import { MemoryExtractionSessionLane } from '../server/memory-extraction-session-lane.js';
 import { HostSessionRetirementCoordinator } from '../server/session-retirement-coordinator.js';
+import { purgeSessionSidecars } from '../server/session-sidecar-purge.js';
 import { waitFor as pollFor } from '@maka/core/test-only/async-primitives';
 
 const CONNECTION_CONTEXT: ConnectionContext = {
@@ -51,6 +57,147 @@ const CONNECTION_CONTEXT: ConnectionContext = {
 };
 
 describe('Host Session retirement coordinator', () => {
+  test('retirement finalizes admitted patches and fences late artifact publication', async (t) => {
+    await withHarness(async (harness) => {
+      const capability = await resolveStorageRoot({
+        path: harness.workspaceRoot,
+        kind: 'interactive',
+      });
+      const owner = await tryAcquireInteractiveRootOwner(capability);
+      assert.ok(owner);
+      const artifacts = await openInteractiveArtifactStoreForWrite(owner.lease);
+      const source = join(harness.workspaceRoot, 'late.txt');
+      await fsPromises.writeFile(source, 'late payload');
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const original = fsPromises.realpath;
+      const pause = t.mock.method(
+        fsPromises,
+        'realpath',
+        async (...args: Parameters<typeof original>) => {
+          if (args[0] === source) {
+            entered();
+            await blocked;
+          }
+          return original(...args);
+        },
+      );
+      syncBuiltinESMExports();
+      let recording: Promise<void> | undefined;
+      try {
+        harness.purgeArtifact = (sessionId) => artifacts.purgeSessionArtifacts(sessionId);
+        const recorder = createHostExecutionArtifactServices({
+          artifacts,
+          requestDrain: () => assert.fail('unexpected drain'),
+          sessionAdmission: harness.admission,
+          sessions: harness.store,
+        });
+        const patch = {
+          turnId: 'turn-1',
+          patch: Buffer.from('workspace patch'),
+          binding: {
+            schemaVersion: 1 as const,
+            kind: 'git_worktree' as const,
+            leaseId: `subagent_worktree_${'a'.repeat(32)}`,
+            gitCommonDir: join(harness.workspaceRoot, '.git'),
+            worktreePath: harness.workspaceRoot,
+            branch: `maka/subagent/${'a'.repeat(32)}`,
+            baseCommit: 'b'.repeat(40),
+          },
+        };
+        harness.finalizeWorkspacePatches = async (sessionId) => {
+          const published = await recorder.publishChildWorkspacePatch({ ...patch, sessionId });
+          assert.equal(published.source, 'subagent_writeback');
+          assert.deepEqual(await artifacts.readTextInSession(sessionId, published.id), {
+            ok: true,
+            text: 'workspace patch',
+          });
+        };
+        recording = recorder.recordToolArtifacts({
+          sessionId: harness.revisionId,
+          turnId: 'turn-1',
+          toolUseId: 'tool-1',
+          toolName: 'Write',
+          args: {},
+          result: {},
+          cwd: harness.workspaceRoot,
+          candidates: [{ kind: 'file', name: 'late.txt', sourcePath: source }],
+        });
+        await started;
+        const target = await harness.store.readHeaderRecordSnapshot(harness.revisionId);
+        const removed = await harness.coordinator.handlers['session.remove'](
+          {
+            sessionId: harness.revisionId,
+            expectedRevision: target.revision,
+          },
+          CONNECTION_CONTEXT,
+        );
+        assert.equal(removed.ok, true);
+        await waitFor(
+          async () => (await harness.store.listPendingSessionRetirementCleanupIds()).length === 0,
+          'retirement cleanup completes while source read is paused',
+        );
+        release();
+        await recording;
+        await assert.rejects(
+          recorder.publishChildWorkspacePatch({ ...patch, sessionId: harness.revisionId }),
+          /retired before patch publication/,
+        );
+        assert.deepEqual(
+          (await artifacts.listPage(harness.revisionId, { offset: 0, limit: 10 })).records,
+          [],
+        );
+      } finally {
+        release();
+        try {
+          await recording;
+        } finally {
+          pause.mock.restore();
+          syncBuiltinESMExports();
+          artifacts.close();
+          await owner.close();
+        }
+      }
+    });
+  });
+
+  test('retires context refs before draining every physical garbage batch', async () => {
+    const contextActions: string[] = [];
+    let garbageBatches = 0;
+    await purgeSessionSidecars(
+      {
+        artifacts: { purgeSessionArtifacts: async () => {} },
+        sessionTodo: { purgeSessionState: async () => {} },
+        contextOffload: {
+          retireSession: async (sessionId) => {
+            contextActions.push(`retire:${sessionId}`);
+            return { releasedReferences: 1, releasedLogicalBytes: 10 };
+          },
+          collectGarbage: async (input) => {
+            contextActions.push(`collect:${input.maxBlobs}`);
+            garbageBatches += 1;
+            return { deletedBlobs: 1, deletedBytes: 10, hasMore: garbageBatches < 3 };
+          },
+        },
+        purgeOperationalState: async () => {},
+      },
+      'session-context',
+    );
+
+    assert.deepEqual(contextActions, [
+      'retire:session-context',
+      'collect:64',
+      'collect:64',
+      'collect:64',
+    ]);
+  });
+
   test('rejects ordinary archive and remove operations for the Coordination Session', async () => {
     await withHarness(async (harness) => {
       const created = await harness.store.createStableSession({
@@ -239,7 +386,7 @@ describe('Host Session retirement coordinator', () => {
         'parent retirement cleanup did not converge',
       );
       assert.deepEqual(new Set(harness.actions.purgedArtifacts), new Set(harness.familyIds));
-      assert.deepEqual(new Set(harness.actions.checkedContext), new Set(harness.familyIds));
+      assert.deepEqual(new Set(harness.actions.retiredContext), new Set(harness.familyIds));
     });
   });
 
@@ -1027,7 +1174,7 @@ interface RetirementActions {
   readonly retiredCapabilities: string[];
   readonly retiredMessages: string[];
   readonly purgedArtifacts: string[];
-  readonly checkedContext: string[];
+  readonly retiredContext: string[];
   readonly purgedTasks: string[];
   readonly purgedOperationalState: string[];
   readonly purgedAgentGraphs: string[];
@@ -1066,7 +1213,7 @@ async function withHarness(
       retiredCapabilities: [],
       retiredMessages: [],
       purgedArtifacts: [],
-      checkedContext: [],
+      retiredContext: [],
       purgedTasks: [],
       purgedOperationalState: [],
       purgedAgentGraphs: [],
@@ -1232,8 +1379,12 @@ async function withHarness(
           actions.purgedTasks.push(sessionId);
         },
       },
-      assertNoContextOffloadReferences: async (sessionIds) => {
-        actions.checkedContext.push(...sessionIds);
+      contextOffload: {
+        retireSession: async (sessionId) => {
+          actions.retiredContext.push(sessionId);
+          return { releasedReferences: 0, releasedLogicalBytes: 0 };
+        },
+        collectGarbage: async () => ({ deletedBlobs: 0, deletedBytes: 0, hasMore: false }),
       },
       purgeOperationalState: async (sessionId) => {
         actions.purgedOperationalState.push(sessionId);

@@ -22,6 +22,8 @@ import test from 'node:test';
 import type { BotIncomingMessage } from '@maka/runtime/bots';
 import {
   RuntimeHostOperationError,
+  RuntimeHostPeerError,
+  RuntimeHostPermanentReconnectError,
   RuntimeHostRequestInterruptedError,
   type RuntimeHostSpawnedProcess,
 } from '@maka/runtime-host/client';
@@ -211,6 +213,65 @@ test('waits through a reconnect gap before quiescing Host retirement', async () 
   assert.equal(replacement.prepareRetirementCalls, 1);
   assert.deepEqual(replacement.retirementModes, ['interrupt_active_work']);
   assert.equal(starts, 2);
+  await owner.close();
+});
+
+test('does not treat an in-flight replacement as retired after admission times out', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const first = candidateHarness({
+    ownedProcess: {
+      pid: 42,
+      exited: Promise.resolve({ code: 1, signal: null, stderr: '', stderrTruncated: false }),
+    },
+  });
+  const replacement = candidateHarness();
+  let starts = 0;
+  let reportReconnectStart!: () => void;
+  let releaseReconnect!: () => void;
+  const reconnectStarted = new Promise<void>((resolve) => {
+    reportReconnectStart = resolve;
+  });
+  const reconnectReleased = new Promise<void>((resolve) => {
+    releaseReconnect = resolve;
+  });
+  const owner = await startRuntimeHostDesktopManager({} as DesktopRuntimeHostCandidateStartInput, {
+    startCandidate: async (input) => {
+      starts += 1;
+      if (starts === 1) return ready(first.candidate);
+      reportReconnectStart();
+      const signal = input.signal;
+      assert.ok(signal);
+      await Promise.race([
+        reconnectReleased,
+        new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+      ]);
+      return ready(replacement.candidate);
+    },
+    reconnectBackoff: { minMs: 0, maxMs: 0 },
+    waitForHostExit: async () => {},
+  });
+
+  first.disconnect();
+  await reconnectStarted;
+  const retirement = owner.retireOwnedLocalHost('interrupt_active_work');
+  t.mock.timers.tick(5_000);
+  await assert.rejects(
+    retirement,
+    (error: unknown) =>
+      error instanceof DesktopLocalHostRetirementError &&
+      error.facts.pid === undefined &&
+      !error.facts.forceTerminationAvailable,
+  );
+
+  releaseReconnect();
+  await owner.waitUntilReady('local');
+  assert.equal(
+    (await owner.retireOwnedLocalHost('interrupt_active_work')).kind,
+    'retired',
+  );
+  assert.equal(replacement.prepareRetirementCalls, 1);
   await owner.close();
 });
 
@@ -451,6 +512,57 @@ test('preserves Host facts when authorized retirement is refused', async () => {
   await owner.close();
 });
 
+test('fences replacement launches while force-terminating the exact failed retirement', async () => {
+  const events: string[] = [];
+  const current = candidateHarness({
+    ownedProcess: {
+      pid: 42,
+      exited: new Promise(() => {}),
+    },
+  });
+  const owner = await startRuntimeHostDesktopManager({
+    rootPath: '/test-root',
+    candidateLaunchBarrier: {
+      connect: async () => assert.fail('mocked candidate startup bypasses the barrier'),
+      pause: () => events.push('pause'),
+      retireExcept: async (pid: number) => {
+        events.push(`retire:${pid}`);
+      },
+      resume: () => events.push('resume'),
+      release: () => events.push('release'),
+    },
+  } as unknown as DesktopRuntimeHostCandidateStartInput, {
+    startCandidate: async () => ready(current.candidate),
+    forceTerminateHost: async (identity, stillOwnsProcess) => {
+      assert.deepEqual(identity, {
+        rootPath: '/test-root',
+        rootId: 'test-host',
+        hostEpoch: 'test-host-epoch',
+        pid: 42,
+      });
+      assert.equal(stillOwnsProcess(), true);
+      events.push('terminate');
+      return true;
+    },
+  });
+
+  assert.equal(
+    await owner.forceTerminateOwnedLocalHost({
+      hostId: 'test-host',
+      hostEpoch: 'test-host-epoch',
+      lifecycleMode: 'ephemeral',
+      rootPath: '/test-root',
+      pid: 42,
+      forceTerminationAvailable: true,
+    }),
+    true,
+  );
+  assert.deepEqual(events, ['pause', 'retire:42', 'terminate']);
+  assert.equal((await owner.retireOwnedLocalHost('refuse_active_work')).kind, 'retired');
+  await owner.close();
+  assert.equal(events.at(-1), 'release');
+});
+
 test('resumes candidate launches when candidate retirement fails', async () => {
   const events: string[] = [];
   const current = candidateHarness();
@@ -604,8 +716,8 @@ test('keeps independent shared-session credentials active for the same Host', as
     { startCandidate: async () => ready(candidates.shift()!) },
   );
 
-  await manager.mountGuest(remoteTarget('shared-one', 'shared', 'session_guest'));
-  await manager.mountGuest(remoteTarget('shared-two', 'shared', 'session_guest'));
+  await manager.mountGuest(remoteTarget('shared-one', 'shared', 'session_guest'), () => undefined);
+  await manager.mountGuest(remoteTarget('shared-two', 'shared', 'session_guest'), () => undefined);
   await manager.enable(remoteTarget('owner', 'shared'));
 
   assert.deepEqual(manager.entries().map(({ target }) => target.profile.id), [
@@ -641,6 +753,7 @@ test('aborts an in-flight Guest mount without publishing a late target', async (
   const abort = new AbortController();
   const mounting = manager.mountGuest(
     remoteTarget('shared-cancelled', 'shared', 'session_guest'),
+    () => undefined,
     abort.signal,
   );
   await started;
@@ -710,7 +823,33 @@ test('reconnects after a pairing candidate becomes bound to this Client', async 
   await manager.close();
 });
 
-test('activates Guest access on a fresh stream without replaying route progress', async () => {
+test('reports Guest admission capacity instead of retrying the initial mount', async () => {
+  const local = candidateHarness();
+  const capacity = new RuntimeHostPeerError('peer_capacity_exceeded', 'Host connection capacity is full');
+  let starts = 0;
+  const manager = await startRuntimeHostDesktopManager(
+    {} as DesktopRuntimeHostCandidateStartInput,
+    {
+      startCandidate: async () => {
+        starts += 1;
+        if (starts === 1) return ready(local.candidate);
+        throw capacity;
+      },
+    },
+  );
+  try {
+    await assert.rejects(
+      manager.mountGuest(peerGuestTarget('shared-full'), () => undefined),
+      (error: unknown) => error === capacity,
+    );
+    assert.equal(starts, 2);
+    assert.equal(manager.current('shared-full'), undefined);
+  } finally {
+    await manager.close();
+  }
+});
+
+test('completes Guest import at credential activation while reconnect continues', async () => {
   const local = candidateHarness({ hostId: 'host-a' });
   const remoteHostId = 'a'.repeat(64);
   const pending = candidateHarness({
@@ -718,38 +857,51 @@ test('activates Guest access on a fresh stream without replaying route progress'
     finalizeReconnectRequired: true,
   });
   const active = candidateHarness({ hostId: remoteHostId });
-  const queue = [local.candidate, pending.candidate, active.candidate];
+  let releaseActive!: () => void;
+  const activeReleased = new Promise<void>((resolve) => {
+    releaseActive = resolve;
+  });
+  let starts = 0;
   const phases: string[] = [];
   const routeRefreshes: Array<boolean | undefined> = [];
   const manager = await startRuntimeHostDesktopManager(
     {} as DesktopRuntimeHostCandidateStartInput,
     {
       startCandidate: async (input) => {
+        starts += 1;
         if (input.profileTarget) {
           routeRefreshes.push(input.refreshPeerRoutes);
           input.onConnectionPhase?.('discovering');
           input.onConnectionPhase?.('connecting');
         }
-        return ready(queue.shift()!);
+        if (starts === 1) return ready(local.candidate);
+        if (starts === 2) return ready(pending.candidate);
+        await activeReleased;
+        return ready(active.candidate);
       },
       reconnectBackoff: { minMs: 0, maxMs: 0 },
     },
   );
   await manager.mountGuest(
     peerGuestTarget('shared-session'),
+    () => undefined,
     undefined,
     (phase) => phases.push(phase),
   );
   let activations = 0;
 
-  await manager.finalizeGuestAccess('shared-session', undefined, () => {
+  const result = await manager.finalizeGuestAccess('shared-session', undefined, () => {
     activations += 1;
   });
 
+  assert.equal(result, 'reconnecting');
+  assert.equal(manager.current('shared-session')?.readiness, 'reconnecting');
   assert.deepEqual(phases, ['discovering', 'connecting']);
-  assert.deepEqual(routeRefreshes, [undefined, false]);
   assert.equal(activations, 1);
   assert.equal(pending.closeCalls, 1);
+  releaseActive();
+  await manager.waitUntilReady('shared-session');
+  assert.deepEqual(routeRefreshes, [undefined, false]);
   assert.equal(manager.current('shared-session')?.candidate, active.candidate);
   await manager.close();
 });
@@ -1015,6 +1167,88 @@ test('keeps Local explicitly usable without routing default work away from an un
   assert.deepEqual(removedDefaults, [true]);
   assert.equal(manager.defaultProfileId(), 'offline');
   assert.equal(manager.current(), undefined);
+  await manager.close();
+});
+
+test('keeps an initially unavailable Direct target live and wakes it on new routes', async () => {
+  const local = candidateHarness();
+  const remote = candidateHarness({ hostId: 'a'.repeat(64), ownership: 'external' });
+  let starts = 0;
+  let routeListener: (() => void) | undefined;
+  let reportBackoff!: () => void;
+  const waitingForBackoff = new Promise<void>((resolve) => {
+    reportBackoff = resolve;
+  });
+  const manager = await startRuntimeHostDesktopManager(
+    {
+      peerClient: {
+        subscribeRoutes: (peerId: string, listener: () => void) => {
+          assert.equal(peerId, '12D3KooWpeer');
+          routeListener = listener;
+          return () => undefined;
+        },
+      },
+    } as DesktopRuntimeHostCandidateStartInput,
+    {
+      startCandidate: async () => {
+        starts += 1;
+        if (starts === 1) return ready(local.candidate);
+        if (starts <= 3) return { kind: 'failed', reason: 'host_unresponsive' };
+        return ready(remote.candidate);
+      },
+      reconnectBackoff: {
+        minMs: 30_000,
+        maxMs: 30_000,
+        wait: (_delayMs, signal) =>
+          new Promise<void>((_resolve, reject) => {
+            reportBackoff();
+            const onAbort = () => reject(signal.reason);
+            signal.addEventListener('abort', onAbort, { once: true });
+            if (signal.aborted) onAbort();
+          }),
+      },
+    },
+  );
+
+  await manager.enable(peerTarget('office'));
+  await waitingForBackoff;
+  assert.equal(
+    manager.entries().find((state) => state.target.profile.id === 'office')?.readiness,
+    'reconnecting',
+  );
+  assert.equal(manager.current('office')?.readiness, 'reconnecting');
+  assert.equal(manager.current('office')?.candidate, undefined);
+  assert.ok(routeListener);
+
+  routeListener();
+  await manager.waitUntilReady('office');
+  assert.equal(manager.current('office')?.candidate, remote.candidate);
+  assert.equal(starts, 4);
+  await manager.close();
+});
+
+test('does not activate a Direct target whose immediate retry fails permanently', async () => {
+  const local = candidateHarness();
+  const permanent = new RuntimeHostPermanentReconnectError('credential rejected');
+  let starts = 0;
+  const manager = await startRuntimeHostDesktopManager(
+    {} as DesktopRuntimeHostCandidateStartInput,
+    {
+      startCandidate: async () => {
+        starts += 1;
+        if (starts === 1) return ready(local.candidate);
+        if (starts === 2) throw new Error('route is temporarily unavailable');
+        throw permanent;
+      },
+    },
+  );
+
+  await assert.rejects(manager.enable(peerTarget('office')), (error: unknown) => error === permanent);
+  assert.equal(starts, 3);
+  assert.equal(manager.current('office'), undefined);
+  const state = manager.entries().find((entry) => entry.target.profile.id === 'office');
+  assert.equal(state?.readiness, 'unavailable');
+  if (state?.readiness === 'unavailable') assert.equal(state.error, permanent);
   await manager.close();
 });
 
@@ -1287,6 +1521,62 @@ test('waits passively for a Host that cannot be taken over', async () => {
   await owner.close();
 });
 
+test('offers to stop an exact local ephemeral Host before retrying startup', async () => {
+  const observed = incompatibleHost('blocked_by_residency');
+  const conflict = {
+    ...observed,
+    registration: { ...observed.registration, lifecycleMode: 'ephemeral' as const },
+    processIdentity: {
+      startIdentity: 'darwin:1700000000:123456',
+    },
+    handshake: {
+      ...observed.handshake,
+      activity: {
+        connections: 0,
+        activeOperations: 0,
+        processUptimeSeconds: 60,
+        residencies: [],
+      },
+    },
+  };
+  const replacement = candidateHarness();
+  let starts = 0;
+  let prompts = 0;
+  let terminations = 0;
+  const owner = await startRuntimeHostDesktopManager(
+    { rootPath: '/workspace' } as DesktopRuntimeHostCandidateStartInput,
+    {
+      startCandidate: async () => {
+        starts += 1;
+        return starts === 1 ? conflict : ready(replacement.candidate);
+      },
+      upgradePrompts: {
+        restartable: async () => assert.fail('incompatible Host used restart prompt'),
+        nonRestartable: async (_conflict, action) => {
+          prompts += 1;
+          assert.equal(action, 'replace_may_interrupt_work');
+          return 'replace';
+        },
+      },
+      forceTerminateObservedHost: async (identity, authority) => {
+        terminations += 1;
+        assert.deepEqual(identity, {
+          rootPath: '/workspace',
+          registration: conflict.registration,
+        });
+        assert.deepEqual(authority.processIdentity, conflict.processIdentity);
+        assert.equal(authority.isCurrent(), true);
+        return true;
+      },
+    },
+  );
+
+  assert.equal(prompts, 1, 'even an idle snapshot must not authorize a forced stop');
+  assert.equal(terminations, 1);
+  assert.equal(starts, 2);
+  await owner.close();
+});
+
 test('silently replaces an idle non-restartable Local Host and retries', async () => {
   const observed = upgradeRequired(true);
   const conflict = {
@@ -1460,7 +1750,7 @@ test('lets the user cancel startup when an incompatible Host owns the root', asy
 
 function incompatibleHost(
   replacement: 'wait_for_idle_exit' | 'blocked_by_residency',
-): DesktopRuntimeHostCandidateStartResult {
+): Extract<DesktopRuntimeHostCandidateStartResult, { kind: 'incompatible' }> {
   return {
     kind: 'incompatible',
     registration: hostRegistration({ compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH - 1 }),
@@ -1683,6 +1973,13 @@ function remoteTarget(
 function peerGuestTarget(
   id: string,
 ): NonNullable<DesktopRuntimeHostCandidateStartInput['profileTarget']> {
+  return peerTarget(id, 'session_guest');
+}
+
+function peerTarget(
+  id: string,
+  access?: 'session_guest',
+): NonNullable<DesktopRuntimeHostCandidateStartInput['profileTarget']> {
   return {
     profile: {
       id,
@@ -1690,13 +1987,27 @@ function peerGuestTarget(
       kind: 'remote',
       transport: {
         kind: 'libp2p-direct',
-        peerId: '12D3KooWpeer',
-        routeHints: ['/ip4/192.0.2.1/udp/41000/quic-v1'],
-        coordinationRelays: [],
+        reachability: testPeerReachability('12D3KooWpeer'),
       },
       rootId: 'a'.repeat(64),
-      access: 'session_guest',
+      ...(access ? { access } : {}),
     },
     credential: 'credential-peer',
+  };
+}
+
+function testPeerReachability(peerId: string) {
+  return {
+    lease: {
+      version: 1 as const,
+      peerId,
+      revision: 1,
+      issuedAt: 1,
+      expiresAt: 2,
+      directRoutes: ['/ip4/192.0.2.1/udp/41000/quic-v1'],
+      coordinationRoutes: [],
+    },
+    publicKey: Buffer.from('public').toString('base64url'),
+    signature: Buffer.from('signature').toString('base64url'),
   };
 }

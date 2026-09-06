@@ -23,6 +23,7 @@ import {
   clipboard,
   ipcMain,
   nativeTheme,
+  powerMonitor,
   powerSaveBlocker,
   shell,
   type MessageBoxOptions,
@@ -44,19 +45,26 @@ import {
   SCHEDULED_TASK_NATIVE_EFFECT_SERVICE_ID,
   SCHEDULED_TASK_NATIVE_EFFECT_SERVICE_VERSION,
 } from '@maka/runtime/scheduled-task-tools';
-import { buildMcpTools } from '@maka/runtime/mcp-tools';
+import { buildMcpToolsWithIdentities } from '@maka/runtime/mcp-tools';
 import {
   createClientRuntimeHostCredentialStore,
   createClientRuntimeHostProfileCatalog,
   createRuntimeHostCandidateLaunchBarrier,
-  createRuntimeHostPeerClientFromEnvironment,
   LOCAL_RUNTIME_HOST_PROFILE,
   loadOrCreateRuntimeHostClientInstanceId,
   listRuntimeHostWslDistributions,
   runtimeHostProfileAccess,
   type ResolvedRuntimeHostProfile,
 } from "@maka/runtime-host/client";
-import { openRuntimeHostPeerMeshOwner } from '@maka/runtime-host/peer-mesh';
+import {
+  openRuntimeHostPeerMeshComponent,
+  type RuntimeHostPeerMeshComponent,
+} from '@maka/runtime-host/peer-mesh';
+import {
+  openRuntimeHostPeerEndpointOwner,
+  type RuntimeHostPeerEndpointOwner,
+} from '@maka/runtime-host/peer-reachability';
+import { clientCapabilityEntityId } from "@maka/runtime-host/client-capability-entity-id";
 import type { WorkspaceTarget } from "@maka/runtime-host/protocol";
 import { runtimeHostProfileUsesHostWorkspace } from "@maka/runtime-host/profile-kind";
 import { createCredentialMcpOAuthStorage, McpClientManager } from "@maka/mcp";
@@ -70,6 +78,7 @@ import { createMcpOAuthController } from "./mcp-oauth-controller.js";
 import { registerAppClientIpc, registerAppIpc } from "./app-ipc-main.js";
 import { createAppQuitCoordinator } from "./app-quit-coordinator.js";
 import {
+  desktopDiagnosticUpdateChannel,
   desktopUpdateChannelFromManifest,
   verifyDownloadedUpdateAttestation,
 } from "./app-update-attestation.js";
@@ -110,6 +119,7 @@ import {
   type ReconnectableReadIpcMain,
 } from "./ipc-reconnect-policy.js";
 import { createMainWindowController } from "./main-window.js";
+import { resolveWindowRevealMode } from "./window-reveal.js";
 import type { DesktopRuntimeHostIdentity } from "../preload/bridge-contract.js";
 import {
   captureDesktopDiagnosticEnvironment,
@@ -183,7 +193,11 @@ import {
   DesktopRuntimeHostStartupRecoveryCancelledError,
   startDesktopRuntimeHostWithRecovery,
 } from "./runtime-host-startup-recovery.js";
-import { buildRuntimeHostQuitFailureDialog } from "./runtime-host-quit-copy.js";
+import {
+  buildRuntimeHostActiveQuitDialog,
+  buildRuntimeHostQuitFailureDialog,
+} from "./runtime-host-quit-copy.js";
+import { prepareRuntimeHostQuit } from "./runtime-host-quit.js";
 import { createRuntimeHostUpgradePrompts } from "./runtime-host-upgrade-dialog.js";
 import { registerRuntimeHostMemoryIpc } from "./runtime-host-memory-ipc-main.js";
 import {
@@ -263,33 +277,42 @@ const runtimeHostPeerConfiguration = await configureDesktopRuntimeHostPeerClient
   resourcesPath: process.resourcesPath,
   clientDataRoot: userDataDir,
 });
-let runtimeHostPeerOwner: Awaited<ReturnType<typeof openRuntimeHostPeerMeshOwner>> | undefined;
-let runtimeHostPeerMesh: Awaited<ReturnType<typeof openRuntimeHostPeerMeshOwner>>['mesh'] | undefined;
-let runtimeHostPeerClient:
-  | ReturnType<typeof createRuntimeHostPeerClientFromEnvironment>
-  | undefined;
+let runtimeHostPeerEndpointOwner: RuntimeHostPeerEndpointOwner | undefined;
+let runtimeHostPeerMeshComponent: RuntimeHostPeerMeshComponent | undefined;
+let runtimeHostPeerMesh: RuntimeHostPeerMeshComponent['mesh'] | undefined;
+let runtimeHostPeerClient: RuntimeHostPeerEndpointOwner['client'] | undefined;
 if (runtimeHostPeerConfiguration) {
   try {
-    runtimeHostPeerOwner = await openRuntimeHostPeerMeshOwner({
+    runtimeHostPeerEndpointOwner = await openRuntimeHostPeerEndpointOwner({
       ...runtimeHostPeerConfiguration,
       dataRoot: join(userDataDir, 'peer-mesh'),
-      endpointKind: 'client',
-      onBackgroundReconcileError: (error) => {
-        console.error('[runtime-host] Peer Mesh background synchronization failed:', error);
+      onBackgroundReachabilityError: (error) => {
+        console.error('[runtime-host] peer reachability publication failed:', error);
       },
     });
-    runtimeHostPeerClient = runtimeHostPeerOwner.client;
-    runtimeHostPeerMesh = runtimeHostPeerOwner.mesh;
-    void runtimeHostPeerOwner.closed.catch((error) => {
-      runtimeHostPeerMesh = undefined;
-      console.error('[runtime-host] Peer Mesh stopped; Direct peer remains available:', error);
+    runtimeHostPeerClient = runtimeHostPeerEndpointOwner.client;
+    void runtimeHostPeerEndpointOwner.closed.catch((error) => {
+      console.error('[runtime-host] peer reachability publisher stopped:', error);
     });
+    try {
+      runtimeHostPeerMeshComponent = await openRuntimeHostPeerMeshComponent({
+        dataRoot: join(userDataDir, 'peer-mesh'),
+        endpoint: runtimeHostPeerEndpointOwner,
+        endpointKind: 'client',
+        onBackgroundReconcileError: (error) => {
+          console.error('[runtime-host] Peer Mesh background synchronization failed:', error);
+        },
+      });
+      runtimeHostPeerMesh = runtimeHostPeerMeshComponent.mesh;
+      void runtimeHostPeerMeshComponent.closed.catch((error) => {
+        runtimeHostPeerMesh = undefined;
+        console.error('[runtime-host] Peer Mesh stopped; Direct peer remains available:', error);
+      });
+    } catch (error) {
+      console.error('[runtime-host] Peer Mesh is unavailable; continuing with Direct peer:', error);
+    }
   } catch (error) {
-    console.error('[runtime-host] Peer Mesh is unavailable; continuing with Direct peer:', error);
-    runtimeHostPeerClient = createRuntimeHostPeerClientFromEnvironment(process.env, {
-      automaticRelayDiscovery: runtimeHostPeerConfiguration.automaticRelayDiscovery,
-      webRtcStunUrls: runtimeHostPeerConfiguration.webRtcStunUrls,
-    });
+    console.error('[runtime-host] Direct peer is unavailable:', error);
   }
 }
 const runtimeHostDirectPeerAvailable = runtimeHostPeerClient !== undefined;
@@ -326,6 +349,10 @@ const desktopDiagnostics: DesktopDiagnosticsDeps = {
     captureDesktopDiagnosticEnvironment({
       appVersion: app.getVersion(),
       buildMode: buildInfo.mode,
+      updateChannel: desktopDiagnosticUpdateChannel({
+        isPackaged: app.isPackaged,
+        appPath: app.getAppPath(),
+      }),
       buildCommit: buildInfo.commit,
       locale: app.getLocale(),
       workspacePath: workspaceRoot,
@@ -415,7 +442,6 @@ resolveBrowserDialogAppearance = async () => {
   }
 };
 const mcpConfigStore = createMcpConfigStore(workspaceRoot);
-const workBoardStore = createWorkBoardStore(workspaceRoot);
 const mcpManager = new McpClientManager({
   clientName: "maka-desktop",
   clientVersion: app.getVersion(),
@@ -451,15 +477,17 @@ function ensureMcpReady(): Promise<void> {
   return mcpStartup;
 }
 const keepSystemAwake = createKeepSystemAwakeController(powerSaveBlocker);
-const startHidden =
-  (Boolean(e2eFixture) || isIsolatedE2e) &&
-  process.env.MAKA_E2E_SHOW_WINDOW !== "1";
+const revealMode = resolveWindowRevealMode(
+  Boolean(e2eFixture) || isIsolatedE2e,
+  process.env.MAKA_E2E_SHOW_WINDOW === "1",
+  app.isPackaged,
+);
 let onMainWindowClose = (): void => {};
 const mainWindowController = createMainWindowController({
   workspaceRoot,
   e2eFixture,
   settingsStore,
-  startHidden,
+  revealMode,
   onClose: () => onMainWindowClose(),
   onRendererProcessGone: async (details) => {
     const diagnosticInput = createDesktopMainRendererDiagnosticInput({
@@ -577,15 +605,25 @@ const runtimeHostProfileService = createDesktopRuntimeHostProfileService({
     runtimeHostManager.setDefaultProfile(profileId);
   },
 });
+const notifyGuestSessionMountsChanged = (): void => {
+  mainWindowController.send('session-collaboration:mounts:changed');
+};
 const guestSessionMountService = createDesktopGuestSessionMountService({
   store: createGuestSessionMountStore(runtimeHostCredentialStore),
-  mount: async (target, signal, onConnectionPhase, onPeerEndpoint) => {
+  mount: async (
+    target,
+    signal,
+    onConnectionPhase,
+    onPeerEndpoint,
+    onSessionCatalogChanged,
+  ) => {
     if (target.profile.kind !== 'remote' || !target.credential) {
       throw new Error('A shared Session requires a remote Guest target');
     }
     if (!runtimeHostManager) throw new Error('Runtime Host manager is unavailable');
     await runtimeHostManager.mountGuest(
       { profile: target.profile, credential: target.credential },
+      onSessionCatalogChanged,
       signal,
       onConnectionPhase,
       (status) => {
@@ -595,8 +633,28 @@ const guestSessionMountService = createDesktopGuestSessionMountService({
   },
   finalizeAccess: async (mountId, signal, onAccessActivated) => {
     if (!runtimeHostManager) throw new Error('Runtime Host manager is unavailable');
-    await runtimeHostManager.finalizeGuestAccess(mountId, signal, onAccessActivated);
+    return runtimeHostManager.finalizeGuestAccess(mountId, signal, onAccessActivated);
   },
+  getSharedSession: async (mountId) => {
+    const current = runtimeHostManager?.current(mountId);
+    if (!current?.candidate) {
+      throw new Error('Shared Session Runtime Host is reconnecting');
+    }
+    return current.candidate.client.getSharedSession();
+  },
+  inspect: (mountId) => {
+    const state = runtimeHostManager?.entries().find(
+      (candidate) => candidate.target.profile.id === mountId,
+    );
+    if (!state) return undefined;
+    return {
+      readiness: state.readiness,
+      ...(state.readiness === 'ready' && state.candidate.client.peerPath
+        ? { peerPath: state.candidate.client.peerPath }
+        : {}),
+    };
+  },
+  onMountsChanged: notifyGuestSessionMountsChanged,
   unmount: async (mountId) => {
     if (!runtimeHostManager) return;
     await runtimeHostManager.unmountGuest(mountId);
@@ -610,7 +668,7 @@ const runtimeHostOnboarding = createDesktopRuntimeHostOnboarding({
   runWslSetup: runDesktopRuntimeHostWslSetup,
   listWslDistributions: listRuntimeHostWslDistributions,
   setupPackageMode: runtimeHostSetupPackage.mode,
-  resolveSshDevelopmentPeerTarget: runtimeHostSshTerminal.resolveDevelopmentPeerTarget,
+  resolveSshNodeIdentity: runtimeHostSshTerminal.resolveNodeIdentity,
   resolveSetupPackage: runtimeHostSetupPackage.resolve,
   send: (snapshot) =>
     mainWindowController.send("runtime-host-onboarding:changed", snapshot),
@@ -642,10 +700,11 @@ const runtimeHostManagement = createDesktopRuntimeHostManagement({
   runUpdatePolicy: runtimeHostSshTerminal.runUpdatePolicy,
   runUpdateReconciliation: runtimeHostSshTerminal.runUpdateReconciliation,
   setupPackageMode: runtimeHostSetupPackage.mode,
-  resolveSshDevelopmentPeerTarget: runtimeHostSshTerminal.resolveDevelopmentPeerTarget,
+  resolveSshNodeIdentity: runtimeHostSshTerminal.resolveNodeIdentity,
   resolveUpdatePackage: runtimeHostSetupPackage.resolve,
   currentHostEpoch: (profileId) =>
     runtimeHostManager?.current(profileId)?.candidate?.client.hostEpoch,
+  liveHost: (profileId) => runtimeHostManager?.current(profileId)?.candidate?.client,
   awaitUpdatedConnection: async (
     profileId,
     expectedHostId,
@@ -894,12 +953,6 @@ mcpManager.onChange(() => {
 
 registerPersistentClientIpc();
 registerPetPackIpc({ ipcMain, workspaceRoot, mainWindowController, settingsStore });
-const workBoardIpc = registerWorkBoardIpc({
-  ipcMain,
-  workspaceRoot,
-  mainWindowController,
-  store: workBoardStore,
-});
 const browserIpc = registerBrowserIpc({
   mainWindowController,
   isHostActive: (scope) => runtimeHostManager?.ownsScope(scope) === true,
@@ -951,7 +1004,13 @@ const startLocalRuntimeHostManager = () => startRuntimeHostDesktopManager(
       releaseBrowserSession,
       computerUseTools: native.computerUseTools,
       additionalGroups: () => {
-        const mcpTools = buildMcpTools(mcpManager);
+        const mcpTools = buildMcpToolsWithIdentities(mcpManager);
+        const mcpServers = new Map<string, typeof mcpTools>();
+        for (const identified of mcpTools) {
+          const server = mcpServers.get(identified.serverId);
+          if (server) server.push(identified);
+          else mcpServers.set(identified.serverId, [identified]);
+        }
         return [
           {
             offerId: "desktop_settings",
@@ -967,17 +1026,20 @@ const startLocalRuntimeHostManager = () => startRuntimeHostDesktopManager(
               "Use durable Rive workflows through this Desktop client.",
             tools: [riveWorkflowTool],
           },
-          ...(mcpTools.length === 0
-            ? []
-            : [
-                {
-                  offerId: "desktop_mcp",
-                  label: "MCP",
-                  description:
-                    "Use MCP tools connected by this Desktop client.",
-                  tools: mcpTools,
-                },
-              ]),
+          // One offer per MCP server keeps grant contracts server-scoped: a
+          // server change re-prompts only that server's tools.
+          ...[...mcpServers.keys()].sort().map((serverId) => ({
+            offerId: `desktop_mcp_${clientCapabilityEntityId(serverId, 116)}`,
+            label: `MCP: ${serverId}`.slice(0, 128),
+            description:
+              "Use MCP tools connected by this Desktop client.",
+            tools: (mcpServers.get(serverId) ?? []).map((identified) => ({
+              tool: identified.tool,
+              serverId: identified.serverId,
+              toolName: identified.toolName,
+            })),
+            dynamic: true as const,
+          })),
         ];
       },
       additionalServices: (scope) => [
@@ -1037,13 +1099,13 @@ const startLocalRuntimeHostManager = () => startRuntimeHostDesktopManager(
     },
     emitSessionsChanged,
     completeComputerUseTurn,
-    enableE2eControls: isE2e,
     createSessionCopyCleanup: ({ removeSession, resumeSessionCopy }) =>
       createSessionCopyCleanupAuthority({
         workspaceRoot,
         removeSession,
         resumeSessionCopy,
         processId: sessionCopyOwnerProcessId,
+        databaseOptions: { schemaMigration: 'require_current' },
       }),
     renderer: mainWindowController,
     onError: (error) =>
@@ -1062,6 +1124,7 @@ const startLocalRuntimeHostManager = () => startRuntimeHostDesktopManager(
       showStartupDiagnosticDialog,
     ),
     onTargetStateChanged: (state) => {
+      const profileAccess = runtimeHostProfileAccess(state.target.profile);
       const hostId = state.readiness === "ready"
         ? state.candidate.client.hostId
         : state.hostId;
@@ -1070,13 +1133,23 @@ const startLocalRuntimeHostManager = () => startRuntimeHostDesktopManager(
         profileId: state.target.profile.id,
         profileName: state.target.profile.name,
         profileKind: state.target.profile.kind,
-        profileAccess: runtimeHostProfileAccess(state.target.profile),
+        profileAccess,
         ...(hostId ? { hostId } : {}),
         readiness: state.readiness,
         isDefault:
           (runtimeHostManager?.defaultProfileId() ??
             runtimeHostStartup.preferences.defaultProfileId) === state.target.profile.id,
       });
+      if (profileAccess === 'session_guest') {
+        void guestSessionMountService
+          .connectionChanged(
+            state.target.profile.id,
+            state.readiness === 'unavailable' ? state.error : undefined,
+          )
+          .catch((error: unknown) =>
+            console.warn('[runtime-host] shared Session connection update failed:', error),
+          );
+      }
       if (state.readiness === "unavailable" && state.hostId) {
         void browserIpc.retireTarget({
           hostId: state.hostId,
@@ -1208,6 +1281,15 @@ runtimeHostManager = await startDesktopRuntimeHostWithRecovery({
     return new Promise<never>(() => undefined);
   }
   throw error;
+});
+// Runtime Host is the only schema-migration authority for its State Root.
+// Work Board remains a Desktop-owned table, but it opens only after the Host is
+// ready and verifies the schema instead of changing it behind a resident Host.
+const workBoardIpc = registerWorkBoardIpc({
+  ipcMain,
+  workspaceRoot,
+  mainWindowController,
+  store: createWorkBoardStore(workspaceRoot, { schemaMigration: 'require_current' }),
 });
 wireLifecycle();
 runtimeHostManager.setDefaultProfile(runtimeHostStartup.preferences.defaultProfileId);
@@ -1416,7 +1498,6 @@ function registerHostClientIpc(
     ipcMain: scopedIpc,
     client,
     mainWindowController,
-    sendToRenderer,
     showItemInFolder: (path) => shell.showItemInFolder(path),
   });
   registerRuntimeHostOAuthIpc({
@@ -1530,6 +1611,7 @@ function registerHostClientIpc(
       getProjectRoot: resolveProjectRootForContext,
       workspaceRoot,
       buildInfo,
+      updateChannel: desktopUpdateChannel,
       e2eFixture,
       projectManagement: targetProjectManagement,
       allowLocalProjectPaths: !usesHostWorkspace,
@@ -1863,9 +1945,6 @@ function wireLifecycle(): void {
     },
     onPreparationError: (error) => {
       console.error("[runtime-host] quit retirement failed:", error);
-      void showRuntimeHostQuitFailure(error).catch((dialogError) =>
-        console.error("[runtime-host] quit failure dialog failed:", dialogError),
-      );
     },
     onCleanupError: (error) =>
       console.error("[runtime-host] shutdown failed:", error),
@@ -1874,7 +1953,7 @@ function wireLifecycle(): void {
     resumeQuit: () => app.quit(),
   });
   installDesktopShellPresentation({
-    startHidden,
+    revealMode,
     mainWindowController,
     focusOrCreateWindow: quitCoordinator.focusOrCreateWindow,
     onIconError: (error) =>
@@ -1891,25 +1970,31 @@ function wireLifecycle(): void {
     if (process.platform !== "darwin" && !isBrowserMessageBoxPresentationActive()) app.quit();
   });
   app.on("before-quit", quitCoordinator.handleBeforeQuit);
+  powerMonitor.on("resume", wakePeerRecoveryAfterResume);
   quitCoordinator.focusOrCreateWindow();
 }
 
-async function prepareRuntimeHostDesktopQuit(): Promise<void> {
-  mainWindowController.browserWindow()?.destroy();
-  const retirement = await runtimeHostManager?.retireOwnedLocalHost(
-    "interrupt_active_work",
-  );
-  if (retirement?.kind === "active_tasks") {
-    throw new Error("Runtime Host refused authorized quit retirement");
-  }
-}
-
-async function showRuntimeHostQuitFailure(error: unknown): Promise<void> {
-  const locale = await desktopLocale.resolve();
-  await showDesktopMessageBox(buildRuntimeHostQuitFailureDialog(error, locale), { locale });
+async function prepareRuntimeHostDesktopQuit(): Promise<'ready' | 'cancelled'> {
+  const preparation = await prepareRuntimeHostQuit(runtimeHostManager, {
+    confirmInterrupt: async () => {
+      const locale = await desktopLocale.resolve();
+      const dialog = buildRuntimeHostActiveQuitDialog(locale);
+      const { response } = await showDesktopMessageBox(dialog.options, { locale });
+      return dialog.decisions[response] === 'quit';
+    },
+    recoverFailure: async (error) => {
+      const locale = await desktopLocale.resolve();
+      const dialog = buildRuntimeHostQuitFailureDialog(error, locale);
+      const { response } = await showDesktopMessageBox(dialog.options, { locale });
+      return dialog.decisions[response] ?? 'cancel';
+    },
+  });
+  if (preparation === 'ready') mainWindowController.browserWindow()?.destroy();
+  return preparation;
 }
 
 async function closeRuntimeHostDesktop(): Promise<void> {
+  powerMonitor.off("resume", wakePeerRecoveryAfterResume);
   clientSettingsWatcher.stop();
   updateService.dispose();
   settingsBotsIpc?.dispose();
@@ -1920,7 +2005,15 @@ async function closeRuntimeHostDesktop(): Promise<void> {
     .then(() => runtimeHostManager?.close());
   const runtimeHostPeerShutdown = runtimeHostManagerShutdown
     .catch(() => undefined)
-    .then(() => runtimeHostPeerOwner?.close() ?? runtimeHostPeerClient?.close());
+    .then(async () => {
+      const errors: unknown[] = [];
+      await runtimeHostPeerMeshComponent?.close().catch((error: unknown) => errors.push(error));
+      await runtimeHostPeerEndpointOwner?.close().catch((error: unknown) => errors.push(error));
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) {
+        throw new AggregateError(errors, 'Unable to close Desktop peer resources');
+      }
+    });
   const results = await Promise.allSettled([
     Promise.resolve().then(() => runtimeHostManagement.close()),
     Promise.resolve().then(() => runtimeHostPeerMeshManagement.close()),
@@ -1947,6 +2040,10 @@ async function closeRuntimeHostDesktop(): Promise<void> {
   }
 }
 
+function wakePeerRecoveryAfterResume(): void {
+  runtimeHostManager?.wakePeerRecovery();
+}
+
 function resolveDesktopE2eFixture(): ReturnType<typeof resolveE2eFixture> {
   try {
     return resolveE2eFixture(
@@ -1957,7 +2054,6 @@ function resolveDesktopE2eFixture(): ReturnType<typeof resolveE2eFixture> {
       process.env.MAKA_E2E_FIXTURE_LOCALE,
       process.env.MAKA_E2E_FIXTURE_TIMEZONE,
       process.env.MAKA_E2E_FIXTURE_PLATFORM,
-      process.env.MAKA_E2E_FIXTURE_SCROLL_MOTION,
     );
   } catch (error) {
     if (!process.env.MAKA_E2E_FIXTURE) throw error;

@@ -23,26 +23,23 @@ import type { E2eFixtureScenario, E2eFixtureState } from '@maka/core/e2e-fixture
 import { MODEL_CALL_ATTEMPT_EVENT_TYPE } from '@maka/core/model-call-attempt';
 import type { UiLocale } from '@maka/core/ui-locale';
 import { createSqliteAgentRunStore } from '@maka/storage/agent-run-store';
+import { createWorkspaceRuntimeStore } from '@maka/storage/runtime-event-persistence';
 import { createProjectCatalog } from '@maka/storage/project-catalog';
 import {
   resolveStorageRoot,
   tryAcquireInteractiveRootOwner,
 } from '@maka/storage/root-authority';
-import { openInteractiveSessionTodoStoreForWrite } from '@maka/storage/session-todo-authority';
 import { openInteractiveUsageStoresForWrite } from '@maka/storage/usage-stores';
 import {
   E2E_FIXTURE_NOW,
   LONG_SIDEBAR_PROJECT_ID,
   LONG_SIDEBAR_PROJECT_NAME,
   LONG_SIDEBAR_SESSION_PREFIX,
-  PARTIAL_HISTORY_SESSION_ID,
   PROMPT_RAIL_SESSION_ID,
   TURN_SESSION_ID,
   writeSession,
 } from './e2e-fixture/seed-helpers.js';
 import {
-  partialHistoryMessages,
-  partialHistorySession,
   promptRailMessages,
   promptRailSession,
   turnMessages,
@@ -63,7 +60,6 @@ const E2E_FIXTURE_SCENARIOS = new Set<E2eFixtureScenario>([
   'turn-narrative',
   'turn-narrative-browser',
   'chat-prompt-rail',
-  'chat-partial-history',
   'settings-data',
   'settings-bots-onboarding',
   'settings-general',
@@ -84,7 +80,6 @@ export interface E2eFixture {
   locale: UiLocale | null;
   timezone: string | null;
   platform: 'darwin' | 'win32' | 'linux' | null;
-  scrollMotion: 'auto' | 'smooth' | null;
 }
 
 export function resolveE2eFixture(
@@ -95,7 +90,6 @@ export function resolveE2eFixture(
   rawLocale: string | undefined = undefined,
   rawTimezone: string | undefined = undefined,
   rawPlatform: string | undefined = undefined,
-  rawScrollMotion: string | undefined = undefined,
 ): E2eFixture | null {
   if (!rawScenario) return null;
   if (isPackaged) throw new Error('MAKA_E2E_FIXTURE is only available in dev/test builds.');
@@ -111,13 +105,7 @@ export function resolveE2eFixture(
     locale: parseLocaleFlag(rawLocale),
     timezone: parseTimezoneFlag(rawTimezone),
     platform: parsePlatformFlag(rawPlatform),
-    scrollMotion: parseScrollMotionFlag(rawScrollMotion),
   };
-}
-
-function parseScrollMotionFlag(raw: string | undefined): 'auto' | 'smooth' | null {
-  const normalized = raw?.trim().toLowerCase();
-  return normalized === 'auto' || normalized === 'smooth' ? normalized : null;
 }
 
 function parseThemeFlag(raw: string | undefined): 'light' | 'dark' | 'auto' | null {
@@ -129,7 +117,9 @@ function parseThemeFlag(raw: string | undefined): 'light' | 'dark' | 'auto' | nu
 
 function parseLocaleFlag(raw: string | undefined): UiLocale | null {
   const normalized = raw?.trim().toLowerCase();
-  return normalized === 'zh' || normalized === 'en' ? normalized : null;
+  if (normalized === 'zh-cn') return 'zh-CN';
+  if (normalized === 'zh-tw') return 'zh-TW';
+  return normalized === 'en' ? 'en' : null;
 }
 
 function parseTimezoneFlag(raw: string | undefined): string | null {
@@ -164,23 +154,21 @@ export function getE2eFixtureState(fixture: E2eFixture | null): E2eFixtureState 
     ...(fixture.theme ? { theme: fixture.theme } : {}),
     ...(fixture.locale ? { locale: fixture.locale } : {}),
     ...(fixture.timezone ? { timezone: fixture.timezone } : {}),
-    ...(fixture.scrollMotion ? { scrollMotion: fixture.scrollMotion } : {}),
   };
   switch (fixture.scenario) {
     case 'settings-models':
       return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'models' };
     case 'turn-narrative':
-      return { ...state, activeSessionId: TURN_SESSION_ID, workbarCollapsed: false, workbarTab: 'tasks' };
+      // Any open face will do — the scenario is about focus order through the
+      // transcript, and the workbar is here only so the panel is on screen.
+      // This was the Task face until it was retired.
+      return { ...state, activeSessionId: TURN_SESSION_ID, workbarCollapsed: false, workbarTab: 'review' };
     case 'turn-narrative-browser':
       return { ...state, activeSessionId: TURN_SESSION_ID, workbarCollapsed: false, workbarTab: 'browser' };
     case 'chat-prompt-rail':
       // Workbar collapsed: the rail lives on the chat scrollport's right edge,
-      // and the panel would take the width the measurements are about. Whether
-      // this window scrolls smoothly is a per-launch choice (`scrollMotion`),
-      // because only the jump case needs it and it costs seconds of settling.
+      // and the panel would take the width the measurements are about.
       return { ...state, activeSessionId: PROMPT_RAIL_SESSION_ID, workbarCollapsed: true };
-    case 'chat-partial-history':
-      return { ...state, activeSessionId: PARTIAL_HISTORY_SESSION_ID, workbarCollapsed: true };
     case 'settings-data':
       return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'data' };
     case 'settings-bots-onboarding':
@@ -227,36 +215,14 @@ export async function seedE2eFixture(input: {
   const storageRoot = await resolveStorageRoot({ path: input.workspaceRoot, kind: 'interactive' });
   await writeSettings(input.workspaceRoot, scenario);
   await writeConnections(input.workspaceRoot, now, scenario);
-  await writeSession(input.workspaceRoot, turnSession(now), turnMessages(now));
-
-  if (scenario === 'turn-narrative' || scenario === 'turn-narrative-browser') {
-    const owner = await tryAcquireInteractiveRootOwner(storageRoot);
-    if (!owner) throw new Error('Unable to acquire the E2E fixture SessionTodo root');
-    try {
-      const todos = await openInteractiveSessionTodoStoreForWrite(owner.lease);
-      try {
-        await todos.replaceAll(TURN_SESSION_ID, [
-          { content: '补齐桌面端无障碍覆盖', status: 'in_progress' },
-          { content: '核对模型选择器的键盘路径', status: 'pending' },
-          { content: '确认工具结果可以展开阅读', status: 'completed' },
-        ]);
-      } finally {
-        todos.close();
-      }
-    } finally {
-      await owner.close();
-    }
-  }
+  await writeSession(
+    input.workspaceRoot,
+    turnSession(now),
+    turnMessages(now),
+  );
 
   if (scenario === 'chat-prompt-rail') {
     await writeSession(input.workspaceRoot, promptRailSession(now), promptRailMessages(now));
-  }
-  if (scenario === 'chat-partial-history') {
-    await writeSession(
-      input.workspaceRoot,
-      partialHistorySession(now),
-      partialHistoryMessages(now),
-    );
   }
   if (scenario === 'sidebar-search-modal-open') {
     for (const seed of longSidebarSessions(now)) {
@@ -290,13 +256,14 @@ export async function seedE2eFixture(input: {
     // below. It MUST be the lease's canonicalPath, not the raw workspaceRoot —
     // a /var vs /private/var realpath difference would open a different DB.
     const runStore = createSqliteAgentRunStore(owner.lease.canonicalPath);
+    const runtimeEventStore = createWorkspaceRuntimeStore(owner.lease.canonicalPath);
     try {
       const records = usageStatsRecords(now);
       // Model calls seed the CANONICAL ledger through the AgentRun event stream;
       // tools stay on the legacy telemetry table (there is no canonical tool
       // ledger). This is what actually exercises the canonical merge branch.
-      for (const { header: runHeader, attempt } of records.modelCalls) {
-        await runStore.createRun(runHeader);
+      for (const { opening, attempt } of records.modelCalls) {
+        await runtimeEventStore.appendRuntimeEvent(attempt.sessionId, attempt.runId, opening);
         await runStore.appendEvent(attempt.sessionId, attempt.runId, {
           id: attempt.attemptId,
           type: MODEL_CALL_ATTEMPT_EVENT_TYPE,
@@ -308,6 +275,7 @@ export async function seedE2eFixture(input: {
         });
       }
       for (const record of records.tools) await usage.telemetry.recordToolInvocation(record);
+      runtimeEventStore.close();
       await runStore.close?.();
       // Fold the appended attempts into the read model so the page's first read
       // sees canonical usage (production's readCanonicalUsage also repairs).

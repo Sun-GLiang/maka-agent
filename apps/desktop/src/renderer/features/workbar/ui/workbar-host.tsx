@@ -94,18 +94,6 @@ export interface WorkbarHostModel {
     placement: SessionWorkbarPlacement,
     tabs: readonly SessionWorkbarTab[],
   ) => void;
-  onReorderTab: (
-    placement: SessionWorkbarPlacement,
-    tabId: string,
-    targetTabId: string,
-  ) => void;
-  onMoveTab: (
-    placement: SessionWorkbarPlacement,
-    tabId: string,
-    direction: 'left' | 'right',
-  ) => void;
-  onMoveTabToPanel: (tabId: string, target: SessionWorkbarPlacement) => void;
-  onPinTab: (tabId: string) => void;
   onOpenLauncher: (placement: SessionWorkbarPlacement) => void;
   onRequestOpenTab: (
     placement: SessionWorkbarPlacement,
@@ -119,11 +107,9 @@ export interface WorkbarHostModel {
   onRemoveQuote?: (target: CompanionQuoteTarget) => void;
   onForkVisibilityChange?: (event: CompanionForkVisibilityEvent) => void;
   onContentStateChange?: (panelId: string, hasContent: boolean) => void;
-  onPreparingStateChange?: (panelId: string, preparing: boolean) => void;
   onInitialPromptStarted?: (panelId: string) => void;
   onPromptAccepted?: (panelId: string, prompt: string) => void;
   onActivityStateChange?: (panelId: string, active: boolean) => void;
-  preparingSideChatPanelIds?: ReadonlySet<string>;
   activeSideChatPanelIds?: ReadonlySet<string>;
   sourceSession?: SessionSummary;
   modelChoices?: readonly ChatModelChoice[];
@@ -193,10 +179,6 @@ export function WorkbarHost({ model: props }: { model: WorkbarHostModel }) {
               onActivateTab={props.onActivateTab}
               onCloseTab={props.onCloseTab}
               onCloseTabs={props.onCloseTabs}
-              onReorderTab={props.onReorderTab}
-              onMoveTab={props.onMoveTab}
-              onMoveTabToPanel={props.onMoveTabToPanel}
-              onPinTab={props.onPinTab}
               onOpenLauncher={props.onOpenLauncher}
               onRequestOpenTab={props.onRequestOpenTab}
               quotes={props.quotes}
@@ -204,11 +186,9 @@ export function WorkbarHost({ model: props }: { model: WorkbarHostModel }) {
               onRemoveQuote={props.onRemoveQuote}
               onForkVisibilityChange={props.onForkVisibilityChange}
               onContentStateChange={props.onContentStateChange}
-              onPreparingStateChange={props.onPreparingStateChange}
               onInitialPromptStarted={props.onInitialPromptStarted}
               onPromptAccepted={props.onPromptAccepted}
               onActivityStateChange={props.onActivityStateChange}
-              preparingSideChatPanelIds={props.preparingSideChatPanelIds}
               activeSideChatPanelIds={props.activeSideChatPanelIds}
               sourceSession={props.sourceSession}
               modelChoices={props.modelChoices}

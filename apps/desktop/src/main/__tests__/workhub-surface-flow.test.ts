@@ -165,6 +165,7 @@ test('durable delegation renders terminal link state instead of stale execution 
   const terminalLinks = [
     ['superseded', 'Superseded link', '已被更正'],
     ['aborted', 'Aborted replacement', '更正已中止'],
+    ['stopped', 'Stopped link', '已停止关联'],
   ] as const;
   for (const [linkState, english, chinese] of terminalLinks) {
     const turn: WorkHubCoordinationTurn = {
@@ -185,7 +186,7 @@ test('durable delegation renders terminal link state instead of stale execution 
       },
       updatedAt: 10,
     };
-    const render = (locale: 'en' | 'zh') => renderToStaticMarkup(
+    const render = (locale: 'en' | 'zh-CN') => renderToStaticMarkup(
       createElement(LocaleProvider, {
         locale,
         children: createElement(AstryxLocaleProvider, {
@@ -199,7 +200,7 @@ test('durable delegation renders terminal link state instead of stale execution 
       }),
     );
     const englishMarkup = render('en');
-    const chineseMarkup = render('zh');
+    const chineseMarkup = render('zh-CN');
 
     assert.match(englishMarkup, new RegExp(english, 'u'));
     assert.doesNotMatch(englishMarkup, />Running</u);
@@ -228,7 +229,7 @@ test('durable creation explicitly announces the new work', () => {
     },
     updatedAt: 10,
   };
-  const render = (locale: 'en' | 'zh') => renderToStaticMarkup(
+  const render = (locale: 'en' | 'zh-CN') => renderToStaticMarkup(
     createElement(LocaleProvider, {
       locale,
       children: createElement(AstryxLocaleProvider, {
@@ -243,7 +244,7 @@ test('durable creation explicitly announces the new work', () => {
   );
 
   assert.match(render('en'), /Created new work:/u);
-  assert.match(render('zh'), /已创建新工作：/u);
+  assert.match(render('zh-CN'), /已创建新工作：/u);
 });
 
 test('surface projection refresh gate rejects older reads after a newer refresh starts', () => {
@@ -655,6 +656,13 @@ test('real Session projection creates new guide topics and preserves origin ambi
             replacementDisposition: 'delegate_existing',
             targetSessionId,
             targetTurnId: admitted.turnId,
+          };
+        }
+        if (input.proposal.disposition === 'stop_work') {
+          return {
+            disposition: 'stop_work',
+            outcome: 'cancelled_pending',
+            targetSessionId: input.proposal.expects.targetSessionId,
           };
         }
         const targetSessionId = input.proposal.candidateRef.replace(/^candidate-/u, '');

@@ -27,9 +27,17 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { decodeCanonicalToolResultContent } from '@maka/core/tool-result-record-schema';
 import { type AgentGraphOperatorProvisionRequest } from '@maka/core/agent-graph-topology';
-import { type AgentRunHeader } from '@maka/core/agent-run';
+import {
+  seedInvocation,
+  type SeedInvocationInput,
+} from '@maka/runtime/test-only/invocation-fixture';
 import { type RuntimeEvent } from '@maka/core/runtime-event';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import {
+  buildHistoryCompactCheckpoint,
+  matchHistoryCompactCheckpointPrefix,
+  validateHistoryCompactCheckpointShape,
+} from '@maka/runtime/history-compact-checkpoint';
 import { agentGraphIdForRootSession } from '@maka/runtime/stream-graph-coordinator';
 import { FAKE_ASK_USER_QUESTION_PROMPT } from '@maka/runtime/test-only/fake-backend';
 import { createAgentGraphControlStore } from '@maka/storage/agent-graph-control-store';
@@ -70,6 +78,10 @@ const GRAPH_SIDE_CONVERSATION_REMOVAL_TARGET_ID = 'graph-side-conversation-remov
 const ARCHIVED_SIDE_CONVERSATION_TARGET_ID = 'archived-side-conversation-target';
 const ACTIVE_SOURCE_SIDE_CONVERSATION_TARGET_ID = 'active-source-side-conversation-target';
 
+function sectionedSummary(goal: string): string {
+  return `## Goal\n${goal}\n\n## Progress\n- done\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)`;
+}
+
 test('two Clients share exact retryable Session branch and revision authority', {
   skip: process.platform === 'win32' ? 'Windows SQLite shutdown lifecycle' : false,
   timeout: 120_000,
@@ -104,6 +116,7 @@ test('two Clients share exact retryable Session branch and revision authority', 
     await stopHost(host);
     host = undefined;
 
+    await seedDurableOrderCheckpoint(capability, sourceSessionId);
     host = await startHost(root, capability.rootId);
     await verifyRestartRecoveryAndAdmission(root, sourceSessionId);
     await stopHost(host);
@@ -258,6 +271,35 @@ async function verifyConcurrentRevisionAuthority(
         expectedRevision: removableSideConversationSession.revision,
       }),
       { kind: 'removed', sessionId: GRAPH_SIDE_CONVERSATION_REMOVAL_TARGET_ID },
+    );
+    // An empty copy (no sourceTurnId) forks a side conversation before the
+    // source has a settled turn: it commits (the lineage invariant accepts it),
+    // inherits the side-conversation label, records provenance, and fabricates
+    // no branch turn.
+    const emptySideConversation = await desktop.request('session.branch.create', {
+      sourceSessionId: linkedChildSourceSessionId,
+      targetSessionId: 'graph-side-conversation-empty-target',
+      expectedSourceRevision: linkedChildSource.revision,
+      intent: 'side_conversation',
+    });
+    assert.equal(emptySideConversation.kind, 'committed');
+    if (emptySideConversation.kind !== 'committed') {
+      assert.fail('Empty Side Conversation must commit');
+    }
+    const emptySideConversationSession = requireSessionProjection(emptySideConversation.session);
+    assert.ok(emptySideConversationSession.labels.includes('mode:side_conversation'));
+    assert.equal(emptySideConversationSession.parentSessionId, linkedChildSourceSessionId);
+    assert.equal(emptySideConversationSession.branchOfTurnId, undefined);
+    // An empty copy carries none of the source's current state — including no
+    // in-progress Todo (copyCurrent is false when sourceTurnId is absent), even
+    // though the source below has one.
+    assert.deepEqual(
+      (
+        await tui.request('session.todo.query', {
+          sessionId: 'graph-side-conversation-empty-target',
+        })
+      ).items,
+      [],
     );
     assert.equal((await querySession(tui, graphChildSessionId)).id, graphChildSessionId);
     const graphRevision = await desktop.request('session.revision.create', {
@@ -768,7 +810,6 @@ async function seedSource(
     const execution = await openInteractiveExecutionStoresForWrite(owner.lease);
     const artifacts = await openInteractiveArtifactStoreForWrite(owner.lease);
     const todos = await openInteractiveSessionTodoStoreForWrite(owner.lease);
-    await artifacts.recover();
     const source = await execution.sessionStore.create({
       cwd: root,
       name: 'Source Session',
@@ -831,28 +872,35 @@ async function seedSource(
       'continuation-parent-invocation',
       'continuation-parent-turn',
     );
-    const continuationChild: AgentRunHeader = {
-      ...agentRunHeader(
-        root,
-        continuationSource.id,
-        'continuation-child-run',
-        'continuation-child-invocation',
-        'continuation-child-turn',
-      ),
-      parentRunId: continuationParent.runId,
-      agentId: 'child-agent',
-      agentName: 'Child Agent',
-      retriedFromRunId: continuationParent.runId,
-      retriedFromTurnId: continuationParent.turnId,
-      continuationSource: {
-        sourceInvocationId: continuationParent.invocationId!,
-        sourceRunId: continuationParent.runId,
-        sourceTurnId: continuationParent.turnId,
-        sourceRuntimeEventHighWater: 1,
+    const continuationChildBase = agentRunHeader(
+      root,
+      continuationSource.id,
+      'continuation-child-run',
+      'continuation-child-invocation',
+      'continuation-child-turn',
+    );
+    const continuationChild: SeedInvocationInput = {
+      ...continuationChildBase,
+      opening: {
+        ...continuationChildBase.opening,
+        source: {
+          kind: 'continuation',
+          sourceInvocationId: continuationParent.invocationId!,
+          sourceRunId: continuationParent.runId,
+          sourceTurnId: continuationParent.turnId,
+          sourceRuntimeEventHighWater: 1,
+        },
+        lineage: {
+          parentRunId: continuationParent.runId,
+          agentId: 'child-agent',
+          agentName: 'Child Agent',
+          retriedFromRunId: continuationParent.runId,
+          retriedFromTurnId: continuationParent.turnId,
+        },
       },
     };
     for (const run of [continuationParent, continuationChild]) {
-      await execution.agentRunStore.createRun(run);
+      await seedInvocation(execution.runtimeEventStore, run);
       if (run.runId === continuationParent.runId) {
         await execution.runtimeEventStore.appendRuntimeEvent(
           run.sessionId,
@@ -874,17 +922,17 @@ async function seedSource(
         }),
       );
     }
-    const persistedContinuationRuns = await execution.agentRunStore.listSessionRuns(
+    const persistedContinuationRuns = await execution.runtimeEventStore.listSessionInvocations(
       continuationSource.id,
     );
     const persistedContinuationChild = persistedContinuationRuns.find(
       (run) => run.runId === continuationChild.runId,
     );
-    assert.equal(persistedContinuationChild?.agentId, continuationChild.agentId);
-    assert.deepEqual(
-      persistedContinuationChild?.continuationSource,
-      continuationChild.continuationSource,
+    assert.equal(
+      persistedContinuationChild?.opening.lineage?.agentId,
+      continuationChild.opening?.lineage?.agentId,
     );
+    assert.deepEqual(persistedContinuationChild?.opening.source, continuationChild.opening?.source);
     const artifact = await artifacts.create({
       id: 'source-artifact',
       sessionId: source.id,
@@ -967,22 +1015,22 @@ async function seedSource(
     const sourceRuns = [
       agentRunHeader(root, source.id, 'run-turn-1', 'invocation-turn-1', 'turn-1'),
       agentRunHeader(root, source.id, 'run-turn-2', 'invocation-turn-2', 'turn-2'),
-      {
-        ...agentRunHeader(
+      withParentRun(
+        agentRunHeader(
           root,
           source.id,
           'legacy-child-run',
           'legacy-child-invocation',
           'legacy-child-turn',
         ),
-        parentRunId: 'run-turn-1',
-      },
+        'run-turn-1',
+      ),
     ];
-    for (const run of sourceRuns) await execution.agentRunStore.createRun(run);
+    for (const run of sourceRuns) await seedInvocation(execution.runtimeEventStore, run);
     const sourceRuntimeEvents = [
       runtimeEvent(source.id, 'run-turn-1', 'invocation-turn-1', 'turn-1', {
         id: 'user-1',
-        ts: 1,
+        ts: 2,
         role: 'user',
         author: 'user',
         content: {
@@ -1005,7 +1053,7 @@ async function seedSource(
       }),
       runtimeEvent(source.id, 'run-turn-1', 'invocation-turn-1', 'turn-1', {
         id: 'assistant-1',
-        ts: 2,
+        ts: 1,
         role: 'model',
         author: 'agent',
         content: { kind: 'text', text: 'first response' },
@@ -1189,7 +1237,8 @@ async function seedSource(
       source: 'tool_result',
       now: 3,
     });
-    await execution.agentRunStore.createRun(
+    await seedInvocation(
+      execution.runtimeEventStore,
       agentRunHeader(
         root,
         graphChild.header.id,
@@ -1293,7 +1342,7 @@ async function seedSource(
         'linked-after-turn',
       ),
     ]) {
-      await execution.agentRunStore.createRun(run);
+      await seedInvocation(execution.runtimeEventStore, run);
     }
     const graphRootEvents = [
       runtimeEvent(linkedChildSource.id, 'graph-root-run', 'graph-root-invocation', 'linked-turn', {
@@ -1451,18 +1500,18 @@ async function seedSource(
         'archived-owned-parent-invocation',
         'archived-owned-turn',
       ),
-      {
-        ...agentRunHeader(
+      withParentRun(
+        agentRunHeader(
           root,
           archivedOwnedSource.id,
           'archived-owned-child-run',
           'archived-owned-child-invocation',
           'archived-owned-child-turn',
         ),
-        parentRunId: 'archived-owned-parent-run',
-      },
+        'archived-owned-parent-run',
+      ),
     ];
-    for (const run of archivedOwnedRuns) await execution.agentRunStore.createRun(run);
+    for (const run of archivedOwnedRuns) await seedInvocation(execution.runtimeEventStore, run);
     const archivedOwnedRuntimeEvents = [
       runtimeEvent(
         archivedOwnedSource.id,
@@ -1554,6 +1603,11 @@ async function seedSource(
       { content: 'Retained task', status: 'in_progress' },
       { content: 'Legacy child task', status: 'pending' },
     ]);
+    // The empty side conversation forks from here before any settled turn; this
+    // in-progress Todo proves the empty copy inherits none of it.
+    await todos.replaceAll(linkedChildSource.id, [
+      { content: 'Linked child in-progress task', status: 'in_progress' },
+    ]);
     return {
       sourceSessionId: source.id,
       busySessionId: busy.id,
@@ -1566,6 +1620,50 @@ async function seedSource(
     };
   } finally {
     graph.close();
+    await owner.close();
+  }
+}
+
+async function seedDurableOrderCheckpoint(
+  capability: StorageRootCapability<'interactive'>,
+  sourceSessionId: string,
+): Promise<void> {
+  const owner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(owner);
+  if (!owner) throw new Error('Unable to acquire execution root for checkpoint setup');
+  try {
+    const execution = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const coveredRuntimeEvents = (
+      await execution.runtimeEventStore.readSessionRuntimeEventEntries(sourceSessionId)
+    )
+      .map(({ event }) => event)
+      .filter((event) => event.id === 'user-1' || event.id === 'assistant-1');
+    assert.deepEqual(
+      coveredRuntimeEvents.map((event) => event.id),
+      ['user-1', 'assistant-1'],
+    );
+    const checkpoint = buildHistoryCompactCheckpoint({
+      sessionId: sourceSessionId,
+      coveredRuntimeEvents,
+      summary: sectionedSummary('The first turn completed.'),
+      highWaterSeq: 2,
+    });
+    await execution.agentRunStore.appendEvent(sourceSessionId, 'run-turn-1', {
+      type: 'history_compact_checkpoint_recorded',
+      id: 'checkpoint-turn-1',
+      runId: 'run-turn-1',
+      sessionId: sourceSessionId,
+      turnId: 'turn-1',
+      ts: 2,
+      data: {
+        checkpointId: checkpoint.checkpointId,
+        highWaterName: checkpoint.highWaterName,
+        highWaterSeq: checkpoint.highWaterSeq,
+        boundaryKind: 'historyCompact',
+        checkpoint,
+      },
+    });
+  } finally {
     await owner.close();
   }
 }
@@ -1590,7 +1688,6 @@ async function verifyDurableBranch(
     const execution = await openInteractiveExecutionStoresForWrite(owner.lease);
     const artifacts = await openInteractiveArtifactStoreForWrite(owner.lease);
     const todos = await openInteractiveSessionTodoStoreForWrite(owner.lease);
-    await artifacts.recover();
     // Every copy kind that retains the upload turn must carry a rewritten,
     // readable copy of the user-uploaded attachment (regression guard for the
     // turn-scoped-only artifact selection that dropped user uploads).
@@ -1611,7 +1708,12 @@ async function verifyDurableBranch(
       });
     };
     const messages = await execution.sessionStore.readMessagesSnapshot(branchSessionId);
-    assert.equal(messages.length, 5);
+    // The copied invocation opens on the branch's own spine, so its transcript
+    // projects the copied turn as ended, exactly as the source reads.
+    assert.deepEqual(
+      messages.map((message) => message.type),
+      ['user', 'assistant', 'tool_call', 'tool_result', 'system_note', 'turn_state'],
+    );
     const user = messages.find((message) => message.type === 'user');
     assert.ok(user?.attachments?.[0]);
     const ref = user?.attachments?.[0]?.ref;
@@ -1634,13 +1736,13 @@ async function verifyDurableBranch(
         .sort(),
       ['Legacy child task', 'Retained task'],
     );
-    const copiedRuns = await execution.agentRunStore.listSessionRuns(branchSessionId);
+    const copiedRuns = await execution.runtimeEventStore.listSessionInvocations(branchSessionId);
     assert.equal(copiedRuns.length, 2);
     const copiedChild = copiedRuns.find((run) => run.turnId === 'legacy-child-turn');
     const copiedParent = copiedRuns.find((run) => run.turnId === 'turn-1');
     assert.ok(copiedChild);
     assert.ok(copiedParent);
-    assert.equal(copiedChild.parentRunId, copiedParent.runId);
+    assert.equal(copiedChild.opening.lineage?.parentRunId, copiedParent.runId);
     const copiedProjectionResult = (
       await execution.runtimeEventStore.readRuntimeEvents(branchSessionId, copiedParent.runId)
     ).find((event) => event.content?.kind === 'function_response');
@@ -1668,9 +1770,41 @@ async function verifyDurableBranch(
     );
     assert.ok(copiedProjectionArtifact);
     assert.equal(copiedProjectionPart.ref.relativePath, copiedProjectionArtifact.id);
+    const durableCopiedRuns =
+      await execution.runtimeEventStore.listSessionInvocations(admittedRevisionTargetId);
+    const durableCopiedParent = durableCopiedRuns.find(
+      (invocation) => invocation.turnId === 'turn-1',
+    );
+    assert.ok(durableCopiedParent);
+    const copiedParentEvents = (
+      await execution.runtimeEventStore.readSessionRuntimeEventEntries(admittedRevisionTargetId)
+    )
+      .map(({ event }) => event)
+      .filter(
+        (event) => event.runId === durableCopiedParent.runId && event.content?.kind === 'text',
+      );
+    assert.deepEqual(
+      copiedParentEvents.map((event) => event.ts),
+      [2, 1],
+    );
+    const copiedCheckpoint = await execution.agentRunStore.readEventProjection?.(
+      admittedRevisionTargetId,
+      'history_compact_checkpoint_recorded',
+    );
+    const copiedCheckpointData = copiedCheckpoint?.data?.checkpoint;
+    assert.ok(
+      validateHistoryCompactCheckpointShape(copiedCheckpointData, admittedRevisionTargetId),
+    );
+    assert.equal(
+      matchHistoryCompactCheckpointPrefix(copiedCheckpointData, copiedParentEvents).reason,
+      undefined,
+    );
     assert.equal((await artifacts.listPage('revision-target', { offset: 0, limit: 10 })).total, 0);
     assert.deepEqual(await todos.readOrBootstrap('revision-target'), { items: [] });
-    assert.deepEqual(await execution.agentRunStore.listSessionRuns('revision-target'), []);
+    assert.deepEqual(
+      await execution.runtimeEventStore.listSessionInvocations('revision-target'),
+      [],
+    );
     await assert.rejects(
       () => execution.sessionStore.readHeaderSnapshot('revision-target'),
       /not found/i,
@@ -1721,7 +1855,7 @@ async function verifyDurableBranch(
       ),
     );
     await assertCopiedUpload(activeSourceSideConversationTargetId);
-    const sideConversationRuns = await execution.agentRunStore.listSessionRuns(
+    const sideConversationRuns = await execution.runtimeEventStore.listSessionInvocations(
       graphSideConversationTargetId,
     );
     const sideConversationRun = sideConversationRuns.find((run) => run.turnId === 'linked-turn');
@@ -1755,7 +1889,7 @@ async function verifyDurableBranch(
         text: 'graph child result',
       },
     );
-    const archivedSideConversationRuns = await execution.agentRunStore.listSessionRuns(
+    const archivedSideConversationRuns = await execution.runtimeEventStore.listSessionInvocations(
       archivedSideConversationTargetId,
     );
     const archivedSideConversationChildRun = archivedSideConversationRuns.find(
@@ -1807,7 +1941,8 @@ async function verifyDurableBranch(
     assert.equal(graphResult.content.items[0]?.childSessionId, graphChildSessionId);
     assert.equal(graphResult.content.items[0]?.runId, 'graph-child-run');
     assert.deepEqual(graphResult.content.items[0]?.artifactIds, ['graph-child-artifact']);
-    const graphRevisionRuns = await execution.agentRunStore.listSessionRuns(graphRevisionTargetId);
+    const graphRevisionRuns =
+      await execution.runtimeEventStore.listSessionInvocations(graphRevisionTargetId);
     const graphRevisionRun = graphRevisionRuns.find((run) => run.turnId === 'linked-turn');
     assert.ok(graphRevisionRun);
     const graphRuntimeResult = (
@@ -1989,28 +2124,41 @@ function operationError(code: RuntimeHostOperationError['code']) {
     error instanceof RuntimeHostOperationError && error.code === code;
 }
 
+/** The same seed input, with the lineage edge back to the run that spawned it. */
+function withParentRun(input: SeedInvocationInput, parentRunId: string): SeedInvocationInput {
+  return { ...input, opening: { ...input.opening, lineage: { parentRunId } } };
+}
+
 function agentRunHeader(
   cwd: string,
   sessionId: string,
   runId: string,
   invocationId: string,
   turnId: string,
-): AgentRunHeader {
+): SeedInvocationInput {
   return {
+    sessionId,
     runId,
     invocationId,
-    sessionId,
     turnId,
-    status: 'completed',
-    backendKind: 'fake',
-    llmConnectionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
-    llmConnectionSlug: 'fake',
-    modelId: 'fake-model',
-    cwd,
-    permissionMode: 'ask',
-    createdAt: 1,
-    updatedAt: 5,
-    completedAt: 5,
+    openedAt: 1,
+    opening: {
+      route: {
+        provenance: 'runtime',
+        backendKind: 'fake',
+        llmConnectionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        llmConnectionSlug: 'fake',
+        modelId: 'fake-model',
+      },
+      configuration: {
+        cwd,
+        permissionMode: 'ask',
+        collaborationMode: 'agent',
+        orchestrationMode: 'default',
+        orchestrationSource: 'session',
+        toolMode: 'direct',
+      },
+    },
   };
 }
 

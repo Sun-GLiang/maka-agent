@@ -17,8 +17,12 @@
  * under the License.
  */
 
+import type { RuntimeHostPeerConnectionPath } from '@maka/runtime-host/client';
+import type { SharedSessionCatalogProjection } from '@maka/runtime-host/protocol';
+
 export type SessionCollaborationImportResult =
   | { readonly kind: 'connected'; readonly mountId: string }
+  | { readonly kind: 'recovering'; readonly mountId: string }
   | {
       readonly kind: 'error';
       readonly reason:
@@ -43,4 +47,8 @@ export type SessionCollaborationCancelResult = 'cancelled' | 'settling';
 export interface SessionCollaborationMountSummary {
   readonly mountId: string;
   readonly name: string;
+  readonly hostId: string;
+  readonly readiness: 'connecting' | 'ready' | 'reconnecting' | 'unavailable';
+  readonly peerPath?: RuntimeHostPeerConnectionPath;
+  readonly session?: SharedSessionCatalogProjection;
 }

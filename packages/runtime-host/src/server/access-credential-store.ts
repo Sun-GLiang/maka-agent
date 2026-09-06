@@ -70,6 +70,11 @@ const PERSISTED_GRANT_MIGRATIONS: ReadonlyMap<string, PersistedGrantMigration> =
     'session.turns.query',
     { kind: 'replace', successors: ['session.turns.query', 'session.turn_landmarks.query'] },
   ],
+  // Resource inventory is a dedicated facet of the existing Host diagnostics authority.
+  [
+    'host.diagnostics.query',
+    { kind: 'replace', successors: ['host.diagnostics.query', 'host.resources.query'] },
+  ],
   // TaskLedger became SessionTodo; the query carried its authority over.
   ['task.ledger.query', { kind: 'replace', successors: ['session.todo.query'] }],
   // Retired with the Claude subscription provider, whose client identity the
@@ -88,6 +93,7 @@ export const SESSION_GUEST_OPERATION_GRANTS = Object.freeze([
   'collaboration.turn-request.create',
   'collaboration.turn-request.acknowledge',
   'collaboration.turn-request.query',
+  'collaboration.turn-request.withdraw',
   'runtime.resource.query',
   'session.shared.query',
   'subscription.open',

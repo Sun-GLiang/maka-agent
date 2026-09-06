@@ -29,13 +29,14 @@ import { BrowserViewManager } from './browser/view-manager.js';
 import type { E2eFixture } from './e2e-fixture.js';
 import { installMainWindowPermissionPolicy } from './main-window-permission-policy.js';
 import { loadMainRenderer, resolveMainRendererEntry } from './main-renderer-loader.js';
+import { clearDevRendererHttpCache } from './main-renderer-dev-cache.js';
 import {
   type MainRendererFrameIdentity,
   observeMainRendererProcessGone,
   reloadMainRendererProcess,
 } from './main-renderer-process-gone.js';
 import { isDarkAppearance, isThemePreference, toNativeThemeSource } from './theme-source.js';
-import { createWindowRevealGate } from './window-reveal.js';
+import { createWindowRevealGate, type WindowRevealMode } from './window-reveal.js';
 import { createWindowsMaximizeRendererSync } from './windows-maximize-renderer-sync.js';
 import {
   parseDesktopSessionResourceKey,
@@ -97,7 +98,7 @@ interface MainWindowControllerDeps {
   settingsStore: SettingsReader;
   // main.ts computes this from the same isE2e gate that also guards userData
   // and the fake backend, so main-window.ts owns no env policy of its own.
-  startHidden: boolean;
+  revealMode: WindowRevealMode;
   onClose?: () => void;
   onRendererProcessGone: (details: Electron.RenderProcessGoneDetails) => void | Promise<void>;
 }
@@ -165,22 +166,21 @@ const titleBarOverlayOptions = (
 });
 
 export function createMainWindowController(deps: MainWindowControllerDeps): MainWindowController {
-  const { workspaceRoot, e2eFixture, settingsStore, startHidden } = deps;
+  const { workspaceRoot, e2eFixture, settingsStore } = deps;
   const liveBrowserScopes = new Map<string, { hostId: string; targetEpoch: string }>();
 
-  // PR-SHOW-AFTER-FIRST-COMMIT: windows launched hidden (startHidden covers
+  // PR-SHOW-AFTER-FIRST-COMMIT: windows launched hidden (`hidden` covers
   // e2e-fixture capture and E2E — see main.ts) must never be revealed;
   // e2e-fixture captures run on the hidden window and E2E drives it headless.
-  // `!app.isPackaged` mirrors the original creation-time gate so a packaged
-  // build ignores a stray startHidden flag. The fallback timer, the
-  // renderer-ready IPC, and focus() all route their show() through this
-  // predicate via the reveal gate below.
-  const keepHiddenForE2eFixture = !app.isPackaged && startHidden;
+  // A run that asked for a visible window is `inactive`: it reveals, but never
+  // activates the app. The fallback timer, the renderer-ready IPC, and focus()
+  // all route their show() through this mode via the reveal gate below.
+  const revealMode: WindowRevealMode = deps.revealMode;
   // ChatGPT Pro review P2: focus() (second-instance / activate) used to call
   // mainWindow.show() directly, bypassing the reveal gate — re-launching or
   // clicking the dock icon during the pre-commit window would flash the
   // skeleton anyway. The gate defers those focus requests until markReady.
-  const revealGate = createWindowRevealGate(keepHiddenForE2eFixture);
+  const revealGate = createWindowRevealGate(revealMode);
   let showFallbackTimer: NodeJS.Timeout | undefined;
   let rendererRecoveryReadiness:
     | {
@@ -197,7 +197,7 @@ export function createMainWindowController(deps: MainWindowControllerDeps): Main
   };
   const armShowFallbackTimer = (target: BrowserWindow): void => {
     clearShowFallbackTimer();
-    if (keepHiddenForE2eFixture || target.isDestroyed() || target.isVisible()) return;
+    if (revealMode === 'hidden' || target.isDestroyed() || target.isVisible()) return;
     showFallbackTimer = setTimeout(() => {
       showFallbackTimer = undefined;
       if (!target.isDestroyed()) revealGate.markReady(target);
@@ -522,6 +522,11 @@ export function createMainWindowController(deps: MainWindowControllerDeps): Main
         : { ...mainWindow.getBounds(), isMaximized: false };
       void writeSavedBounds(workspaceRoot, final);
     });
+
+    // Dev-server cache hygiene (issue #4775) — see main-renderer-dev-cache.ts
+    // for why a stale immutable dep-chunk graph must never survive into a new
+    // dev session (duplicate React instances → null hook dispatcher crash).
+    await clearDevRendererHttpCache(mainWindow.webContents.session, rendererEntry);
 
     await loadMainRenderer(mainWindow, rendererEntry);
 

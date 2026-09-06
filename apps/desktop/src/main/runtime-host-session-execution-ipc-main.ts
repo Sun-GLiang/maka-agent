@@ -31,6 +31,7 @@ import {
 } from '@maka/core/session';
 import { type ActiveInteractionRequestEvent, type AttachmentRef } from '@maka/core/events';
 import { type PermissionMode } from '@maka/core/permission';
+import { decodeInteractionFormResponse } from '@maka/core/interaction';
 import { type SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
 import type { AttachmentApprovalRegistry } from "./attachment-approval.js";
 import {
@@ -175,9 +176,9 @@ export interface RuntimeHostSessionObservationIpcDeps {
     RuntimeHostSessionObservationRegistry,
     | 'loadTranscriptAround'
     | 'loadTranscriptBefore'
+    | 'loadTranscriptAfter'
     | 'observe'
     | 'openTranscript'
-    | 'releaseTarget'
   >;
   resolveSideConversation(sessionId: string): Promise<boolean>;
 }
@@ -186,7 +187,6 @@ export interface RuntimeHostSessionObservationIpcDeps {
 export function registerRuntimeHostSessionObservationIpc(
   deps: RuntimeHostSessionObservationIpcDeps,
   ipcMain: ReconnectableReadIpcMain,
-  enableE2eControls = false,
 ): void {
   handleReconnectableRead(
     ipcMain,
@@ -222,11 +222,12 @@ export function registerRuntimeHostSessionObservationIpc(
       event.sender.id,
     );
   });
-  if (enableE2eControls) {
-    ipcMain.handle('sessions:e2e:release-renderer-observations', (event) =>
-      deps.observations.releaseTarget(event.sender.id),
+  ipcMain.handle('sessions:transcript:load-after', async (event, input: unknown) => {
+    await deps.observations.loadTranscriptAfter(
+      normalizeTranscriptRangeRequest(input),
+      event.sender.id,
     );
-  }
+  });
 }
 
 /**
@@ -663,6 +664,28 @@ export function registerRuntimeHostSessionExecutionIpc(
       deps.observer.publishInteractionAnswer(answered, pending);
     },
   );
+  ipcMain.handle(
+    "sessions:respondToUserForm",
+    async (_event, sessionId: string, input: unknown) => {
+      const response = decodeInteractionFormResponse(input);
+      const pending = await requireInteraction(
+        deps.observer,
+        sessionId,
+        response.requestId,
+      );
+      if (pending.request.kind !== "form") {
+        throw new Error("Interaction is not a form request");
+      }
+      const answered = await deps.client.answerInteraction({
+        sessionId,
+        interactionId: response.requestId,
+        answer: response.action === "accept"
+          ? { kind: "form", action: "accept", values: response.values }
+          : { kind: "form", action: response.action },
+      });
+      deps.observer.publishInteractionAnswer(answered, pending);
+    },
+  );
 
   ipcMain.handle("sessions:compact", async (_event, sessionId: string) => {
     const turnId = newId();
@@ -722,7 +745,9 @@ export function registerRuntimeHostSessionExecutionIpc(
         deps.client.copySession("branch", {
           sourceSessionId: sessionId,
           targetSessionId: normalized.copyId,
-          sourceTurnId: normalized.sourceTurnId,
+          ...(normalized.sourceTurnId === undefined
+            ? {}
+            : { sourceTurnId: normalized.sourceTurnId }),
           ...(normalized.sideConversation ? { intent: 'side_conversation' as const } : {}),
         });
       let branch;
@@ -733,7 +758,9 @@ export function registerRuntimeHostSessionExecutionIpc(
                 sessionId: normalized.copyId,
                 kind: 'branch',
                 sourceSessionId: sessionId,
-                sourceTurnId: normalized.sourceTurnId,
+                ...(normalized.sourceTurnId === undefined
+                  ? {}
+                  : { sourceTurnId: normalized.sourceTurnId }),
                 intent: 'side_conversation',
                 ownerId: bindCopyOwner(event),
               },

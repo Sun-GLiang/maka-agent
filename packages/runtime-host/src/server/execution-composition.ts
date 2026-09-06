@@ -27,6 +27,10 @@ import { generalizedErrorMessage } from '@maka/core/redaction';
 import { emptyPlanSessionState } from '@maka/core/plan';
 import type { PermissionMode } from '@maka/core/permission';
 import {
+  runtimeInvocationOutcome,
+  type RuntimeInvocationRecord,
+} from '@maka/core/runtime-invocation';
+import {
   isDeepResearchSession,
   type SessionHeader,
   WORKHUB_COORDINATION_SESSION_ID,
@@ -37,6 +41,7 @@ import { AgentGraphSupervisorWakeCoordinator } from '@maka/runtime/agent-graph-s
 import {
   BackendRegistry,
   SessionManager,
+  workHubDirectStopAbortSource,
   type BackendFactory,
   type BackendPreparationContext,
 } from '@maka/runtime/session-manager';
@@ -73,15 +78,11 @@ import {
 } from '@maka/runtime/shell-detect';
 import { type MakaTool } from '@maka/runtime/tool-runtime';
 import { type RuntimeHostedRootAuthority } from '@maka/runtime/message-authority';
+import { isHostedExecutionTerminal } from './hosted-execution-authority.js';
 import { createAgentGraphControlStore } from '@maka/storage/agent-graph-control-store';
-import {
-  createArtifactAttachmentResourceReader,
-  createReadImageSnapshotter,
-} from '@maka/storage/artifact-stores';
-import {
-  isSessionNotFoundError,
-  SessionMetadataConflictError,
-} from '@maka/storage/execution-stores';
+import { createArtifactAttachmentResourceReader } from '@maka/storage/artifact-stores';
+import { createReadImageSnapshotStore } from '@maka/storage/read-image-snapshot-store';
+import { isSessionNotFoundError } from '@maka/storage/execution-stores';
 import { createExternalSessionAdapterRegistry } from '@maka/storage/external-sessions';
 import { createGitWorktreeChildExecutor } from '@maka/storage/git-worktree-child-executor';
 import { runWithStorageRootLease } from '@maka/storage/root-authority';
@@ -205,15 +206,16 @@ export interface ExecutionRuntimeHostComposition extends RuntimeHostComposition 
   readonly plugins: HostPluginPlatform;
 }
 
-const CONTEXT_OFFLOAD_READER_LIMITS: ContextOffloadLimits = Object.freeze({
+const GIBIBYTE = 1024 * 1024 * 1024;
+const CONTEXT_OFFLOAD_LIMITS: ContextOffloadLimits = Object.freeze({
   ownerMaxBytes: Object.freeze({
     read_image_snapshot: MAX_READ_IMAGE_BYTES,
     tool_result_archive: 0,
   }),
-  // This expand slice opens only the reader path. Zero quotas make accidental
-  // non-empty puts fail closed until the writer/lifecycle cutover lands.
-  sessionLogicalBytes: 0,
-  workspacePhysicalBytes: 0,
+  // Read images are bounded individually and logically per Session. Physical
+  // bytes are content-addressed across Sessions and bounded per workspace.
+  sessionLogicalBytes: GIBIBYTE,
+  workspacePhysicalBytes: 20 * GIBIBYTE,
 });
 
 export interface CreateExecutionRuntimeHostCompositionOptions {
@@ -242,7 +244,7 @@ export async function createExecutionRuntimeHostComposition(
   dependencies: ExecutionRuntimeHostCompositionDependencies = {},
 ): Promise<ExecutionRuntimeHostComposition> {
   const storage = await openStorageWriterComposition(context.owner.lease, {
-    contextOffloadLimits: CONTEXT_OFFLOAD_READER_LIMITS,
+    contextOffloadLimits: CONTEXT_OFFLOAD_LIMITS,
     afterRuntimePolicyOpened: async (stores) => {
       if (options.bootstrapRuntimePolicy !== false) {
         await ensureBootstrapRuntimePolicy({
@@ -258,7 +260,7 @@ export async function createExecutionRuntimeHostComposition(
   });
   if (storage.contextOffloadUnavailable) {
     console.error(
-      `[runtime-host] optional context-offload reader could not be opened: ${generalizedErrorMessage(storage.contextOffloadUnavailable.cause)}`,
+      `[runtime-host] optional context-offload Store could not be opened: ${generalizedErrorMessage(storage.contextOffloadUnavailable.cause)}`,
     );
   }
   const stores = storage.execution;
@@ -291,6 +293,28 @@ export async function createExecutionRuntimeHostComposition(
     const openedContextOffloadReader = openedContextOffloadStore
       ? createInteractiveContextOffloadReader(openedContextOffloadStore)
       : undefined;
+    const contextOffloadAuthority = openedContextOffloadStore
+      ? openedContextOffloadStore
+      : storage.contextOffloadUnavailable
+        ? {
+            copyReferences: async (): Promise<never> => {
+              throw new Error('Context-offload Store is unavailable during Session copy', {
+                cause: storage.contextOffloadUnavailable?.cause,
+              });
+            },
+            retireSession: async (_sessionId: string): Promise<never> => {
+              throw new Error('Context-offload Store is unavailable during Session retirement', {
+                cause: storage.contextOffloadUnavailable?.cause,
+              });
+            },
+            collectGarbage: async (): Promise<never> => {
+              throw new Error(
+                'Context-offload Store is unavailable during context garbage collection',
+                { cause: storage.contextOffloadUnavailable?.cause },
+              );
+            },
+          }
+        : undefined;
     const openedUsageStores = storage.usage;
     const openedShellRunStore = storage.shellRuns;
     const worktreeChildExecutor = createGitWorktreeChildExecutor({
@@ -391,6 +415,8 @@ export async function createExecutionRuntimeHostComposition(
     const executionArtifacts = createHostExecutionArtifactServices({
       artifacts: openedArtifactStore,
       requestDrain: context.requestDrain,
+      sessionAdmission,
+      sessions: stores.sessionStore,
     });
     const builtinTools = {
       shellRuns: runtimeResources,
@@ -400,7 +426,27 @@ export async function createExecutionRuntimeHostComposition(
       }),
       backgroundTasks: runtimeResources,
       ptyControls: runtimeResources,
-      snapshotImage: createReadImageSnapshotter(openedArtifactStore),
+      ...(openedContextOffloadStore
+        ? {
+            snapshotImage: async (input: {
+              readonly sessionId: string;
+              readonly ownerId: string;
+              readonly bytes: Uint8Array;
+              readonly mimeType: string;
+            }) =>
+              createReadImageSnapshotStore(openedContextOffloadStore, input.sessionId).snapshot({
+                ownerId: input.ownerId,
+                bytes: input.bytes,
+                mimeType: input.mimeType,
+              }),
+            releaseImageSnapshot: async (input: {
+              readonly sessionId: string;
+              readonly refId: string;
+            }) => {
+              await openedContextOffloadStore.releaseReference(input);
+            },
+          }
+        : {}),
       ...(sandboxManager ? { sandboxManager } : {}),
       ...(filesystemWorker ? { filesystemWorker } : {}),
     };
@@ -661,10 +707,18 @@ export async function createExecutionRuntimeHostComposition(
           stores.runtimeEventStore.readSessionRuntimeEventEntries(sessionId),
       },
       historyCompaction: {
-        readLatestCheckpoint: (sessionId) =>
-          loadLatestHistoryCompactCheckpointFromRunLedger(stores.agentRunStore, sessionId),
-        readCheckpoints: (sessionId) =>
-          loadHistoryCompactCheckpointsFromRunLedger(stores.agentRunStore, sessionId),
+        readLatestCheckpoint: async (sessionId) =>
+          loadLatestHistoryCompactCheckpointFromRunLedger(
+            stores.agentRunStore,
+            sessionId,
+            await sessionRunIds(stores.runtimeEventStore, sessionId),
+          ),
+        readCheckpoints: async (sessionId) =>
+          loadHistoryCompactCheckpointsFromRunLedger(
+            stores.agentRunStore,
+            sessionId,
+            await sessionRunIds(stores.runtimeEventStore, sessionId),
+          ),
       },
       model: createHostMemoryExtractionModel({
         runtimePolicy: runtimePolicyStores,
@@ -911,7 +965,6 @@ export async function createExecutionRuntimeHostComposition(
         requestDrain: context.requestDrain,
       }),
       readModel: new RuntimeReadModel({
-        runStore: stores.agentRunStore,
         runtimeEventStore: stores.runtimeEventStore,
         projectionCache: stores.sessionStore,
         canonicalPermissionOutcomes,
@@ -976,7 +1029,7 @@ export async function createExecutionRuntimeHostComposition(
             graph.hasLiveSessionState(sessionId),
             hasLiveLinkedDescendantState(
               requireSessionManager(manager),
-              stores.agentRunStore,
+              stores.runtimeEventStore,
               sessionId,
               async (descendantSessionId) =>
                 (await runtimeResources!.hasLiveSessionResources(descendantSessionId)) ||
@@ -1009,18 +1062,7 @@ export async function createExecutionRuntimeHostComposition(
       worktreeChildExecutor,
       listArtifactsForTurn: (sessionId, turnId) =>
         openedArtifactStore.listTurnArtifacts(sessionId, turnId),
-      publishChildWorkspacePatch: ({ sessionId, turnId, binding, patch }) =>
-        openedArtifactStore.create({
-          id: subagentWritebackArtifactId(sessionId, turnId),
-          sessionId,
-          turnId,
-          name: 'workspace.patch',
-          kind: 'diff',
-          content: patch,
-          mimeType: 'text/x-diff; charset=utf-8',
-          source: 'subagent_writeback',
-          summary: `Workspace changes relative to ${binding.baseCommit}.`,
-        }),
+      publishChildWorkspacePatch: executionArtifacts.publishChildWorkspacePatch,
       assertChildWorkspaceQuiescent: async (sessionId) => {
         if (await runtimeResources!.hasLiveSessionResources(sessionId)) {
           throw new Error(
@@ -1031,7 +1073,6 @@ export async function createExecutionRuntimeHostComposition(
     });
     graphCoordinator = new AgentGraphCoordinator({
       sessionStore: stores.sessionStore,
-      runStore: stores.agentRunStore,
       runtimeEventStore: stores.runtimeEventStore,
       controlStore: openedGraphControlStore,
       epochStore: openedGraphControlStore,
@@ -1202,6 +1243,7 @@ export async function createExecutionRuntimeHostComposition(
       ? new SessionTurnAccessRequestCoordinator({
           authority: context.sessionAccessAuthority,
           startTurn: interactiveTurns.handlers['turn.start'],
+          regenerateTurn: interactiveTurns.handlers['turn.regenerate'],
           hostEpoch: context.hostEpoch,
           acquireResidency: () => context.acquireResidency('collaboration-turn-request'),
           requestDrain: context.requestDrain,
@@ -1222,15 +1264,24 @@ export async function createExecutionRuntimeHostComposition(
       startTurn: (sessionId, input, _activity, abortSignal, isCurrent) =>
         graphExecutions.run(sessionId, input, abortSignal, isCurrent),
       inspectAttempt: async (rootSessionId, attemptId, turnId) => {
-        const runs = (await stores.agentRunStore.listSessionRuns(rootSessionId)).filter(
-          (run) => run.agentGraphWakeAttemptId === attemptId && run.turnId === turnId,
+        const runs = (await stores.runtimeEventStore.listSessionInvocations(rootSessionId)).filter(
+          (run) => {
+            const root = run.opening.root;
+            return (
+              root.kind === 'agent_graph_supervisor_wake' &&
+              root.attemptId === attemptId &&
+              run.turnId === turnId
+            );
+          },
         );
         if (runs.length > 1) {
           throw new Error(
             `Agent graph supervisor wake attempt ${attemptId} has multiple AgentRuns`,
           );
         }
-        return runs[0]?.status ?? 'missing';
+        const attempt = runs[0];
+        if (!attempt) return 'missing';
+        return runtimeInvocationOutcome(attempt) ?? 'running';
       },
       recoverContextOverflow: (rootSessionId, { abortSignal }) =>
         graphExecutions.recoverContextOverflow(rootSessionId, randomUUID(), abortSignal),
@@ -1308,50 +1359,63 @@ export async function createExecutionRuntimeHostComposition(
       continuity: continuityCoordinator,
       executions: coordinator,
       sessionActions: {
-        readDelegationRetirement: async (assignment) => {
-          const disposition = await messages.readMessageExecutionDisposition(
-            assignment.targetSessionId,
-            assignment.targetMessageId,
-          );
+        readDelegationRetirement: async (assignment, admission) => {
+          const disposition = admission
+            ? await messages.readMessageExecutionDispositionAdmitted(
+                assignment.targetSessionId,
+                assignment.targetMessageId,
+                admission,
+              )
+            : await messages.readMessageExecutionDisposition(
+                assignment.targetSessionId,
+                assignment.targetMessageId,
+              );
           if (disposition.kind === 'recovering') return 'recovering';
           if (disposition.kind === 'pending') return 'not_retired';
           if (disposition.kind === 'cancelled' || disposition.kind === 'shared_turn') {
             return 'retired';
           }
-          const rootState = coordinator.readRootState(assignment.targetSessionId);
-          return rootState.kind === 'active' &&
-            rootState.turnId === disposition.turnId &&
-            rootState.runId === disposition.runId
-            ? 'not_retired'
-            : 'retired';
+          const identity = {
+            sessionId: assignment.targetSessionId,
+            turnId: disposition.turnId,
+            runId: disposition.runId,
+          };
+          if (isActiveWorkHubRoot(coordinator, identity)) return 'not_retired';
+          // The same restart window as `stopOwnedWorkHubRoot`: an unregistered
+          // root is not evidence that its work ended.
+          const snapshot = await coordinator.read(identity);
+          return isHostedExecutionTerminal(snapshot) ? 'retired' : 'recovering';
         },
-        retireDelegation: async (assignment) => {
+        retireDelegation: async (assignment, retirement) => {
           const disposition = await messages.cancelMessageIfPending(
             assignment.targetSessionId,
             assignment.targetMessageId,
+            retirement.cancellationClaimId,
           );
           if (disposition.kind === 'recovering') {
-            throw new WorkHubActionEffectFailure(
-              'operation_unavailable',
-              'WorkHub is still resolving the delegated Message owner',
-            );
+            return { outcome: 'recovering' as const };
           }
-          if (disposition.kind === 'shared_turn') return;
+          if (disposition.kind === 'cancelled') {
+            return { outcome: 'already_terminal' as const };
+          }
+          if (disposition.kind === 'cancelled_pending') {
+            return { outcome: 'cancelled_pending' as const };
+          }
+          if (disposition.kind === 'shared_turn') {
+            return { outcome: 'not_owned' as const, targetTurnId: disposition.turnId };
+          }
           if (disposition.kind === 'owned_root') {
-            const rootState = coordinator.readRootState(assignment.targetSessionId);
-            if (
-              rootState.kind !== 'active' ||
-              rootState.turnId !== disposition.turnId ||
-              rootState.runId !== disposition.runId
-            ) {
-              return;
-            }
-            await coordinator.stopRoot({
+            const identity = {
               sessionId: assignment.targetSessionId,
               turnId: disposition.turnId,
               runId: disposition.runId,
-            });
+            };
+            return retirement.cause === 'direct_stop'
+              ? stopOwnedWorkHubRoot(coordinator, identity, retirement.cancellationClaimId)
+              : stopReplacedWorkHubRoot(coordinator, identity);
           }
+          disposition satisfies never;
+          throw new Error('Unhandled WorkHub Message retirement disposition');
         },
         assign: async (input) => {
           const durable = await stores.sessionStore.readWorkHubAssignment(input.actionId);
@@ -1483,7 +1547,7 @@ export async function createExecutionRuntimeHostComposition(
       },
       resolveCreateTarget: async () => {
         const { projectId: _projectId, ...target } =
-          await sessionCatalog.resolveExternalSessionImportTarget();
+          await sessionCatalog.resolveDefaultCreateTarget();
         return { ...target, permissionMode: 'explore' };
       },
       requestDrain: context.requestDrain,
@@ -1545,6 +1609,7 @@ export async function createExecutionRuntimeHostComposition(
       stores,
       artifacts: openedArtifactStore,
       sessionTodo: sessionTodoStore,
+      ...(contextOffloadAuthority ? { contextOffload: contextOffloadAuthority } : {}),
       manager,
       admission: sessionAdmission,
       continuity: continuityCoordinator,
@@ -1569,20 +1634,7 @@ export async function createExecutionRuntimeHostComposition(
       continuity: continuityCoordinator,
       artifacts: openedArtifactStore,
       sessionTodo: sessionTodoStore,
-      assertNoContextOffloadReferences: async (sessionIds) => {
-        if (!openedContextOffloadStore) {
-          throw new Error('Context-offload reader is unavailable during Session removal', {
-            cause: storage.contextOffloadUnavailable?.cause,
-          });
-        }
-        for (const sessionId of sessionIds) {
-          if ((await openedContextOffloadStore.usage(sessionId)).references > 0) {
-            throw new SessionMetadataConflictError(
-              'Session removal does not support Session context references yet',
-            );
-          }
-        }
-      },
+      ...(contextOffloadAuthority ? { contextOffload: contextOffloadAuthority } : {}),
       purgeOperationalState: async (sessionId) => {
         await stores.purgeConversationOperationalState(sessionId);
         await openedPlanStore.purgeSessionState(sessionId);
@@ -1703,7 +1755,15 @@ export async function createExecutionRuntimeHostComposition(
         recovery: {
           state: async () => {
             await skills.recover();
-            await openedArtifactStore.recover();
+            try {
+              await openedArtifactStore.reclaimUpgradeResidue();
+            } catch (error) {
+              // Leftover bytes are not worth refusing to start over; the next
+              // start tries again.
+              console.error(
+                `[runtime-host] upgrade residue could not be reclaimed: ${generalizedErrorMessage(error)}`,
+              );
+            }
           },
         },
         drain: [
@@ -1964,6 +2024,74 @@ export async function createExecutionRuntimeHostComposition(
   }
 }
 
+/**
+ * Confirmed direct stop. The action-derived abort source is written onto the
+ * exact root Turn so a retry after a crash can tell WorkHub's own delivery
+ * apart from an earlier or concurrent manual Stop.
+ */
+export async function stopOwnedWorkHubRoot(
+  coordinator: Pick<RootTurnCoordinator, 'readRootState' | 'read' | 'stopRoot'>,
+  identity: { readonly sessionId: string; readonly turnId: string; readonly runId: string },
+  actionId: string,
+): Promise<{
+  readonly outcome: 'stop_delivered' | 'already_terminal' | 'recovering';
+  readonly targetTurnId: string;
+}> {
+  if (isActiveWorkHubRoot(coordinator, identity)) {
+    await coordinator.stopRoot(identity, {
+      source: 'workhub_direct_stop',
+      workHubActionId: actionId,
+    });
+  }
+  const terminal = await coordinator.read(identity);
+  if (
+    terminal.status === 'cancelled' &&
+    terminal.abortSource === workHubDirectStopAbortSource(actionId)
+  ) {
+    return { outcome: 'stop_delivered', targetTurnId: identity.turnId };
+  }
+  // Registration is in-memory, so between Host restart and execution recovery
+  // this root looks inactive while it is still running. `already_terminal` is
+  // committed as an immutable fact, so only a durably terminal snapshot may
+  // claim it; anything else is still resolving.
+  return isHostedExecutionTerminal(terminal)
+    ? { outcome: 'already_terminal', targetTurnId: identity.turnId }
+    : { outcome: 'recovering', targetTurnId: identity.turnId };
+}
+
+/**
+ * Route correction retiring the root it is replacing. It carries its own
+ * cancellation claim, but it is not a direct stop: recording direct-stop
+ * provenance here would let replay mistake a correction for one, so the
+ * retirement keeps the neutral Stop source ordinary supersession has always
+ * used.
+ */
+export async function stopReplacedWorkHubRoot(
+  coordinator: Pick<RootTurnCoordinator, 'readRootState' | 'read' | 'stopRoot'>,
+  identity: { readonly sessionId: string; readonly turnId: string; readonly runId: string },
+): Promise<{
+  readonly outcome: 'stop_delivered' | 'already_terminal';
+  readonly targetTurnId: string;
+}> {
+  if (!isActiveWorkHubRoot(coordinator, identity)) {
+    return { outcome: 'already_terminal', targetTurnId: identity.turnId };
+  }
+  await coordinator.stopRoot(identity);
+  return { outcome: 'stop_delivered', targetTurnId: identity.turnId };
+}
+
+function isActiveWorkHubRoot(
+  coordinator: Pick<RootTurnCoordinator, 'readRootState'>,
+  identity: { readonly sessionId: string; readonly turnId: string; readonly runId: string },
+): boolean {
+  const rootState = coordinator.readRootState(identity.sessionId);
+  return (
+    rootState.kind === 'active' &&
+    rootState.turnId === identity.turnId &&
+    rootState.runId === identity.runId
+  );
+}
+
 function sessionExecutionConnectionRef(
   header: Pick<SessionHeader, 'llmConnectionId' | 'llmConnectionSlug'>,
 ): ExecutionConnectionRef {
@@ -2013,17 +2141,6 @@ function adaptWorkspaceFilesystemWorker(
       }
     },
   };
-}
-
-function subagentWritebackArtifactId(sessionId: string, turnId: string): string {
-  const digest = createHash('sha256')
-    .update('maka-subagent-writeback-v1\0')
-    .update(sessionId)
-    .update('\0')
-    .update(turnId)
-    .digest('hex')
-    .slice(0, 32);
-  return `subagent_writeback_${digest}`;
 }
 
 function requireContinuity(
@@ -2132,11 +2249,23 @@ function requireGoal(coordinator: HostGoalCoordinator | undefined): HostGoalCoor
   return coordinator;
 }
 
+/** Every run this Session has opened, named by the event spine that defines it. */
+async function sessionRunIds(
+  runtimeEventStore: SessionInvocationLister,
+  sessionId: string,
+): Promise<string[]> {
+  return (await runtimeEventStore.listSessionInvocations(sessionId)).map(
+    (invocation) => invocation.runId,
+  );
+}
+
+interface SessionInvocationLister {
+  listSessionInvocations(sessionId: string): Promise<readonly RuntimeInvocationRecord[]>;
+}
+
 async function hasLiveLinkedDescendantState(
   manager: SessionManager,
-  runStore: {
-    listSessionRuns(sessionId: string): Promise<readonly { status: string }[]>;
-  },
+  runtimeEventStore: SessionInvocationLister,
   rootSessionId: string,
   hasLiveSessionState: (sessionId: string) => Promise<boolean>,
 ): Promise<boolean> {
@@ -2150,20 +2279,12 @@ async function hasLiveLinkedDescendantState(
       seen.add(child.id);
       pending.push(child.id);
       const [runs, liveState] = await Promise.all([
-        runStore.listSessionRuns(child.id),
+        runtimeEventStore.listSessionInvocations(child.id),
         hasLiveSessionState(child.id),
       ]);
       if (liveState) return true;
-      if (
-        runs.some(
-          (run) =>
-            run.status === 'created' ||
-            run.status === 'running' ||
-            run.status === 'waiting_for_user',
-        )
-      ) {
-        return true;
-      }
+      // A run whose events never closed it is still live.
+      if (runs.some((run) => runtimeInvocationOutcome(run) === undefined)) return true;
     }
   }
   return false;

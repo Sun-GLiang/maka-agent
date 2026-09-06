@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { deriveMakaDataRoots, resolveMakaDataRoots } from './workspace-root.js';
 import {
   configureRuntimeHostPeerClient,
-  resolveRuntimeHostPeerNativePath,
+  resolveRuntimeHostNativePath,
 } from './runtime-host-peer-artifact.js';
 import {
   parseRuntimeHostCommand,
@@ -170,7 +170,6 @@ function helpText(cliCommand: string): string {
     `  ${cliCommand} runtime-host profile set --id <id> --name <name> --tls-url <wss-url> --expected-root <root-id> [--credential-env <name>]`,
     `  ${cliCommand} runtime-host profile set --id <id> --name <name> --ssh-destination <user@host> --ssh-remote-port <port> --expected-root <root-id> [--ssh-port <port>] [--credential-env <name>]`,
     `  ${cliCommand} runtime-host profile set --id <id> --name <name> --plaintext-url <ws-url> --acknowledge-plaintext --expected-root <root-id> [--credential-env <name>]`,
-    `  ${cliCommand} runtime-host profile set --id <id> --name <name> --peer-id <peer-id> --peer-route <multiaddr> --expected-root <root-id> [--credential-env <name>]`,
     `  ${cliCommand} runtime-host profile remove --id <id>`,
     `  ${cliCommand} runtime-host capability-provider serve --url <ws-url> --mcp-config <path> --expected-root <root-id>`,
     '',
@@ -324,6 +323,12 @@ export async function runMakaCli(
           config.deploymentRoot,
           config.launch.package.integrity,
         );
+        if (process.platform === 'win32') {
+          const { ownWindowsRuntimeHostProcessTree } = await import(
+            './runtime-host-windows-service.js'
+          );
+          await ownWindowsRuntimeHostProcessTree(packageLayout.cliPath);
+        }
         return runRuntimeHostServiceCli({
           rootPath: config.root.path,
           json: command.json,
@@ -336,7 +341,7 @@ export async function runMakaCli(
           ...(peer
             ? {
                 peer: {
-                  nativePath: await resolveRuntimeHostPeerNativePath(packageLayout.cliPath),
+                  nativePath: await resolveRuntimeHostNativePath(packageLayout.cliPath),
                   keyPath: peer.keyPath,
                   expectedPeerId: peer.peerId,
                   listenAddresses: peer.listenAddresses,
@@ -783,7 +788,7 @@ export async function runMakaCli(
             id: command.id,
             name: command.name,
             distribution: command.distribution,
-            operatorPath: command.operatorPath,
+            operator: command.operator,
             expectedRootId: command.expectedRootId,
           },
           {},

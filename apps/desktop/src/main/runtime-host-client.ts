@@ -117,6 +117,7 @@ import {
   type CollaborationTurnRequestAcknowledgeResult,
   type CollaborationTurnRequestDecideResult,
   type CollaborationTurnRequestQueryResult,
+  type CollaborationTurnRequestWithdrawResult,
   type SessionCollaborationGrantKind,
   type SessionTurnAccessRequest,
   type SessionTurnRequestIntent,
@@ -158,6 +159,7 @@ const decodeStoredMessage = (value: unknown): StoredMessage =>
 const MAX_OPTIMISTIC_ATTEMPTS = 3;
 const MAX_SESSION_REVISION_ATTEMPTS = 8;
 const MAX_PRICING_SNAPSHOT_ATTEMPTS = 3;
+const RUNTIME_HOST_RETIREMENT_TIMEOUT_MS = 5_000;
 
 export type DesktopSessionConfigurationPatch = SessionConfigurationPatch;
 
@@ -351,6 +353,12 @@ export class DesktopRuntimeHostClient {
     requestId: string,
   ): Promise<CollaborationTurnRequestAcknowledgeResult> {
     return this.request('collaboration.turn-request.acknowledge', { requestId });
+  }
+
+  withdrawCollaborationTurnRequest(
+    requestId: string,
+  ): Promise<CollaborationTurnRequestWithdrawResult> {
+    return this.request('collaboration.turn-request.withdraw', { requestId });
   }
 
   decideCollaborationTurnRequest(
@@ -548,6 +556,12 @@ export class DesktopRuntimeHostClient {
     attemptId: string,
   ): Promise<OperationOutput<"oauth.login.cancel">> {
     return this.request("oauth.login.cancel", { attemptId });
+  }
+
+  queryOAuthEnrollment(
+    provider: OperationInput<"oauth.enrollment.query">["provider"],
+  ): Promise<OperationOutput<"oauth.enrollment.query">> {
+    return this.request("oauth.enrollment.query", { provider });
   }
 
   async loadSkillCatalog(
@@ -964,11 +978,7 @@ export class DesktopRuntimeHostClient {
     return this.request("workhub.coordination.act", input);
   }
 
-  answerWorkHubCoordination(
-    input: OperationInput<"workhub.coordination.answer">,
-  ): Promise<OperationOutput<"workhub.coordination.answer">> {
-    return this.request("workhub.coordination.answer", input);
-  }
+
 
   recordWorkHubCoordination(
     input: OperationInput<"workhub.coordination.record">,
@@ -1313,7 +1323,11 @@ export class DesktopRuntimeHostClient {
   prepareHostRetirement(
     mode: RuntimeHostRetirementMode,
   ): Promise<RuntimeHostRetirementPreparation> {
-    return prepareConnectedRuntimeHostRetirement(this.connection, mode);
+    return prepareConnectedRuntimeHostRetirement(
+      this.connection,
+      mode,
+      RUNTIME_HOST_RETIREMENT_TIMEOUT_MS,
+    );
   }
 
   stopTurn(
