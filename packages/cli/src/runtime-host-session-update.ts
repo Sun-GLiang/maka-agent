@@ -41,7 +41,7 @@ export class RuntimeHostSessionUpdateError extends Error {
     readonly sessionId: string,
     readonly attempts?: number,
   ) {
-    super(`Runtime Host Session update failed: ${reason}`);
+    super(`Runtime Host Session update failed for session ${sessionId}: ${reason}`);
   }
 }
 

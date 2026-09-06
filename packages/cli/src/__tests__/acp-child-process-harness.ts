@@ -367,9 +367,13 @@ async function seedModelConnection(
         baseUrl: 'https://acp-model.invalid/v1',
         enabled: true,
         enabledModelIds: [model.id],
-        relayModelProfiles: {
-          [model.id]: { thinkingLevels: model.thinkingLevels },
-        },
+        ...(model.thinkingLevels.length === 0
+          ? {}
+          : {
+              relayModelProfiles: {
+                [model.id]: { thinkingLevels: model.thinkingLevels },
+              },
+            }),
       },
     });
     if (created.kind !== 'committed') throw new Error('ACP model fixture did not commit');

@@ -145,7 +145,8 @@ describe('Maka ACP child process', () => {
 
   test('serves multiple ACP Sessions through a real Runtime Host', {
     timeout: 30_000,
-  }, async () => {
+  }, async (t) => {
+    t.after(setParentProviderKeys());
     await withAcpChildProcessHarness(
       async (harness) => {
         await harness.withClient(async ({ context }) => {
@@ -215,7 +216,10 @@ describe('Maka ACP child process', () => {
           assertJsonRpcMessage(message);
         }
       },
-      { startRuntimeHost: true },
+      {
+        startRuntimeHost: true,
+        model: { id: 'relay-basic', thinkingLevels: [] },
+      },
     );
   });
 
@@ -359,4 +363,17 @@ function assertJsonRpcId(id: unknown): void {
     id === null || typeof id === 'string' || (typeof id === 'number' && Number.isFinite(id)),
     'a JSON-RPC id is a string, finite number, or null',
   );
+}
+
+function setParentProviderKeys(): () => void {
+  const names = ['DEEPSEEK_API_KEY', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY'] as const;
+  const previous = names.map((name) => process.env[name]);
+  for (const name of names) process.env[name] = 'acp-parent-environment-key';
+  return () => {
+    for (const [index, name] of names.entries()) {
+      const value = previous[index];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
 }

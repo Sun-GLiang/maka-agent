@@ -101,6 +101,10 @@ test('reports missing and unsupported Session projections without caller-specifi
       assert.ok(error instanceof RuntimeHostSessionUpdateError);
       assert.equal(error.operation, 'session.catalog.query');
       assert.equal(error.reason, 'not_found');
+      assert.equal(
+        error.message,
+        'Runtime Host Session update failed for session session-1: not_found',
+      );
       return true;
     },
   );
