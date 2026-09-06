@@ -19,7 +19,7 @@
 
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, userEvent, waitFor, within } from 'storybook/test';
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useReducer, useState, type CSSProperties, type ReactNode } from 'react';
 import type { ComponentProps } from 'react';
 import type { ProjectRecord } from '@maka/core/project';
 import type { SessionSummary, StoredMessage } from '@maka/core/session';
@@ -29,11 +29,24 @@ import {
   Composer,
   deriveTitlebarProjectName,
   TitlebarSessionIdentity,
+  ToastProvider,
 } from '@maka/ui';
 import type { ChatModelChoice, SessionViewMode, TurnViewModel } from '@maka/ui';
 import { SessionRail, type SessionRailStoryProps } from '../../../packages/ui/stories/session-rail-harness.js';
 import { AppShellTopbarActions } from '../src/renderer/app-shell-chrome-actions';
-import { WorkbarTitlebarActions } from '../src/renderer/features/workbar';
+import {
+  WorkbarServicesProvider,
+  WorkbarTitlebarActions,
+} from '../src/renderer/features/workbar';
+import { WorkbarSurface } from '../src/renderer/features/workbar/stories';
+import {
+  createFakeWorkbarServices,
+  createSessionWorkbarPanelsState,
+  reduceWorkbarLayout,
+  SESSION_BOTTOM_PANEL_DEFAULT_HEIGHT,
+  SESSION_WORKBAR_DEFAULT_WIDTH,
+  type WorkbarLayoutState,
+} from '../src/renderer/features/workbar/testing';
 import { AppShellDetailPanel } from '../src/renderer/app-shell-detail-panel';
 import { deriveAppShellTurnPresentation } from '../src/renderer/app-shell-turn-view-model';
 import {
@@ -341,6 +354,8 @@ function ComposedShell(props: {
   frameHeight?: number | string;
   /** Drives the footer's update action; `undefined` is the silent phase. */
   updateReminder?: SessionListPanelProps['updateReminder'];
+  workbarCollapsed?: boolean;
+  onToggleWorkbar?: () => void;
 }) {
   const [collapsed, setCollapsed] = useState(props.sidebarCollapsed ?? false);
   const [viewMode, setViewMode] = useState<SessionViewMode>(props.initialViewMode ?? 'conversation');
@@ -413,8 +428,8 @@ function ComposedShell(props: {
         )}
         <WorkbarTitlebarActions
           available
-          collapsed={false}
-          onToggle={noop}
+          collapsed={props.workbarCollapsed ?? false}
+          onToggle={props.onToggleWorkbar ?? noop}
         />
       </header>
       <AstryxAppShell
@@ -2164,6 +2179,146 @@ export const TailFollowDoesNotAskForHistory: Story = {
   },
 };
 
+// #4256: one Turn taller than several viewports, its reasoning / answer / tool
+// blocks each carrying a `data-maka-transcript-boundary` marker so sub-turn
+// content-visibility bounds them. Reasoning stays mounted while folded, so it is
+// real layout, not free collapsed bytes.
+function oversizedTurnMessages(): StoredMessage[] {
+  const turnId = 'turn-oversized';
+  const out: StoredMessage[] = [
+    user('msg-oversized-user', turnId, 30, '逐项检查一组独立的合成步骤，并给出简短结果。'),
+  ];
+  const prose = '这一段只包含确定性的合成文本，用于测量长对话的滚动渲染。'.repeat(8);
+  const reasoning = '先确认输入边界（空 / 超长 / 并发），再对合成输出做一次去抖动检查，确保占位高度不随展开态漂移。'.repeat(4);
+  for (let step = 1; step <= 24; step += 1) {
+    const ts = NOW - (25 - step) * 20_000;
+    out.push({
+      type: 'assistant',
+      id: `msg-oversized-a-${step}`,
+      turnId,
+      ts,
+      text: `### 合成步骤 ${step}\n\n${prose}`,
+      // The first line becomes the disclosure button's accessible name, so it
+      // carries the step number — identical names across materialized steps
+      // read as indistinguishable controls to the AX audit.
+      thinking: { text: `第 ${step} 组边界检查\n\n${reasoning}\n\n${reasoning}` },
+      modelId: 'claude-sonnet-4-5',
+    });
+    out.push({
+      type: 'tool_call',
+      id: `tool-oversized-${step}`,
+      turnId,
+      ts: ts + 1_000,
+      toolName: 'Bash',
+      displayName: `合成检查 ${step}`,
+      intent: `读取第 ${step} 组固定测试数据`,
+      stepId: `msg-oversized-a-${step}`,
+      args: { cmd: `fixture-check --step ${step}` },
+    });
+    out.push({
+      type: 'tool_result',
+      id: `tool-oversized-r-${step}`,
+      turnId,
+      ts: ts + 2_000,
+      toolUseId: `tool-oversized-${step}`,
+      isError: false,
+      durationMs: 100 + step,
+      content: { kind: 'text', text: `第 ${step} 组：确定性、可重放，无回归。` },
+    });
+  }
+  return out;
+}
+
+const oversizedTurn = oversizedTurnMessages();
+
+export const OversizedTurnHoldsAReadingAnchorOnColdScroll: Story = {
+  render: () => <ComposedShell chat={{ messages: oversizedTurn }} />,
+  play: async () => {
+    const root = tailScroller();
+    await waitFor(() => expect(tailMetrics().distance).toBeLessThanOrEqual(4));
+    // A single Turn taller than several viewports is the point; without the
+    // overflow the rest proves nothing.
+    expect(
+      root.scrollHeight,
+      JSON.stringify(tailMetrics()),
+    ).toBeGreaterThan(root.clientHeight * 3);
+    // The containment claim itself, in the same Chromium the app ships:
+    // offscreen timeline blocks are genuinely skipped, not merely marked.
+    // (This carries the deleted Electron spec's assertion — #4825 moved this
+    // tier of coverage below Electron.)
+    const skipped = [...root.querySelectorAll<HTMLElement>('[data-maka-transcript-boundary]')]
+      .filter((element) => !element.checkVisibility({ contentVisibilityAuto: true }))
+      .length;
+    expect(skipped, 'no offscreen boundary is skipped').toBeGreaterThan(0);
+
+    // The visible block nearest the middle of the scrollport, re-chosen each
+    // step so it is always one the reader can actually see.
+    const visibleAnchor = (): HTMLElement => {
+      const rootRect = root.getBoundingClientRect();
+      const center = (rootRect.top + rootRect.bottom) / 2;
+      const anchor = [...root.querySelectorAll<HTMLElement>('[data-maka-transcript-boundary]')]
+        .filter((element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.bottom > rootRect.top && rect.top < rootRect.bottom;
+        })
+        .sort((left, right) => {
+          const leftRect = left.getBoundingClientRect();
+          const rightRect = right.getBoundingClientRect();
+          return Math.abs((leftRect.top + leftRect.bottom) / 2 - center)
+            - Math.abs((rightRect.top + rightRect.bottom) / 2 - center);
+        })[0];
+      if (!anchor) throw new Error('no visible reading anchor');
+      return anchor;
+    };
+
+    // Cold: no warmup pass has rendered the blocks above, so each upward step
+    // materializes first-paint intrinsic-size estimates. The criterion is what
+    // the reader sees, so it is measured in viewport space: an anchor they were
+    // reading should move down by exactly the step they asked for. Native
+    // `overflow-anchor` compensates the materialization by adjusting
+    // `scrollTop`, so neither document-space growth nor the scrollTop delta may
+    // be the yardstick — comparing against either reports the (allowed)
+    // correction itself as a jump. Only `|viewport move − intended step|` is a
+    // jump the reader experiences.
+    let worstUnexpected = 0;
+    const steps: Array<Record<string, number>> = [];
+    for (let step = 0; step < 8 && root.scrollTop > 0; step += 1) {
+      const anchor = visibleAnchor();
+      const topBefore = anchor.getBoundingClientRect().top;
+      const intended = Math.min(240, root.scrollTop);
+      const heightBefore = root.scrollHeight;
+      // `behavior: 'instant'` overrides the shell's smooth scrolling: the shell
+      // animates over many frames, and a step measured before the animation
+      // lands reads a still anchor as a 240px jump.
+      root.scrollTo({ top: root.scrollTop - intended, behavior: 'instant' });
+      root.dispatchEvent(new Event('scroll'));
+      await painted(4);
+      const moved = anchor.getBoundingClientRect().top - topBefore;
+      worstUnexpected = Math.max(worstUnexpected, Math.abs(moved - intended));
+      steps.push({
+        step,
+        intended,
+        moved: Math.round(moved),
+        scrollTop: Math.round(root.scrollTop),
+        grewBy: root.scrollHeight - heightBefore,
+      });
+    }
+    // On main this story reads 0 by construction — no sub-turn boundary exists
+    // to materialize. On this branch the error tracks materialization exactly:
+    // a zero-growth step read 0px, and with the folded-disclosure estimate at
+    // 320px against a 24–32px collapsed row, steps measured up to 244px — a
+    // reader-visible stall of a 240px scroll step. With the collapsed estimate
+    // corrected, the residual is the answer blocks' estimate error, which stays
+    // well under half a step. The bound is half a step: loose enough for
+    // per-run variance, tight enough that a stalled or reversed step can never
+    // pass again.
+    expect(
+      worstUnexpected,
+      `worst unexpected reading-anchor move: ${Math.round(worstUnexpected)}px; steps: ${JSON.stringify(steps)}`,
+    ).toBeLessThanOrEqual(120);
+  },
+};
+
 export const AWheelTheScrollerCannotActOnAsksForHistory: Story = {
   render: () => <HistoryHarness turns={1} />,
   play: async () => {
@@ -2809,5 +2964,156 @@ export const RailStaysOnTheVisiblePrompt: Story = {
       currentCounts.every((count) => count === 1),
       `current tick count over time: ${currentCounts.join(',')}`,
     ).toBe(true);
+  },
+};
+
+// What the real `open` action leaves behind, rather than a hand-written topology.
+const workbarLayoutWithOneFace: WorkbarLayoutState = reduceWorkbarLayout(
+  {
+    panels: createSessionWorkbarPanelsState(),
+    rightCollapsed: true,
+    bottomOpen: false,
+    rightWidth: SESSION_WORKBAR_DEFAULT_WIDTH,
+    bottomHeight: SESSION_BOTTOM_PANEL_DEFAULT_HEIGHT,
+  },
+  { type: 'open', placement: 'right', tab: { id: 'workbar:files', kind: 'files' } },
+);
+
+function WorkbarInShell() {
+  const [layout, dispatch] = useReducer(reduceWorkbarLayout, workbarLayoutWithOneFace);
+  const collapseRight = (collapsed: boolean) =>
+    dispatch({ type: 'collapse', placement: 'right', collapsed });
+  return (
+    <ToastProvider>
+      <WorkbarServicesProvider services={createFakeWorkbarServices()}>
+        <ComposedShell
+          workbarCollapsed={layout.rightCollapsed}
+          onToggleWorkbar={() => collapseRight(!layout.rightCollapsed)}
+          detailChildren={
+            <div
+              className="maka-detail-with-artifacts"
+              style={
+                { '--maka-session-workbar-width': `${layout.rightWidth}px` } as CSSProperties
+              }
+            >
+              <div className="mainColumn" />
+              <WorkbarSurface
+                sessionId="session-active"
+                hidden={false}
+                onDismissPanel={() => collapseRight(true)}
+                panelsState={layout.panels}
+                rightCollapsed={layout.rightCollapsed}
+                bottomOpen={layout.bottomOpen}
+                onActivateTab={(placement, tabId) =>
+                  dispatch({ type: 'activate', placement, tabId })
+                }
+                onCloseTab={(placement, tab) =>
+                  dispatch({ type: 'close', placement, tabIds: [tab.id] })
+                }
+                onCloseTabs={(placement, tabs) =>
+                  dispatch({ type: 'close', placement, tabIds: tabs.map((tab) => tab.id) })
+                }
+                onOpenLauncher={(placement) => dispatch({ type: 'open-launcher', placement })}
+                onRequestOpenTab={(placement, kind) =>
+                  dispatch({
+                    type: 'open',
+                    placement,
+                    tab: { id: `workbar:${kind}`, kind },
+                  })
+                }
+                confirmBypass={async () => true}
+              />
+            </div>
+          }
+        />
+      </WorkbarServicesProvider>
+    </ToastProvider>
+  );
+}
+
+// Real path: 收起一个开着面的工作栏 → 从标题栏再展开. The face is opened by
+// dispatching the app's own `open` action rather than by clicking through the
+// launcher, so the story starts where the app does without re-testing the
+// launcher's own path.
+//
+// The collapse toggle is one control that moves between two bands — the
+// workbar's own bar and the titlebar's right cluster — and `workbar/shell.css`
+// pads the bar with the titlebar strip's gutter precisely so it lands on the
+// same x in both. Only a story that mounts both bands can hold it there, which
+// is why this lives beside the shell rather than with the workbar's own
+// stories.
+export const WorkbarCollapseKeepsOneToggleInPlace: Story = {
+  render: () => <WorkbarInShell />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const frame = canvasElement.querySelector<HTMLElement>(
+      '[data-maka-contract="session-workbar-right"]',
+    );
+    if (!frame) throw new Error('the right workbar is missing');
+    // The face's content is a sibling overlay panel with its own `hidden`
+    // (workbar-surface.tsx), so a visible frame does not mean a visible face.
+    const facePanel = canvasElement.querySelector<HTMLElement>(
+      '.maka-session-workbar-panel[data-overlay][data-placement="right"]',
+    );
+    if (!facePanel) throw new Error('the open face has no panel');
+    const bar = within(frame.querySelector<HTMLElement>('.maka-session-workbar-toolbar')!);
+    const collapse = bar.getByRole('button', { name: '收起任务工作栏' });
+    // The launcher stays mounted behind the face, so "not the picker" is a
+    // claim about reachability: `queryByRole` skips the inactive panel.
+    const pickerIsShowing = () =>
+      canvas.queryByRole('list', { name: '打开工具' }) !== null;
+    const face = await bar.findByRole('tab', { selected: true });
+
+    expect(canvas.queryByRole('toolbar', { name: '工作区辅助操作' })).toBeNull();
+    expect(pickerIsShowing()).toBe(false);
+
+    const faceBox = face.getBoundingClientRect();
+    const openToggleBox = collapse.getBoundingClientRect();
+    expect(
+      Math.abs(
+        faceBox.y + faceBox.height / 2 - (openToggleBox.y + openToggleBox.height / 2),
+      ),
+    ).toBeLessThanOrEqual(1);
+
+    // Windows draws its caption buttons over the right of the strip and reports
+    // their width here; macOS reports 0. The bar has to give that width back.
+    const captionWidth = 80;
+    canvasElement.style.setProperty(
+      '--maka-titlebar-overlay-right-width',
+      `${captionWidth}px`,
+    );
+    await waitFor(() => {
+      expect(collapse.getBoundingClientRect().x).toBeCloseTo(
+        openToggleBox.x - captionWidth,
+        0,
+      );
+    });
+    const parked = collapse.getBoundingClientRect();
+
+    // [+] is a menu over the panel, not a swap to the launcher: the face you
+    // are reading stays on screen while you pick another one.
+    await userEvent.click(bar.getByRole('button', { name: '打开或关闭工作栏的面' }));
+    const menu = await within(document.body).findByRole('menu');
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(menu).not.toBeVisible());
+    expect(pickerIsShowing()).toBe(false);
+
+    await userEvent.click(collapse);
+    const restore = await canvas.findByRole('button', { name: '展开任务工作栏' });
+    await waitFor(() => expect(frame).not.toBeVisible());
+    expect(facePanel).not.toBeVisible();
+    const restoreBox = restore.getBoundingClientRect();
+    expect(Math.abs(restoreBox.x - parked.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(restoreBox.y - parked.y)).toBeLessThanOrEqual(1);
+
+    await userEvent.click(restore);
+    await waitFor(() => expect(frame).toBeVisible());
+    expect(facePanel).toBeVisible();
+    expect(pickerIsShowing()).toBe(false);
+    const restoredToggleBox = bar
+      .getByRole('button', { name: '收起任务工作栏' })
+      .getBoundingClientRect();
+    expect(Math.abs(restoredToggleBox.x - parked.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(restoredToggleBox.y - parked.y)).toBeLessThanOrEqual(1);
   },
 };
