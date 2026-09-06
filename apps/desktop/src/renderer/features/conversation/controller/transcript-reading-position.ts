@@ -32,48 +32,6 @@ interface TranscriptRangeController<Message> {
   loadAround(sequence: number): Promise<void>;
 }
 
-interface TranscriptHistoryController {
-  readonly store: {
-    range(): {
-      readonly sessionId: string;
-      readonly hasOlder: boolean;
-      readonly hasNewer: boolean;
-      readonly newestSequence: number | null;
-    };
-  };
-  loadBefore(maxBytes?: number, anchorTurnId?: string): Promise<void>;
-  loadAround(sequence: number): Promise<void>;
-  loadLatest(): Promise<void>;
-}
-
-export type TranscriptHistoryLoadTarget = 'earlier' | 'newer' | 'latest';
-
-export interface TranscriptHistoryLoadPending {
-  readonly sessionId: string;
-  readonly target: TranscriptHistoryLoadTarget;
-}
-
-export function transcriptRangeNeedsLoad(
-  range: { readonly hasOlder: boolean; readonly hasNewer: boolean } | undefined,
-  target: TranscriptHistoryLoadTarget,
-): boolean {
-  return target === 'earlier'
-    ? range?.hasOlder === true
-    : range?.hasNewer === true;
-}
-
-export function transcriptHistoryLoadView(
-  pending: TranscriptHistoryLoadPending | undefined,
-  activeSessionId: string | undefined,
-): { readonly blocked: boolean; readonly pendingDirection: 'older' | 'newer' | undefined } {
-  return {
-    blocked: pending !== undefined,
-    pendingDirection: pending && pending.sessionId === activeSessionId
-      ? pending.target === 'earlier' ? 'older' : 'newer'
-      : undefined,
-  };
-}
-
 interface SearchTarget {
   readonly sessionId: string;
   readonly turnId: string;
@@ -103,60 +61,6 @@ export function newestDurablePromptSequence<Message>(
   } catch {
     return null;
   }
-}
-
-export async function loadTranscriptRange(
-  controller: TranscriptHistoryController,
-  target: TranscriptHistoryLoadTarget,
-  maxBytes: number,
-  anchorTurnId?: string,
-): Promise<void> {
-  if (target === 'earlier') return controller.loadBefore(maxBytes, anchorTurnId);
-  if (target === 'latest') return controller.loadLatest();
-  const range = controller.store.range();
-  if (range.hasNewer && range.newestSequence !== null) {
-    await controller.loadAround(range.newestSequence + 1);
-  }
-}
-
-export function loadTranscriptHistory(options: {
-  readonly controller: TranscriptHistoryController | undefined;
-  readonly sessionId: string | undefined;
-  readonly target: TranscriptHistoryLoadTarget;
-  readonly maxBytes: number;
-  readonly anchorTurnId?: string;
-  readonly loading: { current: boolean };
-  readonly setPending: (pending: TranscriptHistoryLoadPending | undefined) => void;
-  readonly onReadingAnchorChange: () => void;
-  readonly isCurrent: (
-    sessionId: string,
-    controller: TranscriptHistoryController,
-  ) => boolean;
-  readonly onError: (error: unknown, sessionId: string) => void;
-}): boolean {
-  const { controller, sessionId, target } = options;
-  if (
-    !controller ||
-    !sessionId ||
-    options.loading.current ||
-    !options.isCurrent(sessionId, controller)
-  ) return false;
-  const range = currentTranscriptRange(controller, sessionId);
-  if (!range) return false;
-  if (!transcriptRangeNeedsLoad(range, target)) return true;
-  options.loading.current = true;
-  options.setPending({ sessionId, target });
-  if (target !== 'earlier') options.onReadingAnchorChange();
-  void loadTranscriptRange(controller, target, options.maxBytes, options.anchorTurnId)
-    .catch((error) => {
-      if (options.isCurrent(sessionId, controller)) options.onError(error, sessionId);
-    })
-    .finally(() => {
-      options.loading.current = false;
-      options.setPending(undefined);
-    })
-    .catch(() => undefined);
-  return true;
 }
 
 export function transcriptRestoreTarget(
@@ -208,6 +112,85 @@ export function refreshTranscriptTurnLandmarks<T>(options: {
   return () => {
     disposed = true;
   };
+}
+
+export interface TranscriptHistoryRequest {
+  readonly target: 'earlier' | 'later' | 'latest';
+  readonly anchorTurnId?: string;
+}
+
+export interface TranscriptHistoryGate {
+  pending: boolean;
+  queued?: TranscriptHistoryRequest;
+}
+
+function updateTranscriptHistoryPending(
+  current: string | undefined,
+  sessionId: string,
+  request: TranscriptHistoryRequest | undefined,
+): string | undefined {
+  if (request) return `${sessionId}:${request.target}`;
+  return current?.startsWith(`${sessionId}:`) ? undefined : current;
+}
+
+export function transcriptHistoryPendingHandler(
+  setPending: (update: (current: string | undefined) => string | undefined) => void,
+  sessionId: string,
+): (request: TranscriptHistoryRequest | undefined) => void {
+  return (request) => setPending((current) =>
+    updateTranscriptHistoryPending(current, sessionId, request));
+}
+
+export function transcriptHistoryLoadDirection(
+  pending: string | undefined,
+  sessionId: string | undefined,
+): 'older' | 'newer' | undefined {
+  if (!sessionId || !pending?.startsWith(`${sessionId}:`)) return;
+  return pending === `${sessionId}:earlier` ? 'older' : 'newer';
+}
+
+/** One gate per controller: the shell rebuilds the controller per Session, so
+ *  keying by it keeps Sessions from queuing behind each other's loads. */
+export type TranscriptHistoryGates = WeakMap<object, TranscriptHistoryGate>;
+
+export async function loadTranscriptHistory(options: {
+  readonly gates: TranscriptHistoryGates;
+  readonly request: TranscriptHistoryRequest;
+  readonly controller: {
+    loadBefore(maxBytes: number, anchorTurnId?: string): Promise<void>;
+    loadAfter(maxBytes: number, anchorTurnId?: string): Promise<void>;
+    loadLatest(): Promise<void>;
+  };
+  readonly maxBytes: number;
+  readonly isCurrent: () => boolean;
+  readonly setPending: (request: TranscriptHistoryRequest | undefined) => void;
+  readonly onError: (error: unknown) => void;
+}): Promise<void> {
+  const { gates, controller, request } = options;
+  let gate = gates.get(controller) ?? { pending: false };
+  gates.set(controller, gate);
+  if (gate.pending) {
+    // The scroller asks on every reader movement; dropping the request behind
+    // an in-flight load strands the reader until they move again.
+    if (request.target === 'latest' || gate.queued?.target !== 'latest') gate.queued = request;
+    return;
+  }
+  gate.pending = true;
+  options.setPending(request);
+  try {
+    if (request.target === 'latest') await controller.loadLatest();
+    else await controller[request.target === 'earlier' ? 'loadBefore' : 'loadAfter'](
+      options.maxBytes, request.anchorTurnId,
+    );
+  } catch (error) {
+    if (options.isCurrent()) options.onError(error);
+  } finally {
+    gate.pending = false;
+    options.setPending(undefined);
+    const queued = gate.queued;
+    gate.queued = undefined;
+    if (queued && options.isCurrent()) void loadTranscriptHistory({ ...options, request: queued });
+  }
 }
 
 export function restoreSessionTranscriptRange<Message>(options: {

@@ -45,8 +45,8 @@ export type ChatSurfaceLayoutProps = Omit<ComponentProps<typeof ChatLayout>, 'au
    */
   scrollOwner?: 'astryx' | 'host';
   scrollToBottomLabel?: string;
-  /** Runs before pinning. Return false when the Host must veto the action. */
-  onReturnToTail?(): boolean | Promise<void> | void;
+  /** Loads the durable tail after the scroll authority pins to it. */
+  onReturnToTail?(): Promise<void> | void;
 };
 
 /**

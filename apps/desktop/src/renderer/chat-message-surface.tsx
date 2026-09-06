@@ -88,12 +88,10 @@ interface ChatMessageSurfaceProps extends Omit<
   connections: LlmConnection[];
   onRefreshConnections: () => Promise<void> | void;
   onSkip: () => Promise<void> | void;
-  hasOlderHistory: boolean;
-  hasNewerHistory: boolean;
+  hasOlderHistory?: boolean;
+  hasNewerHistory?: boolean;
   historyLoadPending: 'older' | 'newer' | undefined;
-  historyLoadBlocked: boolean;
-  onLoadEarlierHistory: (anchorTurnId?: string) => Promise<void> | void;
-  onLoadNewerHistory: () => Promise<void> | void;
+  onLoadHistory: (target: 'earlier' | 'later' | 'latest', anchorTurnId?: string) => Promise<void> | void;
 }
 
 function captureLiveContent(liveTurn: LiveTurnProjection | undefined) {
@@ -129,9 +127,7 @@ export function ChatMessageSurface({
   hasOlderHistory,
   hasNewerHistory,
   historyLoadPending,
-  historyLoadBlocked,
-  onLoadEarlierHistory,
-  onLoadNewerHistory,
+  onLoadHistory,
   ...chatViewRest
 }: ChatMessageSurfaceProps) {
   const locale = useUiLocale();
@@ -250,9 +246,8 @@ export function ChatMessageSurface({
             hasOlderHistory={hasOlderHistory}
             hasNewerHistory={hasNewerHistory}
             historyLoadPending={historyLoadPending}
-            historyLoadBlocked={historyLoadBlocked}
-            onLoadEarlierHistory={onLoadEarlierHistory}
-            onLoadNewerHistory={onLoadNewerHistory}
+            onLoadEarlierHistory={(anchorTurnId) => onLoadHistory('earlier', anchorTurnId)}
+            onLoadLaterHistory={(anchorTurnId) => onLoadHistory('later', anchorTurnId)}
           />
         )}
       </ChatViewGoalProjectionConsumer>

@@ -30,8 +30,9 @@ test('bounded transcript ranges expose only their truthful boundary gaps', async
   const olderGap = page.locator('[data-transcript-gap="older"]');
   const newerGap = page.locator('[data-transcript-gap="newer"]');
   await expect(olderGap).toBeVisible();
-  await expect(olderGap).toContainText('上方还有未加载的较早消息');
-  await expect(olderGap.getByRole('button', { name: '加载较早消息' })).toBeVisible();
+  await expect(olderGap.getByRole('button', {
+    name: /^(?:加载较早消息|Load earlier messages)$/,
+  })).toBeVisible();
   await expect(newerGap).toHaveCount(0);
   await expect(page.locator('.maka-transcript-history-controls')).toHaveCount(0);
 
@@ -46,41 +47,35 @@ test('bounded transcript ranges expose only their truthful boundary gaps', async
   await expect(firstTurn).toHaveAttribute('data-search-highlight', 'true');
   await expect(olderGap).toHaveCount(0);
   await expect(newerGap).toBeVisible();
-  await expect(newerGap).toContainText('下方还有未加载的较新消息');
-  await expect(newerGap.getByRole('button', { name: '加载较新消息' })).toBeVisible();
+  await expect(newerGap.getByRole('button', {
+    name: /^(?:加载较新消息|Load newer messages)$/,
+  })).toBeVisible();
   await expect(page.locator(GAP)).toHaveCount(1);
   expect(await page.locator(TURN).count()).toBeLessThanOrEqual(10);
 
-  const loadNewer = newerGap.getByRole('button', { name: '加载较新消息' });
-  const loadNewerTop = await loadNewer.evaluate((button) =>
-    Math.round(button.getBoundingClientRect().top)
-  );
+  const loadNewer = newerGap.getByRole('button', {
+    name: /^(?:加载较新消息|Load newer messages)$/,
+  });
   await loadNewer.click();
   await expect(page.locator('[data-turn-id="turn-partial-history-2"]')).toBeVisible();
-  await page.evaluate(async () => {
-    for (let frame = 0; frame < 30; frame += 1) {
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    }
-  });
+  await expect(olderGap).toHaveCount(0);
+  await expect(newerGap).toBeVisible();
+  await expect(loadNewer).toBeEnabled();
+
+  await loadNewer.click();
+  await expect(page.locator('[data-turn-id="turn-partial-history-3"]')).toBeVisible();
   await expect(olderGap).toBeVisible();
   await expect(newerGap).toBeVisible();
   await expect(loadNewer).toBeEnabled();
-  await expect.poll(async () =>
-    Math.abs(
-      Math.round(await loadNewer.evaluate((button) => button.getBoundingClientRect().top))
-        - loadNewerTop,
-    )
-  ).toBeLessThanOrEqual(4);
-  await expect(loadNewer).toBeFocused();
   await expect(oldestPrompt).toBeVisible();
   await expect(page.locator(GAP)).toHaveCount(2);
   expect(await page.locator(TURN).count()).toBeLessThanOrEqual(10);
 
-  const returnToLatest = page.getByRole('button', { name: '滚动主对话到底部' });
+  const returnToLatest = page.getByRole('button', {
+    name: /^(?:滚动主对话到底部|Scroll main conversation to bottom)$/,
+  });
   await expect(returnToLatest).toBeVisible();
-  // This scenario owns the bounded-range action wired into the existing dock
-  // affordance. Its separate fixed-dock hit-test layering is outside #4123.
-  await returnToLatest.evaluate((button: HTMLButtonElement) => button.click());
+  await returnToLatest.click();
 
   await expect(page.locator('[data-turn-id="turn-partial-history-18"]')).toBeVisible();
   await expect(newerGap).toHaveCount(0);

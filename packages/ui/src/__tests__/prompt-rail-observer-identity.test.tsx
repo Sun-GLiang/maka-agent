@@ -48,10 +48,6 @@ import { ChatSurfaceLayout } from '../chat-surface-layout.js';
 import { ChatView } from '../chat-view.js';
 import { LocaleProvider } from '../locale-context.js';
 import { READING_BAND_TOP_PERCENT } from '../prompt-anchor-rail.js';
-import {
-  useTranscriptScrollAuthority,
-  type TranscriptScrollAuthority,
-} from '../transcript-scroll-authority.js';
 
 const originalGlobals = {
   CSS: globalThis.CSS,
@@ -242,71 +238,4 @@ test('the rail observes its reading band, not the whole scrollport', async () =>
   // Zero alone reports a boundary touch as an intersection; the second,
   // positive threshold is what distinguishes real overlap from that.
   assert.deepEqual(init.threshold, [0, 0.000_001]);
-});
-
-test('the host scroll button requests the latest range before pinning', async () => {
-  const { mount } = harness();
-  const calls: string[] = [];
-  let authority: TranscriptScrollAuthority | undefined;
-  function AuthorityProbe() {
-    authority = useTranscriptScrollAuthority();
-    return null;
-  }
-  const layout = createElement(ChatSurfaceLayout, {
-    scrollOwner: 'host',
-    scrollToBottomLabel: 'Return to latest',
-    onReturnToTail: () => {
-      calls.push('load');
-      return Promise.reject(new Error('expected load failure'));
-    },
-    composer: null,
-    children: createElement(AuthorityProbe),
-  });
-  const root = createRoot(mount);
-  mountedRoot = root;
-  await act(() => root.render(
-    createElement(LocaleProvider, {
-      locale: 'en',
-      children: createElement(AstryxLocaleProvider, { children: layout }),
-    }),
-  ));
-  assert.ok(authority);
-  const pinToTail = authority.pinToTail.bind(authority);
-  authority.pinToTail = () => {
-    calls.push('pin');
-    pinToTail();
-  };
-  const button = mount.querySelector<HTMLButtonElement>(
-    'button[aria-label="Return to latest"]',
-  );
-  assert.ok(button);
-
-  await act(async () => {
-    button.dispatchEvent(new window.Event('click', { bubbles: true }));
-    await Promise.resolve();
-  });
-
-  assert.deepEqual(calls, ['load', 'pin']);
-
-  calls.length = 0;
-  await act(() => root.render(
-    createElement(LocaleProvider, {
-      locale: 'en',
-      children: createElement(AstryxLocaleProvider, {
-        children: createElement(ChatSurfaceLayout, {
-          scrollOwner: 'host',
-          scrollToBottomLabel: 'Return to latest',
-          onReturnToTail: () => false,
-          composer: null,
-          children: createElement(AuthorityProbe),
-        }),
-      }),
-    }),
-  ));
-  const blockedButton = mount.querySelector<HTMLButtonElement>(
-    'button[aria-label="Return to latest"]',
-  );
-  assert.ok(blockedButton);
-  blockedButton.dispatchEvent(new window.Event('click', { bubbles: true }));
-  assert.deepEqual(calls, []);
 });

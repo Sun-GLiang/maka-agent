@@ -78,22 +78,10 @@ export interface TranscriptGapRowProps {
   description: string;
   actionLabel: string;
   isPending: boolean;
-  isDisabled?: boolean;
   onActivate(): Promise<void> | void;
 }
 
 export type TranscriptHistoryLoadDirection = TranscriptGapRowProps['direction'];
-
-export function transcriptGapLoadState(
-  direction: TranscriptHistoryLoadDirection,
-  pendingDirection: TranscriptHistoryLoadDirection | undefined,
-  blocked = pendingDirection !== undefined,
-): { isPending: boolean; isDisabled: boolean } {
-  return {
-    isPending: pendingDirection === direction,
-    isDisabled: blocked,
-  };
-}
 
 export interface ChatViewGoalIndicatorProps {
   /**
@@ -142,35 +130,8 @@ export function TranscriptGapRow({
   description,
   actionLabel,
   isPending,
-  isDisabled = false,
   onActivate,
 }: TranscriptGapRowProps) {
-  const actionRef = useRef<HTMLButtonElement>(null);
-  const restoreFocusAfterPendingRef = useRef(false);
-  const activationReachedPendingRef = useRef(false);
-  const isPendingRef = useRef(isPending);
-  isPendingRef.current = isPending;
-
-  useEffect(() => {
-    if (isPending) {
-      activationReachedPendingRef.current = restoreFocusAfterPendingRef.current;
-      return;
-    }
-    if (!activationReachedPendingRef.current) return;
-
-    activationReachedPendingRef.current = false;
-    const shouldRestore = restoreFocusAfterPendingRef.current;
-    restoreFocusAfterPendingRef.current = false;
-    const action = actionRef.current;
-    if (
-      shouldRestore
-      && action?.isConnected
-      && document.activeElement === document.body
-    ) {
-      action.focus({ preventScroll: true });
-    }
-  }, [isPending]);
-
   return (
     <HStack
       className="maka-transcript-gap-row"
@@ -185,17 +146,12 @@ export function TranscriptGapRow({
     >
       <Text type="supporting" color="secondary">{description}</Text>
       <Button
-        ref={actionRef}
         label={actionLabel}
         variant="ghost"
         size="sm"
-        isDisabled={isDisabled}
         isLoading={isPending}
-        onBlur={() => {
-          if (!isPendingRef.current) restoreFocusAfterPendingRef.current = false;
-        }}
+        isInterruptible
         onClick={() => {
-          restoreFocusAfterPendingRef.current = document.activeElement === actionRef.current;
           void onActivate();
         }}
       />
@@ -352,9 +308,8 @@ export function ChatView(props: {
   hasOlderHistory?: boolean;
   hasNewerHistory?: boolean;
   historyLoadPending?: TranscriptHistoryLoadDirection;
-  historyLoadBlocked?: boolean;
   onLoadEarlierHistory?(anchorTurnId?: string): Promise<void> | void;
-  onLoadNewerHistory?(): Promise<void> | void;
+  onLoadLaterHistory?(anchorTurnId?: string): Promise<void> | void;
   transcriptTurnIndex?: ReadonlyArray<{ turnId: string; sequence: number; label: string }>;
   onLoadTranscriptTurn?(target: { turnId: string; sequence: number }): void;
   /**
@@ -647,6 +602,8 @@ export function ChatView(props: {
     behavior: props.scrollBehavior,
     hasOlderHistory: props.hasOlderHistory,
     onLoadEarlierHistory: props.onLoadEarlierHistory,
+    hasNewerHistory: props.hasNewerHistory,
+    onLoadLaterHistory: props.onLoadLaterHistory,
   });
   const { quote: selectionQuote, clear: clearSelectionQuote } = useMessageSelectionQuote(
     scrollRef,
@@ -844,11 +801,6 @@ export function ChatView(props: {
                 : null}
               {transcriptRows.map((row) => {
                 if (row.kind === 'gap') {
-                  const loadState = transcriptGapLoadState(
-                    row.direction,
-                    props.historyLoadPending,
-                    props.historyLoadBlocked,
-                  );
                   const gap = row.direction === 'older'
                     ? {
                         description: copy.transcriptGap.olderDescription,
@@ -858,7 +810,7 @@ export function ChatView(props: {
                     : {
                         description: copy.transcriptGap.newerDescription,
                         actionLabel: copy.transcriptGap.newerAction,
-                        activate: () => props.onLoadNewerHistory?.(),
+                        activate: () => props.onLoadLaterHistory?.(turns.at(-1)?.turnId),
                       };
                   return (
                     <TranscriptGapRow
@@ -866,8 +818,7 @@ export function ChatView(props: {
                       direction={row.direction}
                       description={gap.description}
                       actionLabel={gap.actionLabel}
-                      isPending={loadState.isPending}
-                      isDisabled={loadState.isDisabled}
+                      isPending={props.historyLoadPending === row.direction}
                       onActivate={() => {
                         scrollAuthority.releasePin();
                         return gap.activate();

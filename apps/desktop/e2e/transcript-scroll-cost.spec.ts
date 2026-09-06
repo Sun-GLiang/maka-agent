@@ -168,10 +168,7 @@ async function returnToLatest(page: Page): Promise<void> {
     name: /^(?:滚动主对话到底部|Scroll main conversation to bottom)$/,
   });
   await expect(returnLatest).toBeVisible();
-  // Range loading now reuses the existing transcript dock action. Its fixed
-  // layer's pointer hit testing is covered separately from this range-cost
-  // test, so invoke the action without introducing that unrelated dependency.
-  await returnLatest.evaluate((button: HTMLButtonElement) => button.click());
+  await returnLatest.click();
 }
 
 /**
@@ -271,7 +268,7 @@ test('paging back through the whole history keeps the mounted range bounded', as
   // Coming back from the far end is a range reload, not a scroll: the Host
   // resolves a new window around the tail and the renderer mounts it. The
   // suite's 10s expect timeout is sized for UI that is already on screen, and
-  // this step measured past it on a CI runner with four workers competing.
+  // this step measured past it on a loaded CI runner.
   await returnToLatest(page);
   await expect(page.locator(`[data-turn-id="turn-prompt-rail-${PROMPT_RAIL_PROMPT_COUNT}"]`))
     .toHaveCount(1, { timeout: 30_000 });
