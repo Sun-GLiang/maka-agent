@@ -24,9 +24,8 @@ import {
   newestDurablePromptSequence,
   refreshTranscriptTurnLandmarks,
   restoreSessionTranscriptRange,
-  transcriptHistoryLoadDirection,
-  transcriptHistoryPendingHandler,
   transcriptRestoreTarget,
+  updateTranscriptHistoryPending,
 } from './controller/transcript-reading-position.js';
 
 export const transcriptReadingPosition = {
@@ -34,14 +33,16 @@ export const transcriptReadingPosition = {
   currentRange: currentTranscriptRange,
   loadHistory: loadTranscriptHistory,
   newestDurablePromptSequence,
-  pendingDirection: transcriptHistoryLoadDirection,
-  pendingHandler: transcriptHistoryPendingHandler,
   refreshLandmarks: refreshTranscriptTurnLandmarks,
   restoreRange: restoreSessionTranscriptRange,
   restoreTarget: transcriptRestoreTarget,
+  updatePending: updateTranscriptHistoryPending,
 };
 
-export type { TranscriptHistoryGates } from './controller/transcript-reading-position.js';
+export type {
+  TranscriptHistoryGates,
+  TranscriptHistoryPending,
+} from './controller/transcript-reading-position.js';
 export {
   deriveTaskReadinessNotice,
   isTaskSubmissionHardBlocked,

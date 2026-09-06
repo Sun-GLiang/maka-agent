@@ -73,15 +73,15 @@ export interface LiveContentActivationSnapshot {
   entries: ReadonlyMap<string, string>;
 }
 
-export interface TranscriptGapRowProps {
-  direction: 'older' | 'newer';
+export type TranscriptHistoryLoadDirection = 'older' | 'newer';
+
+export interface TranscriptHistoryGapRowProps {
+  direction: TranscriptHistoryLoadDirection;
   description: string;
   actionLabel: string;
   isPending: boolean;
   onActivate(): Promise<void> | void;
 }
-
-export type TranscriptHistoryLoadDirection = TranscriptGapRowProps['direction'];
 
 export interface ChatViewGoalIndicatorProps {
   /**
@@ -125,13 +125,13 @@ export function resolveRailAlignedTarget<T extends { turnId: string; nonce: numb
 }
 
 /** A truthful missing-range boundary rendered at its position in the transcript. */
-export function TranscriptGapRow({
+export function TranscriptHistoryGapRow({
   direction,
   description,
   actionLabel,
   isPending,
   onActivate,
-}: TranscriptGapRowProps) {
+}: TranscriptHistoryGapRowProps) {
   return (
     <HStack
       className="maka-transcript-gap-row"
@@ -813,7 +813,7 @@ export function ChatView(props: {
                         activate: () => props.onLoadLaterHistory?.(turns.at(-1)?.turnId),
                       };
                   return (
-                    <TranscriptGapRow
+                    <TranscriptHistoryGapRow
                       key={`transcript-gap:${row.direction}`}
                       direction={row.direction}
                       description={gap.description}

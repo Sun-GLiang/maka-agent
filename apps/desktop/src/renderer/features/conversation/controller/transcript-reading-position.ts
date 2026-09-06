@@ -119,34 +119,23 @@ export interface TranscriptHistoryRequest {
   readonly anchorTurnId?: string;
 }
 
+export interface TranscriptHistoryPending {
+  readonly sessionId: string;
+  readonly target: TranscriptHistoryRequest['target'];
+}
+
 export interface TranscriptHistoryGate {
   pending: boolean;
   queued?: TranscriptHistoryRequest;
 }
 
-function updateTranscriptHistoryPending(
-  current: string | undefined,
+export function updateTranscriptHistoryPending(
+  current: TranscriptHistoryPending | undefined,
   sessionId: string,
   request: TranscriptHistoryRequest | undefined,
-): string | undefined {
-  if (request) return `${sessionId}:${request.target}`;
-  return current?.startsWith(`${sessionId}:`) ? undefined : current;
-}
-
-export function transcriptHistoryPendingHandler(
-  setPending: (update: (current: string | undefined) => string | undefined) => void,
-  sessionId: string,
-): (request: TranscriptHistoryRequest | undefined) => void {
-  return (request) => setPending((current) =>
-    updateTranscriptHistoryPending(current, sessionId, request));
-}
-
-export function transcriptHistoryLoadDirection(
-  pending: string | undefined,
-  sessionId: string | undefined,
-): 'older' | 'newer' | undefined {
-  if (!sessionId || !pending?.startsWith(`${sessionId}:`)) return;
-  return pending === `${sessionId}:earlier` ? 'older' : 'newer';
+): TranscriptHistoryPending | undefined {
+  if (request) return { sessionId, target: request.target };
+  return current?.sessionId === sessionId ? undefined : current;
 }
 
 /** One gate per controller: the shell rebuilds the controller per Session, so

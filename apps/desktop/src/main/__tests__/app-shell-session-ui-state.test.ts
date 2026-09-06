@@ -542,6 +542,30 @@ describe('app shell session UI state controller', () => {
     await stale;
   });
 
+  it('keeps transcript history pending ownership structured per Session', () => {
+    const sessionAPending = transcriptReadingPosition.updatePending(
+      undefined,
+      'session',
+      { target: 'earlier' },
+    );
+    assert.deepEqual(sessionAPending, { sessionId: 'session', target: 'earlier' });
+
+    const sessionBPending = transcriptReadingPosition.updatePending(
+      sessionAPending,
+      'session:a',
+      { target: 'latest' },
+    );
+    assert.deepEqual(sessionBPending, { sessionId: 'session:a', target: 'latest' });
+    assert.equal(
+      transcriptReadingPosition.updatePending(sessionBPending, 'session', undefined),
+      sessionBPending,
+    );
+    assert.equal(
+      transcriptReadingPosition.updatePending(sessionBPending, 'session:a', undefined),
+      undefined,
+    );
+  });
+
   it('leaves the switched-to Session untouched when a stale Session load settles late', async () => {
     const scenario = crossSessionGateScenario();
     const stale = scenario.load('a', { target: 'earlier' });

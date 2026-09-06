@@ -79,6 +79,7 @@ import {
   resolveTaskReadinessModelTarget,
   transcriptReadingPosition,
   type TranscriptHistoryGates,
+  type TranscriptHistoryPending,
 } from './features/conversation';
 import { deriveWorkspaceReadinessRecovery } from './workspace-readiness-recovery';
 import { LiveTurnReconciler } from './live-turn-reconciler';
@@ -450,7 +451,7 @@ function AppShellContent({
   const [newChatOrchestrationMode, setNewChatOrchestrationMode] = useState<OrchestrationMode>('default');
   const [newTaskPermissionChoice, setNewTaskPermissionChoice, clearNewTaskPermissionChoice] =
     useNewTaskChoice<ChatDefaultPermissionMode>(currentNewTaskDraftKey);
-  const [historyLoadPending, setHistoryLoadPending] = useState<string>();
+  const [historyLoadPending, setHistoryLoadPending] = useState<TranscriptHistoryPending>();
   const historyLoadGatesRef = useRef<TranscriptHistoryGates>(new WeakMap());
   const [transcriptTurnIndex, setTranscriptTurnIndex] = useState<{
     sessionId: string;
@@ -2546,7 +2547,8 @@ function AppShellContent({
       controller,
       maxBytes: DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES,
       isCurrent: () => activeIdRef.current === sessionId && transcriptRangeRef.current === controller,
-      setPending: transcriptReadingPosition.pendingHandler(setHistoryLoadPending, sessionId),
+      setPending: (request) => setHistoryLoadPending((current) =>
+        transcriptReadingPosition.updatePending(current, sessionId, request)),
       onError: (error) => showSessionError(
         sessionId,
         desktopConversationCopy.actions.messageReadFailedTitle,
@@ -3049,10 +3051,9 @@ function AppShellContent({
                 activeSessionId={activeId}
                 hasOlderHistory={activeTranscriptRange?.hasOlder}
                 hasNewerHistory={activeTranscriptRange?.hasNewer}
-                historyLoadPending={transcriptReadingPosition.pendingDirection(
-                  historyLoadPending,
-                  activeId,
-                )}
+                historyLoadPending={historyLoadPending && historyLoadPending.sessionId === activeId
+                  ? historyLoadPending.target === 'earlier' ? 'older' : 'newer'
+                  : undefined}
                 onLoadHistory={loadTranscriptHistory}
                 liveContentSeedRevision={liveContent.liveContentSeedRevision(activeEventSeed, activeId)}
                 messages={messages}

@@ -20,14 +20,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { TranscriptGapRow } from '../chat-view.js';
+import { TranscriptHistoryGapRow } from '../chat-view.js';
 
 function renderGap(
   direction: 'older' | 'newer',
   isPending: boolean,
 ): string {
   return renderToStaticMarkup(
-    <TranscriptGapRow
+    <TranscriptHistoryGapRow
       direction={direction}
       description={direction === 'older' ? 'Earlier messages are not loaded.' : 'Newer messages are not loaded.'}
       actionLabel={direction === 'older' ? 'Load earlier messages' : 'Load newer messages'}
