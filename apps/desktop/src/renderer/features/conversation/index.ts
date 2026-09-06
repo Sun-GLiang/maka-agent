@@ -25,7 +25,6 @@ import {
   refreshTranscriptTurnLandmarks,
   restoreSessionTranscriptRange,
   transcriptRestoreTarget,
-  updateTranscriptHistoryPending,
 } from './controller/transcript-reading-position.js';
 
 export const transcriptReadingPosition = {
@@ -36,7 +35,6 @@ export const transcriptReadingPosition = {
   refreshLandmarks: refreshTranscriptTurnLandmarks,
   restoreRange: restoreSessionTranscriptRange,
   restoreTarget: transcriptRestoreTarget,
-  updatePending: updateTranscriptHistoryPending,
 };
 
 export type {

@@ -39,6 +39,7 @@ import { selectLiveTurn } from './use-app-shell-session-ui-reads';
 import { useExternalStoreSelector } from './use-external-store-selector';
 import { useDeepResearchRun } from './use-deep-research-run';
 import { ChatRecoveryNotice, SessionHealthRecoveryNotice } from './chat-recovery-notice';
+import type { TranscriptHistoryPending } from './features/conversation';
 
 const selectShellRunRecord = (state: AppShellSessionUiState, sessionId: string | undefined) =>
   sessionId ? state.shellRunUpdatesBySession[sessionId] : undefined;
@@ -61,6 +62,7 @@ interface ChatMessageSurfaceProps extends Omit<
   | 'liveTurn'
   | 'shellRunUpdates'
   | 'goalIndicator'
+  | 'historyLoadPending'
 > {
   /**
    * #1985: the live projection and the shell-run records are the only session
@@ -90,7 +92,7 @@ interface ChatMessageSurfaceProps extends Omit<
   onSkip: () => Promise<void> | void;
   hasOlderHistory?: boolean;
   hasNewerHistory?: boolean;
-  historyLoadPending: 'older' | 'newer' | undefined;
+  historyLoadPending?: TranscriptHistoryPending;
   onLoadHistory: (target: 'earlier' | 'later' | 'latest', anchorTurnId?: string) => Promise<void> | void;
 }
 
@@ -245,7 +247,9 @@ export function ChatMessageSurface({
             goalIndicator={goalProjection.goalIndicator}
             hasOlderHistory={hasOlderHistory}
             hasNewerHistory={hasNewerHistory}
-            historyLoadPending={historyLoadPending}
+            historyLoadPending={historyLoadPending && historyLoadPending.sessionId === activeSessionId
+              ? historyLoadPending.target === 'earlier' ? 'older' : 'newer'
+              : undefined}
             onLoadEarlierHistory={(anchorTurnId) => onLoadHistory('earlier', anchorTurnId)}
             onLoadLaterHistory={(anchorTurnId) => onLoadHistory('later', anchorTurnId)}
           />

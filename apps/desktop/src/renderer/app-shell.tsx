@@ -2444,12 +2444,12 @@ function AppShellContent({
     if (target !== 'earlier') handleTranscriptReadingAnchorChange();
     return transcriptReadingPosition.loadHistory({
       gates: historyLoadGatesRef.current,
+      sessionId,
       request: { target, anchorTurnId },
       controller,
       maxBytes: DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES,
       isCurrent: () => activeIdRef.current === sessionId && transcriptRangeRef.current === controller,
-      setPending: (request) => setHistoryLoadPending((current) =>
-        transcriptReadingPosition.updatePending(current, sessionId, request)),
+      setPending: setHistoryLoadPending,
       onError: (error) => showSessionError(
         sessionId,
         desktopConversationCopy.actions.messageReadFailedTitle,
@@ -2958,9 +2958,7 @@ function AppShellContent({
                 activeSessionId={activeId}
                 hasOlderHistory={activeTranscriptRange?.hasOlder}
                 hasNewerHistory={activeTranscriptRange?.hasNewer}
-                historyLoadPending={historyLoadPending && historyLoadPending.sessionId === activeId
-                  ? historyLoadPending.target === 'earlier' ? 'older' : 'newer'
-                  : undefined}
+                historyLoadPending={historyLoadPending}
                 onLoadHistory={loadTranscriptHistory}
                 liveContentSeedRevision={liveContent.liveContentSeedRevision(activeEventSeed, activeId)}
                 messages={messages}

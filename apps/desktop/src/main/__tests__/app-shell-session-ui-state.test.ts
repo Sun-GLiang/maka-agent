@@ -34,6 +34,7 @@ import {
 import {
   transcriptReadingPosition,
   type TranscriptHistoryGates,
+  type TranscriptHistoryPending,
 } from '../../renderer/features/conversation/index.js';
 
 function boundaryRequest(requestId: string): SandboxBoundaryRequestEvent {
@@ -104,21 +105,24 @@ function deferredHistoryController() {
 function crossSessionGateScenario() {
   type HistoryRequest = Parameters<typeof transcriptReadingPosition.loadHistory>[0]['request'];
   const gates: TranscriptHistoryGates = new WeakMap();
+  const sessionIds = { a: 'session', b: 'session:a' } as const;
   const sides = {
     a: deferredHistoryController(),
     b: deferredHistoryController(),
   };
   let active: 'a' | 'b' = 'a';
   let range: object = sides.a.controller;
+  let currentPending: TranscriptHistoryPending | undefined;
   const pending = {
-    a: [] as Array<HistoryRequest | undefined>,
-    b: [] as Array<HistoryRequest | undefined>,
+    a: [] as Array<Pick<HistoryRequest, 'target'> | undefined>,
+    b: [] as Array<Pick<HistoryRequest, 'target'> | undefined>,
   };
   const errors = { a: [] as unknown[], b: [] as unknown[] };
   return {
     sides,
     pending,
     errors,
+    currentPending: () => currentPending,
     switchTo(id: 'a' | 'b') {
       active = id;
       range = sides[id].controller;
@@ -130,11 +134,17 @@ function crossSessionGateScenario() {
       const side = sides[id];
       return transcriptReadingPosition.loadHistory({
         gates,
+        sessionId: sessionIds[id],
         request,
         controller: side.controller,
         maxBytes: 4096,
         isCurrent: () => active === id && range === side.controller,
-        setPending: (value) => pending[id].push(value),
+        setPending: (update) => {
+          currentPending = update(currentPending);
+          pending[id].push(currentPending?.sessionId === sessionIds[id]
+            ? { target: currentPending.target }
+            : undefined);
+        },
         onError: (error) => errors[id].push(error),
       });
     },
@@ -536,34 +546,11 @@ describe('app shell session UI state controller', () => {
     assert.deepEqual(scenario.sides.b.calls, ['latest']);
     assert.deepEqual(scenario.pending.b, [{ target: 'latest' }]);
 
-    scenario.sides.b.settleLatest();
     scenario.sides.a.settleBefore();
-    await navigation;
     await stale;
-  });
-
-  it('keeps transcript history pending ownership structured per Session', () => {
-    const sessionAPending = transcriptReadingPosition.updatePending(
-      undefined,
-      'session',
-      { target: 'earlier' },
-    );
-    assert.deepEqual(sessionAPending, { sessionId: 'session', target: 'earlier' });
-
-    const sessionBPending = transcriptReadingPosition.updatePending(
-      sessionAPending,
-      'session:a',
-      { target: 'latest' },
-    );
-    assert.deepEqual(sessionBPending, { sessionId: 'session:a', target: 'latest' });
-    assert.equal(
-      transcriptReadingPosition.updatePending(sessionBPending, 'session', undefined),
-      sessionBPending,
-    );
-    assert.equal(
-      transcriptReadingPosition.updatePending(sessionBPending, 'session:a', undefined),
-      undefined,
-    );
+    assert.deepEqual(scenario.currentPending(), { sessionId: 'session:a', target: 'latest' });
+    scenario.sides.b.settleLatest();
+    await navigation;
   });
 
   it('leaves the switched-to Session untouched when a stale Session load settles late', async () => {
@@ -632,7 +619,7 @@ describe('app shell session UI state controller', () => {
     assert.deepEqual(scenario.pending.a, [
       { target: 'earlier' },
       undefined,
-      { target: 'later', anchorTurnId: 'turn-anchor' },
+      { target: 'later' },
       undefined,
     ]);
   });

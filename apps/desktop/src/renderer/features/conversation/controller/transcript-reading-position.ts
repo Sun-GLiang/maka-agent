@@ -129,7 +129,7 @@ export interface TranscriptHistoryGate {
   queued?: TranscriptHistoryRequest;
 }
 
-export function updateTranscriptHistoryPending(
+function updateTranscriptHistoryPending(
   current: TranscriptHistoryPending | undefined,
   sessionId: string,
   request: TranscriptHistoryRequest | undefined,
@@ -144,6 +144,7 @@ export type TranscriptHistoryGates = WeakMap<object, TranscriptHistoryGate>;
 
 export async function loadTranscriptHistory(options: {
   readonly gates: TranscriptHistoryGates;
+  readonly sessionId: string;
   readonly request: TranscriptHistoryRequest;
   readonly controller: {
     loadBefore(maxBytes: number, anchorTurnId?: string): Promise<void>;
@@ -152,7 +153,11 @@ export async function loadTranscriptHistory(options: {
   };
   readonly maxBytes: number;
   readonly isCurrent: () => boolean;
-  readonly setPending: (request: TranscriptHistoryRequest | undefined) => void;
+  readonly setPending: (
+    update: (
+      current: TranscriptHistoryPending | undefined,
+    ) => TranscriptHistoryPending | undefined,
+  ) => void;
   readonly onError: (error: unknown) => void;
 }): Promise<void> {
   const { gates, controller, request } = options;
@@ -165,7 +170,8 @@ export async function loadTranscriptHistory(options: {
     return;
   }
   gate.pending = true;
-  options.setPending(request);
+  options.setPending((current) =>
+    updateTranscriptHistoryPending(current, options.sessionId, request));
   try {
     if (request.target === 'latest') await controller.loadLatest();
     else await controller[request.target === 'earlier' ? 'loadBefore' : 'loadAfter'](
@@ -175,7 +181,8 @@ export async function loadTranscriptHistory(options: {
     if (options.isCurrent()) options.onError(error);
   } finally {
     gate.pending = false;
-    options.setPending(undefined);
+    options.setPending((current) =>
+      updateTranscriptHistoryPending(current, options.sessionId, undefined));
     const queued = gate.queued;
     gate.queued = undefined;
     if (queued && options.isCurrent()) void loadTranscriptHistory({ ...options, request: queued });
