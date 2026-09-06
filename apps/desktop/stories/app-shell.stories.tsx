@@ -1779,27 +1779,22 @@ function PartialHistoryHarness() {
     <ComposedShell
       frameHeight={720}
       chat={{
-        messages: readingEarlier ? transcriptTurns(1, 8) : transcriptTurns(5, 4),
+        messages: readingEarlier ? transcriptTurns(1, 4) : transcriptTurns(5, 4),
         transcriptTurnIndex: PARTIAL_HISTORY_INDEX,
         onLoadTranscriptTurn: () => setReadingEarlier(true),
-        returnToLatest: readingEarlier
-          ? {
-              title: '正在查看较早的消息',
-              label: '返回最新消息',
-              isPending: false,
-              onClick: () => setReadingEarlier(false),
-            }
-          : undefined,
+        hasOlderHistory: !readingEarlier,
+        hasNewerHistory: readingEarlier,
+        onLoadNewerHistory: () => setReadingEarlier(false),
       }}
     />
   );
 }
 
-function historyNoticePresentation(notice: HTMLElement) {
-  const style = getComputedStyle(notice);
-  const box = notice.getBoundingClientRect();
+function historyGapPresentation(gap: HTMLElement) {
+  const style = getComputedStyle(gap);
+  const box = gap.getBoundingClientRect();
   const composer = document.querySelector<HTMLElement>('.maka-composer-astryx');
-  const frame = notice.closest<HTMLElement>('.appFrame');
+  const frame = gap.closest<HTMLElement>('.appFrame');
   if (!composer || !frame) throw new Error('The shell geometry is incomplete');
   const composerBox = composer.getBoundingClientRect();
   const frameBox = frame.getBoundingClientRect();
@@ -1819,17 +1814,20 @@ function historyNoticePresentation(notice: HTMLElement) {
       (box.left + box.right) / 2 - (composerBox.left + composerBox.right) / 2,
     ),
     fitsFrame: box.left >= frameBox.left && box.right <= frameBox.right,
-    hasHorizontalOverflow: notice.scrollWidth > notice.clientWidth,
+    clientWidth: gap.clientWidth,
+    scrollWidth: gap.scrollWidth,
+    hasHorizontalOverflow: gap.scrollWidth > gap.clientWidth,
   };
 }
 
 // Real path: selecting a prompt outside the loaded transcript range, then
-// returning to the latest range. The notice stays a quiet reading-column
+// loading the newer range. Each boundary stays a quiet reading-column
 // control and every inactive prompt-rail tick uses one neutral treatment.
 export const PartialHistoryNotice: Story = {
   render: () => <PartialHistoryHarness />,
   play: async ({ canvasElement }) => {
-    expect(canvasElement.querySelector('.maka-transcript-history-controls')).toBeNull();
+    expect(canvasElement.querySelector('[data-transcript-gap="older"]')).not.toBeNull();
+    expect(canvasElement.querySelector('[data-transcript-gap="newer"]')).toBeNull();
     const firstPrompt = canvasElement.querySelector<HTMLButtonElement>(
       '.maka-prompt-rail-tick[data-prompt-turn-id="turn-scroll-1"]',
     );
@@ -1837,14 +1835,14 @@ export const PartialHistoryNotice: Story = {
     firstPrompt.click();
 
     await waitFor(() => {
-      expect(canvasElement.querySelector('.maka-transcript-history-controls')).not.toBeNull();
+      expect(canvasElement.querySelector('[data-transcript-gap="newer"]')).not.toBeNull();
     });
-    const notice = canvasElement.querySelector<HTMLElement>('.maka-transcript-history-controls');
-    if (!notice) throw new Error('The partial-history notice did not render');
-    expect(notice.textContent).toContain('正在查看较早的消息');
-    expect(notice.textContent).not.toMatch(/保存|加载/);
+    const gap = canvasElement.querySelector<HTMLElement>('[data-transcript-gap="newer"]');
+    if (!gap) throw new Error('The newer transcript gap did not render');
+    expect(gap.textContent).toContain('下方还有未加载的较新消息');
+    expect(gap.textContent).toContain('加载较新消息');
 
-    const regular = historyNoticePresentation(notice);
+    const regular = historyGapPresentation(gap);
     expect(regular.backgroundColor).toBe('rgba(0, 0, 0, 0)');
     expect(regular.borderWidths).toEqual(['0px', '0px', '0px', '0px']);
     expect(regular.display).toBe('flex');
@@ -1852,7 +1850,7 @@ export const PartialHistoryNotice: Story = {
     expect(regular.justifyContent).toBe('center');
     expect(regular.widthDelta).toBeLessThanOrEqual(1);
     expect(regular.centerDelta).toBeLessThanOrEqual(1);
-    expect(regular.hasHorizontalOverflow).toBe(false);
+    expect(regular.hasHorizontalOverflow, JSON.stringify(regular)).toBe(false);
 
     const neutralPaint = [
       ...canvasElement.querySelectorAll<HTMLElement>('.maka-prompt-rail-tick'),
@@ -1881,15 +1879,15 @@ export const PartialHistoryNotice: Story = {
     if (!frame) throw new Error('Shell frame did not render');
     frame.style.width = '520px';
     await painted(2);
-    const narrow = historyNoticePresentation(notice);
+    const narrow = historyGapPresentation(gap);
     expect(narrow.centerDelta).toBeLessThanOrEqual(1);
     expect(narrow.fitsFrame).toBe(true);
-    expect(narrow.hasHorizontalOverflow).toBe(false);
+    expect(narrow.hasHorizontalOverflow, JSON.stringify(narrow)).toBe(false);
 
-    const returnButton = within(notice).getByRole('button', { name: '返回最新消息' });
-    returnButton.click();
+    const loadNewerButton = within(gap).getByRole('button', { name: '加载较新消息' });
+    loadNewerButton.click();
     await waitFor(() => {
-      expect(canvasElement.querySelector('.maka-transcript-history-controls')).toBeNull();
+      expect(canvasElement.querySelector('[data-transcript-gap="newer"]')).toBeNull();
       expect(canvasElement.querySelector('[data-turn-id="turn-scroll-8"]')).not.toBeNull();
     });
   },

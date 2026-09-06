@@ -329,7 +329,7 @@
   padding: var(--space-0-5) var(--space-1-5);
 }
 .maka-transcript-gap-row {
-  width: min(var(--maka-reading-measure), calc(100% - (2 * var(--space-6))));
+  width: min(var(--maka-reading-measure), 100%);
   margin: var(--space-2) auto;
   padding-block: var(--space-1);
 }
