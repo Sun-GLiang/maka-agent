@@ -723,6 +723,56 @@ describe('ACP Session registry', () => {
     await registry.dispose();
   });
 
+  for (const action of ['close', 'shutdown', 'failure'] as const) {
+    test(`handles ${action} before attachment open settles without starting a Turn`, async () => {
+      const attachment = new FakeAcpSessionAttachment('pending');
+      const gate = deferred<AcpSessionAttachment>();
+      let opening = false;
+      let starts = 0;
+      const registry = new AcpSessionRegistry({
+        connect: async () =>
+          fakeConnection({
+            request: async (operation) => {
+              if (operation === 'session.create') return catalogSession('pending');
+              starts += 1;
+              throw new Error('unexpected Turn admission');
+            },
+          }),
+        newSessionId: () => 'pending',
+        openSessionAttachment: async (input) => {
+          attachment.bind(input);
+          opening = true;
+          return gate.promise;
+        },
+      });
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      const prompt = registry.prompt(
+        { sessionId: 'pending', prompt: [{ type: 'text', text: 'hello' }] },
+        promptContext([]),
+      );
+      const outcome = prompt.then(
+        (result) => result,
+        (error: unknown) => error,
+      );
+      await waitFor(() => opening);
+      const closing =
+        action === 'close'
+          ? registry.close({ sessionId: 'pending' })
+          : action === 'shutdown'
+            ? registry.dispose()
+            : Promise.resolve();
+      if (action === 'failure') attachment.failAttachment(new Error('early subscription EOF'));
+      gate.resolve(attachment);
+      await closing;
+      const result = await outcome;
+      if (action === 'failure') assert.ok(result instanceof RequestError);
+      else assert.deepEqual(result, { stopReason: 'cancelled' });
+      assert.equal(starts, 0);
+      assert.equal(attachment.closeCalls, 1);
+      await registry.dispose();
+    });
+  }
+
   test('shutdown cancels active prompts and closes attachments before the shared Host', async () => {
     const lifecycle: string[] = [];
     const startGate = deferred<unknown>();
@@ -874,7 +924,7 @@ describe('ACP Session registry', () => {
     await registry.dispose();
   });
 
-  test('does not grant ownership after failed or legacy creates', async () => {
+  test('keeps failed creates unowned and returns committed IDs even for unsupported projections', async () => {
     for (const [name, createOutcome] of [
       [
         'failed',
@@ -904,6 +954,15 @@ describe('ACP Session registry', () => {
         newSessionId: () => sessionId,
       });
 
+      if (!(createOutcome instanceof Error)) {
+        assert.deepEqual(await registry.create({ cwd: '/workspace', mcpServers: [] }), {
+          sessionId,
+        });
+        await registry.close({ sessionId });
+        assert.equal(requests, 1);
+        await registry.dispose();
+        continue;
+      }
       await assert.rejects(registry.create({ cwd: '/workspace', mcpServers: [] }));
       await assertInvalidParams(
         registry.setConfigOption({
@@ -914,6 +973,225 @@ describe('ACP Session registry', () => {
         { reason: 'unknown_session' },
       );
       assert.equal(requests, 1);
+      await registry.dispose();
+    }
+  });
+
+  test('returns the committed ID on catalog failure without admitting mutations during projection', async () => {
+    const catalog = deferred<never>();
+    let projecting = false;
+    const connection = fakeConnection({ request: async () => catalogSession('created') });
+    const request = connection.request;
+    connection.request = (async (operation, input) => {
+      if (operation === 'connection.catalog.query') {
+        projecting = true;
+        return catalog.promise;
+      }
+      return request(operation, input);
+    }) as AcpSessionRegistryConnection['request'];
+    const registry = new AcpSessionRegistry({
+      connect: async () => connection,
+      newSessionId: () => 'created',
+    });
+    const creation = registry.create({ cwd: '/workspace', mcpServers: [] });
+    await waitFor(() => projecting);
+    await assertInvalidParams(
+      registry.setConfigOption({
+        sessionId: 'created',
+        configId: 'permission_mode',
+        value: 'bypass',
+      }),
+      { reason: 'unknown_session' },
+    );
+    catalog.reject(new Error('catalog unavailable'));
+    assert.deepEqual(await creation, { sessionId: 'created' });
+    assert.deepEqual(await registry.close({ sessionId: 'created' }), {});
+    await registry.dispose();
+  });
+
+  test('publishes complete external options in order, including model changes, and stops after close', async () => {
+    const sessionId = 'external-options';
+    const attachment = new FakeAcpSessionAttachment(sessionId);
+    let session = catalogSession(sessionId);
+    const notifications: SessionNotification[] = [];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return session;
+            if (operation === 'session.catalog.query') return { kind: 'session', session };
+            if (operation === 'session.configuration.update') {
+              session = {
+                ...session,
+                ...(input as { patch: object }).patch,
+                revision: session.revision + 1,
+              };
+              attachment.setMetadataRevision(session.revision);
+              return { kind: 'committed', session };
+            }
+            if (operation === 'turn.start') {
+              attachment.emit(
+                'turn',
+                sessionEvent('turn', { type: 'complete', stopReason: 'end_turn' }),
+              );
+              return { kind: 'started' };
+            }
+            throw new Error(operation);
+          },
+        }),
+      newSessionId: () => sessionId,
+      newTurnId: () => 'turn',
+      openSessionAttachment: async (input) => {
+        attachment.bind(input);
+        attachment.setMetadataRevision(1);
+        return attachment;
+      },
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.prompt(
+      { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
+      promptContext(notifications),
+    );
+    session = { ...session, revision: 2, model: 'non-reasoning' };
+    attachment.setMetadataRevision(2);
+    await waitFor(() => notifications.length === 1);
+    const removed = notifications[0]!.update;
+    assert.equal(removed.sessionUpdate, 'config_option_update');
+    if (removed.sessionUpdate !== 'config_option_update') assert.fail();
+    assert.deepEqual(
+      removed.configOptions,
+      configOptions({}).filter(({ id }) => id !== 'thinking_level'),
+    );
+    session = { ...session, revision: 3, model: 'default', thinkingLevel: 'high' };
+    attachment.setMetadataRevision(3);
+    await waitFor(() => notifications.length === 2);
+    const added = notifications[1]!.update;
+    assert.equal(added.sessionUpdate, 'config_option_update');
+    if (added.sessionUpdate !== 'config_option_update') assert.fail();
+    assert.deepEqual(added.configOptions, configOptions({ thinking_level: 'high' }));
+    const configured = await registry.setConfigOption({
+      sessionId,
+      configId: 'permission_mode',
+      value: 'bypass',
+    });
+    assert.deepEqual(notifications[2]!.update, {
+      sessionUpdate: 'config_option_update',
+      configOptions: configured.configOptions,
+    });
+    await registry.close({ sessionId });
+    session = { ...session, revision: 5, model: 'non-reasoning' };
+    attachment.setMetadataRevision(5);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(notifications.length, 3);
+    await registry.dispose();
+  });
+
+  test('suppresses an external configuration projection that finishes after close', async () => {
+    const sessionId = 'closing-options';
+    const attachment = new FakeAcpSessionAttachment(sessionId);
+    const read = deferred<{ kind: 'session'; session: SessionCatalogProjection }>();
+    let reading = false;
+    const notifications: SessionNotification[] = [];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession(sessionId);
+            if (operation === 'session.catalog.query') {
+              reading = true;
+              return read.promise;
+            }
+            attachment.emit(
+              'turn',
+              sessionEvent('turn', { type: 'complete', stopReason: 'end_turn' }),
+            );
+            return { kind: 'started' };
+          },
+        }),
+      newSessionId: () => sessionId,
+      newTurnId: () => 'turn',
+      openSessionAttachment: async (input) => {
+        attachment.bind(input);
+        attachment.setMetadataRevision(1);
+        return attachment;
+      },
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.prompt(
+      { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
+      promptContext(notifications),
+    );
+    attachment.setMetadataRevision(2);
+    await waitFor(() => reading);
+    await registry.close({ sessionId });
+    read.resolve({
+      kind: 'session',
+      session: catalogSession(sessionId, '/workspace', { revision: 2, permissionMode: 'bypass' }),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(notifications, []);
+    await registry.dispose();
+  });
+
+  test('closing an active prompt does not wait for a stalled configuration read', async () => {
+    const attachment = new FakeAcpSessionAttachment('stalled');
+    const read = deferred<{ kind: 'session'; session: SessionCatalogProjection }>();
+    let reading = false;
+    let started = false;
+    const notifications: SessionNotification[] = [];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession('stalled');
+            if (operation === 'session.catalog.query') {
+              reading = true;
+              return read.promise;
+            }
+            if (operation === 'turn.stop') return {};
+            started = true;
+            attachment.setRoot({
+              sessionId: 'stalled',
+              turnId: 'turn',
+              runId: 'run',
+              status: 'running',
+            });
+            attachment.setMetadataRevision(2);
+            attachment.emit(
+              'turn',
+              sessionEvent('turn', { type: 'text_delta', messageId: 'answer', text: 'pending' }),
+            );
+            return { kind: 'started' };
+          },
+        }),
+      newSessionId: () => 'stalled',
+      newTurnId: () => 'turn',
+      openSessionAttachment: async (input) => {
+        attachment.bind(input);
+        attachment.setMetadataRevision(1);
+        return attachment;
+      },
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    const prompt = registry.prompt(
+      { sessionId: 'stalled', prompt: [{ type: 'text', text: 'hello' }] },
+      promptContext(notifications),
+    );
+    await waitFor(() => reading && started);
+    let closed = false;
+    const closing = registry.close({ sessionId: 'stalled' }).then(() => {
+      closed = true;
+    });
+    try {
+      await waitFor(() => closed);
+      assert.deepEqual(await prompt, { stopReason: 'cancelled' });
+      assert.deepEqual(notifications, []);
+    } finally {
+      read.resolve({
+        kind: 'session',
+        session: catalogSession('stalled', '/workspace', { revision: 2 }),
+      });
+      await closing;
       await registry.dispose();
     }
   });
@@ -1908,6 +2186,11 @@ class FakeAcpSessionAttachment implements AcpSessionAttachment {
       projectionRevision: this.snapshot.projectionRevision + 1,
       rootTurn,
     };
+    this.#callbacks?.onSnapshotChanged(this.snapshot);
+  }
+
+  setMetadataRevision(metadataRevision: number): void {
+    this.snapshot = { ...this.snapshot, session: { ...this.snapshot.session, metadataRevision } };
     this.#callbacks?.onSnapshotChanged(this.snapshot);
   }
 

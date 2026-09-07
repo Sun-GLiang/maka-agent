@@ -107,6 +107,26 @@ describe('ACP Session event mapper', () => {
     assert.match(update.messageId ?? '', /^answer:revision:[0-9a-f]{16}$/u);
   });
 
+  test('ends on authoritative abort and nonrecoverable error but not recoverable errors', async () => {
+    const failed = eventMapper([]);
+    assert.equal(
+      await failed.accept(event({ type: 'error', recoverable: true, message: 'retry' })),
+      undefined,
+    );
+    assert.equal(
+      await failed.accept(event({ type: 'error', recoverable: false, message: 'failed' })),
+      'end_turn',
+    );
+    assert.equal(
+      await failed.accept(event({ type: 'complete', stopReason: 'end_turn' })),
+      'end_turn',
+    );
+    assert.equal(
+      await eventMapper([]).accept(event({ type: 'abort', reason: 'crash' })),
+      'end_turn',
+    );
+  });
+
   test('emits exactly one terminal result', async () => {
     const mapper = eventMapper([]);
     assert.equal(

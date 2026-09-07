@@ -18,6 +18,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { foldRuntimeHostAssistantDelta } from '@maka/runtime-host/adapter';
 import type { SessionNotification, SessionUpdate, StopReason } from '@agentclientprotocol/sdk';
 import type { SessionEvent } from '@maka/core/events';
 import type { StoredMessage } from '@maka/core/session';
@@ -74,8 +75,11 @@ export class AcpSessionEventMapper {
         case 'complete':
           this.#terminal = 'end_turn';
           break;
+        case 'error':
+          if (!event.recoverable) this.#terminal = 'end_turn';
+          break;
         case 'abort':
-          this.#terminal = 'cancelled';
+          this.#terminal = 'end_turn';
           break;
         default:
           break;
@@ -147,9 +151,10 @@ function deltaText(
   event: Extract<SessionEvent, { type: 'text_delta' | 'thinking_delta' }>,
   current = '',
 ): string {
-  if (event.startOffset === undefined) return current + event.text;
-  if (event.startOffset > current.length) return current + event.text;
-  return current.slice(0, event.startOffset) + event.text;
+  return foldRuntimeHostAssistantDelta(current, {
+    startOffset: event.startOffset ?? current.length,
+    text: event.text,
+  }).text;
 }
 
 function streamKey(kind: StreamKind, messageId: string): string {

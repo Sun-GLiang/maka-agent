@@ -38,6 +38,7 @@ import {
   type StopReason,
 } from '@agentclientprotocol/sdk';
 import type { SessionEvent } from '@maka/core/events';
+import { isRuntimeHostTerminalTurn } from '@maka/runtime-host/adapter';
 import type { StoredMessage } from '@maka/core/session';
 import {
   readRuntimeHostConnectionCatalog,
@@ -59,6 +60,7 @@ import {
 import { RuntimeHostSessionChannel } from '../runtime-host-session-channel.js';
 import {
   RuntimeHostSessionUpdateError,
+  getRuntimeHostSession,
   requireRuntimeHostSessionProjection,
   updateRuntimeHostSession,
 } from '../runtime-host-session-update.js';
@@ -121,6 +123,16 @@ export interface AcpSessionRegistryOptions {
   ) => Promise<AcpSessionAttachment>;
 }
 
+interface AcpAttachmentConfiguration {
+  readonly notify: AcpPromptContext['notify'];
+  readonly retired: Promise<void>;
+  readonly retire: () => void;
+  tail: Promise<unknown>;
+  metadataRevision?: number;
+  options?: string;
+  delivery?: Promise<void>;
+}
+
 interface ActiveAcpPrompt {
   readonly sessionId: string;
   readonly turnId: string;
@@ -147,6 +159,7 @@ export class AcpSessionRegistry {
   readonly #inFlightOperations = new Set<Promise<unknown>>();
   readonly #ownedSessionIds = new Set<string>();
   readonly #attachments = new Map<string, Promise<AcpSessionAttachment>>();
+  readonly #attachmentConfigurations = new Map<string, AcpAttachmentConfiguration>();
   readonly #activePrompts = new Map<string, Set<ActiveAcpPrompt>>();
   readonly #sessionCloseTasks = new Map<string, Promise<CloseSessionResponse>>();
   #connection: AcpSessionRegistryConnection | undefined;
@@ -189,7 +202,14 @@ export class AcpSessionRegistry {
     } catch (error) {
       throw requestErrorFromConfigInput(error);
     }
-    return this.#track(this.#setConfigOption(params));
+    const configuration = this.#attachmentConfigurations.get(params.sessionId);
+    return this.#track(
+      configuration
+        ? this.#queueConfiguration(configuration, () =>
+            this.#setConfigOption(params, configuration),
+          )
+        : this.#setConfigOption(params),
+    );
   }
 
   async prompt(params: PromptRequest, context: AcpPromptContext): Promise<PromptResponse> {
@@ -210,7 +230,11 @@ export class AcpSessionRegistry {
     if (existing) return existing;
     this.#assertOwned(params.sessionId);
     this.#ownedSessionIds.delete(params.sessionId);
-    const task = this.#track(this.#closeSession(params.sessionId));
+    const configuration = this.#attachmentConfigurations.get(params.sessionId);
+    const delivery = configuration?.delivery;
+    configuration?.retire();
+    this.#attachmentConfigurations.delete(params.sessionId);
+    const task = this.#track(this.#closeSession(params.sessionId, delivery));
     this.#sessionCloseTasks.set(params.sessionId, task);
     const forget = () => {
       if (this.#sessionCloseTasks.get(params.sessionId) === task) {
@@ -233,7 +257,16 @@ export class AcpSessionRegistry {
     const active: ActiveAcpPrompt = {
       sessionId: params.sessionId,
       turnId,
-      mapper: new AcpSessionEventMapper({ sessionId: params.sessionId, notify: context.notify }),
+      mapper: new AcpSessionEventMapper({
+        sessionId: params.sessionId,
+        notify: async (notification) => {
+          const configuration = this.#attachmentConfigurations.get(params.sessionId);
+          if (configuration) await Promise.race([configuration.tail, configuration.retired]);
+          if (!this.#closing && this.#ownedSessionIds.has(params.sessionId)) {
+            await context.notify(notification);
+          }
+        },
+      }),
       waiters: new Set(),
       dispatchStarted: false,
       startSettled: false,
@@ -268,7 +301,7 @@ export class AcpSessionRegistry {
       const connection = await this.#getConnection('subscription.open');
       let attachment: AcpSessionAttachment;
       try {
-        attachment = await this.#ensureAttachment(params.sessionId, connection);
+        attachment = await this.#ensureAttachment(params.sessionId, connection, context.notify);
       } catch (error) {
         if (active.cancelled) return { stopReason: await active.mapper.cancel() };
         throw error;
@@ -306,6 +339,8 @@ export class AcpSessionRegistry {
         return { stopReason: await active.mapper.cancel() };
       }
       const stopReason = await observation;
+      const configuration = this.#attachmentConfigurations.get(params.sessionId);
+      if (configuration) await Promise.race([configuration.tail, configuration.retired]);
       return { stopReason };
     } finally {
       context.signal.removeEventListener('abort', onAbort);
@@ -352,11 +387,11 @@ export class AcpSessionRegistry {
     while (!active.finished) {
       const root = active.attachment?.snapshot.rootTurn;
       if (root?.turnId === active.turnId) {
-        if (isTerminalRootTurn(root)) return;
+        if (isRuntimeHostTerminalTurn(root)) return;
         const connection = this.#connection;
         if (!connection) return;
         await connection.request('turn.stop', {
-          sessionId: active.sessionId,
+          sessionId: root.sessionId,
           turnId: root.turnId,
           runId: root.runId,
         });
@@ -370,16 +405,47 @@ export class AcpSessionRegistry {
   async #ensureAttachment(
     sessionId: string,
     connection: AcpSessionRegistryConnection,
+    notify: AcpPromptContext['notify'],
   ): Promise<AcpSessionAttachment> {
     const existing = this.#attachments.get(sessionId);
     if (existing) return existing;
+    let retire!: () => void;
+    const retired = new Promise<void>((resolve) => {
+      retire = resolve;
+    });
+    const configuration: AcpAttachmentConfiguration = {
+      notify,
+      tail: Promise.resolve(),
+      retired,
+      retire,
+    };
+    this.#attachmentConfigurations.set(sessionId, configuration);
     let task!: Promise<AcpSessionAttachment>;
     let attachment: AcpSessionAttachment | undefined;
     let earlyFailure: Error | undefined;
     task = this.#openSessionAttachment({
       connection,
       sessionId,
-      onSnapshotChanged: () => this.#wakeSession(sessionId),
+      onSnapshotChanged: (snapshot) => {
+        this.#wakeSession(sessionId);
+        if (configuration.metadataRevision === undefined) {
+          configuration.metadataRevision = snapshot.session.metadataRevision;
+          return;
+        }
+        if (configuration.metadataRevision === snapshot.session.metadataRevision) return;
+        configuration.metadataRevision = snapshot.session.metadataRevision;
+        void this.#queueConfiguration(configuration, async () => {
+          if (!this.#configurationIsLive(sessionId, configuration)) return;
+          const session = await getRuntimeHostSession(connection, sessionId);
+          if (!session) throw unknownSessionError();
+          const configOptions = await this.#projectConfigOptions(connection, session);
+          await this.#notifyConfiguration(sessionId, configuration, configOptions);
+        }).catch((error: unknown) => {
+          const failure = error instanceof Error ? error : new Error(String(error));
+          if (attachment) this.#retireFailedAttachment(sessionId, task, attachment, failure);
+          else earlyFailure = failure;
+        });
+      },
       onTranscriptReplaced: (turnId, messages) => {
         for (const active of this.#activePrompts.get(sessionId) ?? []) {
           if (active.turnId === turnId) {
@@ -399,6 +465,7 @@ export class AcpSessionRegistry {
         attachment = opened;
         if (earlyFailure) {
           this.#retireFailedAttachment(sessionId, task, opened, earlyFailure);
+          throw earlyFailure;
         }
         if (this.#closing || !this.#ownedSessionIds.has(sessionId)) {
           return opened.close().then(() => {
@@ -408,7 +475,11 @@ export class AcpSessionRegistry {
         return opened;
       })
       .catch((error: unknown) => {
-        if (this.#attachments.get(sessionId) === task) this.#attachments.delete(sessionId);
+        if (this.#attachments.get(sessionId) === task) {
+          this.#attachments.delete(sessionId);
+          configuration.retire();
+          this.#attachmentConfigurations.delete(sessionId);
+        }
         if (error instanceof RequestError) throw error;
         throw requestErrorFromRuntimeHost(error, 'subscription.open');
       });
@@ -422,7 +493,11 @@ export class AcpSessionRegistry {
     attachment: AcpSessionAttachment,
     error: Error,
   ): void {
-    if (this.#attachments.get(sessionId) === task) this.#attachments.delete(sessionId);
+    if (this.#attachments.get(sessionId) === task) {
+      this.#attachments.delete(sessionId);
+      this.#attachmentConfigurations.get(sessionId)?.retire();
+      this.#attachmentConfigurations.delete(sessionId);
+    }
     for (const active of this.#activePrompts.get(sessionId) ?? []) {
       if (active.attachment !== attachment) continue;
       active.observationSettled = true;
@@ -432,7 +507,7 @@ export class AcpSessionRegistry {
     void attachment.close().catch(() => undefined);
   }
 
-  async #closeSession(sessionId: string): Promise<CloseSessionResponse> {
+  async #closeSession(sessionId: string, delivery?: Promise<void>): Promise<CloseSessionResponse> {
     const active = [...(this.#activePrompts.get(sessionId) ?? [])];
     const cancellation = await Promise.allSettled(
       active.map((prompt) => this.#cancelPrompt(prompt)),
@@ -442,12 +517,14 @@ export class AcpSessionRegistry {
     let closeError: unknown;
     if (attachmentTask) {
       try {
-        const attachment = await attachmentTask;
-        await attachment.close();
+        // A rejected open has no retained resource; close still releases ownership.
+        const attachment = await attachmentTask.catch(() => undefined);
+        await attachment?.close();
       } catch (error) {
         closeError = error;
       }
     }
+    await delivery;
     const failedCancellation = cancellation.find(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     );
@@ -498,19 +575,24 @@ export class AcpSessionRegistry {
     } catch (error) {
       throw requestErrorFromRuntimeHost(error, 'session.create', { sessionId });
     }
-    let created: SessionCatalogProjection;
+    // Session creation has committed. Optional presentation failures must not
+    // turn that success into an unreachable durable Session.
+    let configOptions: SessionConfigOption[] | undefined;
     try {
-      created = requireRuntimeHostSessionProjection(result, 'session.create');
-    } catch (error) {
-      throw requestErrorFromSessionUpdate(error, 'session.create', { sessionId });
+      const created = requireRuntimeHostSessionProjection(result, 'session.create');
+      configOptions = await this.#projectConfigOptions(connection, created);
+    } catch {
+      // The client can still prompt, configure, list, or close the returned ID.
     }
-    const configOptions = await this.#projectConfigOptions(connection, created);
-    this.#ownedSessionIds.add(sessionId);
-    return { sessionId, configOptions };
+    // Do not admit mutations while projection is pending, or resurrect ownership
+    // if connection shutdown raced the successful Host creation.
+    if (!this.#closing) this.#ownedSessionIds.add(sessionId);
+    return { sessionId, ...(configOptions ? { configOptions } : {}) };
   }
 
   async #setConfigOption(
     params: SetSessionConfigOptionRequest & { readonly value: string },
+    configuration?: AcpAttachmentConfiguration,
   ): Promise<SetSessionConfigOptionResponse> {
     const connection = await this.#getConnection('session.configuration.update');
     let committed: SessionCatalogProjection;
@@ -526,13 +608,56 @@ export class AcpSessionRegistry {
           }),
         {
           operation: 'session.configuration.update',
-          assertRequestAllowed: () => this.#assertOpen('session.configuration.update'),
+          assertRequestAllowed: () => {
+            this.#assertOpen('session.configuration.update');
+            this.#assertOwned(params.sessionId);
+          },
         },
       );
     } catch (error) {
       throw requestErrorFromSessionUpdate(error, 'session.configuration.update');
     }
-    return { configOptions: await this.#projectConfigOptions(connection, committed) };
+    const configOptions = await this.#projectConfigOptions(connection, committed);
+    if (configuration)
+      await this.#notifyConfiguration(params.sessionId, configuration, configOptions);
+    return { configOptions };
+  }
+
+  #configurationIsLive(sessionId: string, configuration: AcpAttachmentConfiguration): boolean {
+    return (
+      !this.#closing &&
+      this.#ownedSessionIds.has(sessionId) &&
+      this.#attachmentConfigurations.get(sessionId) === configuration
+    );
+  }
+
+  #queueConfiguration<T>(
+    configuration: AcpAttachmentConfiguration,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    // Serialize asynchronous catalog projection and delivery, not Host frames:
+    // session-channel/projector remain the only subscription ordering authority.
+    // A local set emits its committed options before its response; subscription
+    // refreshes observed during that set follow its notification in this queue.
+    const result = configuration.tail.then(operation, operation);
+    configuration.tail = result.catch(() => undefined);
+    return result;
+  }
+
+  async #notifyConfiguration(
+    sessionId: string,
+    configuration: AcpAttachmentConfiguration,
+    configOptions: SessionConfigOption[],
+  ): Promise<void> {
+    if (!this.#configurationIsLive(sessionId, configuration)) return;
+    const options = JSON.stringify(configOptions);
+    if (configuration.options === options) return;
+    configuration.delivery = configuration.notify({
+      sessionId,
+      update: { sessionUpdate: 'config_option_update', configOptions },
+    });
+    await configuration.delivery;
+    configuration.options = options;
   }
 
   async #projectConfigOptions(
@@ -604,10 +729,16 @@ export class AcpSessionRegistry {
     const cancellations = active.map((prompt) => this.#cancelPrompt(prompt));
     const attachments = [...this.#attachments.values()];
     this.#attachments.clear();
+    const configurations = [...this.#attachmentConfigurations.values()];
+    for (const configuration of configurations) configuration.retire();
+    this.#attachmentConfigurations.clear();
     await Promise.allSettled(attachments.map(async (attachment) => (await attachment).close()));
     await Promise.allSettled(cancellations);
     await Promise.allSettled([this.#closeOwnedConnection()]);
-    await Promise.allSettled([...this.#inFlightOperations]);
+    await Promise.allSettled([
+      ...this.#inFlightOperations,
+      ...configurations.map(({ tail }) => tail),
+    ]);
     this.#ownedSessionIds.clear();
   }
 
@@ -707,10 +838,6 @@ async function openRuntimeHostSessionAttachment(
   });
   opened.channel.activate();
   return opened.channel;
-}
-
-function isTerminalRootTurn(root: NonNullable<SessionContinuitySnapshot['rootTurn']>): boolean {
-  return root.status === 'completed' || root.status === 'failed' || root.status === 'cancelled';
 }
 
 function unknownSessionError(): RequestError {

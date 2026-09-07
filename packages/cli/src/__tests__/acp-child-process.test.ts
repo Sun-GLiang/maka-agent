@@ -24,6 +24,10 @@ import { createServer, type ServerResponse } from 'node:http';
 import { PassThrough } from 'node:stream';
 import { describe, test } from 'node:test';
 import { methods, type SessionNotification } from '@agentclientprotocol/sdk';
+import { waitFor } from '@maka/core/test-only/async-primitives';
+import { connectRuntimeHost } from '@maka/runtime-host/client';
+import { RUNTIME_HOST_PROTOCOL_VERSION } from '@maka/runtime-host/protocol';
+import { getRuntimeHostSession } from '../runtime-host-session-update.js';
 import {
   pipeCapturedStdout,
   StdoutCaptureBridge,
@@ -329,6 +333,75 @@ describe('Maka ACP child process', () => {
     );
   });
 
+  test('Host admission rejects an extra attachment before starting a Turn and close releases capacity', {
+    timeout: 30_000,
+  }, async () => {
+    const model = await startAcpModelFixture();
+    try {
+      await withAcpChildProcessHarness(
+        async (harness) => {
+          await harness.withClient(async ({ context }) => {
+            await context.request(methods.agent.initialize, { protocolVersion: 1 });
+            const ids: string[] = [];
+            for (let index = 0; index < 17; index += 1) {
+              ids.push(
+                (
+                  await context.request(methods.agent.session.new, {
+                    cwd: harness.workspaceRoot,
+                    mcpServers: [],
+                  })
+                ).sessionId,
+              );
+            }
+            const prompt = (sessionId: string) =>
+              context.request(methods.agent.session.prompt, {
+                sessionId,
+                prompt: [{ type: 'text', text: 'COMPLETE_ME' }],
+              });
+            for (const id of ids.slice(0, 16))
+              assert.deepEqual(await prompt(id), { stopReason: 'end_turn' });
+            await assert.rejects(prompt(ids[16]!), (error: unknown) => {
+              assert.equal(
+                (error as { data?: { operation?: string } }).data?.operation,
+                'subscription.open',
+              );
+              return true;
+            });
+            const connected = await connectRuntimeHost({
+              rootPath: harness.workspaceRoot,
+              protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+            });
+            assert.equal(connected.kind, 'connected');
+            if (connected.kind !== 'connected') assert.fail();
+            try {
+              const untouched = await connected.connection.openSessionSubscription({
+                sessionId: ids[16]!,
+                transcript: { kind: 'none' },
+              });
+              assert.equal(
+                untouched.snapshot.rootTurn,
+                null,
+                'capacity rejection must not create a Turn',
+              );
+              await untouched.close();
+              await context.request(methods.agent.session.close, { sessionId: ids[0]! });
+              assert.ok(await getRuntimeHostSession(connected.connection, ids[0]!));
+              assert.deepEqual(await prompt(ids[16]!), { stopReason: 'end_turn' });
+            } finally {
+              await connected.connection.close();
+            }
+          });
+        },
+        {
+          startRuntimeHost: true,
+          model: { id: 'capacity-fixture', thinkingLevels: [], baseUrl: model.baseUrl },
+        },
+      );
+    } finally {
+      await model.close();
+    }
+  });
+
   test('streams, cancels, and closes through the real ACP and Runtime Host process boundary', {
     timeout: 30_000,
   }, async () => {
@@ -361,6 +434,48 @@ describe('Maka ACP child process', () => {
                 ),
                 true,
               );
+
+              // A second client mutates the Host while ACP retains its attachment.
+              const connected = await connectRuntimeHost({
+                rootPath: harness.workspaceRoot,
+                protocol: {
+                  min: RUNTIME_HOST_PROTOCOL_VERSION,
+                  max: RUNTIME_HOST_PROTOCOL_VERSION,
+                },
+              });
+              assert.equal(connected.kind, 'connected');
+              if (connected.kind !== 'connected') assert.fail('Host connection unavailable');
+              try {
+                const current = await getRuntimeHostSession(
+                  connected.connection,
+                  created.sessionId,
+                );
+                assert.ok(current);
+                const changed = await connected.connection.request('session.configuration.update', {
+                  sessionId: created.sessionId,
+                  expectedRevision: current.revision,
+                  patch: { permissionMode: 'bypass', thinkingLevel: 'low' },
+                });
+                assert.equal(changed.kind, 'committed');
+                await waitFor(
+                  () =>
+                    updates.some(
+                      ({ update }) =>
+                        update.sessionUpdate === 'config_option_update' &&
+                        update.configOptions.some(
+                          (option) =>
+                            option.id === 'permission_mode' && option.currentValue === 'bypass',
+                        ) &&
+                        update.configOptions.some(
+                          (option) =>
+                            option.id === 'thinking_level' && option.currentValue === 'low',
+                        ),
+                    ),
+                  { timeoutMs: 5000, pollMs: 10, message: 'external configuration notification' },
+                );
+              } finally {
+                await connected.connection.close();
+              }
 
               const cancelled = context.request(methods.agent.session.prompt, {
                 sessionId: created.sessionId,
