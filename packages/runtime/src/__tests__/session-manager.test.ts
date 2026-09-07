@@ -3290,94 +3290,72 @@ describe('SessionManager child-session runtime primitive', () => {
     assert.strictEqual(childTwoResult.status, 'cancelled');
   });
 
-  test('observes a rejected hosted stop while child lookup is pending', async () => {
-    const store = new MemorySessionStore();
-    const listStarted = makeGate();
-    const releaseList = makeGate();
-    const childLookupError = new Error('child lookup failed');
-    store.list = async () => {
-      listStarted.release();
-      await releaseList.promise;
-      throw childLookupError;
-    };
-    const runStore = new MemoryAgentRunStore();
-    const authority = hostedRootAuthority();
-    const ownStopError = new Error('hosted stop rejected');
-    authority.stopSession = async () => {
-      throw ownStopError;
-    };
-    const manager = new SessionManager({
-      store,
-      runStore,
-      runtimeEventStore: runStore,
-      backends: new BackendRegistry(),
-      messageAuthority: authority,
-      newId: nextId(),
-      now: nextNow(350),
-    });
-    const unhandled: unknown[] = [];
-    const onUnhandledRejection = (reason: unknown) => {
-      if (reason === ownStopError) unhandled.push(reason);
-    };
-    process.on('unhandledRejection', onUnhandledRejection);
-
-    const stopping = manager.stopSession('session-1', { source: 'stop_button' });
-    const stopRejection = assert.rejects(stopping, (error: unknown) => error === ownStopError);
-    try {
-      await listStarted.promise;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.deepStrictEqual(unhandled, []);
-    } finally {
-      releaseList.release();
-      await stopRejection;
-      process.off('unhandledRejection', onUnhandledRejection);
-    }
-  });
-
-  test('observes a rejected direct stop while hosted child lookup is pending', async () => {
-    const store = new MemorySessionStore();
-    const listStarted = makeGate();
-    const releaseList = makeGate();
-    const childLookupError = new Error('child lookup failed');
-    store.list = async () => {
-      listStarted.release();
-      await releaseList.promise;
-      throw childLookupError;
-    };
-    const runStore = new MemoryAgentRunStore();
-    const ownStopError = new Error('direct stop rejected');
-    const manager = new SessionManager({
-      store,
-      runStore,
-      runtimeEventStore: runStore,
-      backends: new BackendRegistry(),
-      runtimeKernel: {
-        stopSession: async () => {
+  for (const { name, stopOptions, stop } of [
+    {
+      name: 'observes a rejected hosted stop while child lookup is pending',
+      stopOptions: (rejectStop: () => Promise<never>) => {
+        const authority = hostedRootAuthority();
+        authority.stopSession = rejectStop;
+        return { messageAuthority: authority };
+      },
+      stop: (manager: SessionManager) =>
+        manager.stopSession('session-1', { source: 'stop_button' }),
+    },
+    {
+      name: 'observes a rejected direct stop while hosted child lookup is pending',
+      stopOptions: (rejectStop: () => Promise<never>) => ({
+        runtimeKernel: { stopSession: rejectStop } as unknown as RuntimeKernelLike,
+        messageAuthority: hostedRootAuthority(),
+      }),
+      stop: (manager: SessionManager) =>
+        manager.deliverHostedRootStop('session-1', { source: 'stop_button' }),
+    },
+  ]) {
+    test(name, async () => {
+      const store = new MemorySessionStore();
+      const listStarted = makeGate();
+      const releaseList = makeGate();
+      const childLookupError = new Error('child lookup failed');
+      store.list = async () => {
+        listStarted.release();
+        await releaseList.promise;
+        throw childLookupError;
+      };
+      const runStore = new MemoryAgentRunStore();
+      const ownStopError = new Error('own stop rejected');
+      const manager = new SessionManager({
+        store,
+        runStore,
+        runtimeEventStore: runStore,
+        backends: new BackendRegistry(),
+        ...stopOptions(async () => {
           throw ownStopError;
-        },
-      } as unknown as RuntimeKernelLike,
-      messageAuthority: hostedRootAuthority(),
-      newId: nextId(),
-      now: nextNow(375),
-    });
-    const unhandled: unknown[] = [];
-    const onUnhandledRejection = (reason: unknown) => {
-      if (reason === ownStopError) unhandled.push(reason);
-    };
-    process.on('unhandledRejection', onUnhandledRejection);
+        }),
+        newId: nextId(),
+        now: nextNow(350),
+      });
+      const unhandled: unknown[] = [];
+      const onUnhandledRejection = (reason: unknown) => {
+        if (reason === ownStopError) unhandled.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandledRejection);
 
-    const stopping = manager.deliverHostedRootStop('session-1', { source: 'stop_button' });
-    const stopRejection = assert.rejects(stopping, (error: unknown) => error === ownStopError);
-    try {
-      await listStarted.promise;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.deepStrictEqual(unhandled, []);
-    } finally {
-      releaseList.release();
-      await stopRejection;
-      process.off('unhandledRejection', onUnhandledRejection);
-    }
-  });
+      const stopping = stop(manager);
+      const stopRejection = assert.rejects(stopping, (error: unknown) => error === ownStopError);
+      try {
+        await listStarted.promise;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.deepStrictEqual(unhandled, []);
+      } finally {
+        releaseList.release();
+        try {
+          await stopRejection;
+        } finally {
+          process.off('unhandledRejection', onUnhandledRejection);
+        }
+      }
+    });
+  }
 
   test('startup recovery repairs an interrupted child inline run only in the child session', async () => {
     const store = new MemorySessionStore();

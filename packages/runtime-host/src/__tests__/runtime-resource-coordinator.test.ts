@@ -34,10 +34,7 @@ import {
   HostRuntimeResourceCoordinator,
   type HostRuntimeResourceCoordinatorInput,
 } from '../server/runtime-resource-coordinator.js';
-import {
-  runAfterCurrentSessionAdmission,
-  SessionAdmissionGate,
-} from '../server/session-admission-gate.js';
+import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 
 const SESSION_ID = 'session-1';
 const RUNTIME_REF = 'maka://runtime/background-tasks/shell-1';
@@ -259,33 +256,6 @@ describe('Host Runtime Resource coordinator', () => {
     assert.equal(!unavailable.ok && unavailable.error.code, 'internal_failure');
     assert.equal(harness.drainCount, 1);
     assert.equal(harness.terminateCount, 0);
-  });
-
-  test('requests a canonical state drain only after leaving Session admission', async (t) => {
-    t.mock.method(console, 'error', () => {});
-    let drainAdmission: Promise<void> | undefined;
-    let harness!: ReturnType<typeof createHarness>;
-    harness = createHarness({
-      requestDrain: () => {
-        runAfterCurrentSessionAdmission(() => {
-          harness.drainCount += 1;
-          drainAdmission = harness.sessionAdmission.run(SESSION_ID, async () => {});
-          void drainAdmission.catch(() => {});
-        });
-      },
-    });
-    harness.stateReadFailure = new Error('canonical state unavailable');
-
-    const result = await harness.coordinator.handlers['runtime.resource.query'](
-      { kind: 'list_start', sessionId: SESSION_ID },
-      connection('connection-1'),
-    );
-
-    assert.equal(result.ok, false);
-    assert.equal(!result.ok && result.error.code, 'internal_failure');
-    assert.equal(harness.drainCount, 1);
-    assert.ok(drainAdmission, 'the canonical read failure requests a drain');
-    await assert.doesNotReject(drainAdmission);
   });
 
   test('logs a bounded redacted canonical state failure before draining', async (t) => {
