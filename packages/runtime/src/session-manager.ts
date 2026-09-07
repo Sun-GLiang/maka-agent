@@ -3597,10 +3597,9 @@ export class SessionManager {
       : undefined;
     await this.#stopSessionTree(
       sessionId,
-      () =>
-        hostedAuthority
-          ? hostedAuthority.stopSession(sessionId, input)
-          : this.runtimeKernel.stopSession(sessionId, input),
+      hostedAuthority
+        ? hostedAuthority.stopSession(sessionId, input)
+        : this.runtimeKernel.stopSession(sessionId, input),
       (childSessionId) =>
         hostedAuthority
           ? hostedAuthority.stopSession(childSessionId, input)
@@ -3614,7 +3613,7 @@ export class SessionManager {
       : undefined;
     await this.#stopSessionTree(
       sessionId,
-      () => this.runtimeKernel.stopSession(sessionId, input),
+      this.runtimeKernel.stopSession(sessionId, input),
       (childSessionId) =>
         authority
           ? authority.stopSession(childSessionId, input)
@@ -3624,10 +3623,11 @@ export class SessionManager {
 
   async #stopSessionTree(
     sessionId: string,
-    stopOwn: () => Promise<void>,
+    ownStop: Promise<void>,
     stopChild: (childSessionId: string) => Promise<void>,
   ): Promise<void> {
-    const ownStop = observeSettlement(stopOwn());
+    // Observe immediately while child lookup runs; await below still propagates the original error.
+    void ownStop.catch(() => undefined);
     let childStops: PromiseSettledResult<void>[] = [];
     let childLookupError: unknown;
     try {
@@ -3640,8 +3640,7 @@ export class SessionManager {
     } catch (error) {
       childLookupError = error;
     }
-    const ownStopResult = await ownStop;
-    if (ownStopResult.status === 'rejected') throw ownStopResult.reason;
+    await ownStop;
     const childStopError = childStops.find(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     )?.reason;
@@ -5529,13 +5528,6 @@ function boundAgentOutputCollections(
 function tail<T>(items: readonly T[], max: number): T[] {
   if (items.length <= max) return [...items];
   return items.slice(items.length - max);
-}
-
-function observeSettlement<T>(promise: Promise<T>): Promise<PromiseSettledResult<T>> {
-  return promise.then(
-    (value) => ({ status: 'fulfilled', value }),
-    (reason: unknown) => ({ status: 'rejected', reason }),
-  );
 }
 
 function shellRunBashToolCallIds(messages: readonly StoredMessage[]): Set<string> {

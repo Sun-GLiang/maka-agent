@@ -47,20 +47,13 @@ const currentSessionAdmissions = new AsyncLocalStorage<readonly SessionAdmission
 
 /** Run immediately outside admission, or after every active admission in this async chain releases. */
 export function runAfterCurrentSessionAdmission(operation: () => void): void {
-  const activeAdmissions = [
-    ...new Set((currentSessionAdmissions.getStore() ?? []).filter((context) => context.active)),
-  ];
-  if (activeAdmissions.length === 0) {
-    operation();
-    return;
-  }
-
-  let remaining = activeAdmissions.length;
+  const admissions = currentSessionAdmissions.getStore() ?? [];
   const afterRelease = () => {
-    remaining -= 1;
-    if (remaining === 0) operation();
+    const active = admissions.find((context) => context.active);
+    if (active) active.afterRelease.add(afterRelease);
+    else operation();
   };
-  for (const context of activeAdmissions) context.afterRelease.add(afterRelease);
+  afterRelease();
 }
 
 export class SessionAdmissionGate {
