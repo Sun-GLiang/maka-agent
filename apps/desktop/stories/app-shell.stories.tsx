@@ -3281,13 +3281,33 @@ export const NarrowWorkbarClearsTitlebarReserve: Story = {
     narrowWorkbarShare.mockClear();
     const canvas = within(canvasElement);
     const titlebar = canvasElement.querySelector<HTMLElement>('.maka-window-titlebar');
+    const identity = canvasElement.querySelector<HTMLElement>(
+      '[data-maka-contract="titlebar-identity"]',
+    );
     const detail = canvasElement.querySelector<HTMLElement>('.maka-detail-with-artifacts');
     const workbar = canvasElement.querySelector<HTMLElement>(
       '.maka-session-workbar[data-placement="right"]:not([data-collapsed])',
     );
-    if (!titlebar || !detail || !workbar) {
-      throw new Error('the titlebar, detail area, or right workbar is missing');
+    if (!titlebar || !identity || !detail || !workbar) {
+      throw new Error('the titlebar, identity, detail area, or right workbar is missing');
     }
+
+    // A bottom Workbar must not take width from the title. Share can remain
+    // clickable even when a stale right-side reserve squeezes the title away.
+    await userEvent.click(canvas.getByRole('button', { name: '收起任务工作栏' }));
+    const restore = await canvas.findByRole('button', { name: '展开任务工作栏' });
+    await waitFor(() => expect(workbar).not.toBeVisible());
+    const collapsedIdentityWidth = identity.getBoundingClientRect().width;
+    expect(collapsedIdentityWidth).toBeGreaterThan(0);
+
+    await userEvent.click(restore);
+    await waitFor(() => {
+      expect(workbar).toBeVisible();
+      // Collapsing adds a titlebar toggle, so expanding may give space back.
+      expect(identity.getBoundingClientRect().width).toBeGreaterThanOrEqual(
+        collapsedIdentityWidth - 1,
+      );
+    });
 
     const share = canvas.getByRole('button', { name: '分享此任务' });
     await waitFor(() =>
