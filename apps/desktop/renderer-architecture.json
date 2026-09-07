@@ -71,6 +71,7 @@
     "src/renderer/locales/permission-center-copy.ts",
     "src/renderer/locales/plan-mode-copy.ts",
     "src/renderer/locales/session-collaboration-copy.ts",
+    "src/renderer/locales/session-local-copy.ts",
     "src/renderer/locales/settings-bot-copy.ts",
     "src/renderer/locales/settings-daily-review-copy.ts",
     "src/renderer/locales/settings-data-copy.ts",
@@ -333,6 +334,7 @@
           "./app-shell-copy.js": 1,
           "./attachment-preflight.js": 1,
           "./composer-attachments.js": 1,
+          "./features/conversation/index.js": 1,
           "./locales/shell-copy.js": 1,
           "./model-connection-errors.js": 1,
           "./session-workspace-errors.js": 1,
@@ -340,8 +342,8 @@
           "@maka/core/session-name": 1,
           "@maka/ui": 1
         },
-        "importSpecifiers": 14,
-        "nonTriviaTokens": 4086
+        "importSpecifiers": 13,
+        "nonTriviaTokens": 4076
       },
       "src/renderer/app-shell-chrome-actions.tsx": {
         "importDeclarations": 4,
@@ -713,7 +715,7 @@
           "react": 1
         },
         "importSpecifiers": 11,
-        "nonTriviaTokens": 1408
+        "nonTriviaTokens": 1399
       },
       "src/renderer/app-shell.tsx": {
         "importDeclarations": 79,
@@ -750,9 +752,9 @@
         "environmentCapabilities": {
           "document.querySelector": 1,
           "requestAnimationFrame": 1,
-          "window.clearTimeout": 4,
+          "window.clearTimeout": 1,
           "window.requestAnimationFrame": 4,
-          "window.setTimeout": 2
+          "window.setTimeout": 1
         },
         "hookCalls": {
           "useActiveExecutionBoundary": 1,
@@ -768,13 +770,13 @@
           "useAppShellTurnPresentation": 1,
           "useCommandPalette": 1,
           "useComposerAttachments": 1,
-          "useEffect": 12,
+          "useEffect": 10,
           "useKeyboardHelp": 1,
           "useLayoutEffect": 2,
           "useNewTaskChoice": 1,
           "useOnboardingSnapshot": 1,
           "usePlanModeState": 1,
-          "useRef": 21,
+          "useRef": 20,
           "useSessionCollaborationDialog": 1,
           "useSessionEventHealthPolling": 1,
           "useSessionNavigationReads": 1,
@@ -893,7 +895,7 @@
           "react": 1
         },
         "importSpecifiers": 121,
-        "nonTriviaTokens": 14995
+        "nonTriviaTokens": 14630
       },
       "src/renderer/use-app-shell-composer-quotes.ts": {
         "importDeclarations": 2,
@@ -1611,6 +1613,15 @@
         "dependencyPaths": {}
       },
       "src/renderer/locales/session-collaboration-copy.ts": {
+        "bridgePaths": {},
+        "environmentCapabilities": {},
+        "hookCalls": {},
+        "lifecycleMethods": {},
+        "unresolvedDependencies": 0,
+        "actionFactories": [],
+        "dependencyPaths": {}
+      },
+      "src/renderer/locales/session-local-copy.ts": {
         "bridgePaths": {},
         "environmentCapabilities": {},
         "hookCalls": {},
@@ -3070,6 +3081,7 @@
           "../assets/provider-brands/xiaomimimo.svg": 1,
           "../assets/provider-brands/zai.svg": 1,
           "../assets/provider-brands/zenmux.svg": 1,
+          "../features/connection-settings": 1,
           "simple-icons": 1
         }
       },
