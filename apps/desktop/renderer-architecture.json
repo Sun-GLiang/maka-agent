@@ -89,6 +89,7 @@
     "src/renderer/locales/shell-copy.ts",
     "src/renderer/locales/shell-remaining-copy.ts",
     "src/renderer/locales/task-readiness-copy.ts",
+    "src/renderer/locales/workhub-copy.ts",
     "src/renderer/main.tsx",
     "src/renderer/mcp-brand-contrast.ts",
     "src/renderer/mcp-brand-marks.tsx",
@@ -247,7 +248,6 @@
     "src/renderer/workhub-coordination-host-scope.ts",
     "src/renderer/workhub-coordination-lifecycle.ts",
     "src/renderer/workhub-coordination-port.ts",
-    "src/renderer/workhub-route-policy.ts",
     "src/renderer/workhub-send-lease.ts",
     "src/renderer/workhub-session-port.ts",
     "src/renderer/workhub-surface.tsx",
@@ -1783,6 +1783,15 @@
         "dependencyPaths": {}
       },
       "src/renderer/locales/task-readiness-copy.ts": {
+        "bridgePaths": {},
+        "environmentCapabilities": {},
+        "hookCalls": {},
+        "lifecycleMethods": {},
+        "unresolvedDependencies": 0,
+        "actionFactories": [],
+        "dependencyPaths": {}
+      },
+      "src/renderer/locales/workhub-copy.ts": {
         "bridgePaths": {},
         "environmentCapabilities": {},
         "hookCalls": {},
@@ -4565,7 +4574,7 @@
         "unresolvedDependencies": 0,
         "actionFactories": [],
         "dependencyPaths": {
-          "./workhub-route-policy.js": 1
+          "./features/workhub/index.js": 1
         }
       },
       "src/renderer/workhub-coordination-host-scope.ts": {
@@ -4601,17 +4610,6 @@
           "./desktop-transcript-range-store.js": 1,
           "./workhub-controller.js": 1,
           "@maka/core/session": 1
-        }
-      },
-      "src/renderer/workhub-route-policy.ts": {
-        "bridgePaths": {},
-        "environmentCapabilities": {},
-        "hookCalls": {},
-        "lifecycleMethods": {},
-        "unresolvedDependencies": 0,
-        "actionFactories": [],
-        "dependencyPaths": {
-          "./application/contracts/workhub-request-intent.js": 1
         }
       },
       "src/renderer/workhub-send-lease.ts": {
@@ -4656,6 +4654,8 @@
         "unresolvedDependencies": 0,
         "actionFactories": [],
         "dependencyPaths": {
+          "./features/workhub/index.js": 1,
+          "./locales/workhub-copy.js": 1,
           "./workhub-coordination-port.js": 1,
           "./workhub-send-lease.js": 1,
           "@astryxdesign/core": 1,
