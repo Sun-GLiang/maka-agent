@@ -520,37 +520,18 @@ type E2eTestFixtures = {
   gitReviewWindow: { page: Page; projectRoot: string };
   invocableSkillsWindow: Page;
   projectSidebarWindow: Page;
+  renameFocusWindow: { page: Page; app: ElectronApplication };
   parentRemovalWindow: Page;
   railRenderWindow: Page;
   promptRailWindow: Page;
-  threadSearchWindow: Page;
+  partialHistoryWindow: Page;
   requestHeaderRowWindow: Page;
   newTaskTargetWindow: Page;
   directoryReferenceWindow: { page: Page; folder: string };
   accessibilityNarrativeWindow: Page;
 };
 
-type E2eWorkerFixtures = {
-  isolatedDisplay: void;
-};
-
-export const test = base.extend<E2eTestFixtures, E2eWorkerFixtures>({
-  isolatedDisplay: [async ({}, use, workerInfo) => {
-    const base = process.env.MAKA_E2E_X_DISPLAY_BASE;
-    if (base === undefined) {
-      await use();
-      return;
-    }
-    if (!/^\d+$/.test(base)) throw new Error(`Invalid E2E X display base: ${base}`);
-    const previous = process.env.DISPLAY;
-    process.env.DISPLAY = `:${Number(base) + workerInfo.parallelIndex}`;
-    try {
-      await use();
-    } finally {
-      if (previous === undefined) delete process.env.DISPLAY;
-      else process.env.DISPLAY = previous;
-    }
-  }, { scope: 'worker', auto: true }],
+export const test = base.extend<E2eTestFixtures>({
   directoryReferenceWindow: async ({}, use) => {
     await withE2eWindow(
       { seed: true, readinessSelector: COMPOSER_INPUT, locale: 'zh-CN', showWindow: true },
@@ -620,6 +601,17 @@ export const test = base.extend<E2eTestFixtures, E2eWorkerFixtures>({
       locale: 'zh-CN',
     }, use);
   },
+  // Visible because the contract under test is native keyboard delivery into
+  // the focused renderer element, not Playwright's synthetic page keyboard.
+  renameFocusWindow: async ({}, use) => {
+    await withE2eWindow({
+      seed: false,
+      readinessSelector: '[data-maka-contract="search-modal"][open]',
+      e2eFixtureScenario: 'sidebar-search-modal-open',
+      locale: 'zh-CN',
+      showWindow: true,
+    }, async (page, { app }) => use({ page, app }));
+  },
   parentRemovalWindow: async ({}, use) => {
     await withE2eWindow(
       {
@@ -661,16 +653,15 @@ export const test = base.extend<E2eTestFixtures, E2eWorkerFixtures>({
       showWindow: true,
     }, use);
   },
-  // The same seeded transcript, on a window of its own. Search reads the Host
-  // through the bridge and renders nothing, so it needs neither the warm
-  // window's compositor nor its between-test reset — and taking it off the
-  // reused window is what retires the readiness gate's cross-test bleed (#4707).
-  threadSearchWindow: async ({}, use) => {
+  // A transcript larger than the bounded Desktop range. Clicking an unloaded
+  // prompt exercises the real load-around path and its partial-history UI.
+  partialHistoryWindow: async ({}, use) => {
     await withE2eWindow({
       seed: false,
       readinessSelector: '[data-turn-id]',
-      e2eFixtureScenario: 'chat-prompt-rail',
+      e2eFixtureScenario: 'chat-partial-history',
       locale: 'zh-CN',
+      showWindow: true,
     }, use);
   },
   // Settings → 模型, where `no-models` is the seeded openai-compatible relay —

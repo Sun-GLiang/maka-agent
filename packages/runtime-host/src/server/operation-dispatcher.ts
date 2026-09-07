@@ -83,6 +83,8 @@ export interface ConnectionContext {
   credentialId?: string;
   credentialClientInstanceId?: string;
   clientInstanceId?: string;
+  /** EOF/teardown latch; dispatched operations opt in to cancellation. */
+  inputClosedSignal?: AbortSignal;
   turnAdmissionAuthorization?: RootTurnAdmissionAuthorization;
   acquireResidency(): OperationResidency;
 }
