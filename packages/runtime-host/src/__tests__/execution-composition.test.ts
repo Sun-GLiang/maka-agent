@@ -31,7 +31,14 @@ import type {
   AgentGraphIntentClaim,
   AgentGraphIntentClaimRequest,
 } from '@maka/core/agent-graph-control';
+import type { HostedUserQuestionSettlement } from '@maka/core/backend-types';
 import type { ShellRunRecord } from '@maka/core/shell-run';
+import { deferred, waitFor as pollFor } from '@maka/core/test-only/async-primitives';
+import { RuntimeInteractionFailStopError } from '@maka/runtime/interaction-authority';
+import {
+  AgentGraphCoordinator,
+  agentGraphIdForRootSession,
+} from '@maka/runtime/stream-graph-coordinator';
 import {
   FAKE_ASK_USER_QUESTION_PROMPT,
   FAKE_HOLD_OPEN_PROMPT,
@@ -63,8 +70,10 @@ import {
   runtimeHostFilesystemWorkerRuntime,
   stopOwnedWorkHubRoot,
   stopReplacedWorkHubRoot,
+  type ExecutionRuntimeHostCompositionDependencies,
 } from '../server/execution-composition.js';
-import { waitFor as pollFor } from '@maka/core/test-only/async-primitives';
+import type { RuntimeHostCompositionContext } from '../server/host-kernel.js';
+import { runAfterCurrentSessionAdmission } from '../server/session-admission-gate.js';
 
 const require = createRequire(import.meta.url);
 const FAKE_CONNECTION_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -1468,6 +1477,183 @@ test('production composition validates graph stop before aborting a claimed chil
   });
 });
 
+test('interaction fail-stop drains graph operators after answer admission releases', {
+  timeout: 10_000,
+}, async (t) => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const failure = new Error('backend continuation apply failed');
+    let graph!: AgentGraphCoordinator;
+    const recoverGraph = AgentGraphCoordinator.prototype.recover;
+    t.mock.method(
+      AgentGraphCoordinator.prototype,
+      'recover',
+      async function (this: AgentGraphCoordinator) {
+        graph = this;
+        return recoverGraph.call(this);
+      },
+    );
+    const published = deferred<string>();
+    const stopped = deferred<void>();
+    const stopObservations: Array<{ outsideAdmission: boolean; error?: unknown }> = [];
+    let settlement: HostedUserQuestionSettlement | undefined;
+    let retained = false;
+    let retainedAtShutdownRequest = false;
+    let requestedInsideAdmission = false;
+    let composition!: Awaited<ReturnType<typeof createExecutionRuntimeHostComposition>>;
+    const captured = await createCapturedExecutionComposition(owner, {
+      context: {
+        retainUntilProcessExit: () => {
+          retained = true;
+        },
+        requestDrain: () => {
+          retainedAtShutdownRequest = retained;
+          let released = false;
+          runAfterCurrentSessionAdmission(() => {
+            released = true;
+            composition.beginDrain();
+          });
+          requestedInsideAdmission ||= !released;
+        },
+      },
+      dependencies: {
+        primaryBackendFactory: (backendContext) => {
+          const backend = new FakeBackend(backendContext);
+          const send = backend.send.bind(backend);
+          backend.send = async function* (input) {
+            const bridge = input.hostedInteraction;
+            assert.ok(bridge);
+            yield* send({
+              ...input,
+              hostedInteraction: {
+                ...bridge,
+                admitUserQuestionRequest: async (request) => {
+                  settlement = request.settlement;
+                  await bridge.admitUserQuestionRequest({
+                    ...request,
+                    settlement: {
+                      ...request.settlement,
+                      applyAnswer: async () => {
+                        throw failure;
+                      },
+                    },
+                  });
+                  published.resolve(request.request.requestId);
+                },
+              },
+            });
+          };
+          return backend;
+        },
+      },
+    });
+    composition = captured.composition;
+    const { manager } = captured;
+    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const client = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'interaction-drain-client',
+      principal: 'local_os_user' as const,
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const session = await manager.createSession({
+        cwd: root,
+        llmConnectionId: FAKE_CONNECTION_ID,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      await graph.toolsForSession(session.id);
+      const turnId = 'interaction-drain-turn';
+      const started = await composition.handlers['turn.start'](
+        {
+          sessionId: session.id,
+          turnId,
+          content: { text: FAKE_ASK_USER_QUESTION_PROMPT },
+        },
+        client,
+      );
+      assert.equal(started.ok, true);
+      const interactionId = await published.promise;
+      const run = (await stores.runtimeEventStore.listSessionInvocations(session.id)).find(
+        (run) => run.turnId === turnId,
+      );
+      assert.ok(run);
+      const operator = await manager.provisionAgentGraphOperator({
+        graphId: agentGraphIdForRootSession(session.id),
+        workId: `graph_work_${'a'.repeat(32)}`,
+        operatorId: `graph_operator_${'b'.repeat(32)}`,
+        agentId: LOCAL_READ_AGENT_DEFINITION.id,
+        source: {
+          sessionId: session.id,
+          turnId,
+          runId: run.runId,
+          toolCallId: 'provision-for-drain',
+        },
+        edges: [],
+        expectedScheduleRevision: 0,
+      });
+      const stopSession = manager.stopSession.bind(manager);
+      t.mock.method(
+        manager,
+        'stopSession',
+        async (sessionId: string, input: Parameters<SessionManager['stopSession']>[1]) => {
+          if (sessionId !== operator.header.id) return stopSession(sessionId, input);
+          let outsideAdmission = false;
+          runAfterCurrentSessionAdmission(() => {
+            outsideAdmission = true;
+          });
+          const observation: (typeof stopObservations)[number] = { outsideAdmission };
+          stopObservations.push(observation);
+          try {
+            await stopSession(sessionId, input);
+          } catch (error) {
+            observation.error = error;
+            throw error;
+          } finally {
+            stopped.resolve();
+          }
+        },
+      );
+      await assert.rejects(
+        composition.handlers['interaction.answer'](
+          {
+            sessionId: session.id,
+            interactionId,
+            answer: { kind: 'question', answers: ['邀请制', '本周', '是'] },
+          },
+          client,
+        ),
+        (error: unknown) =>
+          error instanceof RuntimeInteractionFailStopError && error.authorityFailure === failure,
+      );
+      await stopped.promise;
+      assert.equal(retained, true);
+      assert.equal(retainedAtShutdownRequest, true);
+      assert.equal(requestedInsideAdmission, true);
+      assert.deepEqual(stopObservations, [{ outsideAdmission: true }]);
+      await assert.rejects(
+        composition.handlers['interaction.answer'](
+          {
+            sessionId: session.id,
+            interactionId,
+            answer: { kind: 'question', answers: ['邀请制', '本周', '是'] },
+          },
+          client,
+        ),
+        RuntimeInteractionFailStopError,
+      );
+    } finally {
+      // Release the injected backend waiter; fail-stop intentionally cannot apply its continuation.
+      await settlement?.applyClosure('turn_stopped');
+      await assert.rejects(
+        composition.close(),
+        /Unable to close Runtime Host execution composition/,
+      );
+    }
+  });
+});
+
 function compositionContext(owner: InteractiveRootOwner) {
   return {
     owner,
@@ -1578,7 +1764,13 @@ async function seedLegacyFakeBackendSession(
   return sessionId;
 }
 
-async function createCapturedExecutionComposition(owner: InteractiveRootOwner): Promise<{
+async function createCapturedExecutionComposition(
+  owner: InteractiveRootOwner,
+  options: {
+    context?: Partial<RuntimeHostCompositionContext>;
+    dependencies?: ExecutionRuntimeHostCompositionDependencies;
+  } = {},
+): Promise<{
   composition: Awaited<ReturnType<typeof createExecutionRuntimeHostComposition>>;
   manager: SessionManager;
 }> {
@@ -1593,9 +1785,11 @@ async function createCapturedExecutionComposition(owner: InteractiveRootOwner): 
     // own; the deterministic one arrives through the same `primaryBackendFactory`
     // seam the Desktop E2E run uses.
     const composition = await createExecutionRuntimeHostComposition(
-      compositionContext(owner),
+      { ...compositionContext(owner), ...options.context },
       {},
-      { primaryBackendFactory: (backendContext) => new FakeBackend(backendContext) },
+      options.dependencies ?? {
+        primaryBackendFactory: (backendContext) => new FakeBackend(backendContext),
+      },
     );
     await composition.recover();
     if (!manager) throw new Error('Production execution composition did not construct Runtime');

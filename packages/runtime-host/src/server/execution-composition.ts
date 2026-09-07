@@ -675,7 +675,7 @@ export async function createExecutionRuntimeHostComposition(
         if (poisonFailure) return;
         poisonFailure = error;
         context.retainUntilProcessExit();
-        beginDrain();
+        // The kernel starts domain drain after the current Session admission releases.
         context.requestDrain();
       },
       onSandboxBoundarySettled: (sessionId) =>
@@ -1140,7 +1140,7 @@ export async function createExecutionRuntimeHostComposition(
         poisonFailure = error;
         runtimePolicyActivation.poison();
         context.retainUntilProcessExit();
-        beginDrain();
+        // The kernel starts domain drain after the current Session admission releases.
         context.requestDrain();
       },
       ...dependencies.oauthAuthorization,
