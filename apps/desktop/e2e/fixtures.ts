@@ -523,6 +523,7 @@ type E2eTestFixtures = {
   parentRemovalWindow: Page;
   railRenderWindow: Page;
   promptRailWindow: Page;
+  partialHistoryWindow: Page;
   requestHeaderRowWindow: Page;
   newTaskTargetWindow: Page;
   directoryReferenceWindow: { page: Page; folder: string };
@@ -636,6 +637,17 @@ export const test = base.extend<E2eTestFixtures>({
       // Every other fixture window names its locale; without one the renderer
       // takes the host's, so any test that reaches a control by its label
       // passes on a Chinese desktop and cannot find it on an English CI runner.
+      locale: 'zh-CN',
+      showWindow: true,
+    }, use);
+  },
+  // A transcript larger than the bounded Desktop range. Clicking an unloaded
+  // prompt exercises the real load-around path and its partial-history UI.
+  partialHistoryWindow: async ({}, use) => {
+    await withE2eWindow({
+      seed: false,
+      readinessSelector: '[data-turn-id]',
+      e2eFixtureScenario: 'chat-partial-history',
       locale: 'zh-CN',
       showWindow: true,
     }, use);

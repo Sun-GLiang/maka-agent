@@ -24,6 +24,7 @@ import {
   newestDurablePromptSequence,
   refreshTranscriptTurnLandmarks,
   restoreSessionTranscriptRange,
+  transcriptRestoreTarget,
 } from './controller/transcript-reading-position.js';
 
 export const transcriptReadingPosition = {
@@ -33,9 +34,13 @@ export const transcriptReadingPosition = {
   newestDurablePromptSequence,
   refreshLandmarks: refreshTranscriptTurnLandmarks,
   restoreRange: restoreSessionTranscriptRange,
+  restoreTarget: transcriptRestoreTarget,
 };
 
-export type { TranscriptHistoryGates } from './controller/transcript-reading-position.js';
+export type {
+  TranscriptHistoryGates,
+  TranscriptHistoryPending,
+} from './controller/transcript-reading-position.js';
 export {
   deriveTaskReadinessNotice,
   isTaskSubmissionHardBlocked,

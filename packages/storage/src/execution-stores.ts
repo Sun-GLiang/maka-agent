@@ -193,6 +193,11 @@ export interface ExecutionAgentRunReader {
     type: AgentRunProjectionKey,
   ): Promise<AgentRunEvent | null | undefined>;
   readRootTurnAdmission(sessionId: string, turnId: string): Promise<RootTurnAdmission | undefined>;
+  readRootTurnContinuationAdmission(
+    sessionId: string,
+    sourceTurnId: string,
+    sourceRunId: string,
+  ): Promise<RootTurnAdmission | undefined>;
   readRootTurnSourceMessageReceipt(
     sessionId: string,
     sourceMessageId: string,
@@ -408,6 +413,8 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
         run(() => sessionStore.listPendingSandboxBoundaryRequests(sessionId)),
       listSandboxBoundaryRestartClosures: (sessionId) =>
         run(() => sessionStore.listSandboxBoundaryRestartClosures(sessionId)),
+      hasExplicitSandboxBoundaryDenial: (identities) =>
+        run(() => sessionStore.hasExplicitSandboxBoundaryDenial(identities)),
       settleSandboxBoundaryRequest: (input) =>
         run(() => sessionStore.settleSandboxBoundaryRequest(input)),
       setExecutionBoundaryKind: (sessionId, boundaryKind, projection) =>
@@ -527,6 +534,10 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
         run(() => agentRunStore.admitRootTurn(input)),
       readRootTurnAdmission: (sessionId, turnId) =>
         run(() => agentRunStore.readRootTurnAdmission(sessionId, turnId)),
+      readRootTurnContinuationAdmission: (sessionId, sourceTurnId, sourceRunId) =>
+        run(() =>
+          agentRunStore.readRootTurnContinuationAdmission(sessionId, sourceTurnId, sourceRunId),
+        ),
       readRootTurnStartRejection: (sessionId, turnId) =>
         run(() => agentRunStore.readRootTurnStartRejection(sessionId, turnId)),
       commitRootTurnStartRejection: (input: CommitRootTurnStartRejectionInput) =>
@@ -663,6 +674,10 @@ async function openExecutionStoresForRead<K extends StorageRootKind, E extends o
         run(() => agentRunStore.readEventProjection(sessionId, type)),
       readRootTurnAdmission: (sessionId, turnId) =>
         run(() => agentRunStore.readRootTurnAdmission(sessionId, turnId)),
+      readRootTurnContinuationAdmission: (sessionId, sourceTurnId, sourceRunId) =>
+        run(() =>
+          agentRunStore.readRootTurnContinuationAdmission(sessionId, sourceTurnId, sourceRunId),
+        ),
       readRootTurnSourceMessageReceipt: (sessionId, sourceMessageId) =>
         run(() => agentRunStore.readRootTurnSourceMessageReceipt(sessionId, sourceMessageId)),
     },

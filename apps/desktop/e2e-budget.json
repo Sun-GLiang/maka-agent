@@ -17,6 +17,10 @@
       "tests": 1,
       "electron": "renderer reload is the whole contract: an explicit new task must not reopen history"
     },
+    "partial-history-notice.spec.ts": {
+      "tests": 1,
+      "electron": "bounded paging crosses renderer, preload and Host transcript storage; the return-to-tail assertion also uses a real pointer hit-test"
+    },
     "proxy-password-editing.spec.ts": {
       "tests": 1,
       "electron": "the password never reaches the renderer; only the Host can report passwordConfigured and authenticate offline"
@@ -31,7 +35,7 @@
     },
     "session-workbar.spec.ts": {
       "tests": 6,
-      "electron": "workbar visibility persists across Session switches and reloads, Git changes re-read on window focus, terminal PTY ownership across Sessions, Side Chat's fork lifecycle, and a first send that has to reach the Host; the composer-usage test is renderer-only and rides along on those windows until app-shell.tsx's composer-to-workbar wiring has a story host"
+      "electron": "Git changes re-read on window focus, terminal PTY ownership across Sessions, Side Chat's fork lifecycle, a first send that has to reach the Host, and per-Session collapse persisted across a renderer reload; the composer-usage test is renderer-only and rides along on those windows until app-shell.tsx's composer-to-workbar wiring has a story host"
     },
     "settings.spec.ts": {
       "tests": 4,
