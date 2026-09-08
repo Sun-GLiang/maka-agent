@@ -754,6 +754,32 @@ describe('Host Runtime Resource coordinator', () => {
   });
 });
 
+test('rejects a queued resource start when drain detaches from the active Session admission', async () => {
+  const harness = createHarness();
+  let release!: () => void;
+  let entered!: () => void;
+  const blocker = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const active = harness.sessionAdmission.run(SESSION_ID, async () => {
+    entered();
+    await blocker;
+    // Invoke from inside the active async context after the resource launch is queued.
+    harness.sessionAdmission.detach(() => harness.coordinator.beginDrain());
+  });
+  await started;
+  const resource = harness.coordinator.runBackgroundBash(backgroundInput());
+  const observed = assert.rejects(resource, /Runtime resources are draining/);
+  release();
+  await Promise.all([active, observed]);
+  assert.equal(harness.lastBackgroundInput, undefined);
+  assert.equal(harness.terminateCount, 1);
+  assert.equal(harness.activeResidencies, 0);
+});
+
 function createHarness(
   options: Partial<
     Pick<

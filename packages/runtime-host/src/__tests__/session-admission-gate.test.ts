@@ -20,11 +20,7 @@
 import { deferred } from '@maka/core/test-only/async-primitives';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import {
-  runAfterCurrentSessionAdmission,
-  SessionAdmissionGate,
-  type SessionAdmissionLease,
-} from '../server/session-admission-gate.js';
+import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 
 test('serializes operations for one Session', async () => {
   const gate = new SessionAdmissionGate();
@@ -153,71 +149,6 @@ test('rejects accidental admission re-entry instead of deadlocking', async () =>
   });
 });
 
-test('runs outside-admission work synchronously when no admission is active', () => {
-  let ran = false;
-
-  runAfterCurrentSessionAdmission(() => {
-    ran = true;
-  });
-
-  assert.equal(ran, true);
-});
-
-test('runs outside-admission work after release and before the next queued admission', async () => {
-  const gate = new SessionAdmissionGate();
-  const entered = deferred();
-  const release = deferred();
-  const order: string[] = [];
-
-  const active = gate.run('session', async () => {
-    order.push('active:start');
-    runAfterCurrentSessionAdmission(() => {
-      order.push('after-release');
-    });
-    entered.resolve();
-    await release.promise;
-    order.push('active:end');
-  });
-  await entered.promise;
-  const queued = gate.run('session', () => {
-    order.push('queued');
-  });
-
-  assert.deepEqual(order, ['active:start']);
-  release.resolve();
-  await Promise.all([active, queued]);
-  assert.deepEqual(order, ['active:start', 'active:end', 'after-release', 'queued']);
-});
-
-test('tracks admitted work started outside the owning async chain until release', async () => {
-  const gate = new SessionAdmissionGate();
-  const leaseReady = deferred<SessionAdmissionLease>();
-  const release = deferred();
-  const order: string[] = [];
-
-  const active = gate.run('session', async (lease) => {
-    order.push('active:start');
-    leaseReady.resolve(lease);
-    await release.promise;
-    order.push('active:end');
-  });
-  const lease = await leaseReady.promise;
-  await gate.runAdmitted('session', lease, () => {
-    order.push('admitted');
-    runAfterCurrentSessionAdmission(() => {
-      order.push('after-release');
-    });
-  });
-  const queued = gate.run('session', () => {
-    order.push('queued');
-  });
-
-  assert.deepEqual(order, ['active:start', 'admitted']);
-  release.resolve();
-  await Promise.all([active, queued]);
-  assert.deepEqual(order, ['active:start', 'admitted', 'active:end', 'after-release', 'queued']);
-});
-
 test('work detached from an admission takes admissions of its own', async () => {
   const gate = new SessionAdmissionGate();
   const release = deferred();
@@ -243,65 +174,31 @@ test('work detached from an admission takes admissions of its own', async () => 
   assert.deepEqual(order, ['active:start', 'active:end', 'detached:admitted']);
 });
 
-test('treats detached work as outside the current admission', async () => {
+test('detached stop waits for its Session admission to release', async () => {
   const gate = new SessionAdmissionGate();
+  const entered = deferred();
+  const release = deferred();
   const order: string[] = [];
-
-  await gate.run('session', async () => {
-    order.push('active:start');
-    await gate.detach(async () => {
-      runAfterCurrentSessionAdmission(() => {
-        order.push('detached:outside');
-      });
-    });
-    order.push('active:end');
+  let stop!: Promise<void>;
+  const active = gate.run('session', async () => {
+    order.push('active');
+    stop = gate.detach(() =>
+      gate.run('session', () => {
+        order.push('stop');
+      }),
+    );
+    entered.resolve();
+    await release.promise;
+    order.push('released');
   });
-
-  assert.deepEqual(order, ['active:start', 'detached:outside', 'active:end']);
-});
-
-for (const firstToRelease of ['outer', 'inner'] as const) {
-  test(`drain waits for overlapping detached admissions when ${firstToRelease} releases first`, async () => {
-    const gate = new SessionAdmissionGate();
-    const entered = deferred();
-    const releaseOuter = deferred();
-    const releaseInner = deferred();
-    const order: string[] = [];
-    let inner!: Promise<void>;
-    let stop!: Promise<void>;
-    const outer = gate.run('outer', async () => {
-      inner = gate.enqueueDetached('inner', async () => {
-        runAfterCurrentSessionAdmission(() => {
-          order.push('drain');
-          stop = gate.run('operator', () => {
-            order.push('stop');
-          });
-        });
-        entered.resolve();
-        await releaseInner.promise;
-        order.push('inner');
-      });
-      await releaseOuter.promise;
-      order.push('outer');
-    });
-    await entered.promise;
-    if (firstToRelease === 'outer') {
-      releaseOuter.resolve();
-      await outer;
-    } else {
-      releaseInner.resolve();
-      await inner;
-    }
-    assert.deepEqual(order, [firstToRelease]);
-    releaseOuter.resolve();
-    releaseInner.resolve();
-    await Promise.all([outer, inner]);
+  await entered.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  try {
+    assert.deepEqual(order, ['active']);
+  } finally {
+    release.resolve();
+    await active;
     await stop;
-    assert.deepEqual(order, [
-      firstToRelease,
-      firstToRelease === 'outer' ? 'inner' : 'outer',
-      'drain',
-      'stop',
-    ]);
-  });
-}
+  }
+  assert.deepEqual(order, ['active', 'released', 'stop']);
+});

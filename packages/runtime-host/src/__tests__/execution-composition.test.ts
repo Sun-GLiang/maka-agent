@@ -39,7 +39,6 @@ import type {
 import type { HostedUserQuestionSettlement } from '@maka/core/backend-types';
 import type { ShellRunRecord } from '@maka/core/shell-run';
 import { waitFor as pollFor } from '@maka/core/test-only/async-primitives';
-import { RuntimeInteractionFailStopError } from '@maka/runtime/interaction-authority';
 import {
   AgentGraphCoordinator,
   agentGraphIdForRootSession,
@@ -76,8 +75,10 @@ import {
   stopOwnedWorkHubRoot,
   stopReplacedWorkHubRoot,
 } from '../server/execution-composition.js';
-import type { RuntimeHostCompositionContext } from '../server/host-kernel.js';
-import { runAfterCurrentSessionAdmission } from '../server/session-admission-gate.js';
+import { RuntimeHostKernel, type RuntimeHostCompositionContext } from '../server/host-kernel.js';
+import { defineInteractiveRuntimeHostComposition } from '../server/host-composition.js';
+import { connectRuntimeHost, RuntimeHostOperationError } from '../client/index.js';
+import { RUNTIME_HOST_PROTOCOL_VERSION } from '../protocol/index.js';
 
 const require = createRequire(import.meta.url);
 const FAKE_CONNECTION_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -1992,7 +1993,7 @@ test('production composition validates graph stop before aborting a claimed chil
   });
 });
 
-test('interaction fail-stop drains graph operators after answer admission releases', {
+test('interaction fail-stop stops graph operators through the kernel and releases ownership', {
   timeout: 10_000,
 }, async (t) => {
   await withCompositionRoot(async ({ root, owner }) => {
@@ -2009,65 +2010,72 @@ test('interaction fail-stop drains graph operators after answer admission releas
     );
     const published = deferred<string>();
     const stopped = deferred<void>();
-    const stopObservations: Array<{ outsideAdmission: boolean; error?: unknown }> = [];
+    const stopObservations: Array<{ error?: unknown }> = [];
     let settlement: HostedUserQuestionSettlement | undefined;
     let retained = false;
     let retainedAtShutdownRequest = false;
-    let requestedInsideAdmission = false;
-    let composition!: Awaited<ReturnType<typeof createExecutionRuntimeHostComposition>>;
-    const captured = await createCapturedExecutionComposition(owner, {
-      context: {
-        retainUntilProcessExit: () => {
-          retained = true;
-        },
-        requestDrain: () => {
-          retainedAtShutdownRequest = retained;
-          let released = false;
-          runAfterCurrentSessionAdmission(() => {
-            released = true;
-            composition.beginDrain();
-          });
-          requestedInsideAdmission ||= !released;
-        },
-      },
-      primaryBackendFactory: (backendContext) => {
-        const backend = new FakeBackend(backendContext);
-        const send = backend.send.bind(backend);
-        backend.send = async function* (input) {
-          const bridge = input.hostedInteraction;
-          assert.ok(bridge);
-          yield* send({
-            ...input,
-            hostedInteraction: {
-              ...bridge,
-              admitUserQuestionRequest: async (request) => {
-                settlement = request.settlement;
-                await bridge.admitUserQuestionRequest({
-                  ...request,
-                  settlement: {
-                    ...request.settlement,
-                    applyAnswer: async () => {
-                      throw failure;
-                    },
-                  },
-                });
-                published.resolve(request.request.requestId);
-              },
+    let captured!: Awaited<ReturnType<typeof createCapturedExecutionComposition>>;
+    const host = await RuntimeHostKernel.start({
+      owner,
+      idleGraceMs: 60_000,
+      shutdownGraceMs: 5_000,
+      composition: defineInteractiveRuntimeHostComposition(async (kernelContext) => {
+        captured = await createCapturedExecutionComposition(owner, {
+          context: {
+            ...kernelContext,
+            retainUntilProcessExit: () => {
+              retained = true;
+              kernelContext.retainUntilProcessExit();
             },
-          });
-        };
-        return backend;
-      },
+            requestDrain: () => {
+              retainedAtShutdownRequest = retained;
+              kernelContext.requestDrain();
+            },
+          },
+          primaryBackendFactory: (backendContext) => {
+            const backend = new FakeBackend(backendContext);
+            const send = backend.send.bind(backend);
+            backend.send = async function* (input) {
+              const bridge = input.hostedInteraction;
+              assert.ok(bridge);
+              yield* send({
+                ...input,
+                hostedInteraction: {
+                  ...bridge,
+                  admitUserQuestionRequest: async (request) => {
+                    settlement = request.settlement;
+                    await bridge.admitUserQuestionRequest({
+                      ...request,
+                      settlement: {
+                        ...request.settlement,
+                        applyAnswer: async () => {
+                          throw failure;
+                        },
+                      },
+                    });
+                    published.resolve(request.request.requestId);
+                  },
+                },
+              });
+            };
+            return backend;
+          },
+        });
+        return captured.composition;
+      }),
     });
-    composition = captured.composition;
+    const closed = host.closed.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    const connected = await connectRuntimeHost({
+      rootPath: root,
+      protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+    });
+    assert.equal(connected.kind, 'connected');
+    if (connected.kind !== 'connected') throw new Error('kernel connection unavailable');
     const { manager } = captured;
     const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
-    const client = {
-      hostEpoch: 'execution-composition-test',
-      connectionId: 'interaction-drain-client',
-      principal: 'local_os_user' as const,
-      acquireResidency: () => ({ release() {} }),
-    };
     try {
       const session = await manager.createSession({
         cwd: root,
@@ -2078,13 +2086,20 @@ test('interaction fail-stop drains graph operators after answer admission releas
       });
       await graph.toolsForSession(session.id);
       const turnId = 'interaction-drain-turn';
-      const started = await composition.handlers['turn.start'](
+      // Prepare the held-open backend with a fixture residency. The answer below exercises
+      // kernel drain over UDS; poisoned root-execution settlement is a separate close path.
+      const started = await captured.composition.handlers['turn.start'](
         {
           sessionId: session.id,
           turnId,
           content: { text: FAKE_ASK_USER_QUESTION_PROMPT },
         },
-        client,
+        {
+          hostEpoch: host.hostEpoch,
+          connectionId: 'interaction-drain-fixture',
+          principal: 'local_os_user',
+          acquireResidency: () => ({ release() {} }),
+        },
       );
       assert.equal(started.ok, true);
       const interactionId = await published.promise;
@@ -2112,11 +2127,7 @@ test('interaction fail-stop drains graph operators after answer admission releas
         'stopSession',
         async (sessionId: string, input: Parameters<SessionManager['stopSession']>[1]) => {
           if (sessionId !== operator.header.id) return stopSession(sessionId, input);
-          let outsideAdmission = false;
-          runAfterCurrentSessionAdmission(() => {
-            outsideAdmission = true;
-          });
-          const observation: (typeof stopObservations)[number] = { outsideAdmission };
+          const observation: (typeof stopObservations)[number] = {};
           stopObservations.push(observation);
           try {
             await stopSession(sessionId, input);
@@ -2129,40 +2140,42 @@ test('interaction fail-stop drains graph operators after answer admission releas
         },
       );
       await assert.rejects(
-        composition.handlers['interaction.answer'](
-          {
-            sessionId: session.id,
-            interactionId,
-            answer: { kind: 'question', answers: ['邀请制', '本周', '是'] },
-          },
-          client,
-        ),
+        connected.connection.request('interaction.answer', {
+          sessionId: session.id,
+          interactionId,
+          answer: { kind: 'question', answers: ['邀请制', '本周', '是'] },
+        }),
         (error: unknown) =>
-          error instanceof RuntimeInteractionFailStopError && error.authorityFailure === failure,
+          error instanceof RuntimeHostOperationError && error.code === 'internal_failure',
       );
       await stopped.promise;
       assert.equal(retained, true);
       assert.equal(retainedAtShutdownRequest, true);
-      assert.equal(requestedInsideAdmission, true);
-      assert.deepEqual(stopObservations, [{ outsideAdmission: true }]);
-      await assert.rejects(
-        composition.handlers['interaction.answer'](
-          {
-            sessionId: session.id,
-            interactionId,
-            answer: { kind: 'question', answers: ['邀请制', '本周', '是'] },
-          },
-          client,
-        ),
-        RuntimeInteractionFailStopError,
-      );
+      assert.deepEqual(stopObservations, [{}]);
     } finally {
       // Release the injected backend waiter; fail-stop intentionally cannot apply its continuation.
       await settlement?.applyClosure('turn_stopped');
-      await assert.rejects(
-        composition.close(),
-        /Unable to close Runtime Host execution composition/,
+      await connected.connection.close();
+      void host.close().catch(() => undefined);
+      const closeError = await closed;
+      assert.ok(
+        closeError instanceof AggregateError,
+        `Unexpected shutdown result: ${String(closeError)}`,
       );
+      const errorTree = (error: unknown): string =>
+        error instanceof AggregateError
+          ? [error.message, ...error.errors.map(errorTree)].join('\n')
+          : String(error);
+      // Poisoned compositions can aggregate other close errors; operator stop must not reenter admission.
+      const details = errorTree(closeError);
+      assert.match(details, /Interaction coordinator entered fail-stop/);
+      assert.doesNotMatch(
+        details,
+        /Cannot enter Session admission|termination required|shutdown deadline/i,
+      );
+      const replacementOwner = await tryAcquireInteractiveRootOwner(owner.capability);
+      assert.ok(replacementOwner, 'kernel released exclusive root ownership');
+      await replacementOwner.close();
     }
   });
 });
