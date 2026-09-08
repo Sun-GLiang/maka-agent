@@ -58,7 +58,6 @@ export async function runMakaAcpStdioServer(
         throw new Error('ACP requires a reconnecting Runtime Host connection');
       }
       return {
-        hostEpoch: connection.hostEpoch,
         request: connection.request.bind(connection) as RuntimeHostConnection['request'],
         openSessionSubscription: connection.openSessionSubscription.bind(connection),
         openSessionSubscriptionOnce: connection.openSessionSubscriptionOnce.bind(connection),

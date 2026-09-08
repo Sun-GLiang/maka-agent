@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -100,9 +101,11 @@ export async function mapAcpPromptContent(
 }
 
 async function readPromptFile(path: string): Promise<OpenedPromptFile> {
-  const handle = await open(path, 'r');
+  // A FIFO must not wait for a writer before we can reject it.
+  const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const stats = await handle.stat();
+    if (!stats.isFile()) throw invalidPrompt('prompt', 'resource_not_file');
     const prefix = Buffer.alloc(Math.min(PDF_HEADER_SCAN_BYTES, stats.size));
     const { bytesRead } = await handle.read(prefix, 0, prefix.length, 0);
     return {

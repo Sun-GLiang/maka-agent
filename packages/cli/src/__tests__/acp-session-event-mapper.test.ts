@@ -44,29 +44,23 @@ describe('ACP Session event mapper', () => {
     );
   });
 
-  test('fills a completion suffix and assigns deterministic IDs to non-prefix revisions', async () => {
-    const notifications: SessionNotification[] = [];
-    const mapper = eventMapper(notifications);
-
-    await mapper.accept(event({ type: 'text_delta', messageId: 'answer', text: 'hel' }));
-    await mapper.accept(event({ type: 'text_complete', messageId: 'answer', text: 'hello' }));
-    await mapper.accept(event({ type: 'text_complete', messageId: 'answer', text: 'hullo' }));
-    await mapper.accept(event({ type: 'text_complete', messageId: 'answer', text: 'hullo' }));
-    await mapper.accept(event({ type: 'text_complete', messageId: 'answer', text: 'hello' }));
-    await mapper.accept(event({ type: 'text_complete', messageId: 'answer', text: 'hullo' }));
-
-    assert.equal(notifications.length, 5);
-    assert.deepEqual(notifications[1]?.update, chunk('agent_message_chunk', 'answer', 'lo'));
-    const replacement = notifications[2]?.update;
-    assert.equal(replacement?.sessionUpdate, 'agent_message_chunk');
-    if (replacement?.sessionUpdate !== 'agent_message_chunk') return;
-    assert.equal(replacement.content.type, 'text');
-    assert.equal(replacement.content.type === 'text' && replacement.content.text, 'hullo');
-    assert.match(replacement.messageId ?? '', /^answer:revision:[0-9a-f]{16}$/u);
-    const repeatedRevision = notifications[4]?.update;
-    assert.equal(repeatedRevision?.sessionUpdate, 'agent_message_chunk');
-    if (repeatedRevision?.sessionUpdate !== 'agent_message_chunk') return;
-    assert.notEqual(repeatedRevision.messageId, replacement.messageId);
+  test('rejects non-prefix revisions instead of reporting a second message or success', async () => {
+    for (const kind of ['text', 'thinking'] as const) {
+      for (const text of ['new', '']) {
+        const notifications: SessionNotification[] = [];
+        const mapper = eventMapper(notifications);
+        await mapper.accept(event({ type: `${kind}_delta`, messageId: 'answer', text: 'old' }));
+        await assert.rejects(
+          mapper.accept(event({ type: `${kind}_complete`, messageId: 'answer', text })),
+          { data: { source: 'adapter', code: 'unsupported_stream_revision' } },
+        );
+        await assert.rejects(mapper.accept(event({ type: 'complete', stopReason: 'end_turn' })));
+        assert.deepEqual(
+          notifications.map(({ update }) => update),
+          [chunk(kind === 'text' ? 'agent_message_chunk' : 'agent_thought_chunk', 'answer', 'old')],
+        );
+      }
+    }
   });
 
   test('serializes canonical transcript replacement with live notifications', async () => {
@@ -92,7 +86,7 @@ describe('ACP Session event mapper', () => {
         id: 'answer',
         turnId: 'turn-1',
         ts: 2,
-        text: 'new',
+        text: 'older',
         modelId: 'model',
       },
     ]);
@@ -103,8 +97,29 @@ describe('ACP Session event mapper', () => {
     const update = notifications[1]?.update;
     assert.equal(update?.sessionUpdate, 'agent_message_chunk');
     if (update?.sessionUpdate !== 'agent_message_chunk') return;
-    assert.equal(update.content.type === 'text' && update.content.text, 'new');
-    assert.match(update.messageId ?? '', /^answer:revision:[0-9a-f]{16}$/u);
+    assert.equal(update.content.type === 'text' && update.content.text, 'er');
+    assert.equal(update.messageId, 'answer');
+  });
+
+  test('rejects a canonical message that clears already delivered thinking', async () => {
+    const notifications: SessionNotification[] = [];
+    const mapper = eventMapper(notifications);
+    await mapper.accept(event({ type: 'thinking_delta', messageId: 'answer', text: 'old' }));
+    await assert.rejects(
+      mapper.replaceTranscript('turn-1', [
+        {
+          type: 'assistant',
+          id: 'answer',
+          turnId: 'turn-1',
+          ts: 2,
+          text: 'answer',
+          modelId: 'model',
+        },
+      ]),
+      { data: { source: 'adapter', code: 'unsupported_stream_revision' } },
+    );
+    await assert.rejects(mapper.accept(event({ type: 'complete', stopReason: 'end_turn' })));
+    assert.equal(notifications.length, 1);
   });
 
   test('ends on authoritative abort and nonrecoverable error but not recoverable errors', async () => {

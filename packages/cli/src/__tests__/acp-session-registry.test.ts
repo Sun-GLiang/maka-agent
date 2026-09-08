@@ -656,6 +656,153 @@ describe('ACP Session registry', () => {
     await registry.dispose();
   });
 
+  for (const action of ['cancel', 'close', 'dispose'] as const) {
+    test(`${action} stops an externally started root on an idle attachment`, async () => {
+      const sessionId = 'external-root';
+      const attachment = new FakeAcpSessionAttachment(sessionId);
+      const calls: Array<{ operation: string; input: unknown }> = [];
+      const registry = new AcpSessionRegistry({
+        connect: async () =>
+          fakeConnection({
+            request: async (operation, input) => {
+              calls.push({ operation, input });
+              if (operation === 'session.create') return catalogSession(sessionId);
+              if (operation === 'turn.start') {
+                attachment.emit(
+                  'local',
+                  sessionEvent('local', { type: 'complete', stopReason: 'end_turn' }),
+                );
+                return { kind: 'started' };
+              }
+              if (operation === 'turn.stop') {
+                assert.equal(attachment.closeCalls, 0);
+                return {};
+              }
+              throw new Error(operation);
+            },
+          }),
+        newSessionId: () => sessionId,
+        newTurnId: () => 'local',
+        openSessionAttachment: async (input) => attachment.bind(input),
+      });
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.prompt(
+        { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
+        promptContext([]),
+      );
+      attachment.setRoot({
+        sessionId,
+        turnId: 'external',
+        runId: 'external-run',
+        status: 'running',
+      });
+      try {
+        if (action === 'dispose') await registry.dispose();
+        else await registry[action]({ sessionId });
+        assert.deepEqual(
+          calls.filter(({ operation }) => operation === 'turn.stop'),
+          [
+            {
+              operation: 'turn.stop',
+              input: { sessionId, turnId: 'external', runId: 'external-run' },
+            },
+          ],
+        );
+      } finally {
+        attachment.setRoot(null);
+        await registry.dispose();
+      }
+    });
+  }
+
+  for (const source of ['complete', 'recovery'] as const) {
+    test(`fails a ${source} rewrite, stops its exact root, and permits another prompt`, async () => {
+      const sessionId = 'rewrite';
+      const attachment = new FakeAcpSessionAttachment(sessionId);
+      const notifications: SessionNotification[] = [];
+      const stops: unknown[] = [];
+      let turnNumber = 0;
+      const registry = new AcpSessionRegistry({
+        connect: async () =>
+          fakeConnection({
+            request: async (operation, input) => {
+              if (operation === 'session.create') return catalogSession(sessionId);
+              if (operation === 'turn.start') {
+                const { turnId } = input as { turnId: string };
+                attachment.setRoot({
+                  sessionId,
+                  turnId,
+                  runId: `run-${turnId}`,
+                  status: 'running',
+                });
+                if (turnId === 'turn-1') {
+                  attachment.emit(
+                    turnId,
+                    sessionEvent(turnId, { type: 'text_delta', messageId: 'answer', text: 'old' }),
+                  );
+                } else {
+                  attachment.emit(
+                    turnId,
+                    sessionEvent(turnId, { type: 'complete', stopReason: 'end_turn' }),
+                  );
+                }
+                return { kind: 'started' };
+              }
+              if (operation === 'turn.stop') {
+                stops.push(input);
+                return {};
+              }
+              throw new Error(operation);
+            },
+          }),
+        newSessionId: () => sessionId,
+        newTurnId: () => `turn-${++turnNumber}`,
+        openSessionAttachment: async (input) => attachment.bind(input),
+      });
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      const prompt = registry.prompt(
+        { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
+        promptContext(notifications),
+      );
+      const rejected = assert.rejects(prompt, {
+        data: { source: 'adapter', code: 'unsupported_stream_revision' },
+      });
+      await waitFor(() => notifications.length === 1);
+      if (source === 'complete') {
+        attachment.emit(
+          'turn-1',
+          sessionEvent('turn-1', { type: 'text_complete', messageId: 'answer', text: '' }),
+        );
+      } else {
+        attachment.replaceTranscript('turn-1', [
+          {
+            type: 'assistant',
+            id: 'answer',
+            turnId: 'turn-1',
+            ts: 1,
+            text: 'new',
+            modelId: 'default',
+          },
+        ]);
+      }
+      try {
+        await rejected;
+        assert.deepEqual(stops, [{ sessionId, turnId: 'turn-1', runId: 'run-turn-1' }]);
+        assert.equal(notifications.length, 1);
+        assert.deepEqual(
+          await registry.prompt(
+            { sessionId, prompt: [{ type: 'text', text: 'next' }] },
+            promptContext([]),
+          ),
+          { stopReason: 'end_turn' },
+        );
+      } finally {
+        attachment.setRoot(null);
+        await registry.dispose();
+      }
+    });
+  }
+
   test('retires a failed attachment so the next prompt opens a fresh one', async () => {
     const first = new FakeAcpSessionAttachment('session-reattach');
     const second = new FakeAcpSessionAttachment('session-reattach');
@@ -2187,6 +2334,10 @@ class FakeAcpSessionAttachment implements AcpSessionAttachment {
       rootTurn,
     };
     this.#callbacks?.onSnapshotChanged(this.snapshot);
+  }
+
+  replaceTranscript(turnId: string, messages: readonly StoredMessage[]): void {
+    this.#callbacks?.onTranscriptReplaced(turnId, messages);
   }
 
   setMetadataRevision(metadataRevision: number): void {

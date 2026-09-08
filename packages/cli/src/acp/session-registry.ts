@@ -91,7 +91,7 @@ type AcpSessionRegistryLifecycleOperation =
 export interface AcpSessionRegistryConnection
   extends Pick<
     RuntimeHostReconnectingConnection,
-    'hostEpoch' | 'request' | 'openSessionSubscription' | 'openSessionSubscriptionOnce' | 'close'
+    'request' | 'openSessionSubscription' | 'openSessionSubscriptionOnce' | 'close'
   > {}
 
 export interface AcpSessionAttachment {
@@ -220,8 +220,7 @@ export class AcpSessionRegistry {
 
   async cancel(params: CancelNotification): Promise<void> {
     if (this.#closing) return;
-    const active = [...(this.#activePrompts.get(params.sessionId) ?? [])];
-    await Promise.allSettled(active.map((prompt) => this.#cancelPrompt(prompt)));
+    await this.#cancelSession(params.sessionId);
   }
 
   async close(params: CloseSessionRequest): Promise<CloseSessionResponse> {
@@ -335,13 +334,17 @@ export class AcpSessionRegistry {
 
       if (active.cancelled) {
         await active.stopTask;
-        void observation.catch(() => undefined);
         return { stopReason: await active.mapper.cancel() };
       }
       const stopReason = await observation;
       const configuration = this.#attachmentConfigurations.get(params.sessionId);
       if (configuration) await Promise.race([configuration.tail, configuration.retired]);
       return { stopReason };
+    } catch (error) {
+      // A failed projection must not leave the corresponding Host Turn running.
+      active.stopTask ??= this.#stopPromptWhenObservable(active);
+      await active.stopTask.catch(() => undefined);
+      throw error;
     } finally {
       context.signal.removeEventListener('abort', onAbort);
       active.finished = true;
@@ -357,23 +360,47 @@ export class AcpSessionRegistry {
     try {
       for await (const event of events) {
         const terminal = await active.mapper.accept(event);
-        if (terminal) {
-          active.observationSettled = true;
-          this.#wake(active);
-          return terminal;
-        }
+        if (terminal) return terminal;
       }
       if (active.cancelled) return active.mapper.cancel();
       throw new Error('Runtime Host Turn observation ended without a terminal event');
     } catch (error) {
-      active.observationSettled = true;
-      this.#wake(active);
       if (active.cancelled) return active.mapper.cancel();
       throw error;
     } finally {
       active.observationSettled = true;
       this.#wake(active);
     }
+  }
+
+  #cancelSession(sessionId: string): Promise<PromiseSettledResult<void>[]> {
+    const active = [...(this.#activePrompts.get(sessionId) ?? [])];
+    const cancellations = active.map((prompt) => this.#cancelPrompt(prompt));
+    const attachment = this.#attachments.get(sessionId);
+    if (attachment) {
+      cancellations.push(
+        attachment.then(
+          async (opened) => {
+            const root = opened.snapshot.rootTurn;
+            // Local prompts already latch cancellation across pending turn.start.
+            // An idle attachment may also observe a Turn started by another client.
+            if (
+              root &&
+              !isRuntimeHostTerminalTurn(root) &&
+              !active.some((prompt) => prompt.turnId === root.turnId)
+            ) {
+              await this.#connection?.request('turn.stop', {
+                sessionId: root.sessionId,
+                turnId: root.turnId,
+                runId: root.runId,
+              });
+            }
+          },
+          () => undefined,
+        ),
+      );
+    }
+    return Promise.allSettled(cancellations);
   }
 
   async #cancelPrompt(active: ActiveAcpPrompt): Promise<void> {
@@ -449,7 +476,9 @@ export class AcpSessionRegistry {
       onTranscriptReplaced: (turnId, messages) => {
         for (const active of this.#activePrompts.get(sessionId) ?? []) {
           if (active.turnId === turnId) {
-            void active.mapper.replaceTranscript(turnId, messages).catch(() => undefined);
+            void active.mapper.replaceTranscript(turnId, messages).catch((error: unknown) => {
+              active.attachment?.failTurn(turnId, error);
+            });
           }
         }
       },
@@ -508,10 +537,7 @@ export class AcpSessionRegistry {
   }
 
   async #closeSession(sessionId: string, delivery?: Promise<void>): Promise<CloseSessionResponse> {
-    const active = [...(this.#activePrompts.get(sessionId) ?? [])];
-    const cancellation = await Promise.allSettled(
-      active.map((prompt) => this.#cancelPrompt(prompt)),
-    );
+    const cancellation = await this.#cancelSession(sessionId);
     const attachmentTask = this.#attachments.get(sessionId);
     this.#attachments.delete(sessionId);
     let closeError: unknown;
@@ -725,8 +751,8 @@ export class AcpSessionRegistry {
   }
 
   async #dispose(): Promise<void> {
-    const active = [...this.#activePrompts.values()].flatMap((prompts) => [...prompts]);
-    const cancellations = active.map((prompt) => this.#cancelPrompt(prompt));
+    const sessionIds = new Set([...this.#activePrompts.keys(), ...this.#attachments.keys()]);
+    const cancellations = [...sessionIds].map((sessionId) => this.#cancelSession(sessionId));
     const attachments = [...this.#attachments.values()];
     this.#attachments.clear();
     const configurations = [...this.#attachmentConfigurations.values()];

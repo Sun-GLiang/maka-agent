@@ -17,18 +17,17 @@
  * under the License.
  */
 
-import { createHash } from 'node:crypto';
 import { foldRuntimeHostAssistantDelta } from '@maka/runtime-host/adapter';
-import type { SessionNotification, SessionUpdate, StopReason } from '@agentclientprotocol/sdk';
+import {
+  RequestError,
+  type SessionNotification,
+  type SessionUpdate,
+  type StopReason,
+} from '@agentclientprotocol/sdk';
 import type { SessionEvent } from '@maka/core/events';
 import type { StoredMessage } from '@maka/core/session';
 
 type StreamKind = 'text' | 'thinking';
-
-interface StreamState {
-  text: string;
-  messageId: string;
-}
 
 export interface AcpSessionEventMapperOptions {
   readonly sessionId: string;
@@ -39,9 +38,10 @@ export interface AcpSessionEventMapperOptions {
 export class AcpSessionEventMapper {
   readonly #sessionId: string;
   readonly #notify: (notification: SessionNotification) => Promise<void>;
-  readonly #streams = new Map<string, StreamState>();
+  readonly #streams = new Map<string, string>();
   #tail: Promise<unknown> = Promise.resolve();
   #terminal: StopReason | undefined;
+  #failure: RequestError | undefined;
 
   constructor(options: AcpSessionEventMapperOptions) {
     this.#sessionId = options.sessionId;
@@ -50,13 +50,14 @@ export class AcpSessionEventMapper {
 
   accept(event: SessionEvent): Promise<StopReason | undefined> {
     return this.#enqueue(async () => {
+      if (this.#failure) throw this.#failure;
       if (this.#terminal) return this.#terminal;
       switch (event.type) {
         case 'text_delta':
           await this.#acceptText(
             'text',
             event.messageId,
-            deltaText(event, this.#state('text', event.messageId)?.text),
+            deltaText(event, this.#streams.get(streamKey('text', event.messageId))),
           );
           break;
         case 'text_complete':
@@ -66,7 +67,7 @@ export class AcpSessionEventMapper {
           await this.#acceptText(
             'thinking',
             event.messageId,
-            deltaText(event, this.#state('thinking', event.messageId)?.text),
+            deltaText(event, this.#streams.get(streamKey('thinking', event.messageId))),
           );
           break;
         case 'thinking_complete':
@@ -90,12 +91,11 @@ export class AcpSessionEventMapper {
 
   replaceTranscript(turnId: string, messages: readonly StoredMessage[]): Promise<void> {
     return this.#enqueue(async () => {
+      if (this.#failure) throw this.#failure;
       if (this.#terminal) return;
       for (const message of messages) {
         if (message.turnId !== turnId || message.type !== 'assistant') continue;
-        if (message.thinking?.text !== undefined) {
-          await this.#acceptText('thinking', message.id, message.thinking.text);
-        }
+        await this.#acceptText('thinking', message.id, message.thinking?.text ?? '');
         await this.#acceptText('text', message.id, message.text);
       }
     });
@@ -108,33 +108,26 @@ export class AcpSessionEventMapper {
     });
   }
 
-  get terminal(): StopReason | undefined {
-    return this.#terminal;
-  }
-
   async #acceptText(kind: StreamKind, hostMessageId: string, nextText: string): Promise<void> {
     const key = streamKey(kind, hostMessageId);
-    const current = this.#streams.get(key);
-    if (current?.text === nextText) return;
-    let messageId = current?.messageId ?? hostMessageId;
-    let chunk = nextText;
-    if (current && nextText.startsWith(current.text)) {
-      chunk = nextText.slice(current.text.length);
-    } else if (current) {
-      messageId = revisionMessageId(hostMessageId, kind, current.messageId, nextText);
+    const current = this.#streams.get(key) ?? '';
+    if (!nextText.startsWith(current)) {
+      // ACP v1 chunks only append. A new message ID cannot retract prior output.
+      this.#failure = RequestError.internalError(
+        { source: 'adapter', code: 'unsupported_stream_revision' },
+        'Runtime Host revised streamed output that ACP v1 cannot replace; the prompt failed',
+      );
+      throw this.#failure;
     }
-    this.#streams.set(key, { text: nextText, messageId });
+    const chunk = nextText.slice(current.length);
+    this.#streams.set(key, nextText);
     if (chunk.length === 0) return;
     const update: SessionUpdate = {
       sessionUpdate: kind === 'text' ? 'agent_message_chunk' : 'agent_thought_chunk',
       content: { type: 'text', text: chunk },
-      messageId,
+      messageId: hostMessageId,
     };
     await this.#notify({ sessionId: this.#sessionId, update });
-  }
-
-  #state(kind: StreamKind, messageId: string): StreamState | undefined {
-    return this.#streams.get(streamKey(kind, messageId));
   }
 
   #enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -159,21 +152,4 @@ function deltaText(
 
 function streamKey(kind: StreamKind, messageId: string): string {
   return `${kind}:${messageId}`;
-}
-
-function revisionMessageId(
-  messageId: string,
-  kind: StreamKind,
-  previousMessageId: string,
-  text: string,
-): string {
-  const digest = createHash('sha256')
-    .update(kind)
-    .update('\0')
-    .update(previousMessageId)
-    .update('\0')
-    .update(text)
-    .digest('hex')
-    .slice(0, 16);
-  return `${messageId}:revision:${digest}`;
 }

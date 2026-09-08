@@ -18,6 +18,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -28,6 +29,45 @@ import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_COUNT } from '@maka/core/attachmen
 import { mapAcpPromptContent } from '../acp/prompt-content.js';
 
 describe('ACP prompt content', () => {
+  test('rejects a FIFO without blocking the process', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-acp-fifo-'));
+    const fifo = join(root, 'pipe');
+    execFileSync('mkfifo', [fifo]);
+    const child = spawn(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `
+      import assert from 'node:assert/strict';
+      import { mapAcpPromptContent } from ${JSON.stringify(new URL('../acp/prompt-content.js', import.meta.url).href)};
+      await assert.rejects(mapAcpPromptContent([{ type: 'resource_link', name: 'pipe', uri: process.argv[1] }]),
+        { data: { field: 'prompt', reason: 'resource_not_file' } });
+    `,
+        pathToFileURL(fifo).href,
+      ],
+      { stdio: 'pipe' },
+    );
+    let stderr = '';
+    child.stderr.on('data', (data) => {
+      stderr += data;
+    });
+    const timeout = setTimeout(() => child.kill('SIGKILL'), 3000);
+    try {
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', resolve);
+      });
+      assert.equal(code, 0, `FIFO reader must reject and exit: ${stderr}`);
+    } finally {
+      clearTimeout(timeout);
+      child.kill();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('joins ordered text blocks with paragraph separators', async () => {
     assert.deepEqual(
       await mapAcpPromptContent([
