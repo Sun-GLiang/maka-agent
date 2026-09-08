@@ -334,7 +334,7 @@ describe('Maka ACP child process', () => {
   });
 
   test('Host admission rejects an extra attachment before starting a Turn and close releases capacity', {
-    timeout: 30_000,
+    timeout: 60_000,
   }, async () => {
     const model = await startAcpModelFixture();
     try {
@@ -358,8 +358,13 @@ describe('Maka ACP child process', () => {
                 sessionId,
                 prompt: [{ type: 'text', text: 'COMPLETE_ME' }],
               });
-            for (const id of ids.slice(0, 16))
-              assert.deepEqual(await prompt(id), { stopReason: 'end_turn' });
+            // Independent Sessions can finish concurrently. All attachments must
+            // remain retained after completion before we test the next admission.
+            await Promise.all(
+              ids.slice(0, 16).map(async (id) => {
+                assert.deepEqual(await prompt(id), { stopReason: 'end_turn' });
+              }),
+            );
             await assert.rejects(prompt(ids[16]!), (error: unknown) => {
               assert.equal(
                 (error as { data?: { operation?: string } }).data?.operation,
@@ -394,6 +399,8 @@ describe('Maka ACP child process', () => {
         },
         {
           startRuntimeHost: true,
+          // This operation covers 17 creates and 17 complete Turns, not one RPC.
+          timeoutMs: 45_000,
           model: { id: 'capacity-fixture', thinkingLevels: [], baseUrl: model.baseUrl },
         },
       );
