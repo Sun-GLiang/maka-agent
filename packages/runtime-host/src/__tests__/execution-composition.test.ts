@@ -79,6 +79,7 @@ import { RuntimeHostKernel, type RuntimeHostCompositionContext } from '../server
 import { defineInteractiveRuntimeHostComposition } from '../server/host-composition.js';
 import { connectRuntimeHost, RuntimeHostOperationError } from '../client/index.js';
 import { RUNTIME_HOST_PROTOCOL_VERSION } from '../protocol/index.js';
+import { readLedgerMessages } from './fixtures/ledger-transcript.js';
 
 const require = createRequire(import.meta.url);
 const FAKE_CONNECTION_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -645,6 +646,9 @@ test('production recovery preserves legacy Automation history and closes an orph
     const composition = await createExecutionRuntimeHostComposition(compositionContext(owner));
     try {
       await composition.recover();
+      // The legacy transcript itself, as the converter reads it: recovery must
+      // leave a pre-ledger Automation's origin intact for the import that
+      // follows on the Session's first read.
       const history = await stores.sessionStore.readMessages(historical.id);
       assert.deepEqual(history[0]?.type === 'user' ? history[0].origin : undefined, {
         kind: 'legacy_automation',
@@ -2463,7 +2467,7 @@ async function assertUniqueGraphExecutionFacts(
 ): Promise<void> {
   const [runs, messages, runtimeEvents] = await Promise.all([
     stores.runtimeEventStore.listSessionInvocations(claim.targetSessionId),
-    stores.sessionStore.readMessages(claim.targetSessionId),
+    readLedgerMessages(stores.runtimeEventStore, claim.targetSessionId),
     stores.runtimeEventStore.readImmutableRuntimeEvents(claim.targetSessionId, claim.targetRunId),
   ]);
   assert.deepEqual(
