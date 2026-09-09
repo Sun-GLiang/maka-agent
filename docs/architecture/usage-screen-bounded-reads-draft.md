@@ -42,11 +42,13 @@ indexes, cursor comparator, repair/read ordering, source-accounting composition,
 and scan/sort budget enforcement on the project's SQLite setup. The mechanisms
 below are candidates for that review, not decisions already made on his behalf.
 
-Activity filtering, additional breakdown/pricing pagination, and the automatic
-refresh policy also need product-scope confirmation. Their required Storage
-support is subject to likun's review. Tests for candidate mechanisms apply only
-if those mechanisms are selected; the core consistency and bounded-read
-requirements remain mandatory.
+The author recommends preserving existing activity search and status filtering
+by applying them in Storage before pagination. Removing them or restricting them
+to the visible page requires explicit product approval. Additional breakdown/pricing
+pagination and the automatic refresh policy remain product decisions, with their
+Storage support subject to likun's review. Recommendations below are proposals
+for acceptance or replacement, not accepted decisions. Mechanism-specific tests
+apply only after selection; consistency and bounded reads remain mandatory.
 
 ## User outcome
 
@@ -76,11 +78,12 @@ new activity page with older summary or pricing data.
 6. Usage records, canonical accounting rules, pricing mutation semantics, and
    repair ownership stay with their existing durable owners.
 
-The core product scope includes activity pagination and a visible revision-change
-state. Server-side activity filtering and additional breakdown/pricing pagination
-are candidate extensions whose scope still needs confirmation for #4058. Exports,
-retention-policy changes, retroactive repricing, and general-purpose query
-infrastructure are outside this design.
+The proposed core product scope includes activity pagination, preservation of
+existing search/status filters across the selected range, and a visible
+revision-change state. Additional breakdown/pricing pagination needs scope
+confirmation, including what users see when an unpaged collection exceeds its
+cap. Exports, retention-policy changes, retroactive repricing, and general-purpose
+query infrastructure are outside this design.
 
 ## Storage decisions and trade-offs
 
@@ -88,6 +91,22 @@ The options below give likun a comparison to accept, reject, or replace before
 implementation. They preserve the single-transaction first screen, Storage-owned
 revision checks, and absence of a retained Host dataset. They do not select a
 mechanism or transfer any existing writer's authority.
+
+### Author proposals for maintainer decision
+
+These starting proposals make the choices reviewable. Record acceptance,
+replacement, or a request for evidence in the PR; do not infer implementation
+approval from agreement with the core direction alone.
+
+| Decision | Author proposal and code basis | Alternative / acceptance condition | Decision owner |
+| --- | --- | --- | --- |
+| Query boundary | Expose screen/page reads on `usage-stores.ts`, delegating synchronous SQL to one internal module using the existing operational database lease | Direct facade implementation is also valid; demonstrate one handle/transaction and no duplicate root owner | likun |
+| Repair boundary | Host requests one explicit bounded pass through the existing writer, then reads the screen; `canonical-usage-reader.ts` already orchestrates repair | Storage may wrap both steps with an explicitly writable API; either choice must bound selection, event bytes, and completeness work below | likun |
+| Revision | Start with a root-wide counter advanced in existing write transactions, plus pricing revision and Host/query fencing | Triggers are an alternative if explicit coverage is too fragile; accept only after the writer matrix below and live-write refresh measurements | likun |
+| Schema and cursor | Reuse canonical columns; add legacy/tool scalar projections and indexes matching source-qualified storage identity | Choose the minimum columns after accounting/query-plan review; resumable backfill must preserve orphaned historical Usage | likun |
+| Work enforcement | Evaluate bounded admission before exact SQL aggregation, as specified below; refuse the whole screen when admission fails | This can reject All, or every time range on root-wide completeness overflow. Product must accept that outcome or request another bounded design before implementation | likun + product maintainer |
+| Existing filters | Preserve model/provider/tool substring search and status filtering in Storage; the baseline UI already exposes both | Any removal or changed matching semantics needs explicit product approval; sparse search must consume a finite scan budget | product maintainer; Storage feasibility by likun |
+| Refresh and other lists | Propose at most one automatic first-screen reload per user action, then manual Refresh; defer extra list navigation only if an explicit whole-screen limit outcome is accepted | Confirm pagination versus failure for oversized breakdown/pricing lists; never silently truncate or drain pages | product maintainer; Storage support by likun |
 
 ### Query module placement
 
@@ -136,12 +155,95 @@ existing pricing revision and Host identity fencing remain part of the contract.
 
 Storage review must establish enforceable work boundaries and acceptance criteria
 for the whole first-screen path: repair, completeness queries, aggregation, and
-activity selection, plus continuation and any included filters. Specify fixture
+activity selection, plus continuation and the preserved filters. Specify fixture
 sizes, scan/sort work limits, latency targets, and the behavior when a limit is
 reached. Mechanisms remain open, but bounded output alone is insufficient.
 Use the performance fixtures below to validate the selected implementation;
 partial totals must never be presented as complete. Product confirmation of
-filtering and refresh behavior remains separate from these Storage choices.
+filter behavior, oversized collections, and refresh remains separate from the
+Storage mechanism. The following candidate supplies a concrete starting point;
+its row ceilings are proposed experiment parameters, not project guarantees.
+
+### Candidate: bounded admission before exact work
+
+A conservative implementation can bound work without a new SQLite interruption
+API: in the same transaction as the expensive operation, first admit a finite
+indexed relation. Probe at most the remaining row budget plus one, selecting only
+narrow keys/measurements; refuse before aggregation if the range exceeds it.
+Do not compute a full `COUNT(*)` to make that decision. Across Usage sources,
+consume one shared allowance rather than granting the full allowance per source.
+
+For an admitted relation, SQL can compute exact totals and groups with a bounded
+number of input rows. Each string/payload also needs a byte allowance, checked
+before decoding or filtering it; row count alone cannot bound arbitrarily large
+legacy values. Maintained scalar byte measurements, or bounded per-row checks
+proved against the selected schema, are part of this candidate. Migrations must
+establish them before admitting reads. Admission is repeated inside the initial
+repair write transaction and the later read transaction where needed, so writes
+between the two cannot bypass the read budget.
+
+| Path | Proposed work boundary | Enforcement and result when exhausted |
+| --- | --- | --- |
+| Repair | At most 10k source runs considered, 16 repaired runs, 512 events per repaired run, plus an explicit shared event-byte cap | Bound candidate-run selection before joining/sorting; measure event bytes before loading JSON. Existing run/event limits alone are insufficient. Refuse this attempt rather than calling the old unbounded helper |
+| Completeness | At most 10k source/checkpoint entries per relation, with bounded key bytes | Admit source and checkpoint relations before exact pending/unreadable SQL; no full pending `COUNT` or checkpoint `SUM` before admission. Failure is a limited screen result, never complete coverage |
+| Summary and groups | At most 250k scalar Usage rows total across sources, with explicit scalar-byte and group/output caps | Probe range indexes with `remaining + 1`; aggregate only if the entire range is admitted. Refuse the whole screen on overflow, never sum just the admitted prefix |
+| Activity and search | 100 output items / 48 KiB; propose at most 10k examined candidates across sources per request, plus scalar-byte cap | Seek first, then inspect only a bounded candidate relation with the same search normalization as the UI. If a page or definitive end cannot be established, return a limit outcome, not an empty/exhaustive page |
+
+The row numbers are proposed starting values for review. Byte caps and the whole
+frame cap must be selected alongside protocol fields before implementation; the
+activity 48 KiB cap is not a repair, aggregate, or frame budget. Wall-clock targets
+are measured acceptance criteria, not enforced deadlines: bounded rows still
+incur index navigation, disk I/O, and sorting. Review actual plans to exclude a
+hidden full scan or sort before the cap, and do not use an event-loop timer as an
+interruption mechanism.
+
+This candidate deliberately refuses an exact result above admission limits.
+Completeness on this baseline is root/session scoped, not filtered by the Usage
+time range: `projectionScope` only accepts session/run constraints. A root above
+the source/checkpoint cap can therefore reject Today and 7d as well as All.
+Range-aware completeness would require a separate correctness design; it cannot
+be obtained by simply applying the activity timestamp predicate to checkpoints.
+This candidate is suitable only if product accepts that limited/unavailable state,
+with an explicit explanation of which limit was reached. A narrower range helps
+only range-scoped limits; manual retry helps only if relevant state changed. If
+exact All results must remain available beyond that boundary, review an aggregate
+projection or another architecture that can meet that availability requirement.
+An interruption-capable execution design is an alternative only when bounded
+failure is acceptable; interruption alone cannot guarantee exact All results.
+Increasing a fixture limit
+is not proof of bounded latency. The existing repair implementation also needs
+attention: `model-call-ledger.ts:490-584` limits repaired runs/events but still
+computes pending `COUNT` and checkpoint `SUM` over the full relevant relations.
+
+### Minimal SQL feasibility example
+
+For one legacy source, a candidate index is `(ts DESC, storage_key DESC)`. A
+bounded admission probe and continuation seek can be expressed as:
+
+```sql
+-- $probe_limit is the remaining shared allowance plus one.
+SELECT COUNT(*) FROM (
+  SELECT ts FROM usage_llm_calls INDEXED BY candidate_usage_seek
+  WHERE ts >= $from AND ts <= $to
+  ORDER BY ts DESC, storage_key DESC LIMIT $probe_limit
+);
+
+-- Validate that the cursor belongs to the query and lies within $from/$to.
+-- Its upper bound then replaces the first page's $to predicate.
+SELECT ts, storage_key
+FROM usage_llm_calls INDEXED BY candidate_usage_seek
+WHERE ts >= $from AND (ts, storage_key) < ($cursor_ts, $cursor_key)
+ORDER BY ts DESC, storage_key DESC LIMIT $page_lookahead;
+```
+
+The index name is illustrative. These queries prove neither multi-source
+composition nor byte enforcement. The implementation must translate the global
+source-qualified comparator correctly for each source. In particular, inspect
+the plan with the exact predicates: keeping a redundant `ts <= $to` alongside
+the tuple cursor can select the wider timestamp bound and scan the skipped
+prefix. Equal timestamps and repeated display IDs belong in the probe fixture.
+The PR carries the reproducible experiment and its evidence boundary; it is not
+an end-to-end performance claim.
 
 ## Storage query interface
 
@@ -154,12 +256,18 @@ query boundary after scope confirmation. Wire names are also provisional:
 readUsageScreen(range, activityFilters, budget)
   -> screen(revision, resolvedRange, summary, provenance,
             providersPage, modelsPage, toolsPage, pricingPage, activityPage)
+   | limit_exceeded
 
 readUsagePage(query, section, cursor, expectedRevision, budget)
   -> page(revision, rows, nextCursor, hasMore, completeness)
    | revision_changed
    | limit_exceeded
 ```
+
+Under the admission candidate, first-screen `limit_exceeded` contains no partial
+totals. The renderer displays an explicit unavailable state, or keeps an already
+visible screen marked stale; it never installs a partial replacement. Wire error
+names remain provisional, but this outcome must be represented before approval.
 
 `range` resolves once to concrete `from`/`to` timestamps, including a fixed upper
 bound for All. The returned query identity binds the resolved range and activity
@@ -178,8 +286,8 @@ full scan solely to compute a table's exact total or omitted count.
 ## Transaction and repair ordering
 
 One candidate ordering admits at most one repair pass through the existing
-Usage writer, using its existing run/event limits, and commits it before the
-initial screen read transaction. likun will determine the repair/read boundary
+Usage writer, using its existing run/event ceilings plus the admission and byte
+checks above, and commits it before the initial screen read transaction. likun will determine the repair/read boundary
 and how the existing repair authority participates. Repair is a write and must
 not be hidden inside a read-only transaction. The screen read does not repeatedly repair until history is caught up.
 
@@ -203,8 +311,8 @@ If strict title consistency is required, that is a separate scope decision.
 One candidate is a root-scoped durable Usage change counter read alongside the
 existing pricing revision, bound on the wire to the Host generation and a query
 identity. It would be invalidation metadata, not a second collection of Usage
-facts. This is not a preferred or required mechanism: likun will determine the
-cheapest correct revision identity and writer coverage.
+facts. The author proposes this conservative starting point for review; likun
+may replace it with the cheapest correct revision identity and writer coverage.
 
 If a counter is selected, it must advance in the same committed transaction as
 any mutation that changes a screen result. Any selected mechanism must detect
@@ -232,6 +340,42 @@ the required cheap, mutation-sensitive revision. Reconnect, Host replacement,
 and a supported database restore must invalidate earlier tokens even if a
 durable counter value repeats. Page tokens are validated as untrusted inputs;
 an invalid token/query combination is `invalid_request`, not an empty page.
+
+### Writer coverage to validate before selecting the counter
+
+The baseline paths below are concrete audit inputs, not a claim that invalidation
+is already implemented. Counter updates must be part of each originating write
+transaction, never a later Host notification. Tests must call the real paths.
+
+| Mutation / durable owner | Baseline path | Required invalidation and verification |
+| --- | --- | --- |
+| Legacy LLM and tool insert/upsert | `sqlite-usage-store.ts`: `insertLlmCall`, `insertToolInvocation`, `enqueueMutation` | Advance with stored changes, including older-row corrections; rollback leaves both row and counter unchanged |
+| Canonical source event and high-water | `agent-run-store.ts`: `insertAgentRunEvent` updates `core_agent_runs.latest_model_call_sequence` | Invalidate pending coverage at source commit, even if subsequent Usage projection fails; watching only Usage tables misses this transition |
+| Canonical row and repair checkpoint | `model-call-ledger.ts`: `catchUpProjection`, `writeModelCallAttempt`, checkpoint upsert | Advance atomically with repaired rows, applied-through sequence, and unreadable-event changes; exercise partial/failed repair |
+| Session purge and cascades | `conversation-operational-state.ts`: `purge`; `sqlite-usage-schema.ts`: checkpoint foreign key | Invalidate changed coverage when runs/events/checkpoints disappear; preserve surviving Usage rows and all-time spend |
+| Pricing overrides | `sqlite-usage-store.ts`: `SqlitePricingStore` mutation transaction | Read its existing revision in the screen transaction; do not add a second pricing owner or recompute historical cost |
+| Migration / backfill / supported rebuild | `sqlite-usage-schema.ts`, `sqlite-core-execution-schema.ts` and any selected new migration | Update invalidation or rotate interpretation identity before read admission resumes; test interruption/resumption and old-token rejection |
+| Database restore or replacement | Storage lifecycle plus Host/query fencing | A repeated numeric counter must not validate old tokens; require reconnect/generation rotation or an explicit database-incarnation fence |
+
+The inspected baseline has no ordinary delete API for the three Usage fact tables;
+Session purge deliberately leaves them intact. Do not invent a retention path
+for this PR. Any newly introduced delete/correction path must be added to the
+matrix and advance revision in its own transaction. AgentRun events are appended
+on the baseline; migration or future in-place source corrections cannot be
+covered merely by assuming the high-water always changes. Trigger selection
+requires the same table/column inventory and cascade/restore tests.
+
+### Lifecycle of candidate metadata
+
+| Candidate | Owner and lifetime | Retirement / recovery |
+| --- | --- | --- |
+| Usage revision counter | Storage schema and existing mutation transactions; lives with the Usage database, not a reader/session | Removed with the database or an explicit schema migration; restore/recreation invalidates tokens even if its number repeats |
+| Legacy/tool scalar columns, search normalization, byte measurements, and indexes | Storage schema; maintained with each corresponding source row | Follow source-row/schema lifecycle; resumable backfill reads retained original records and never deletes historical Usage to rebuild it |
+| Backfill watermark | Schema migration owner; exists until all relevant rows satisfy the new read contract | Resume after failure; retire marker only after validation and writer maintenance are established; incomplete migration refuses dependent reads |
+
+These lifetimes preserve current Usage retention. Root deletion/restore remains
+with existing lifecycle authority; this proposal adds no independent cleanup
+worker or competing root owner.
 
 ## Query projections and accounting semantics
 
@@ -291,9 +435,13 @@ source and merge only bounded candidate pages. The physical index ordering must
 match the comparator, including the tie direction; tests cover equal timestamps
 and repeated display IDs across and within sources.
 
-If activity filtering is included, filters must apply in Storage before
-pagination; the query/index strategy remains for likun to decide. Current
-activity search is a case-insensitive substring over model/provider/tool names plus a status filter.
+Preserve existing activity filtering in Storage before pagination unless product
+explicitly approves a changed interaction. The query/index strategy remains for
+likun to decide. Current activity search is a case-insensitive substring over
+model/provider/tool names plus a status filter (`usage-settings-view.tsx:96-108`).
+Normalize the search query with the existing JavaScript `trim().toLowerCase()`
+and compare against lowercased field values. A SQL collation or `LOWER()` is not
+automatically equivalent for non-ASCII text.
 It must search the requested range, not only the visible page. Scalar columns
 avoid JSON decoding, but an arbitrary substring is not made indexable by an
 ordinary B-tree. Preserve the semantics with a bounded scan/time outcome, or
@@ -361,10 +509,10 @@ Exact all-time aggregates can still scan narrow indexed columns. SQL `GROUP BY`
 may also sort many groups. The proposal does not promise constant-time All reads
 or a fixed latency improvement without measurement. Query-plan and timing
 evidence must inform likun's decision on the concrete scan/sort work boundaries
-and enforcement mechanism under #4876. This draft does not mandate a new query
-interruption facility or a particular typed budget outcome. If execution limits
-are selected, they must actually bound or interrupt the relevant work on the
-project's synchronous SQLite setup; a timer that fires only after a blocking
+and enforcement mechanism under #4876. Bounded admission above is one concrete
+candidate; no new interruption facility is mandated. The selected limits must
+actually bound or interrupt the relevant work on the project's synchronous
+SQLite setup; a timer that fires only after a blocking
 query returns is not enforcement.
 
 If exact aggregation cannot meet the agreed work/interactive budget, ask likun
@@ -395,7 +543,7 @@ Host compatibility epoch is raised above main when the wire implementation lands
 this design-only change does not reserve or bump an epoch.
 
 Performance evidence uses deterministic 10k, 50k, and 250k mixed-source records,
-high-cardinality breakdowns, any included sparse filters, and a pending-repair
+high-cardinality breakdowns, preserved sparse filters, and a pending-repair
 fixture. Record
 cold/warm first-screen latency, aggregate versus activity SQL time, query plans,
 decoded row counts, payload bytes, and Host/Desktop peak memory. Check first and
