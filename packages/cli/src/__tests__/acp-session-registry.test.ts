@@ -569,6 +569,120 @@ describe('ACP Session registry', () => {
     await registry.dispose();
   });
 
+  for (const timing of ['before interruption', 'after interruption'] as const) {
+    for (const recovery of [
+      'subscription',
+      'query',
+      'not-found',
+      'terminal',
+      'shutdown',
+    ] as const) {
+      test(`retains cancellation ${timing} until unknown admission resolves via ${recovery}`, async () => {
+        const sessionId = 'session-unknown-start';
+        const turn = {
+          sessionId,
+          turnId: 'turn-unknown',
+          runId: 'run-recovered',
+          status: 'running' as const,
+        };
+        const attachment = new FakeAcpSessionAttachment(sessionId);
+        const start = deferred<unknown>();
+        const query = deferred<unknown>();
+        const stopInputs: unknown[] = [];
+        let starts = 0;
+        let queries = 0;
+        let settled = false;
+        const registry = new AcpSessionRegistry({
+          connect: async () =>
+            fakeConnection({
+              request: async (operation, input) => {
+                if (operation === 'session.create') return catalogSession(sessionId);
+                if (operation === 'turn.start') {
+                  starts += 1;
+                  return start.promise;
+                }
+                if (operation === 'turn.query') {
+                  assert.deepEqual(input, { sessionId, turnId: turn.turnId });
+                  queries += 1;
+                  return query.promise;
+                }
+                if (operation === 'turn.stop') {
+                  stopInputs.push(input);
+                  attachment.setRoot({
+                    ...turn,
+                    status: 'cancelled',
+                    terminalEventId: 'terminal-unknown',
+                    abortSource: 'user',
+                  });
+                  return attachment.snapshot.rootTurn;
+                }
+                throw new Error(`Unexpected operation ${operation}`);
+              },
+            }),
+          newSessionId: () => sessionId,
+          newTurnId: () => turn.turnId,
+          openSessionAttachment: async (input) => attachment.bind(input),
+        });
+        await registry.create({ cwd: '/workspace', mcpServers: [] });
+        const prompt = registry
+          .prompt({ sessionId, prompt: [{ type: 'text', text: 'run' }] }, promptContext([]))
+          .then((result) => {
+            settled = true;
+            return result;
+          });
+        await waitFor(() => attachment.nextCalls(turn.turnId) === 1);
+        const cancel = () =>
+          recovery === 'shutdown' ? registry.dispose() : registry.cancel({ sessionId });
+        let cancellation = timing === 'before interruption' ? cancel() : undefined;
+        start.reject(
+          new RuntimeHostRequestInterruptedError(
+            'turn.start',
+            'command',
+            'dispatched',
+            'connection_lost',
+          ),
+        );
+        await waitFor(() => queries === 1);
+        cancellation ??= cancel();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(settled, false);
+        assert.deepEqual(stopInputs, []);
+        if (recovery === 'subscription') {
+          // A transient query failure and an unrelated root do not retire or
+          // redirect the original cancellation intent.
+          query.reject(
+            new RuntimeHostRequestInterruptedError('turn.query', 'query', 'dispatched', 'timeout'),
+          );
+          attachment.setRoot({ ...turn, turnId: 'other-turn', runId: 'other-run' });
+          await new Promise((resolve) => setImmediate(resolve));
+          assert.equal(settled, false);
+          assert.deepEqual(stopInputs, []);
+          attachment.setRoot(turn);
+        } else if (recovery === 'not-found') {
+          query.reject(
+            new RuntimeHostOperationError('turn.query', 'not_found', 'Turn was not admitted'),
+          );
+        } else if (recovery === 'terminal') {
+          query.resolve({ ...turn, status: 'completed', terminalEventId: 'terminal-unknown' });
+        } else {
+          if (recovery === 'shutdown') assert.equal(attachment.closeCalls, 1);
+          query.resolve(turn);
+        }
+        await cancellation;
+        assert.deepEqual(await prompt, { stopReason: 'cancelled' });
+        assert.deepEqual(
+          stopInputs,
+          recovery === 'not-found' || recovery === 'terminal'
+            ? []
+            : [{ sessionId, turnId: turn.turnId, runId: turn.runId }],
+        );
+        assert.equal(starts, 1);
+        assert.equal(queries, 1);
+        await registry.dispose();
+      });
+    }
+  }
+
   test('shutdown stops a late admitted start after observation has closed', async () => {
     const sessionId = 'session-late-start';
     const turn = { sessionId, turnId: 'turn-late', runId: 'run-late', status: 'running' as const };

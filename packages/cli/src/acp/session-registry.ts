@@ -141,7 +141,7 @@ interface ActiveAcpPrompt {
   readonly waiters: Set<() => void>;
   attachment?: AcpSessionAttachment;
   dispatchStarted: boolean;
-  startSettled: boolean;
+  admissionSettled: boolean;
   startedTurn?: TurnSnapshot;
   cancelled: boolean;
   finished: boolean;
@@ -281,7 +281,7 @@ export class AcpSessionRegistry {
       }),
       waiters: new Set(),
       dispatchStarted: false,
-      startSettled: false,
+      admissionSettled: false,
       cancelled: false,
       finished: false,
     };
@@ -328,7 +328,7 @@ export class AcpSessionRegistry {
       this.#wake(active);
       try {
         const result = await connection.request('turn.start', startInput);
-        active.startSettled = true;
+        active.admissionSettled = true;
         if (result.kind === 'started') active.startedTurn = result.turn;
         this.#wake(active);
         if (result.kind === 'blocked') {
@@ -337,7 +337,31 @@ export class AcpSessionRegistry {
           throw error;
         }
       } catch (error) {
-        active.startSettled = true;
+        // A lost dispatched response does not establish whether Host admitted
+        // this Turn. Retain this attempt until subscription or query facts do.
+        active.admissionSettled = !(
+          error instanceof RuntimeHostRequestInterruptedError && error.dispatch === 'dispatched'
+        );
+        if (!active.admissionSettled) {
+          void connection.request('turn.query', { sessionId: active.sessionId, turnId }).then(
+            (turn) => {
+              active.startedTurn = turn;
+              active.admissionSettled = true;
+              this.#wake(active);
+            },
+            (queryError: unknown) => {
+              // Only an authoritative absence settles unknown admission. A
+              // failed query must leave cancellation latched for recovery.
+              if (
+                queryError instanceof RuntimeHostOperationError &&
+                queryError.code === 'not_found'
+              ) {
+                active.admissionSettled = true;
+              }
+              this.#wake(active);
+            },
+          );
+        }
         this.#wake(active);
         attachment.failTurn(turnId, error);
         if (!active.cancelled) throw requestErrorFromRuntimeHost(error, 'turn.start');
@@ -355,6 +379,7 @@ export class AcpSessionRegistry {
       // A failed projection must not leave the corresponding Host Turn running.
       active.stopTask ??= this.#stopPromptWhenObservable(active);
       await active.stopTask.catch(() => undefined);
+      if (active.cancelled) return { stopReason: await active.mapper.cancel() };
       throw error;
     } finally {
       context.signal.removeEventListener('abort', onAbort);
@@ -448,7 +473,7 @@ export class AcpSessionRegistry {
         }
         return;
       }
-      if (active.startSettled) return;
+      if (active.admissionSettled) return;
       await this.#waitForPromptChange(active);
     }
   }
