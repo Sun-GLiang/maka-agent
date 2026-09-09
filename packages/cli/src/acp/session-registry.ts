@@ -56,6 +56,7 @@ import {
   HOST_OPERATION_SPECS,
   type SessionCatalogProjection,
   type SessionContinuitySnapshot,
+  type TurnSnapshot,
 } from '@maka/runtime-host/protocol';
 import { RuntimeHostSessionChannel } from '../runtime-host-session-channel.js';
 import {
@@ -141,8 +142,7 @@ interface ActiveAcpPrompt {
   attachment?: AcpSessionAttachment;
   dispatchStarted: boolean;
   startSettled: boolean;
-  startSucceeded: boolean;
-  observationSettled: boolean;
+  startedTurn?: TurnSnapshot;
   cancelled: boolean;
   finished: boolean;
   stopTask?: Promise<void>;
@@ -269,8 +269,6 @@ export class AcpSessionRegistry {
       waiters: new Set(),
       dispatchStarted: false,
       startSettled: false,
-      startSucceeded: false,
-      observationSettled: false,
       cancelled: false,
       finished: false,
     };
@@ -318,7 +316,7 @@ export class AcpSessionRegistry {
       try {
         const result = await connection.request('turn.start', startInput);
         active.startSettled = true;
-        active.startSucceeded = result.kind === 'started';
+        if (result.kind === 'started') active.startedTurn = result.turn;
         this.#wake(active);
         if (result.kind === 'blocked') {
           const error = new Error('Runtime Host blocked the requested Turn');
@@ -333,7 +331,7 @@ export class AcpSessionRegistry {
       }
 
       if (active.cancelled) {
-        await active.stopTask;
+        await active.stopTask?.catch(() => undefined);
         return { stopReason: await active.mapper.cancel() };
       }
       const stopReason = await observation;
@@ -367,9 +365,6 @@ export class AcpSessionRegistry {
     } catch (error) {
       if (active.cancelled) return active.mapper.cancel();
       throw error;
-    } finally {
-      active.observationSettled = true;
-      this.#wake(active);
     }
   }
 
@@ -406,25 +401,41 @@ export class AcpSessionRegistry {
   async #cancelPrompt(active: ActiveAcpPrompt): Promise<void> {
     active.cancelled = true;
     active.stopTask ??= this.#stopPromptWhenObservable(active);
-    await Promise.all([active.mapper.cancel(), active.stopTask]);
+    await Promise.all([
+      active.mapper.cancel(),
+      active.stopTask.catch((error: unknown) => {
+        // End only this prompt's observation. Failed delivery does not establish
+        // a terminal Host Turn, and teardown still receives the original error.
+        active.attachment?.failTurn(active.turnId, error);
+        throw error;
+      }),
+    ]);
   }
 
   async #stopPromptWhenObservable(active: ActiveAcpPrompt): Promise<void> {
     if (!active.dispatchStarted) return;
     while (!active.finished) {
-      const root = active.attachment?.snapshot.rootTurn;
-      if (root?.turnId === active.turnId) {
+      const observed = active.attachment?.snapshot.rootTurn;
+      // Subscription teardown can precede the start response. Keep the admitted
+      // identity until exact Stop completes, even when observation has ended.
+      const root = observed?.turnId === active.turnId ? observed : active.startedTurn;
+      if (root) {
         if (isRuntimeHostTerminalTurn(root)) return;
         const connection = this.#connection;
         if (!connection) return;
-        await connection.request('turn.stop', {
-          sessionId: root.sessionId,
-          turnId: root.turnId,
-          runId: root.runId,
-        });
+        try {
+          await connection.request('turn.stop', {
+            sessionId: root.sessionId,
+            turnId: root.turnId,
+            runId: root.runId,
+          });
+        } catch (error) {
+          console.error('[acp] Host Stop delivery failed:', error);
+          throw error;
+        }
         return;
       }
-      if ((active.startSettled && !active.startSucceeded) || active.observationSettled) return;
+      if (active.startSettled) return;
       await this.#waitForPromptChange(active);
     }
   }
@@ -529,7 +540,6 @@ export class AcpSessionRegistry {
     }
     for (const active of this.#activePrompts.get(sessionId) ?? []) {
       if (active.attachment !== attachment) continue;
-      active.observationSettled = true;
       attachment.failTurn(active.turnId, error);
       this.#wake(active);
     }

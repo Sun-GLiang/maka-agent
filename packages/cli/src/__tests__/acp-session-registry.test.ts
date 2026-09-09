@@ -569,6 +569,136 @@ describe('ACP Session registry', () => {
     await registry.dispose();
   });
 
+  test('shutdown stops a late admitted start after observation has closed', async () => {
+    const sessionId = 'session-late-start';
+    const turn = { sessionId, turnId: 'turn-late', runId: 'run-late', status: 'running' as const };
+    const start = deferred<unknown>();
+    const stop = deferred<unknown>();
+    const calls: string[] = [];
+    const attachment = new FakeAcpSessionAttachment(sessionId);
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession(sessionId);
+            if (operation === 'turn.start') return start.promise;
+            if (operation === 'turn.stop') {
+              assert.deepEqual(input, { sessionId, turnId: turn.turnId, runId: turn.runId });
+              calls.push('stop');
+              return stop.promise;
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          close: async () => {
+            calls.push('connection.close');
+          },
+        }),
+      newSessionId: () => sessionId,
+      newTurnId: () => turn.turnId,
+      openSessionAttachment: async (input) => attachment.bind(input),
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    const prompt = registry.prompt(
+      { sessionId, prompt: [{ type: 'text', text: 'run' }] },
+      promptContext([]),
+    );
+    await waitFor(() => attachment.nextCalls(turn.turnId) === 1);
+    const disposal = registry.dispose();
+    await waitFor(() => attachment.closeCalls === 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    start.resolve({
+      kind: 'started',
+      turn,
+      skillInvocation: { loaded: [], failed: [], receipts: [] },
+    });
+    try {
+      await waitFor(() => calls.includes('stop'));
+      assert.deepEqual(calls, ['stop']);
+    } finally {
+      stop.resolve({ ...turn, status: 'cancelled' });
+      await disposal;
+      await prompt;
+    }
+    assert.deepEqual(await prompt, { stopReason: 'cancelled' });
+    assert.deepEqual(calls, ['stop', 'connection.close']);
+  });
+
+  for (const timing of ['before start returns', 'after start returns'] as const) {
+    for (const action of ['cancel', 'abort'] as const) {
+      test(`${action} completes the prompt when Stop delivery rejects ${timing} without another event`, async (t) => {
+        const diagnostic = t.mock.method(console, 'error', () => undefined);
+        const start = deferred<unknown>();
+        const abort = new AbortController();
+        const sessionId = 'session-stop-reject';
+        const turn = {
+          sessionId,
+          turnId: 'turn-reject',
+          runId: 'run-reject',
+          status: 'running' as const,
+        };
+        const failure = new Error('Stop delivery failed');
+        const attachment = new FakeAcpSessionAttachment(sessionId);
+        const registry = new AcpSessionRegistry({
+          connect: async () =>
+            fakeConnection({
+              request: async (operation) => {
+                if (operation === 'session.create') return catalogSession(sessionId);
+                if (operation === 'turn.start') return start.promise;
+                if (operation === 'turn.stop') throw failure;
+                throw new Error(`Unexpected operation ${operation}`);
+              },
+            }),
+          newSessionId: () => sessionId,
+          newTurnId: () => turn.turnId,
+          openSessionAttachment: async (input) => attachment.bind(input),
+        });
+        await registry.create({ cwd: '/workspace', mcpServers: [] });
+        let outcome: unknown;
+        const prompt = registry
+          .prompt(
+            { sessionId, prompt: [{ type: 'text', text: 'run' }] },
+            { ...promptContext([]), signal: abort.signal },
+          )
+          .then(
+            (result) => {
+              outcome = result;
+            },
+            (error: unknown) => {
+              outcome = error;
+            },
+          );
+        await waitFor(() => attachment.nextCalls(turn.turnId) === 1);
+        const started = {
+          kind: 'started',
+          turn,
+          skillInvocation: { loaded: [], failed: [], receipts: [] },
+        };
+        if (timing === 'after start returns') {
+          start.resolve(started);
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        attachment.setRoot(turn);
+        const cancellation = action === 'cancel' ? registry.cancel({ sessionId }) : abort.abort();
+        await waitFor(() => diagnostic.mock.callCount() === 1);
+        start.resolve(started);
+        await cancellation;
+        try {
+          await waitFor(() => outcome !== undefined);
+          assert.deepEqual(outcome, { stopReason: 'cancelled' });
+          assert.deepEqual(diagnostic.mock.calls[0]?.arguments, [
+            '[acp] Host Stop delivery failed:',
+            failure,
+          ]);
+          assert.equal(attachment.closeCalls, 0);
+          assert.equal(attachment.snapshot.rootTurn?.status, 'running');
+        } finally {
+          await registry.dispose();
+          await prompt;
+        }
+      });
+    }
+  }
+
   test('close removes ownership immediately and still closes attachment after stop failure', async () => {
     const attachment = new FakeAcpSessionAttachment('session-close-live');
     const stopFailure = new Error('stop failed');
@@ -808,11 +938,16 @@ describe('ACP Session registry', () => {
     const second = new FakeAcpSessionAttachment('session-reattach');
     let attachmentOpens = 0;
     let starts = 0;
+    const stops: unknown[] = [];
     const registry = new AcpSessionRegistry({
       connect: async () =>
         fakeConnection({
           request: async (operation, input) => {
             if (operation === 'session.create') return catalogSession('session-reattach');
+            if (operation === 'turn.stop') {
+              stops.push(input);
+              return {};
+            }
             if (operation !== 'turn.start') throw new Error(`Unexpected operation ${operation}`);
             starts += 1;
             const turnId = (input as { turnId: string }).turnId;
@@ -867,6 +1002,9 @@ describe('ACP Session registry', () => {
       { stopReason: 'end_turn' },
     );
     assert.equal(attachmentOpens, 2);
+    assert.deepEqual(stops, [
+      { sessionId: 'session-reattach', turnId: 'turn-first', runId: 'run-turn-first' },
+    ]);
     await registry.dispose();
   });
 
@@ -936,7 +1074,6 @@ describe('ACP Session registry', () => {
           },
           close: async () => {
             lifecycle.push('connection.close');
-            startGate.reject(new Error('connection closed'));
           },
         }),
       newSessionId: () => 'session-shutdown',
@@ -950,7 +1087,10 @@ describe('ACP Session registry', () => {
     );
     await waitFor(() => attachment.nextCalls('turn-shutdown') === 1);
 
-    await registry.dispose();
+    const disposal = registry.dispose();
+    await waitFor(() => attachment.closeCalls === 1);
+    startGate.reject(new Error('start request interrupted'));
+    await disposal;
 
     assert.deepEqual(await prompt, { stopReason: 'cancelled' });
     assert.deepEqual(lifecycle, ['attachment.close', 'connection.close']);
