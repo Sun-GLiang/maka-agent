@@ -43,6 +43,8 @@ import type {
   WorkHubCoordinationActResult,
   WorkHubCoordinationCandidatesResult,
 } from '@maka/runtime-host/protocol';
+import { ExpectedOperationError } from './application/contracts/operation-diagnostics.js';
+
 
 /**
  * A Host operation the Coordination port could not complete. It lives beside
@@ -120,6 +122,7 @@ export interface WorkHubProjectedTurn {
 }
 
 export interface WorkHubCoordinationTurn {
+  attachments?: WorkHubCoordinationActInput['attachments'];
   messageId: string;
   turnId: string;
   text: string;
@@ -160,8 +163,11 @@ export interface WorkHubProjection {
 }
 
 export interface WorkHubSubmitInput {
+  attachments?: WorkHubCoordinationActInput['attachments'];
+  newWorkDefaults?: WorkHubCoordinationActInput['newWorkDefaults'];
   requestId: string;
   text: string;
+  newSessionFallbackTitle: string;
   retryAction?: true;
   explicitTarget?: WorkHubSessionTarget;
   correction?: WorkHubCorrectionContext;
@@ -286,6 +292,10 @@ export interface WorkHubController {
   resetVisitContext(): void;
 }
 
+export type WorkHubExpectedFailureCode =
+  | 'candidates_changed'
+  | 'linked_correction_unavailable';
+
 export function createWorkHubController(deps: {
   sessions: WorkHubSessionPort;
   coordination: WorkHubCoordinationPort;
@@ -303,7 +313,9 @@ export function createWorkHubController(deps: {
   ): WorkHubCorrectionContext => {
     const sourceActionId = candidateBySessionId.get(from.sessionId)?.latestDelegationActionId;
     if (!sourceActionId) {
-      throw new Error('WorkHub linked correction requires an active durable delegation');
+      throw new ExpectedOperationError<WorkHubExpectedFailureCode>(
+        'linked_correction_unavailable',
+      );
     }
     return { from, sourceActionId };
   };
@@ -583,13 +595,13 @@ export function createWorkHubController(deps: {
         text: input.text,
         sessions: ordinary,
       });
-      const resume = await submitNamedDelegationAction(input, resumeDecision, 'resume', routingStrategy.strategyId);
+      const resume = input.attachments?.length ? undefined : await submitNamedDelegationAction(input, resumeDecision, 'resume', routingStrategy.strategyId);
       if (resume) return resume;
       const stopDecision = submissionPolicy.resolveStop({
         text: input.text,
         sessions: ordinary,
       });
-      const stop = await submitNamedDelegationAction(input, stopDecision, 'stop', routingStrategy.strategyId);
+      const stop = input.attachments?.length ? undefined : await submitNamedDelegationAction(input, stopDecision, 'stop', routingStrategy.strategyId);
       if (stop) return stop;
       const candidateSet = await coordination.candidates();
       const candidateBySessionId = new Map(
@@ -628,6 +640,7 @@ export function createWorkHubController(deps: {
         sessions: routable,
         originPromptBySessionId: new Map(routingEvidence.map((entry) => [entry.target.sessionId, entry.originPrompt])),
         ...(input.explicitTarget ? { explicitTarget: input.explicitTarget } : {}),
+        newSessionFallbackTitle: input.newSessionFallbackTitle,
         ...(evidence ? { interpretation: {
           classification: evidence.classification,
           resolution: evidence.resolution.kind,
@@ -657,6 +670,7 @@ export function createWorkHubController(deps: {
         await coordination.act({
           actionId: input.requestId,
           userText: input.text,
+          ...(input.attachments ? { attachments: input.attachments } : {}),
           proposal: { disposition: 'answer_here' },
         });
         return {
@@ -676,6 +690,8 @@ export function createWorkHubController(deps: {
           ? {
               actionId: input.requestId,
               userText: input.text,
+          ...(input.attachments ? { attachments: input.attachments } : {}),
+              ...(input.newWorkDefaults ? { newWorkDefaults: input.newWorkDefaults } : {}),
               confirmation: { kind: 'user_correction' },
               proposal: {
                 disposition: 'replace',
@@ -686,6 +702,8 @@ export function createWorkHubController(deps: {
           : {
               actionId: input.requestId,
               userText: input.text,
+          ...(input.attachments ? { attachments: input.attachments } : {}),
+              ...(input.newWorkDefaults ? { newWorkDefaults: input.newWorkDefaults } : {}),
               proposal: { disposition: 'create_new', title },
             });
         if (
@@ -712,7 +730,7 @@ export function createWorkHubController(deps: {
         (session) => session.target.sessionId === target.sessionId,
       );
       if (!targetSession) {
-        throw new Error('WorkHub target Session is unavailable');
+        throw new ExpectedOperationError<WorkHubExpectedFailureCode>('candidates_changed');
       }
       if (targetSession?.state === 'waiting_for_user' && !input.retryAction) {
         return {
@@ -725,12 +743,13 @@ export function createWorkHubController(deps: {
       }
       const candidate = candidateBySessionId.get(target.sessionId);
       if (!candidate) {
-        throw new Error('WorkHub target Session is unavailable');
+        throw new ExpectedOperationError<WorkHubExpectedFailureCode>('candidates_changed');
       }
       const action: WorkHubCoordinationActInput = correction
         ? {
             actionId: input.requestId,
             userText: input.text,
+          ...(input.attachments ? { attachments: input.attachments } : {}),
             candidateSetId: candidateSet.candidateSetId,
             confirmation: { kind: 'user_correction' },
             proposal: {
@@ -745,6 +764,7 @@ export function createWorkHubController(deps: {
         : {
             actionId: input.requestId,
             userText: input.text,
+          ...(input.attachments ? { attachments: input.attachments } : {}),
             candidateSetId: candidateSet.candidateSetId,
             proposal: {
               disposition: 'delegate_existing',

@@ -27,6 +27,7 @@ import {
   ChatSurfaceLayout,
   ChatView,
   Composer,
+  createTranscriptViewportNavigation,
   deriveTitlebarProjectName,
   TitlebarSessionIdentity,
   ToastProvider,
@@ -2075,11 +2076,20 @@ export const PartialHistoryNotice: Story = {
 
 /** Stops the harness below, so the tail can be read against a settled transcript. */
 let stopTailStream: (() => void) | undefined;
+let startTailStream: (() => void) | undefined;
 
 /** Streams one line per frame into a live Turn. */
 function StreamingTailHarness() {
+  const [question, setQuestion] = useState<string>();
+  const [streaming, setStreaming] = useState(false);
+  const [viewportNavigation] = useState(createTranscriptViewportNavigation);
   const [lines, setLines] = useState(1);
   useEffect(() => {
+    startTailStream = () => setStreaming(true);
+    return () => { startTailStream = undefined; };
+  }, []);
+  useEffect(() => {
+    if (!streaming) return;
     // Paced by frames, not by the clock, so it stays in step with the
     // per-frame sampler on a slow runner.
     let frame = 0;
@@ -2099,23 +2109,37 @@ function StreamingTailHarness() {
       stop();
       stopTailStream = undefined;
     };
-  }, []);
+  }, [streaming]);
   return (
     <ComposedShell
-      session={{ status: 'running', streaming: true }}
+      session={{ status: question ? 'running' : 'active', streaming: Boolean(question) }}
+      composer={{
+        onSend: (text) => {
+          // Production publishes this once before admitting the sent Message.
+          // Controller/store races are covered by the Desktop integration suite;
+          // this story measures what the real ChatView does with that command.
+          viewportNavigation.followLatest(activeSession.id);
+          setQuestion(text);
+        },
+      }}
       chat={{
-        runningStatus: true,
+        runningStatus: Boolean(question),
+        viewportNavigation,
         messages: [
-          user('msg-tail-1', 'turn-tail', 3, '把转录推过一屏，看看尾巴还跟不跟得住。'),
-          {
-            type: 'turn_state',
-            id: 'state-tail',
-            turnId: 'turn-tail',
-            ts: NOW - 30_000,
-            status: 'running',
-          },
+          user('history-question', 'history-turn', 6, '已有问题。'),
+          assistant('history-answer', 'history-turn', 5, TAIL_LINES.slice(0, 40).join('\n\n')),
+          ...(question ? [
+            user('msg-tail-1', 'turn-tail', 3, question),
+            {
+              type: 'turn_state' as const,
+              id: 'state-tail',
+              turnId: 'turn-tail',
+              ts: NOW - 30_000,
+              status: 'running' as const,
+            },
+          ] : []),
         ],
-        liveTurn: {
+        liveTurn: question ? {
           turnId: 'turn-tail',
           phase: 'streamed',
           steps: [{
@@ -2129,15 +2153,31 @@ function StreamingTailHarness() {
             },
             tools: [],
           }],
-        },
+        } : undefined,
       }}
     />
   );
 }
 
+// Real path: read earlier content in a Session → send another question →
+// follow the growing answer, through the production viewport command port.
 export const StreamingTailFollow: Story = {
   render: () => <StreamingTailHarness />,
-  play: async () => {
+  play: async ({ canvasElement }) => {
+    await waitFor(() => expect(tailMetrics().distance).toBeLessThanOrEqual(4));
+    const input = canvasElement.querySelector<HTMLElement>('.maka-composer-editor [contenteditable="true"]');
+    if (!input) throw new Error('The composer input is missing');
+    await userEvent.type(input, 'Second question after reading history.');
+    tailScroller().scrollTop = 0;
+    await painted(6);
+    expect(tailMetrics().distance).toBeGreaterThan(500);
+    expect(dockOffered()).toBe(true);
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => {
+      expect(canvasElement.querySelector('[data-turn-id="turn-tail"]')).not.toBeNull();
+      expect(tailMetrics().distance).toBeLessThanOrEqual(4);
+    });
+    startTailStream?.();
     // The fuse runs out inside the smoke's per-story budget, so a stalled
     // stream fails saying so instead of timing the story out.
     const lag = await measureTailLag(600);
@@ -2177,7 +2217,13 @@ const HISTORY_BATCH = 4;
 const HISTORY_BATCHES_AVAILABLE = 8;
 
 /** A settled transcript with a turn the play function can make arrive. */
-function SettledTranscriptHarness({ turns }: { turns: number }) {
+function SettledTranscriptHarness({
+  turns,
+  composer,
+}: {
+  turns: number;
+  composer?: Partial<ComposerProps>;
+}) {
   const [extra, setExtra] = useState(0);
   useEffect(() => {
     appendTurn = () => setExtra((count) => count + 1);
@@ -2185,7 +2231,7 @@ function SettledTranscriptHarness({ turns }: { turns: number }) {
       appendTurn = undefined;
     };
   }, []);
-  return <ComposedShell chat={{ messages: transcriptTurns(0, turns + extra) }} />;
+  return <ComposedShell chat={{ messages: transcriptTurns(0, turns + extra) }} composer={composer} />;
 }
 
 /** The history seam is two props: `hasOlderHistory`, and a loader that prepends. */
@@ -2241,9 +2287,31 @@ export const TailFollowsGrowthOutsideTurns: Story = {
 };
 
 export const ReaderScrolledUpIsNotPulledBack: Story = {
-  render: () => <SettledTranscriptHarness turns={12} />,
+  render: () => (
+    <SettledTranscriptHarness
+      turns={12}
+      composer={{
+        contextUsage: {
+          usageTokens: 37_000,
+          declaredContextWindow: 100_000,
+          onOpen: noop,
+        },
+      }}
+    />
+  ),
   play: async () => {
     const root = tailScroller();
+    const contextGauge = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="打开用量追踪"]',
+    );
+    const scrollButtonPaintBoundary = dockButton().parentElement;
+    if (!contextGauge?.querySelector('svg') || !scrollButtonPaintBoundary) {
+      throw new Error('the context gauge or scroll-button paint boundary is missing');
+    }
+    const boundaryStyle = getComputedStyle(scrollButtonPaintBoundary);
+    // Chromium canonicalizes `layout style paint` to the equivalent `content`.
+    expect(boundaryStyle.contain).toBe('content');
+    expect(boundaryStyle.willChange).toContain('opacity');
     await waitFor(() => expect(tailMetrics().distance).toBeLessThanOrEqual(4));
 
     root.scrollTop -= 500;
@@ -2275,6 +2343,20 @@ export const ReaderScrolledUpIsNotPulledBack: Story = {
         JSON.stringify({ anchorTurnId, anchorTop, afterTop, ...tailMetrics() }),
       ).toBeLessThanOrEqual(4);
     });
+
+    // Returning to the tail fades the dock button. That transition must not
+    // re-raster the context gauge on the same compositing surface (#4973).
+    // Geometry alone cannot see a device-pixel repaint, so the boundary above
+    // pins the causal contract; these samples separately ensure the fix never
+    // turns into a real footer movement.
+    const iconTops: number[] = [];
+    root.scrollTop = root.scrollHeight;
+    root.dispatchEvent(new Event('scroll'));
+    for (let frame = 0; frame < 16; frame += 1) {
+      await painted(1);
+      iconTops.push(contextGauge.querySelector('svg')!.getBoundingClientRect().top);
+    }
+    expect(Math.max(...iconTops) - Math.min(...iconTops)).toBeLessThanOrEqual(0.25);
   },
 };
 
@@ -2345,14 +2427,14 @@ export const TailFollowDoesNotAskForHistory: Story = {
 // blocks each carrying a `data-maka-transcript-boundary` marker so sub-turn
 // content-visibility bounds them. Reasoning stays mounted while folded, so it is
 // real layout, not free collapsed bytes.
-function oversizedTurnMessages(): StoredMessage[] {
+function oversizedTurnMessages(steps = 24): StoredMessage[] {
   const turnId = 'turn-oversized';
   const out: StoredMessage[] = [
     user('msg-oversized-user', turnId, 30, '逐项检查一组独立的合成步骤，并给出简短结果。'),
   ];
   const prose = '这一段只包含确定性的合成文本，用于测量长对话的滚动渲染。'.repeat(8);
   const reasoning = '先确认输入边界（空 / 超长 / 并发），再对合成输出做一次去抖动检查，确保占位高度不随展开态漂移。'.repeat(4);
-  for (let step = 1; step <= 24; step += 1) {
+  for (let step = 1; step <= steps; step += 1) {
     const ts = NOW - (25 - step) * 20_000;
     out.push({
       type: 'assistant',
@@ -2392,6 +2474,10 @@ function oversizedTurnMessages(): StoredMessage[] {
 }
 
 const oversizedTurn = oversizedTurnMessages();
+
+export const Performance45Tools: Story = {
+  render: () => <ComposedShell chat={{ messages: oversizedTurnMessages(45) }} />,
+};
 
 export const OversizedTurnHoldsAReadingAnchorOnColdScroll: Story = {
   render: () => <ComposedShell chat={{ messages: oversizedTurn }} />,
