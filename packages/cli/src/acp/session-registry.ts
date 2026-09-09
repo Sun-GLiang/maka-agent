@@ -160,6 +160,7 @@ export class AcpSessionRegistry {
   readonly #ownedSessionIds = new Set<string>();
   readonly #attachments = new Map<string, Promise<AcpSessionAttachment>>();
   readonly #attachmentConfigurations = new Map<string, AcpAttachmentConfiguration>();
+  readonly #pendingConfigSets = new Map<string, Set<Promise<unknown>>>();
   readonly #activePrompts = new Map<string, Set<ActiveAcpPrompt>>();
   readonly #sessionCloseTasks = new Map<string, Promise<CloseSessionResponse>>();
   #connection: AcpSessionRegistryConnection | undefined;
@@ -203,13 +204,25 @@ export class AcpSessionRegistry {
       throw requestErrorFromConfigInput(error);
     }
     const configuration = this.#attachmentConfigurations.get(params.sessionId);
-    return this.#track(
+    const operation = this.#track(
       configuration
         ? this.#queueConfiguration(configuration, () =>
             this.#setConfigOption(params, configuration),
           )
         : this.#setConfigOption(params),
     );
+    let pending = this.#pendingConfigSets.get(params.sessionId);
+    if (!pending) {
+      pending = new Set();
+      this.#pendingConfigSets.set(params.sessionId, pending);
+    }
+    pending.add(operation);
+    try {
+      return await operation;
+    } finally {
+      pending.delete(operation);
+      if (pending.size === 0) this.#pendingConfigSets.delete(params.sessionId);
+    }
   }
 
   async prompt(params: PromptRequest, context: AcpPromptContext): Promise<PromptResponse> {
@@ -453,7 +466,9 @@ export class AcpSessionRegistry {
     });
     const configuration: AcpAttachmentConfiguration = {
       notify,
-      tail: Promise.resolve(),
+      // Setters can outlive an absent or failed attachment. Their responses
+      // must precede refreshes delivered by the new attachment's queue.
+      tail: Promise.allSettled([...(this.#pendingConfigSets.get(sessionId) ?? [])]),
       retired,
       retire,
     };

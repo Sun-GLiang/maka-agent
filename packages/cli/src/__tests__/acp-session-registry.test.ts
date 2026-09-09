@@ -1373,6 +1373,104 @@ describe('ACP Session registry', () => {
     await registry.dispose();
   });
 
+  for (const replaceAttachment of [false, true]) {
+    test(`orders pending configuration responses before updates across ${replaceAttachment ? 'replacement' : 'first'} attachment`, async () => {
+      const sessionId = 'configuration-attachment-race';
+      let session = catalogSession(sessionId);
+      let attachment: FakeAcpSessionAttachment | undefined;
+      let turn = 0;
+      let holdProjection = false;
+      const projectionStarted = deferred<void>();
+      const releaseProjection = deferred<void>();
+      const delivered: Array<[string, string | boolean]> = [];
+      const connection = fakeConnection({
+        request: async (operation, input) => {
+          if (operation === 'session.create') return session;
+          if (operation === 'session.catalog.query') return { kind: 'session', session };
+          if (operation === 'session.configuration.update') {
+            session = {
+              ...session,
+              ...(input as { patch: object }).patch,
+              revision: session.revision + 1,
+            };
+            attachment?.setMetadataRevision(session.revision);
+            return { kind: 'committed', session };
+          }
+          if (operation === 'turn.start') {
+            const { turnId } = input as { turnId: string };
+            attachment!.emit(
+              turnId,
+              sessionEvent(turnId, { type: 'complete', stopReason: 'end_turn' }),
+            );
+            return { kind: 'started' };
+          }
+          throw new Error(operation);
+        },
+      });
+      const request = connection.request;
+      connection.request = (async (operation, input) => {
+        if (operation === 'connection.catalog.query' && holdProjection) {
+          holdProjection = false;
+          projectionStarted.resolve();
+          await releaseProjection.promise;
+        }
+        return request(operation, input);
+      }) as AcpSessionRegistryConnection['request'];
+      const registry = new AcpSessionRegistry({
+        connect: async () => connection,
+        newSessionId: () => sessionId,
+        newTurnId: () => `turn-${++turn}`,
+        openSessionAttachment: async (input) => {
+          attachment = new FakeAcpSessionAttachment(sessionId).bind(input);
+          attachment.setMetadataRevision(session.revision);
+          return attachment;
+        },
+      });
+      const prompt = () =>
+        registry.prompt(
+          { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
+          {
+            signal: new AbortController().signal,
+            notify: async ({ update }) => {
+              if (update.sessionUpdate === 'config_option_update') {
+                delivered.push([
+                  'notification',
+                  update.configOptions.find(({ id }) => id === 'permission_mode')!.currentValue,
+                ]);
+              }
+            },
+          },
+        );
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      if (replaceAttachment) await prompt();
+      holdProjection = true;
+      const setting = registry
+        .setConfigOption({ sessionId, configId: 'permission_mode', value: 'bypass' })
+        .then(({ configOptions }) => {
+          delivered.push([
+            'response',
+            configOptions.find(({ id }) => id === 'permission_mode')!.currentValue,
+          ]);
+        });
+      await projectionStarted.promise;
+      const previous = attachment;
+      if (replaceAttachment) previous!.failAttachment(new Error('subscription failed'));
+      const prompting = prompt();
+      await waitFor(() => attachment !== undefined && attachment !== previous);
+      session = { ...session, revision: session.revision + 1, permissionMode: 'ask' };
+      attachment!.setMetadataRevision(session.revision);
+      await new Promise((resolve) => setImmediate(resolve));
+      releaseProjection.resolve();
+      await Promise.all([setting, prompting]);
+      await waitFor(() => delivered.some(([kind]) => kind === 'notification'));
+      await registry.dispose();
+      assert.deepEqual(delivered, [
+        ['response', 'bypass'],
+        ['notification', 'ask'],
+      ]);
+    });
+  }
+
   test('suppresses an external configuration projection that finishes after close', async () => {
     const sessionId = 'closing-options';
     const attachment = new FakeAcpSessionAttachment(sessionId);
