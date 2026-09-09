@@ -82,6 +82,67 @@ are candidate extensions whose scope still needs confirmation for #4058. Exports
 retention-policy changes, retroactive repricing, and general-purpose query
 infrastructure are outside this design.
 
+## Storage decisions and trade-offs
+
+The options below give likun a comparison to accept, reject, or replace before
+implementation. They preserve the single-transaction first screen, Storage-owned
+revision checks, and absence of a retained Host dataset. They do not select a
+mechanism or transfer any existing writer's authority.
+
+### Query module placement
+
+| Option | Benefit | Cost / constraint |
+| --- | --- | --- |
+| Add screen/page operations to the existing Usage stores facade | Reuses the current root lease, admission, and lifecycle integration | Adds cross-source query responsibilities to that module; the implementation must still use one transaction rather than compose independent asynchronous reads |
+| Introduce a dedicated Usage query module inside Storage | Concentrates transaction, accounting, cursor, and budget logic behind one interface | Needs explicit integration with the existing lease and lifecycle; must not acquire a competing root owner or duplicate accounting rules |
+
+These options can be combined: the existing facade can expose a dedicated
+internal query module. Compare the actual change footprint and reuse of existing
+SQL before choosing. Results should carry Usage data, with display formatting
+and UI state remaining outside Storage. Verify consistency and budgets through
+the public screen/page interface, whichever placement is selected.
+
+### Repair orchestration
+
+| Option | Benefit | Cost / constraint |
+| --- | --- | --- |
+| Host explicitly requests one bounded repair through the existing writer, then calls the unified Storage read | Keeps the write step and its failure handling visible to the caller | Callers must apply the agreed repair policy consistently; Storage must derive completeness inside the read transaction rather than trust the earlier repair result |
+| A Storage operation explicitly wraps bounded repair followed by the read transaction | Centralizes ordering and failure handling for all callers | The operation requires writer authority and must advertise its write effect; it cannot masquerade as a read-only reader method |
+
+Both candidates retain the existing repair owner and end the repair transaction
+before opening the read transaction. Compare writer-admission integration and
+test repair failure, a source event committed between repair and read, and
+pending work after the permitted pass. Neither candidate requires repair on
+continuation or repairing history to completion.
+
+### Revision maintenance and invalidation scope
+
+If a durable Usage counter is selected, its update mechanism and invalidation
+scope are separate decisions:
+
+| Update mechanism | Benefit | Cost / evidence needed |
+| --- | --- | --- |
+| Advance it explicitly within each relevant write transaction | Keeps invalidation next to the mutation and can avoid no-op updates | Enumerate every writer, source-event update, repair, cascade, and supported rebuild path; demonstrate that none bypasses invalidation |
+| Use narrowly scoped SQLite triggers | Covers changes to selected tables regardless of the calling writer | Define the relevant tables and columns, no-op predicates, and migration lifecycle; measure extra writes and prove source/checkpoint coverage as well as Usage-row coverage |
+
+A root-wide counter simplifies comparison but also invalidates queries for
+unrelated writes. Finer scopes can reduce that disruption, but require a proof
+that cross-scope changes and corrections moving older records into or out of a
+query still invalidate it. Compare continuation success and refresh frequency
+under active writes alongside write cost. Neither scope is selected here; the
+existing pricing revision and Host identity fencing remain part of the contract.
+
+### Required evidence before implementation
+
+Storage review must establish enforceable work boundaries and acceptance criteria
+for the whole first-screen path: repair, completeness queries, aggregation, and
+activity selection, plus continuation and any included filters. Specify fixture
+sizes, scan/sort work limits, latency targets, and the behavior when a limit is
+reached. Mechanisms remain open, but bounded output alone is insufficient.
+Use the performance fixtures below to validate the selected implementation;
+partial totals must never be presented as complete. Product confirmation of
+filtering and refresh behavior remains separate from these Storage choices.
+
 ## Storage query interface
 
 The candidate interface below illustrates the core contract and optional list
