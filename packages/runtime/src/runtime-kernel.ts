@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import type { WorkHubActionReceipt } from '@maka/core/workhub-action-result';
 import type { AgentRunStore } from '@maka/core/agent-run';
 import { agentRunCompositionFromEvents } from '@maka/core/agent-run';
 import type { RuntimeInvocationRecord } from '@maka/core/runtime-invocation';
@@ -46,10 +47,6 @@ import type {
   SessionHeader,
   SessionHeaderPatch,
   SessionStatus,
-  StoredMessage,
-  SystemNoteMessage,
-  TurnRecord,
-  TurnStateMessage,
 } from '@maka/core/session';
 import { isDeepStrictEqual } from 'node:util';
 import type { UserMessageInput } from '@maka/core/runtime-inputs';
@@ -66,6 +63,7 @@ import {
   type AgentRunActiveSession,
   type AgentRunBeginResult,
   type AgentRunDurability,
+  type AgentRunHooks,
   type AgentRunLineage,
   type RuntimeContinuationFailpoint,
 } from './agent-run.js';
@@ -94,11 +92,7 @@ import type {
 } from './session-manager.js';
 import type { TurnShellPlan } from './shell-detect.js';
 import type { ShellRunProcessManager } from './shell-run-manager.js';
-import {
-  buildStatusPatch,
-  buildTurnStateMessage,
-  normalizeStopSessionSource,
-} from './session-projection-helpers.js';
+import { buildStatusPatch, normalizeStopSessionSource } from './session-projection-helpers.js';
 import { buildToolsForAgentDefinition } from './agent-catalog.js';
 import { loadLatestHistoryCompactCheckpointFromRunLedger } from './history-compact-ledger.js';
 import { loadModelProjectionTransitionsFromRunLedger } from './model-projection-transition-ledger.js';
@@ -177,6 +171,12 @@ export interface RuntimeKernelLike {
   resumeContinuation?(
     continuation: RuntimeContinuation,
     options?: ResumeContinuationOptions,
+  ): AsyncIterable<SessionEvent>;
+  runCoordinationOperation(
+    sessionId: string,
+    input: UserMessageInput,
+    options: TurnStartOptions,
+    execute: () => Promise<WorkHubActionReceipt>,
   ): AsyncIterable<SessionEvent>;
   compactSession(sessionId: string, input?: CompactSessionInput): AsyncIterable<SessionEvent>;
   preflightContextCompaction(sessionId: string): Promise<void>;
@@ -332,18 +332,6 @@ interface StopOperation {
   abortSource: string | undefined;
   ts: number;
   statusProjected: boolean;
-  turnProjections: Map<
-    string,
-    {
-      id: string;
-      turnId: string;
-      lineage: AgentRunLineage;
-      message?: TurnStateMessage;
-      projected: boolean;
-    }
-  >;
-  abortNote: SystemNoteMessage;
-  abortNoteProjected: boolean;
   targets: Map<number, StopTarget>;
   queue: Promise<void>;
 }
@@ -366,6 +354,7 @@ interface PendingExecutionClaim {
   rejectSettled(error: unknown): void;
   phase: 'pending' | 'attached' | 'reserved' | 'released' | 'failed';
   run?: AgentRun;
+  hostOperation?: true;
   backendPreparation?: PreparedBackendActivation;
   stopIntent?: SessionStopIntent;
   finalization?: ExecutionClaimOutcome;
@@ -670,7 +659,6 @@ export class RuntimeKernel implements RuntimeKernelLike {
         runId: options.runId,
         userMessageId: options.userMessageId,
         durability: options.durability,
-        store: this.deps.store,
         runStore: this.deps.runStore,
         runtimeEventStore: this.deps.runtimeEventStore,
         ...(this.deps.toolBoundaryProtocol
@@ -694,8 +682,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
           updateHeader: (targetSessionId, patch) => this.updateHeader(targetSessionId, patch),
           updateStatus: (targetSessionId, status, blockedReason, ts) =>
             this.updateStatus(targetSessionId, status, blockedReason, ts),
-          appendTurnState: (targetSessionId, turnId, status, lineage, options) =>
-            this.appendTurnState(targetSessionId, turnId, status, lineage, options),
+          ...this.messageProjectionHook(),
         },
       });
       if (options.admitTurn && (await options.admitTurn()) === 'cancelled') {
@@ -871,7 +858,6 @@ export class RuntimeKernel implements RuntimeKernelLike {
           : { parentRunId: continuation.sourceRunId },
       runId: continuation.runId,
       invocationId: continuation.invocationId,
-      store: this.deps.store,
       runStore: this.deps.runStore,
       runtimeEventStore: this.deps.runtimeEventStore,
       ...(continuationToolBoundaryProtocol
@@ -957,8 +943,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
         updateHeader: (targetSessionId, patch) => this.updateHeader(targetSessionId, patch),
         updateStatus: (targetSessionId, status, blockedReason, ts) =>
           this.updateStatus(targetSessionId, status, blockedReason, ts),
-        appendTurnState: (targetSessionId, turnId, status, lineage, options) =>
-          this.appendTurnState(targetSessionId, turnId, status, lineage, options),
+        ...this.messageProjectionHook(),
       },
     });
 
@@ -977,6 +962,119 @@ export class RuntimeKernel implements RuntimeKernelLike {
       () => this.revalidateContinuationSafety(continuation),
       inheritedSandboxBoundaryDenied,
     );
+  }
+
+  /** Host coordination uses the same Run owner and terminal authority without a provider send. */
+  async *runCoordinationOperation(
+    sessionId: string,
+    input: UserMessageInput,
+    options: TurnStartOptions,
+    execute: () => Promise<WorkHubActionReceipt>,
+  ): AsyncIterable<SessionEvent> {
+    const execution = this.takeExecutionClaim(sessionId);
+    execution.hostOperation = true;
+    try {
+      await this.enterExecutionClaim(execution);
+      const header = await this.deps.store.readHeader(sessionId);
+      const run = new AgentRun({
+        sessionId,
+        header,
+        userInput: input,
+        runId: options.runId,
+        userMessageId: options.userMessageId,
+        durability: 'required',
+        runStore: this.deps.runStore,
+        runtimeEventStore: this.deps.runtimeEventStore,
+        newId: this.deps.newId,
+        now: this.deps.now,
+        effectiveOrchestration: resolveEffectiveOrchestration('default', undefined),
+        hooks: {
+          reserveRun: async (id, nextHeader, activeRun) => {
+            const active = await this.reserveParentRun(id, nextHeader, activeRun, execution);
+            this.reserveExecutionClaim(execution, active, activeRun);
+            return active;
+          },
+          unregisterRun: (active, activeRun) => this.unregisterParentRun(active, activeRun),
+          updateHeader: (id, patch) => this.updateHeader(id, patch),
+          updateStatus: (id, status, reason, ts) => this.updateStatus(id, status, reason, ts),
+          ...this.messageProjectionHook(),
+        },
+      });
+      this.attachExecutionClaim(execution, run);
+      const owners = this.createRunOwnerScope(run, execution);
+      try {
+        owners.bindMessage(this.deps.messageAuthority, {
+          sessionId,
+          turnId: input.turnId,
+          runId: run.runId,
+        });
+        // Keep the execution claim attached until finalization. Stop/drain can
+        // therefore cancel and await this Run without a provider generation.
+        await run.beginCoordination();
+        await options.onRunStarted?.(run.runId, header);
+      } catch (error) {
+        await this.finalizeFailedRunStart(owners, run, execution, error);
+        return;
+      }
+      try {
+        if (run.isStopped()) return;
+        const executed = await execute();
+        const receipt: WorkHubActionReceipt = {
+          ...executed,
+          result:
+            executed.result.disposition === 'clarify'
+              ? { ...executed.result, coordinationTurnId: input.turnId }
+              : executed.result,
+        };
+        const receiptEvent: RuntimeEvent = {
+          id: this.deps.newId(),
+          sessionId,
+          turnId: input.turnId,
+          runId: run.runId,
+          invocationId: run.runId,
+          ts: this.deps.now(),
+          partial: false,
+          role: 'system',
+          author: 'host',
+          modelVisibility: 'hidden',
+          actions: { coordination: receipt },
+        };
+        await run.recordRuntimeEvents([receiptEvent], { requireDurableWrite: true });
+        if (run.isStopped()) return;
+        const complete: CompleteEvent = {
+          type: 'complete',
+          id: this.deps.newId(),
+          turnId: input.turnId,
+          ts: this.deps.now(),
+          stopReason: 'end_turn',
+        };
+        await run.acceptMappedEvent(
+          complete,
+          mapSessionEventToRuntimeEvent(
+            complete,
+            this.runtimeEventMapContext({
+              sessionId,
+              invocationId: run.runId,
+              runId: run.runId,
+              turnId: input.turnId,
+            }),
+          ),
+          { requireTerminalWrite: true },
+        );
+        yield complete;
+      } catch (error) {
+        await run.recordFailure(error);
+        throw error;
+      } finally {
+        const failures = new FailureCollector();
+        await failures.capture(() => owners.finalize());
+        await failures.capture(() => owners.releaseMessage());
+        failures.throwIfAny(`Coordination cleanup failed for ${run.runId}`);
+      }
+    } finally {
+      this.releaseExecutionClaim(execution);
+      await this.flushBackendInvalidation(sessionId);
+    }
   }
 
   async *compactSession(
@@ -1035,7 +1133,6 @@ export class RuntimeKernel implements RuntimeKernelLike {
       userInput: { turnId, text: '' },
       rootExecutionKind: 'context_compact',
       ...(input.hostedRoot ? { runId: input.hostedRoot.runId } : {}),
-      store: this.deps.store,
       runStore: this.deps.runStore,
       runtimeEventStore: this.deps.runtimeEventStore,
       ...(this.deps.toolBoundaryProtocol
@@ -1059,8 +1156,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
         updateHeader: (targetSessionId, patch) => this.updateHeader(targetSessionId, patch),
         updateStatus: (targetSessionId, status, blockedReason, ts) =>
           this.updateStatus(targetSessionId, status, blockedReason, ts),
-        appendTurnState: (targetSessionId, nextTurnId, status, lineage, options) =>
-          this.appendTurnState(targetSessionId, nextTurnId, status, lineage, options),
+        ...this.messageProjectionHook(),
       },
     });
 
@@ -1125,13 +1221,26 @@ export class RuntimeKernel implements RuntimeKernelLike {
         runId: run.runId,
         turnId: run.turnId,
       });
+      // Ahead of the usage row, because the ledger seals on its terminal fact:
+      // a note queued behind one this compaction may already own would be
+      // refused, and the reader would never learn the summary was skipped.
+      if (result.outcome.kind === 'failed') {
+        await run.recordSystemNote('context_compaction_failed_open').catch(() => {});
+        notedTerminal = true;
+      } else if (result.outcome.kind === 'compacted') {
+        // Explicit compaction runs on its own turn and never enters the
+        // send-flow note block, so the "compacted" note is written here. The
+        // next user send passively replays this standalone checkpoint, which
+        // `shouldAppendContextCompactedNote` suppresses, so there is no
+        // duplicate.
+        await run.recordSystemNote('context_compacted').catch(() => {});
+        notedTerminal = true;
+      }
       await run.acceptMappedEvent(
         tokenUsageEvent,
         mapSessionEventToRuntimeEvent(tokenUsageEvent, eventContext),
         { requireTerminalWrite: true },
       );
-      if (run.isStopped()) return;
-      await run.recordStoredSessionEvent(tokenUsageEvent);
       if (run.isStopped()) return;
       yield tokenUsageEvent;
       if (run.isStopped()) return;
@@ -1140,55 +1249,17 @@ export class RuntimeKernel implements RuntimeKernelLike {
         mapSessionEventToRuntimeEvent(completeEvent, eventContext),
         { requireTerminalWrite: true },
       );
-      // The terminal RuntimeEvent is now durably committed, so this compaction
-      // Turn is authoritatively `completed` — a later stop cannot turn it into a
-      // cancelled Turn. Only now is the durable note written: a stop that wins
-      // before the terminal commit returns above, leaving no note, so an
-      // interrupted compaction leaves no durable row. `unchanged` writes nothing.
-      if (result.outcome.kind === 'failed') {
-        const note: SystemNoteMessage = {
-          type: 'system_note',
-          id: this.deps.newId(),
-          turnId: run.turnId,
-          ts: this.deps.now(),
-          kind: 'context_compaction_failed_open',
-        };
-        await this.appendDurableCompactionNote(sessionId, note);
-        notedTerminal = true;
-      } else if (result.outcome.kind === 'compacted') {
-        // Explicit compaction runs on its own turn and never enters the
-        // send-flow note block, so write the durable "compacted" note here. The
-        // next user send passively replays this standalone checkpoint, which
-        // `shouldAppendContextCompactedNote` now suppresses, so there is no
-        // duplicate.
-        const note: SystemNoteMessage = {
-          type: 'system_note',
-          id: this.deps.newId(),
-          turnId: run.turnId,
-          ts: this.deps.now(),
-          kind: 'context_compacted',
-        };
-        await this.appendDurableCompactionNote(sessionId, note);
-        notedTerminal = true;
-      }
+      if (run.isStopped()) return;
       yield completeEvent;
     } catch (error) {
-      await run.recordFailure(error);
-      // A thrown compaction still owns a durable fail-open row — but not when the
-      // throw is a stop / cancellation, which must leave no durable row (matches
-      // the terminal-committed guard above). recordFailure writes the failed
-      // turn_state either way; the internal compaction Turn has no user/timeline
-      // for a failure banner, so append the note unless already written or stopped.
+      // A thrown compaction still owns a fail-open note — but not when the throw
+      // is a stop, which must leave no row. The note goes ahead of the failure
+      // because the ledger seals on its terminal fact; the internal compaction
+      // Turn has no user timeline for a failure banner.
       if (!notedTerminal && !run.isStopped()) {
-        const note: SystemNoteMessage = {
-          type: 'system_note',
-          id: this.deps.newId(),
-          turnId: run.turnId,
-          ts: this.deps.now(),
-          kind: 'context_compaction_failed_open',
-        };
-        await this.appendDurableCompactionNote(sessionId, note);
+        await run.recordSystemNote('context_compaction_failed_open').catch(() => {});
       }
+      await run.recordFailure(error);
       throw error;
     } finally {
       const failures = new FailureCollector();
@@ -1196,48 +1267,6 @@ export class RuntimeKernel implements RuntimeKernelLike {
       await failures.capture(() => owners.releaseMessage());
       failures.throwIfAny(`Runtime compaction cleanup failed for ${run.runId}`);
     }
-  }
-
-  /**
-   * Append a terminal context-compaction transcript note durably.
-   *
-   * The terminal RuntimeEvent (the canonical outcome) is already committed by
-   * the time this runs, so a note-write failure must NOT fail the successful
-   * compaction. But a single silent attempt could leave a completed compaction
-   * with no transcript row and no later repair — terminal transcript reads carry
-   * no live overlay and passive checkpoint replay suppresses the note. So retry
-   * transient store failures here, reusing the SAME note and verifying the
-   * durable ledger after an ambiguous failure before another append. The
-   * message id is not unique in storage, so the stable id alone is not a
-   * deduplication guarantee. Returns whether the note landed.
-   */
-  private async appendDurableCompactionNote(
-    sessionId: string,
-    note: SystemNoteMessage,
-  ): Promise<boolean> {
-    const MAX_ATTEMPTS = 3;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      try {
-        await this.deps.store.appendMessage(sessionId, note);
-        return true;
-      } catch {
-        // appendMessage can commit and still fail before acknowledging it. Do
-        // not retry until a durable read proves the note absent: message ids are
-        // not unique, so blindly appending the same object would duplicate it.
-        try {
-          const existing = (await this.deps.store.readMessages(sessionId)).find(
-            (candidate) => candidate.id === note.id,
-          );
-          if (existing) return isDeepStrictEqual(existing, note);
-        } catch {
-          // An unreadable ledger cannot prove the ambiguous write absent. Give
-          // up conservatively; reconcile-on-load owns this residual gap.
-          return false;
-        }
-        if (attempt === MAX_ATTEMPTS) return false;
-      }
-    }
-    return false;
   }
 
   private async requireContextCompactionBackend(
@@ -1968,15 +1997,6 @@ export class RuntimeKernel implements RuntimeKernelLike {
         delivery: { kind: 'pending' },
       } satisfies StopTarget);
     const needsRun = !target.runs.has(run.runId);
-    const projection =
-      needsRun && run.isSessionInline() && !operation.turnProjections.has(run.runId)
-        ? {
-            id: this.deps.newId(),
-            turnId: run.turnId,
-            lineage: run.lineage,
-            projected: false,
-          }
-        : undefined;
 
     if (!existingOperation) this.stopOperations.set(sessionId, operation);
     if (!existingTarget) {
@@ -1991,7 +2011,6 @@ export class RuntimeKernel implements RuntimeKernelLike {
         sessionInline: run.isSessionInline(),
         stopCompleted: false,
       });
-      if (projection) operation.turnProjections.set(run.runId, projection);
     }
     return operation;
   }
@@ -2003,15 +2022,6 @@ export class RuntimeKernel implements RuntimeKernelLike {
       abortSource,
       ts,
       statusProjected: false,
-      turnProjections: new Map(),
-      abortNote: {
-        type: 'system_note',
-        id: this.deps.newId(),
-        ts,
-        kind: 'abort',
-        ...(abortSource ? { data: { source: abortSource } } : {}),
-      },
-      abortNoteProjected: false,
       targets: new Map(),
       queue: Promise.resolve(),
     };
@@ -2091,27 +2101,11 @@ export class RuntimeKernel implements RuntimeKernelLike {
       await this.updateStatus(sessionId, 'aborted', undefined, operation.ts);
       operation.statusProjected = true;
     }
-    for (const projection of operation.turnProjections.values()) {
-      if (projection.projected) continue;
-      projection.message ??= buildTurnStateMessage({
-        id: projection.id,
-        turnId: projection.turnId,
-        ts: operation.ts,
-        status: 'aborted',
-        lineage: projection.lineage,
-        ...(operation.abortSource ? { abortSource: operation.abortSource } : {}),
-      });
-      await this.appendStopProjection(sessionId, projection.message);
-      projection.projected = true;
-    }
-    if (!operation.abortNoteProjected) {
-      await this.appendStopProjection(sessionId, operation.abortNote);
-      operation.abortNoteProjected = true;
-    }
-    // The Session projection above now reads as aborted. The ledger has to say
-    // the same thing before this stop reports success: a Run left non-terminal
-    // here stays that way, because the stream that would have finalized it is
-    // exactly the one the stop could not wake.
+    // The ledger has to say this turn was aborted before the stop reports
+    // success: a Run left non-terminal here stays that way, because the stream
+    // that would have finalized it is exactly the one the stop could not wake.
+    // Nothing else records the abort — the transcript reads it back off this
+    // terminal fact.
     //
     // Without a Host interaction authority, Runtime owns terminal settlement.
     // A Hosted Run's terminal fact belongs to the Host, which also parks
@@ -2133,8 +2127,6 @@ export class RuntimeKernel implements RuntimeKernelLike {
     }
     const completed =
       operation.statusProjected &&
-      operation.abortNoteProjected &&
-      [...operation.turnProjections.values()].every((projection) => projection.projected) &&
       [...operation.targets.values()].every(
         (target) =>
           target.delivery.kind !== 'pending' &&
@@ -2152,19 +2144,6 @@ export class RuntimeKernel implements RuntimeKernelLike {
       if (target.delivery.kind === 'failed') failures.add(target.delivery.error);
     }
     failures.throwIfAny(`Stop cleanup failed for session ${sessionId}`);
-  }
-
-  private async appendStopProjection(sessionId: string, message: StoredMessage): Promise<void> {
-    const existing = (await this.deps.store.readMessages(sessionId)).find(
-      (candidate) => candidate.id === message.id,
-    );
-    if (existing) {
-      if (!isDeepStrictEqual(existing, message)) {
-        throw new Error(`stop projection ${message.id} conflicts with an existing message`);
-      }
-      return;
-    }
-    await this.deps.store.appendMessage(sessionId, message);
   }
 
   async respondToSandboxBoundary(
@@ -2208,25 +2187,29 @@ export class RuntimeKernel implements RuntimeKernelLike {
     );
   }
 
+  private activeRunsFor(sessionId: string): AgentRun[] {
+    const runs = new Set<AgentRun>();
+    for (const active of this.backendGenerationsFor(sessionId)) {
+      for (const run of active.activeRuns.values()) runs.add(run);
+    }
+    for (const claim of this.executionClaims.get(sessionId) ?? []) {
+      if (claim.hostOperation && claim.run) runs.add(claim.run);
+    }
+    return [...runs];
+  }
+
   hasActiveRuns(sessionId: string): boolean {
-    return this.backendGenerationsFor(sessionId).some((active) => active.activeRuns.size > 0);
+    return this.activeRunsFor(sessionId).length > 0;
   }
 
   runningTurnIds(sessionId: string): string[] {
-    const turnIds: string[] = [];
-    for (const active of this.backendGenerationsFor(sessionId)) {
-      for (const run of active.activeRuns.values()) {
-        if (!turnIds.includes(run.turnId)) turnIds.push(run.turnId);
-      }
-    }
-    return turnIds;
+    return [...new Set(this.activeRunsFor(sessionId).map((run) => run.turnId))];
   }
 
   hasActiveRun(sessionId: string, runId: string, turnId?: string): boolean {
-    return this.backendGenerationsFor(sessionId).some((active) => {
-      const run = active.activeRuns.get(runId);
-      return run !== undefined && (turnId === undefined || run.turnId === turnId);
-    });
+    return this.activeRunsFor(sessionId).some(
+      (run) => run.runId === runId && (turnId === undefined || run.turnId === turnId),
+    );
   }
 
   requestRunHandoff(
@@ -2468,8 +2451,10 @@ export class RuntimeKernel implements RuntimeKernelLike {
   }): Pick<
     BackendFactoryContext,
     | 'recordRunTrace'
+    | 'recordSystemNote'
     | 'recordModelCallAttempt'
     | 'recordRunComposition'
+    | 'recordRequestComposition'
     | 'loadHistoryCompactCheckpoint'
     | 'recordHistoryCompactCheckpoint'
     | 'loadModelProjectionTransitions'
@@ -2486,6 +2471,8 @@ export class RuntimeKernel implements RuntimeKernelLike {
       recordRunTrace: (event) => {
         runFor(event.turnId)?.recordRunTrace(event);
       },
+      recordSystemNote: (kind, turnId, data) =>
+        runFor(turnId)?.recordSystemNote(kind, data) ?? Promise.resolve(),
       ...(this.deps.runStore
         ? {
             // Resolved by runId rather than turnId: the canonical record names
@@ -2500,6 +2487,13 @@ export class RuntimeKernel implements RuntimeKernelLike {
                 return Promise.reject(new Error('No active AgentRun for Run Composition'));
               }
               return run.recordRunComposition(snapshot);
+            },
+            recordRequestComposition: (runId, snapshot) => {
+              const run = this.active.get(sessionId)?.activeRuns.get(runId);
+              if (!run) {
+                return Promise.reject(new Error('No active AgentRun for Request Composition'));
+              }
+              return run.recordRequestComposition(snapshot);
             },
             loadHistoryCompactCheckpoint: () => this.historyCompactCoordinator.load(sessionId),
             recordHistoryCompactCheckpoint: (
@@ -2927,33 +2921,16 @@ export class RuntimeKernel implements RuntimeKernelLike {
     return next;
   }
 
-  private async appendTurnState(
-    sessionId: string,
-    turnId: string,
-    status: TurnRecord['status'],
-    lineage: AgentRunLineage = {},
-    options: {
-      id?: string;
-      ts?: number;
-      errorClass?: string;
-      abortSource?: string;
-      retry?: TurnRecord['retry'];
-    } = {},
-  ): Promise<void> {
-    const ts = options.ts ?? this.deps.now();
-    await this.deps.store.appendMessage(
-      sessionId,
-      buildTurnStateMessage({
-        id: options.id ?? this.deps.newId(),
-        turnId,
-        ts,
-        status,
-        lineage,
-        ...(options.abortSource ? { abortSource: options.abortSource } : {}),
-        ...(options.errorClass !== undefined ? { errorClass: options.errorClass } : {}),
-        ...(options.retry ? { retry: options.retry } : {}),
-      }),
-    );
+  /** Present only when the store keeps a Session catalog to project into. */
+  private messageProjectionHook(): Pick<AgentRunHooks, 'commitMessageProjection'> {
+    const commit = this.deps.store.commitMessageCatalogProjection;
+    if (!commit) return {};
+    return {
+      commitMessageProjection: async (sessionId, message) => {
+        await commit.call(this.deps.store, sessionId, message);
+        this.updateCachedHeader(sessionId, await this.deps.store.readHeader(sessionId));
+      },
+    };
   }
 }
 

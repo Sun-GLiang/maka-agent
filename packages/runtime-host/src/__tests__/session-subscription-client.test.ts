@@ -181,6 +181,54 @@ test('PTY callbacks bypass a stalled Session iterator and isolate consumer failu
   await subscription.close();
 });
 
+test('domain callbacks validate identity, support unsubscribe, and stop on close', async () => {
+  const subscription = new ClientSessionSubscription(
+    openResult('host-1', 'subscription-domain'),
+    async () => undefined,
+    async () => {
+      throw new Error('unexpected read');
+    },
+  );
+  const domains: string[] = [];
+  const unsubscribe = subscription.subscribeSessionDomainChanges((frame) => {
+    domains.push(frame.domain);
+  });
+  subscription.accept({
+    kind: 'subscription.session_domain_changed',
+    hostEpoch: 'host-1',
+    subscriptionId: 'subscription-domain',
+    sequence: 1,
+    sessionId: 'session-1',
+    domain: 'todo',
+  });
+  assert.deepEqual(domains, ['todo']);
+
+  unsubscribe();
+  subscription.accept({
+    kind: 'subscription.session_domain_changed',
+    hostEpoch: 'host-1',
+    subscriptionId: 'subscription-domain',
+    sequence: 2,
+    sessionId: 'session-1',
+    domain: 'usage',
+  });
+  assert.deepEqual(domains, ['todo']);
+
+  await subscription.close();
+  assert.throws(
+    () =>
+      subscription.accept({
+        kind: 'subscription.session_domain_changed',
+        hostEpoch: 'host-1',
+        subscriptionId: 'subscription-domain',
+        sequence: 3,
+        sessionId: 'other-session',
+        domain: 'todo',
+      }),
+    /Session subscription is closed|Session subscription frame identity changed/,
+  );
+});
+
 test('isolates a sequence gap and continues requests on the same connection', async () => {
   await withProtocolPeer(
     async (transport, hostEpoch, rootId) => {
@@ -406,7 +454,65 @@ test('loads a canonical transcript while live frames continue on the same connec
   );
 });
 
-test('reassembles a large message from bounded backward pages', async () => {
+test('resumes bounded index preparation before publishing the canonical transcript', async () => {
+  const message = {
+    type: 'assistant' as const,
+    id: 'message-1',
+    turnId: 'turn-1',
+    ts: 1,
+    text: 'snapshot text',
+    modelId: 'test-model',
+  };
+  await withProtocolPeer(
+    async (transport, hostEpoch, rootId) => {
+      let openRequest = await acceptConnectionAndReadOpen(transport, hostEpoch, rootId);
+      for (let batch = 0; batch < 3; batch++) {
+        await writeProtocolFrame(transport, {
+          requestId: openRequest.requestId,
+          operation: 'subscription.open',
+          ok: false,
+          error: { code: 'transcript_preparing', message: `indexed through ${batch * 64}` },
+        });
+        const next = decodeClientFrame(await transport.read(1_000));
+        assert.ok(!('kind' in next) && next.operation === 'subscription.open');
+        assert.deepEqual(next.input, openRequest.input);
+        openRequest = next;
+      }
+      const opened = openResult(
+        hostEpoch,
+        'subscription-transcript',
+        transcriptBootstrap(Buffer.from(JSON.stringify(message), 'utf8')),
+      );
+      await writeRawLocalIpc(
+        transport,
+        Buffer.concat([
+          encodeLocalIpcTestFrame({
+            requestId: openRequest.requestId,
+            operation: 'subscription.open',
+            ok: true,
+            result: opened,
+          }),
+          encodeLocalIpcTestFrame(deltaFrame(hostEpoch, opened.subscriptionId, 1)),
+        ]),
+      );
+      await answerClose(transport, opened.subscriptionId);
+    },
+    async (connection) => {
+      const subscription = await connection.openSessionSubscription({
+        sessionId: 'session-1',
+        transcript: { kind: 'tail', maxBytes: 16 * 1024 },
+      });
+      assert.deepEqual(await subscription.loadTranscript(decodeStoredMessage), [message]);
+      assert.deepEqual(await subscription[Symbol.asyncIterator]().next(), {
+        done: false,
+        value: deltaFrame(connection.hostEpoch, subscription.subscriptionId, 1),
+      });
+      await subscription.close();
+    },
+  );
+});
+
+test('reassembles bounded backward pages with a timeout independent of index preparation', async () => {
   const message = {
     type: 'user' as const,
     id: 'user-1',
@@ -418,10 +524,19 @@ test('reassembles a large message from bounded backward pages', async () => {
   const splitAt = Math.floor(encoded.byteLength / 2);
   await withProtocolPeer(
     async (transport, hostEpoch, rootId) => {
-      const openRequest = await acceptConnectionAndReadOpen(transport, hostEpoch, rootId);
+      let openRequest = await acceptConnectionAndReadOpen(transport, hostEpoch, rootId);
+      await new Promise<void>((resolve) => setTimeout(resolve, 700));
+      await writeProtocolFrame(transport, {
+        requestId: openRequest.requestId,
+        operation: 'subscription.open',
+        ok: false,
+        error: { code: 'transcript_preparing', message: 'Preparing history' },
+      });
+      const next = decodeClientFrame(await transport.read(1_000));
+      assert.ok(!('kind' in next) && next.operation === 'subscription.open');
+      openRequest = next;
       const opened = openResult(hostEpoch, 'subscription-fragmented', {
         throughSequence: 0,
-        durableCoverage: 'complete',
         overlayMessageCount: 0,
         durable: transcriptPage({
           rawBytes: encoded.byteLength - splitAt,
@@ -457,6 +572,7 @@ test('reassembles a large message from bounded backward pages', async () => {
         anchorSequence: null,
         maxBytes: SESSION_TRANSCRIPT_PAGE_MAX_BYTES,
       });
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
       await writeProtocolFrame(transport, {
         requestId: continuationRequest.requestId,
         operation: 'session.transcript.page',
@@ -478,10 +594,13 @@ test('reassembles a large message from bounded backward pages', async () => {
       await answerClose(transport, opened.subscriptionId);
     },
     async (connection) => {
-      const subscription = await connection.openSessionSubscription({
-        sessionId: 'session-1',
-        transcript: { kind: 'tail', maxBytes: 16 * 1024 },
-      });
+      const subscription = await connection.openSessionSubscription(
+        {
+          sessionId: 'session-1',
+          transcript: { kind: 'tail', maxBytes: 16 * 1024 },
+        },
+        1_000,
+      );
       assert.deepEqual(await subscription.loadTranscript(decodeStoredMessage), [message]);
       await subscription.close();
     },
@@ -502,7 +621,6 @@ test('decodes one bounded page without walking the remaining transcript', async 
   const subscription = new ClientSessionSubscription(
     openResult('host-1', 'subscription-bounded-page', {
       throughSequence: 4,
-      durableCoverage: 'complete',
       overlayMessageCount: 0,
       durable: {
         ...transcriptPage({
@@ -615,7 +733,6 @@ test('assembles the complete edge Turn while paging newer transcript', async () 
   const subscription = new ClientSessionSubscription(
     openResult('host-1', 'subscription-newer-turn', {
       throughSequence: 1,
-      durableCoverage: 'complete',
       overlayMessageCount: 0,
       durable: initial,
       overlay: { ...transcriptPage({ source: 'overlay' }), throughSequence: 1 },
@@ -904,51 +1021,7 @@ test('keeps the connection usable when close wins the overlay release race', asy
   );
 });
 
-test('rejects a durable sequence gap', async () => {
-  const message = Buffer.from(
-    JSON.stringify({
-      type: 'user',
-      id: 'user-1',
-      turnId: 'turn-1',
-      ts: 1,
-      text: 'hello',
-    }),
-    'utf8',
-  );
-  const fragment = {
-    kind: 'durable' as const,
-    sequence: 0,
-    byteOffset: 0,
-    totalBytes: message.byteLength,
-    payloadDigest: null,
-    data: message.toString('base64'),
-  };
-  const gap = new ClientSessionSubscription(
-    openResult('host-1', 'subscription-gap', {
-      throughSequence: 1,
-      durableCoverage: 'complete',
-      overlayMessageCount: 0,
-      durable: {
-        ...transcriptPage({
-          rawBytes: message.byteLength,
-          fragments: [{ ...fragment, sequence: 1 }],
-        }),
-        throughSequence: 1,
-      },
-      overlay: { ...transcriptPage({ source: 'overlay' }), throughSequence: 1 },
-    }),
-    async () => undefined,
-    async () => {
-      throw new Error('unexpected page request');
-    },
-  );
-  await assert.rejects(
-    () => gap.loadTranscript(decodeStoredMessage),
-    hasSubscriptionReason('correlation_changed'),
-  );
-});
-
-test('loads a projected durable transcript with intentionally sparse sequences', async () => {
+test('loads a durable transcript whose sequences are sparse', async () => {
   const messages = [0, 2].map((sequence) =>
     Buffer.from(
       JSON.stringify({
@@ -964,7 +1037,6 @@ test('loads a projected durable transcript with intentionally sparse sequences',
   const subscription = new ClientSessionSubscription(
     openResult('host-1', 'subscription-projected', {
       throughSequence: 2,
-      durableCoverage: 'projected',
       overlayMessageCount: 0,
       durable: {
         ...transcriptPage({
@@ -1010,7 +1082,6 @@ test('rejects a durable message that does not match its payload digest', async (
   const subscription = new ClientSessionSubscription(
     openResult('host-1', 'subscription-digest-mismatch', {
       throughSequence: 0,
-      durableCoverage: 'complete',
       overlayMessageCount: 0,
       durable: transcriptPage({
         rawBytes: message.byteLength,
@@ -1075,7 +1146,6 @@ test('rejects a transcript cursor that does not advance', async () => {
   const subscription = new ClientSessionSubscription(
     openResult('host-1', 'subscription-stuck-cursor', {
       throughSequence: 0,
-      durableCoverage: 'complete',
       overlayMessageCount: 0,
       durable: repeated,
       overlay: transcriptPage({ source: 'overlay' }),
@@ -1105,7 +1175,6 @@ test('rejects an overlay that terminates before its declared high-water', async 
   const subscription = new ClientSessionSubscription(
     openResult('host-1', 'subscription-truncated-overlay', {
       throughSequence: null,
-      durableCoverage: 'complete',
       overlayMessageCount: 2,
       durable: { ...transcriptPage(), throughSequence: null },
       overlay: {
@@ -1197,7 +1266,6 @@ test('acknowledges a complete overlay before waiting for durable continuation pa
   const subscription = new ClientSessionSubscription(
     openResult('host-1', 'subscription-overlay-release-before-durable', {
       throughSequence: 0,
-      durableCoverage: 'complete',
       overlayMessageCount: 1,
       durable: transcriptPage({
         rawBytes: durableMessage.byteLength - split,
@@ -1271,7 +1339,6 @@ test('close stops transcript pagination after the in-flight page', async () => {
   const subscription = new ClientSessionSubscription(
     openResult('host-1', 'subscription-closing', {
       throughSequence: 0,
-      durableCoverage: 'complete',
       overlayMessageCount: 0,
       durable: transcriptPage({
         rawBytes: Math.floor(message.byteLength / 2),
@@ -1638,7 +1705,6 @@ function openResult(
 function transcriptBootstrap(message: Buffer): SessionTranscriptBootstrap {
   return {
     throughSequence: 0,
-    durableCoverage: 'complete',
     overlayMessageCount: 0,
     durable: transcriptPage({
       rawBytes: message.byteLength,
@@ -1660,7 +1726,6 @@ function transcriptBootstrap(message: Buffer): SessionTranscriptBootstrap {
 function overlayBootstrap(message: Buffer): SessionTranscriptBootstrap {
   return {
     throughSequence: null,
-    durableCoverage: 'complete',
     overlayMessageCount: 1,
     durable: { ...transcriptPage(), throughSequence: null },
     overlay: {

@@ -39,6 +39,7 @@ import type { StorageRef } from '@maka/core/events';
 import { encodeCanonicalRuntimeEvent } from '@maka/core/canonical-runtime-event';
 import type { SessionEvent } from '@maka/core/events';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
+import type { RequestCompositionSnapshotInput } from '@maka/core/run-composition';
 import {
   createSessionEventMapMemory,
   mapSessionEventToRuntimeEvent,
@@ -88,6 +89,7 @@ import { buildLlmHistorySummarizer } from '../history-compact-summarizer.js';
 import { createToolResultArchiveCapability } from '../tool-result-archive-capability.js';
 import {
   createTestAiSdkBackend,
+  projectedTranscriptOf,
   readExternalExecutionBoundary,
   testToolResultArchive,
 } from './execution-boundary-test-helpers.js';
@@ -96,6 +98,9 @@ import type { OpenAiResponsesSemanticBaseline } from '../openai-responses-contin
 import type { OpenAiResponsesTransportState } from '../openai-responses-websocket.js';
 import { getAIModel } from '../model-factory.js';
 import { waitFor as pollFor } from '@maka/core/test-only/async-primitives';
+import { Context } from '../plugin-kernel.js';
+import { MakaCompositionLoader } from '../plugin-composition-loader.js';
+import { PluginToolService } from '../plugin-tool-service.js';
 import { testInvocationOpening } from './invocation-fixture.js';
 
 describe('AiSdkBackend ApplyPatch routing', () => {
@@ -3508,6 +3513,300 @@ describe('AiSdkBackend model history', () => {
     assert.equal(artifactReads, 1);
   });
 
+  test('a live Plugin can enable, execute, and disable a Tool within one Turn', async () => {
+    const durable = durableTurnHarness('turn-dynamic-tools', 'check inventory then disable access');
+    const root = new Context();
+    const pluginTools = new PluginToolService(root);
+    const loader = new MakaCompositionLoader({ root });
+    let disposeInventory: (() => Promise<void>) | undefined;
+    const inventoryTool: MakaTool = {
+      name: 'lookup_inventory',
+      description: 'look up current inventory',
+      parameters: z.object({ sku: z.string() }),
+      impl: async ({ sku }) => ({ sku, available: 7 }),
+    };
+    await loader.install({
+      packageId: 'inventory-plugin',
+      host: (ctx) => {
+        ctx.tools.register({
+          name: 'enable_inventory',
+          description: 'enable inventory access',
+          parameters: z.object({}),
+          impl: async () => {
+            disposeInventory ??= ctx.tools.register(inventoryTool);
+            return { enabled: inventoryTool.name };
+          },
+        });
+        ctx.tools.register({
+          name: 'disable_inventory',
+          description: 'disable inventory access',
+          parameters: z.object({}),
+          impl: async () => {
+            await disposeInventory?.();
+            disposeInventory = undefined;
+            return { disabled: inventoryTool.name };
+          },
+        });
+      },
+    });
+    await loader.create('profile', {
+      id: 'inventory-entry',
+      packageId: 'inventory-plugin',
+    });
+    let calls = 0;
+    const requestCompositions: RequestCompositionSnapshotInput[] = [];
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        calls += 1;
+        const toolCall =
+          calls === 1
+            ? {
+                id: 'search-enable-call',
+                name: TOOL_SEARCH_NAME,
+                input: JSON.stringify({ query: 'enable inventory', limit: 1 }),
+              }
+            : calls === 2
+              ? { id: 'enable-call', name: 'enable_inventory', input: '{}' }
+              : calls === 3
+                ? {
+                    id: 'search-inventory-call',
+                    name: TOOL_SEARCH_NAME,
+                    input: JSON.stringify({ query: 'look up current inventory', limit: 1 }),
+                  }
+                : calls === 4
+                  ? {
+                      id: 'inventory-call',
+                      name: inventoryTool.name,
+                      input: JSON.stringify({ sku: 'SKU-42' }),
+                    }
+                  : calls === 5
+                    ? {
+                        id: 'search-disable-call',
+                        name: TOOL_SEARCH_NAME,
+                        input: JSON.stringify({ query: 'disable inventory', limit: 1 }),
+                      }
+                    : calls === 6
+                      ? { id: 'disable-call', name: 'disable_inventory', input: '{}' }
+                      : undefined;
+        return {
+          stream: simulateReadableStream({
+            chunks: (toolCall
+              ? [
+                  { type: 'stream-start', warnings: [] },
+                  {
+                    type: 'tool-call',
+                    toolCallId: toolCall.id,
+                    toolName: toolCall.name,
+                    input: toolCall.input,
+                  },
+                  {
+                    type: 'finish',
+                    finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+                    usage: emptyUsage(),
+                  },
+                ]
+              : [
+                  { type: 'stream-start', warnings: [] },
+                  {
+                    type: 'finish',
+                    finishReason: { unified: 'stop', raw: 'stop' },
+                    usage: emptyUsage(),
+                  },
+                ]) as LanguageModelV4StreamPart[],
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
+    });
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [...pluginTools.resolve('session-1', []).tools],
+      resolveTools: () => pluginTools.resolve('session-1', []).tools,
+      toolAvailability: {
+        groups: [
+          {
+            id: 'plugins',
+            toolNames: ['enable_inventory', 'lookup_inventory', 'disable_inventory'],
+          },
+        ],
+      },
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+      recordRequestComposition: async (_runId, snapshot) => {
+        requestCompositions.push(snapshot);
+        return snapshot.compositionId;
+      },
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drainDurably(
+      backend.send(durable.input({ runId: 'run-1', invocationId: 'invocation-1' })),
+      durable,
+    );
+
+    const namesForRequest = (index: number): string[] => {
+      const tools = model.doStreamCalls[index]?.tools ?? [];
+      return Array.isArray(tools)
+        ? tools.flatMap((tool) =>
+            tool && typeof tool === 'object' && 'name' in tool ? [String(tool.name)] : [],
+          )
+        : Object.keys(tools);
+    };
+    assert.equal(namesForRequest(0).includes('enable_inventory'), false);
+    assert.equal(namesForRequest(1).includes('enable_inventory'), true);
+    assert.equal(namesForRequest(2).includes(inventoryTool.name), false);
+    assert.equal(namesForRequest(3).includes(inventoryTool.name), true);
+    assert.equal(namesForRequest(4).includes('disable_inventory'), false);
+    assert.equal(namesForRequest(5).includes('disable_inventory'), true);
+    assert.equal(namesForRequest(6).includes(inventoryTool.name), false);
+    assert.equal(requestCompositions.length, 7);
+    assert.equal(requestCompositions[2]?.toolNames.includes(inventoryTool.name), false);
+    assert.equal(requestCompositions[3]?.toolNames.includes(inventoryTool.name), true);
+    assert.equal(requestCompositions[6]?.toolNames.includes(inventoryTool.name), false);
+    const finalPrompt = model.doStreamCalls[6]?.prompt as Array<{
+      role: string;
+      content: Array<{ output?: { value?: unknown } }>;
+    }>;
+    assert.equal(
+      JSON.stringify(finalPrompt).includes('SKU-42') &&
+        JSON.stringify(finalPrompt).includes('available'),
+      true,
+    );
+    await loader.close();
+  });
+
+  test('installs, invokes, and removes a live weather plugin within one model turn', async () => {
+    const root = new Context();
+    const pluginTools = new PluginToolService(root);
+    const loader = new MakaCompositionLoader({ root });
+    const invocations: Array<{ city: string }> = [];
+    await loader.install({
+      packageId: 'weather-package',
+      host: (ctx) => {
+        ctx.tools.register({
+          name: 'weather_forecast',
+          description: 'Get the current weather forecast for a city',
+          parameters: z.object({ city: z.string() }),
+          impl: async (input) => {
+            const { city } = input as { city: string };
+            invocations.push({ city });
+            return { city, condition: 'sunny', temperatureCelsius: 28 };
+          },
+        });
+      },
+    });
+
+    const installPlugin: MakaTool = {
+      name: 'install_weather_plugin',
+      description: 'Install the weather plugin for the current profile',
+      parameters: z.object({}),
+      impl: async () => {
+        await loader.create('profile', {
+          id: 'weather-entry',
+          packageId: 'weather-package',
+        });
+        return { installed: true };
+      },
+    };
+    const removePlugin: MakaTool = {
+      name: 'remove_weather_plugin',
+      description: 'Remove the installed weather plugin',
+      parameters: z.object({}),
+      impl: async () => {
+        await loader.remove('weather-entry');
+        return { removed: true };
+      },
+    };
+    const resolveTools = (): readonly MakaTool[] =>
+      pluginTools.resolve('session-1', [installPlugin, removePlugin]).tools;
+    const durable = durableTurnHarness(
+      'turn-live-weather-plugin',
+      'Install a weather plugin, check Shanghai, then remove the plugin.',
+    );
+    const scriptedCalls = [
+      { toolCallId: 'install-call', toolName: installPlugin.name, input: '{}' },
+      {
+        toolCallId: 'forecast-call',
+        toolName: 'weather_forecast',
+        input: JSON.stringify({ city: 'Shanghai' }),
+      },
+      { toolCallId: 'remove-call', toolName: removePlugin.name, input: '{}' },
+    ] as const;
+    let step = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        const call = scriptedCalls[step++];
+        return {
+          stream: simulateReadableStream({
+            chunks: (call
+              ? [
+                  { type: 'stream-start', warnings: [] },
+                  { type: 'tool-call', ...call },
+                  {
+                    type: 'finish',
+                    finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+                    usage: emptyUsage(),
+                  },
+                ]
+              : [
+                  { type: 'stream-start', warnings: [] },
+                  {
+                    type: 'finish',
+                    finishReason: { unified: 'stop', raw: 'stop' },
+                    usage: emptyUsage(),
+                  },
+                ]) as LanguageModelV4StreamPart[],
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
+    });
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [...resolveTools()],
+      resolveTools,
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    try {
+      const events = await drainDurably(backend.send(durable.input()), durable);
+      const namesForStep = (index: number): string[] => {
+        const tools = model.doStreamCalls[index]?.tools ?? [];
+        return Array.isArray(tools)
+          ? tools.flatMap((tool) =>
+              tool && typeof tool === 'object' && 'name' in tool ? [String(tool.name)] : [],
+            )
+          : Object.keys(tools);
+      };
+
+      assert.equal(namesForStep(0).includes('weather_forecast'), false);
+      assert.equal(namesForStep(1).includes('weather_forecast'), true);
+      assert.equal(namesForStep(2).includes('weather_forecast'), true);
+      assert.equal(namesForStep(3).includes('weather_forecast'), false);
+      assert.deepEqual(invocations, [{ city: 'Shanghai' }]);
+      assert.equal(events.filter((event) => event.type === 'tool_result').length, 3);
+      assert.deepEqual(pluginTools.inspect(), []);
+    } finally {
+      await loader.close();
+    }
+  });
+
   test('reloads durable multi-tool settlement before terminal continuation', async () => {
     const anchor = runtimeTextEvent({
       id: 'runtime-user',
@@ -4857,7 +5156,6 @@ describe('AiSdkBackend model history', () => {
         const backendInput: AiSdkBackendInput = {
           sessionId: 'session-1',
           header: header(),
-          appendMessage: async () => {},
           connection: connection(),
           apiKey: 'sk-test',
           modelId: 'mock-model-id',
@@ -5214,6 +5512,9 @@ describe('AiSdkBackend model history', () => {
       appendMessage: async (message: StoredMessage) => {
         appended.push(message as unknown as { type: string; kind?: string; data?: unknown });
       },
+      recordSystemNote: async (kind, _turnId, data) => {
+        appended.push({ type: 'system_note', kind, data });
+      },
       connection: connection(),
       modelId: 'mock-model-id',
       modelFactory: () => model,
@@ -5286,6 +5587,9 @@ describe('AiSdkBackend model history', () => {
       appendMessage: async (message: StoredMessage) => {
         appended.push(message as unknown as { type: string; kind?: string });
       },
+      recordSystemNote: async (kind) => {
+        appended.push({ type: 'system_note', kind });
+      },
       connection: connection(),
       modelId: 'mock-model-id',
       modelFactory: () => model,
@@ -5343,7 +5647,10 @@ describe('AiSdkBackend model history', () => {
     let failNextNoteWrite = true;
     const backend = createBackend({
       appendMessage: async (message: StoredMessage) => {
-        const candidate = message as unknown as { type: string; kind?: string };
+        persisted.push(message as unknown as { type: string; kind?: string });
+      },
+      recordSystemNote: async (kind) => {
+        const candidate = { type: 'system_note', kind };
         if (isFailOpenNote(candidate)) {
           noteWriteAttempts += 1;
           if (failNextNoteWrite) {
@@ -5535,8 +5842,9 @@ describe('AiSdkBackend model history', () => {
     const gate = makeGate();
     let usagePersistenceStarted = false;
     const backend = createBackend({
-      appendMessage: async (message) => {
-        if (message.type !== 'token_usage') return;
+      // The usage checkpoint is the persistence this turn awaits at its step
+      // boundary, so holding it here is the window the stop has to win.
+      recordUsageCheckpoint: async () => {
         usagePersistenceStarted = true;
         await gate.promise;
       },
@@ -7270,7 +7578,7 @@ describe('AiSdkBackend model history', () => {
 });
 
 describe('AiSdkBackend error surfaces', () => {
-  test('generalizes model setup errors before emitting renderer events', async () => {
+  test('preserves model setup diagnostics in renderer events', async () => {
     const backend = createBackend({
       connection: connection(),
       apiKey: 'sk-live-secret-token-value',
@@ -7290,8 +7598,7 @@ describe('AiSdkBackend error surfaces', () => {
     const error = events.find(
       (event): event is Extract<SessionEvent, { type: 'error' }> => event.type === 'error',
     );
-    assert.equal(error?.message, '401 Authorization: Bearer [redacted]');
-    assert.equal(JSON.stringify(events).includes('sk-live-secret-token-value'), false);
+    assert.equal(error?.message, '401 Authorization: Bearer sk-live-secret-token-value');
   });
 
   test('stops after a T1 rejection only after sibling tool calls settle', async () => {
@@ -7776,6 +8083,13 @@ describe('AiSdkBackend usage telemetry', () => {
   });
 
   for (const output of ['text', 'tool'] as const) {
+    // The upstream cut the SSE connection mid-answer: chunks arrived, no
+    // `finish` frame did. The stream then ends without yielding an error and
+    // without throwing, so every guard that watches for a thrown failure sees
+    // nothing. Reporting `end_turn` here tells the caller the model said its
+    // piece when the connection simply died — a benchmark cell recorded
+    // `status: completed` on exactly this shape while the agent was still
+    // mid-task.
     test(`does not retry a truncated provider stream after ${output} activity`, async () => {
       const durable = durableTurnHarness('turn-truncated', 'analyse the image');
       let calls = 0;
@@ -8663,7 +8977,8 @@ describe('AiSdkBackend usage telemetry', () => {
         },
         readToolResultArchive: async () => ({ ok: false, reason: 'not_found' }),
         readArchivedToolResultResource: async (event) => {
-          const serializedResult = store.get(event.artifactId);
+          const serializedResult =
+            event.storage === 'ledger' ? undefined : store.get(event.artifactId);
           return serializedResult === undefined
             ? { ok: false, reason: 'not_found' }
             : { ok: true, serializedResult };
@@ -9621,11 +9936,16 @@ describe('AiSdkBackend RunTrace', () => {
 
   test('disables hidden AI SDK retries and traces the one explicit Runtime retry', async () => {
     const attempts: ModelCallAttempt[] = [];
+    const stableTool = testTool('stable_tool', z.object({}));
+    const retryOnlyTool = testTool('retry_only_tool', z.object({}));
+    let surface: readonly MakaTool[] = [stableTool];
     let calls = 0;
+    const requestCompositions: RequestCompositionSnapshotInput[] = [];
     const model = new MockLanguageModelV4({
       doStream: async () => {
         calls += 1;
         if (calls === 1) {
+          surface = [stableTool, retryOnlyTool];
           throw new APICallError({
             message: 'retry me',
             url: 'https://provider.invalid/v1/messages',
@@ -9657,9 +9977,14 @@ describe('AiSdkBackend RunTrace', () => {
       connection: connection(),
       modelId: 'mock-model-id',
       modelFactory: () => model,
-      tools: [],
+      tools: [...surface],
+      resolveTools: () => surface,
       recordModelCallAttempt: ({ attempt }) => {
         attempts.push(attempt);
+      },
+      recordRequestComposition: async (_runId, snapshot) => {
+        requestCompositions.push(snapshot);
+        return snapshot.compositionId;
       },
       providerRetrySleep: async () => {},
     });
@@ -9667,6 +9992,22 @@ describe('AiSdkBackend RunTrace', () => {
     await drain(backend.send({ turnId: 'turn-1', runId: 'run-1', text: 'hi', context: [] }));
 
     assert.equal(calls, 2);
+    assert.equal(
+      model.doStreamCalls.every((call) =>
+        Array.isArray(call.tools)
+          ? call.tools.every(
+              (tool) => !('name' in tool) || String(tool.name) !== retryOnlyTool.name,
+            )
+          : !(retryOnlyTool.name in (call.tools ?? {})),
+      ),
+      true,
+    );
+    assert.equal(requestCompositions.length, 1);
+    assert.ok(
+      attempts.every(
+        (attempt) => attempt.requestCompositionId === requestCompositions[0]?.compositionId,
+      ),
+    );
     assert.deepEqual(
       attempts.map(({ attempt, status }) => ({ attempt, status })),
       [
@@ -10190,54 +10531,6 @@ describe('AiSdkBackend RunTrace', () => {
       false,
     );
     assert.equal(events.find((event) => event.type === 'complete')?.stopReason, 'end_turn');
-  });
-
-  test('does not report a consumed idle timeout for a later assistant append failure', async () => {
-    const timers = manualWatchdogTimer();
-    let calls = 0;
-    const model = new MockLanguageModelV4({
-      doStream: async (options) => {
-        calls += 1;
-        return {
-          stream: hangingProviderStream(
-            [
-              { type: 'stream-start', warnings: [] },
-              { type: 'reasoning-start', id: 'reasoning-1' },
-              {
-                type: 'reasoning-delta',
-                id: 'reasoning-1',
-                delta: 'partial thought',
-              },
-            ],
-            options.abortSignal,
-          ),
-        };
-      },
-    });
-    const backend = createBackend({
-      appendMessage: async () => {
-        throw new Error('assistant append failed');
-      },
-      connection: connection(),
-      modelId: 'mock-model-id',
-      modelFactory: () => model,
-      tools: [],
-      streamWatchdogTimer: timers.clock,
-      providerRetrySleep: async () => {},
-    });
-
-    const events: SessionEvent[] = [];
-    for await (const event of backend.send({ turnId: 'turn-1', text: 'hi', context: [] })) {
-      events.push(event);
-      if (event.type === 'thinking_delta' && event.text === 'partial thought') timers.fire();
-    }
-
-    assert.equal(calls, 1);
-    const error = events.find((event) => event.type === 'error');
-    assert.equal(error?.type, 'error');
-    assert.notEqual(error?.type === 'error' ? error.reason : undefined, 'timeout');
-    assert.equal(error?.type === 'error' ? error.message : undefined, 'assistant append failed');
-    assert.equal(events.find((event) => event.type === 'complete')?.stopReason, 'error');
   });
 
   test('links a recovered tool call to the retry assistant step', async () => {
@@ -16294,9 +16587,18 @@ function runtimeExecute(
   eventSink: { push(event: SessionEvent): void },
 ) {
   const runtime = turnScope(backend, turnId).toolRuntime;
+  // This drives the tool runtime beneath `send()`, so the stream that becomes
+  // the ledger is teed here instead.
+  const project = projectedTranscriptOf(backend);
   const durableEventSink: DurableSessionEventSink = {
-    push: (event) => eventSink.push(event),
-    pushAndWaitUntilConsumed: async (event) => eventSink.push(event),
+    push: (event) => {
+      eventSink.push(event);
+      void project?.(event, turnId);
+    },
+    pushAndWaitUntilConsumed: async (event) => {
+      eventSink.push(event);
+      await project?.(event, turnId);
+    },
   };
   return async (
     input: unknown,

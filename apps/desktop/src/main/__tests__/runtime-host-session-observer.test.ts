@@ -670,6 +670,7 @@ test('fences transcript range failures across same-source replica recovery', asy
   };
   let opens = 0;
   let staleRangeStarted = false;
+  let currentRangeStarted = false;
   const observer = new RuntimeHostSessionObserver({
     client: {
       openSession: async () => {
@@ -694,7 +695,6 @@ test('fences transcript range failures across same-source replica recovery', asy
           events,
           transcriptBootstrap: {
             throughSequence: 1,
-            durableCoverage: 'complete',
             overlayMessageCount: 0,
             durable: bootstrap,
             overlay: { ...bootstrap, source: 'overlay', nextCursor: null },
@@ -709,6 +709,7 @@ test('fences transcript range failures across same-source replica recovery', asy
                 return staleRange.promise;
               }
             : async () => {
+                currentRangeStarted = true;
                 throw currentFailure;
               },
           async close() {
@@ -757,7 +758,12 @@ test('fences transcript range failures across same-source replica recovery', asy
     sequence: 1,
     reason: 'slow_consumer',
   });
-  await waitFor(() => batches.at(-1)?.generation !== opened.generation);
+  await waitFor(() => currentRangeStarted);
+  assert.equal(
+    batches.at(-1)?.generation,
+    opened.generation,
+    'a failed recovery range does not replace the visible snapshot with an unrelated bootstrap',
+  );
   staleRange.reject(new Error('stale replica rejected its range'));
   await assert.doesNotReject(staleLoad);
 
@@ -990,7 +996,6 @@ test('finishes transcript open and replays a stale range request after replaceme
           events,
           transcriptBootstrap: {
             throughSequence: 0,
-            durableCoverage: 'complete',
             overlayMessageCount: 0,
             durable: {
               kind: 'page',
@@ -2166,7 +2171,6 @@ test("finishes a watched predecessor after initial catch-up recovery", async () 
               turnId: "turn-1",
               ts: 20,
               status: "completed" as const,
-              partialOutputRetained: true,
             },
           ]),
           events: secondEvents,
@@ -2322,7 +2326,6 @@ test("reconciles terminal, Goal, interaction, and sidecar state after subscripti
         turnId: 'turn-1',
         status: 'completed' as const,
         statusSource: 'recorded' as const,
-        partialOutputRetained: true,
       }],
       openSession: async () => {
         openCount += 1;

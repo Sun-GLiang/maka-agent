@@ -101,7 +101,26 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 125 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 135 as const;
+// 135: WorkHub model Turns replace direct action proposals with active-Turn task tools.
+// 134: Coordination actions own real Runtime Turns. Removes the synthetic record
+// operation, projects typed action receipts and admitted action identities, and
+// distinguishes stale candidate refusals and resumable transcript preparation.
+// 133: WorkHub actions carry attachments and new-Work model/permission defaults.
+// Epoch-132 peers reject these additional fields on strict action shapes.
+// 132: new Tool Result archives use versioned ledger references, not Artifact payloads.
+// 131: Logical model steps bind durable Request Composition identities.
+// 130: Turn contributions carry the optional bounded `failureMessage` diagnostic.
+// Epoch-129 peers reject this added field on the strict contribution shape.
+// 129: Turn states and Turn records drop `partialOutputRetained`. The fact was
+// derived twice — once from the Turn's output rows, once off the state message
+// — and read by nothing; older peers require the field on both.
+// 128: Session transcript bootstraps drop `durableCoverage`. A durable sequence
+// is an event ordinal times its stride, so no projection has contiguous
+// sequences any more and the claim the field made is unavailable to make.
+// 127: Session Turn contributions carry only the Turn's recorded state. Older
+// peers require the derived shape booleans this projection no longer sends.
+// 126: Durable transcript cursors seek Session event ordinals instead of run indexes.
 // 125: Live Turn snapshots carry an optional `rootExecutionKind:'context_compact'`
 // so a running context-compaction Turn can render a transcript row. Epoch-124
 // peers reject the added optional field on the strict live snapshot shape.
