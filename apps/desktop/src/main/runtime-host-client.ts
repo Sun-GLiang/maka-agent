@@ -546,6 +546,18 @@ export class DesktopRuntimeHostClient {
     return this.request("connection.onboarding.save", input);
   }
 
+  startExternalAgentSetup(input: OperationInput<"external_agents.setup.start">): Promise<OperationOutput<"external_agents.setup.start">> {
+    return this.request("external_agents.setup.start", input);
+  }
+
+  queryExternalAgentSetup(attemptId: string): Promise<OperationOutput<"external_agents.setup.query">> {
+    return this.request("external_agents.setup.query", { attemptId });
+  }
+
+  cancelExternalAgentSetup(attemptId: string): Promise<OperationOutput<"external_agents.setup.cancel">> {
+    return this.request("external_agents.setup.cancel", { attemptId });
+  }
+
   startOAuthLogin(
     attemptId: string,
     target: OperationInput<"oauth.login.start">["target"],

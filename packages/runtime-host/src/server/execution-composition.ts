@@ -156,6 +156,7 @@ import { MemoryExtractionSessionLane } from './memory-extraction-session-lane.js
 import { type HostMessageRootPort, HostMessageCoordinator } from './message-coordinator.js';
 import { HostNetworkProxyCoordinator } from './network-proxy-coordinator.js';
 import { HostOAuthExecutionAuthority } from './oauth-execution-authority.js';
+import { HostExternalAgentSetupCoordinator } from './external-agent-setup-coordinator.js';
 import { HostOAuthCoordinator, type HostOAuthCoordinatorInput } from './oauth-coordinator.js';
 import { HostPlanCoordinator } from './plan-coordinator.js';
 import {
@@ -578,6 +579,7 @@ export async function createExecutionRuntimeHostComposition(
     let memory: HostMemoryCoordinator | undefined;
     let clientCapabilities: HostClientCapabilityCoordinator | undefined;
     let oauth: HostOAuthCoordinator | undefined;
+    let externalAgentSetup: HostExternalAgentSetupCoordinator | undefined;
     let scheduledTasks: HostScheduledTaskCoordinator | undefined;
     let scheduledTaskTool: MakaTool | undefined;
     let goal: HostGoalCoordinator | undefined;
@@ -1161,6 +1163,15 @@ export async function createExecutionRuntimeHostComposition(
       onModelToolsChanged: registerBackendInvalidation,
       interactions,
       grants: stores.interactionStore,
+    });
+    externalAgentSetup = new HostExternalAgentSetupCoordinator({
+      readPolicy: () => runtimePolicyStores.runtimePolicy.getSnapshot(),
+      acquireResidency: () => context.acquireResidency('external-agent-setup'),
+      onCleanupFailure: () => {
+        context.retainUntilProcessExit();
+        context.requestDrain();
+      },
+      capabilities: clientCapabilities,
     });
     oauth = new HostOAuthCoordinator({
       runtimePolicy: runtimePolicyStores,
@@ -1940,6 +1951,7 @@ export async function createExecutionRuntimeHostComposition(
           skills.handlers,
           usagePricing.handlers,
           oauth.handlers,
+          externalAgentSetup.handlers,
           webSearch.handlers,
           networkProxy.handlers,
           configuration.handlers,
@@ -1951,6 +1963,7 @@ export async function createExecutionRuntimeHostComposition(
           () => connectionEffects.beginDrain(),
           () => skills.beginDrain(),
           () => oauth?.beginDrain(),
+          () => externalAgentSetup?.beginDrain(),
         ],
         close: [
           () => archiveEvidence?.close(),
@@ -1962,12 +1975,16 @@ export async function createExecutionRuntimeHostComposition(
               : requireSessionManager(manager).refreshIdleBackends(),
           () => skills.close(),
           () => oauth?.close(),
+          () => externalAgentSetup?.close(),
           () => {
             unsubscribeTranscriptChanges?.();
             unsubscribeUsageChanges?.();
           },
         ],
-        releaseConnection: [(connectionId) => artifacts.releaseConnection(connectionId)],
+        releaseConnection: [
+          (connectionId) => artifacts.releaseConnection(connectionId),
+          (connectionId) => externalAgentSetup?.releaseConnection(connectionId),
+        ],
       }),
       createRuntimeHostDomainModule({
         id: 'client-capability',

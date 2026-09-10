@@ -282,6 +282,7 @@ async function loadRuntimeHostSettingsWithoutLane(
     workspaceInstructions: policy.workspaceInstructions,
     privacy: policy.privacy,
     chatDefaults: policy.chatDefaults,
+    externalAgents: policy.externalAgents,
     shell: policy.shell,
     webSearch: {
       ...local.webSearch,
@@ -379,6 +380,9 @@ async function applyHostPatchWithoutLane(
       patch.chatDefaults,
       "set_chat_defaults",
     );
+  }
+  if (patch.externalAgents) {
+    await client.updateRuntimePolicy(() => ({ kind: "set_external_agents", value: patch.externalAgents! }));
   }
   if (patch.shell) {
     await mergePolicy(client, "shell", patch.shell, "set_shell");

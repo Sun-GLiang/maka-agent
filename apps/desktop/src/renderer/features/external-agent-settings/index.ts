@@ -17,4 +17,6 @@
  * under the License.
  */
 
-export * from "../application/contracts/settings-presentation/oauth-login-flow-guard.js";
+export { ExternalAgentsSettingsPage } from './page.js';
+export { ExternalAgentSettingsServicesProvider } from './services.js';
+export type { ExternalAgentSettingsServices, ExternalAgentSettingsHost } from './services.js';
