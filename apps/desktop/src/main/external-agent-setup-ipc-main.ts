@@ -28,6 +28,11 @@ import type {
   OAuthPresentationExpectation,
 } from './runtime-host-oauth-presentation.js';
 
+// Cover the Host's 30-second initialization plus five-minute authentication window,
+// with admission headroom. Terminal queries and cancellation release this earlier;
+// the bounded fallback also releases abandoned Desktop expectations.
+const SETUP_PRESENTATION_TIMEOUT_MS = 6 * 60_000;
+
 export function registerExternalAgentSetupIpc(deps: {
   ipcMain: ReconnectableReadIpcMain;
   client: Pick<
@@ -50,7 +55,7 @@ export function registerExternalAgentSetupIpc(deps: {
       if (pending) throw new Error('Another external agent login is in progress');
       pending = {
         id: input.attemptId,
-        expectation: deps.presentation.expect(input.attemptId, input.attemptId),
+        expectation: deps.presentation.expect(input.attemptId, input.attemptId, SETUP_PRESENTATION_TIMEOUT_MS),
       };
     }
     try {

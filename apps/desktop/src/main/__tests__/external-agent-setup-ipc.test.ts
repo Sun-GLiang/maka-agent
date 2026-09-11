@@ -94,3 +94,51 @@ test('setup IPC registers an expectation before start and releases it on termina
   const next = presentation.expect('regular-oauth');
   next.cancel();
 });
+
+test('setup accepts a delayed authorization link and clears terminal, cancelled and abandoned expectations', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  type Handler = Parameters<Parameters<typeof registerExternalAgentSetupIpc>[0]['ipcMain']['handle']>[1];
+  const handlers = new Map<string, Handler>();
+  const opened: string[] = [];
+  const presentation = new RuntimeHostOAuthPresentation(async (url) => { opened.push(url); });
+  let input = { attemptId: 'slow-login', action: 'login' as const, expectedExecutable: '/agent' };
+  let phase: ExternalAgentSetupProjection['phase'] = 'connecting';
+  registerExternalAgentSetupIpc({
+    ipcMain: { handle: (channel, listener) => { handlers.set(channel, listener); } },
+    presentation,
+    client: {
+      startExternalAgentSetup: async (value) => ({ ...value, phase }),
+      queryExternalAgentSetup: async () => ({ ...input, phase }),
+      cancelExternalAgentSetup: async () => ({ ...input, phase: 'cancelled' }),
+    },
+  });
+  const invoke = (channel: string) => handlers.get(channel)!({} as IpcMainInvokeEvent,
+    channel === 'external-agents:setup:start' ? input : { attemptId: input.attemptId });
+  const present = () => presentation.openExternal('https://accounts.google.com/delayed', input.attemptId, new AbortController().signal);
+  await invoke('external-agents:setup:start');
+  // Initialization can take 30 seconds, followed by up to five minutes of authentication.
+  t.mock.timers.tick(320_000);
+  await present();
+  assert.equal(opened.length, 1);
+  phase = 'succeeded';
+  await invoke('external-agents:setup:query');
+  for (const terminal of ['failed', 'cancelled'] as const) {
+    input = { ...input, attemptId: terminal };
+    phase = 'connecting';
+    await invoke('external-agents:setup:start');
+    t.mock.timers.tick(35_000);
+    if (terminal === 'cancelled') await invoke('external-agents:setup:cancel');
+    else { phase = 'failed'; await invoke('external-agents:setup:query'); }
+    await assert.rejects(present(), /no matching OAuth presentation/);
+  }
+  input = { ...input, attemptId: 'abandoned' };
+  phase = 'connecting';
+  await invoke('external-agents:setup:start');
+  t.mock.timers.tick(360_000);
+  await assert.rejects(present(), /no matching OAuth presentation/);
+  await invoke('external-agents:setup:cancel');
+  const regular = presentation.expect('regular-oauth');
+  t.mock.timers.tick(30_000);
+  await assert.rejects(regular.presented, /did not present OAuth authorization/);
+  assert.equal(opened.length, 1);
+});

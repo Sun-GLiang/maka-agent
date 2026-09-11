@@ -78,3 +78,13 @@ The approved UI revision extends PR1 with managed installation; it supersedes th
 Managed-install acceptance used both a direct production installer run and the built Desktop with an isolated real Host. Google's full archive downloaded and verified successfully. Desktop cancellation removed its staging directory and preserved the previously saved path; retry installed both official executables, completed an ACP handshake, and saved the managed absolute path via Settings. No ACP server/helper remained. A subsequent sign-in was started but the page was changed before its final result was recorded; it is not counted as a new successful real-login acceptance. The earlier successful same-version authentication record above remains separate.
 
 Validation: full build/typecheck, lint, format, Desktop Knip and renderer architecture passed. The complete Host suite passed (1,865 passed, 12 skipped), Desktop passed (2,506 tests), and CLI passed (934 passed, 3 skipped). The final focused installer/setup/IPC/UI suite passed 40 tests, including the added cancel/disconnect/drain checks.
+
+
+## PR1 follow-up checklist
+
+- [x] Browser presentation covers the Host initialization/authentication window: setup uses a six-minute bounded expectation, released earlier on terminal result or cancellation. Regular model OAuth keeps its 30-second timeout. Controlled IPC tests cover a link arriving after 320 seconds, cancellation, failure, abandoned expiry and the regular OAuth timeout.
+- [ ] Record the current Desktop sequence in one acceptance run: Install → automatic path save → successful Google login → cancel/retry → successful login again. Check temporary server/helper cleanup at terminal results. The separate historical installation and login records above do not complete this item.
+- [ ] Complete latest-head CI and PR review.
+- [ ] Merge PR1.
+
+The previous head `b10421741` passed all applicable CI checks (CLI Eval was conditionally skipped). Reassess CI on the follow-up head. Issue #5103 now scopes official behavior verification to each dependent PR: PR1 initialization/authentication; PR2 task execution and restoration feasibility; PR3 full restoration/replay; PR4 dynamic configuration. PR1 does not claim task/session/model/restore acceptance.
