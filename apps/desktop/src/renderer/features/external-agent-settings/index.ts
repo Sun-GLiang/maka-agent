@@ -19,4 +19,4 @@
 
 export { ExternalAgentsSettingsPage } from './page.js';
 export { ExternalAgentSettingsServicesProvider } from './services.js';
-export type { ExternalAgentSettingsServices, ExternalAgentSettingsHost } from './services.js';
+export type { ExternalAgentSettingsServices } from './services.js';
