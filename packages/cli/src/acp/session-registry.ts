@@ -46,6 +46,7 @@ import {
   RuntimeHostCatalogReadError,
   RuntimeHostOperationError,
   RuntimeHostRequestInterruptedError,
+  RuntimeHostSubscriptionError,
   RuntimeHostSessionCatalogRevisionChangedError,
   type RuntimeHostReconnectingConnection,
   type RuntimeHostSessionCatalogPageCursor,
@@ -141,6 +142,7 @@ interface ActiveAcpPrompt {
   readonly waiters: Set<() => void>;
   attachment?: AcpSessionAttachment;
   dispatchStarted: boolean;
+  startRequestSettled: boolean;
   admissionSettled: boolean;
   startedTurn?: TurnSnapshot;
   cancelled: boolean;
@@ -272,8 +274,6 @@ export class AcpSessionRegistry {
       mapper: new AcpSessionEventMapper({
         sessionId: params.sessionId,
         notify: async (notification) => {
-          const configuration = this.#attachmentConfigurations.get(params.sessionId);
-          if (configuration) await Promise.race([configuration.tail, configuration.retired]);
           if (!this.#closing && this.#ownedSessionIds.has(params.sessionId)) {
             await context.notify(notification);
           }
@@ -281,6 +281,7 @@ export class AcpSessionRegistry {
       }),
       waiters: new Set(),
       dispatchStarted: false,
+      startRequestSettled: false,
       admissionSettled: false,
       cancelled: false,
       finished: false,
@@ -328,6 +329,7 @@ export class AcpSessionRegistry {
       this.#wake(active);
       try {
         const result = await connection.request('turn.start', startInput);
+        active.startRequestSettled = true;
         active.admissionSettled = true;
         if (result.kind === 'started') active.startedTurn = result.turn;
         this.#wake(active);
@@ -339,7 +341,8 @@ export class AcpSessionRegistry {
       } catch (error) {
         // A lost dispatched response does not establish whether Host admitted
         // this Turn. Retain this attempt until subscription or query facts do.
-        active.admissionSettled = !(
+        active.startRequestSettled = true;
+        active.admissionSettled ||= !(
           error instanceof RuntimeHostRequestInterruptedError && error.dispatch === 'dispatched'
         );
         if (!active.admissionSettled) {
@@ -350,11 +353,11 @@ export class AcpSessionRegistry {
               this.#wake(active);
             },
             (queryError: unknown) => {
-              // Only an authoritative absence settles unknown admission. A
-              // failed query must leave cancellation latched for recovery.
+              // A retryable query interruption still leaves subscription
+              // recovery as a fact source. Any permanent failure ends this
+              // local attempt without claiming that Host rejected admission.
               if (
-                queryError instanceof RuntimeHostOperationError &&
-                queryError.code === 'not_found'
+                !(queryError instanceof RuntimeHostRequestInterruptedError && queryError.retryable)
               ) {
                 active.admissionSettled = true;
               }
@@ -372,15 +375,14 @@ export class AcpSessionRegistry {
         return { stopReason: await active.mapper.cancel() };
       }
       const stopReason = await observation;
-      const configuration = this.#attachmentConfigurations.get(params.sessionId);
-      if (configuration) await Promise.race([configuration.tail, configuration.retired]);
       return { stopReason };
     } catch (error) {
       // A failed projection must not leave the corresponding Host Turn running.
       active.stopTask ??= this.#stopPromptWhenObservable(active);
       await active.stopTask.catch(() => undefined);
       if (active.cancelled) return { stopReason: await active.mapper.cancel() };
-      throw error;
+      if (error instanceof RequestError) throw error;
+      throw requestErrorFromRuntimeHost(error, 'subscription.open');
     } finally {
       context.signal.removeEventListener('abort', onAbort);
       active.finished = true;
@@ -473,7 +475,7 @@ export class AcpSessionRegistry {
         }
         return;
       }
-      if (active.admissionSettled) return;
+      if (active.admissionSettled && active.startRequestSettled) return;
       await this.#waitForPromptChange(active);
     }
   }
@@ -519,9 +521,7 @@ export class AcpSessionRegistry {
           const configOptions = await this.#projectConfigOptions(connection, session);
           await this.#notifyConfiguration(sessionId, configuration, configOptions);
         }).catch((error: unknown) => {
-          const failure = error instanceof Error ? error : new Error(String(error));
-          if (attachment) this.#retireFailedAttachment(sessionId, task, attachment, failure);
-          else earlyFailure = failure;
+          console.error('[acp] Session configuration refresh failed:', error);
         });
       },
       onTranscriptReplaced: (turnId, messages) => {
@@ -580,6 +580,10 @@ export class AcpSessionRegistry {
     }
     for (const active of this.#activePrompts.get(sessionId) ?? []) {
       if (active.attachment !== attachment) continue;
+      // Recovery has ended, so no future subscription fact can settle an
+      // outcome-unknown admission. A pending start response may still provide
+      // the exact identity and is handled before cancellation can retire.
+      active.admissionSettled = true;
       attachment.failTurn(active.turnId, error);
       this.#wake(active);
     }
@@ -802,6 +806,9 @@ export class AcpSessionRegistry {
 
   async #dispose(): Promise<void> {
     const sessionIds = new Set([...this.#activePrompts.keys(), ...this.#attachments.keys()]);
+    const activePrompts = [...sessionIds].flatMap((sessionId) => [
+      ...(this.#activePrompts.get(sessionId) ?? []),
+    ]);
     const cancellations = [...sessionIds].map((sessionId) => this.#cancelSession(sessionId));
     const attachments = [...this.#attachments.values()];
     this.#attachments.clear();
@@ -809,6 +816,29 @@ export class AcpSessionRegistry {
     for (const configuration of configurations) configuration.retire();
     this.#attachmentConfigurations.clear();
     await Promise.allSettled(attachments.map(async (attachment) => (await attachment).close()));
+    await Promise.allSettled(
+      activePrompts.map(async (active) => {
+        while (active.dispatchStarted && !active.startRequestSettled && !active.finished) {
+          await this.#waitForPromptChange(active);
+        }
+      }),
+    );
+    const unknownAdmissions = activePrompts.filter((active) => {
+      const observed = active.attachment?.snapshot.rootTurn;
+      const hasStopIdentity =
+        observed?.turnId === active.turnId || active.startedTurn !== undefined;
+      return active.dispatchStarted && !active.admissionSettled && !hasStopIdentity;
+    });
+    if (unknownAdmissions.length > 0) {
+      // At shutdown the attachment is already closed and each start request has
+      // settled, leaving recovery/query as the only remaining fact source.
+      // Close the owned connection so those reads cannot deadlock EOF cleanup.
+      await Promise.allSettled([this.#closeOwnedConnection()]);
+      for (const active of unknownAdmissions) {
+        active.admissionSettled = true;
+        this.#wake(active);
+      }
+    }
     await Promise.allSettled(cancellations);
     await Promise.allSettled([this.#closeOwnedConnection()]);
     await Promise.allSettled([
@@ -1036,6 +1066,14 @@ function runtimeHostErrorData(error: unknown, operation: string): Record<string,
       code: 'request_interrupted',
       reason: error.reason,
       dispatch: error.dispatch,
+    };
+  }
+  if (error instanceof RuntimeHostSubscriptionError) {
+    return {
+      source: 'runtime_host',
+      operation,
+      code: 'subscription_failure',
+      reason: error.reason,
     };
   }
   if (error instanceof RuntimeHostCatalogReadError) {

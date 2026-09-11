@@ -34,6 +34,8 @@ import type { StoredMessage } from '@maka/core/session';
 import { THINKING_LEVELS, type ThinkingLevel } from '@maka/core/model-thinking';
 import {
   RuntimeHostOperationError,
+  RuntimeHostPermanentReconnectError,
+  RuntimeHostSubscriptionError,
   RuntimeHostRequestInterruptedError,
 } from '@maka/runtime-host/client';
 import {
@@ -574,6 +576,8 @@ describe('ACP Session registry', () => {
       'subscription',
       'query',
       'not-found',
+      'permanent-query',
+      'permanent-attachment',
       'terminal',
       'shutdown',
     ] as const) {
@@ -645,7 +649,8 @@ describe('ACP Session registry', () => {
         await waitFor(() => queries === 1);
         cancellation ??= cancel();
         await new Promise((resolve) => setImmediate(resolve));
-        assert.equal(settled, false);
+        if (recovery === 'shutdown') await waitFor(() => settled);
+        else assert.equal(settled, false);
         assert.deepEqual(stopInputs, []);
         if (recovery === 'subscription') {
           // A transient query failure and an unrelated root do not retire or
@@ -658,6 +663,12 @@ describe('ACP Session registry', () => {
           assert.equal(settled, false);
           assert.deepEqual(stopInputs, []);
           attachment.setRoot(turn);
+        } else if (recovery === 'permanent-query') {
+          query.reject(new RuntimeHostPermanentReconnectError('Host identity changed'));
+        } else if (recovery === 'permanent-attachment') {
+          attachment.failAttachment(
+            new RuntimeHostPermanentReconnectError('Host identity changed'),
+          );
         } else if (recovery === 'not-found') {
           query.reject(
             new RuntimeHostOperationError('turn.query', 'not_found', 'Turn was not admitted'),
@@ -668,16 +679,100 @@ describe('ACP Session registry', () => {
           if (recovery === 'shutdown') assert.equal(attachment.closeCalls, 1);
           query.resolve(turn);
         }
+        await waitFor(() => settled);
         await cancellation;
         assert.deepEqual(await prompt, { stopReason: 'cancelled' });
         assert.deepEqual(
           stopInputs,
-          recovery === 'not-found' || recovery === 'terminal'
+          recovery === 'not-found' ||
+            recovery === 'terminal' ||
+            recovery === 'shutdown' ||
+            recovery.startsWith('permanent-')
             ? []
             : [{ sessionId, turnId: turn.turnId, runId: turn.runId }],
         );
         assert.equal(starts, 1);
         assert.equal(queries, 1);
+        await registry.dispose();
+      });
+    }
+  }
+
+  for (const action of ['prompt', 'cancel', 'close', 'dispose'] as const) {
+    for (const admission of ['interrupted', 'started'] as const) {
+      test(`${action} settles after attachment fails before a late ${admission} start response`, async () => {
+        const sessionId = 'failed-before-start';
+        const turn = { sessionId, turnId: 'turn', runId: 'run', status: 'running' as const };
+        const attachment = new FakeAcpSessionAttachment(sessionId);
+        const start = deferred<unknown>();
+        const stops: unknown[] = [];
+        let started = false;
+        let settled = false;
+        const registry = new AcpSessionRegistry({
+          connect: async () =>
+            fakeConnection({
+              request: async (operation, input) => {
+                if (operation === 'session.create') return catalogSession(sessionId);
+                if (operation === 'turn.start') {
+                  started = true;
+                  return start.promise;
+                }
+                if (operation === 'turn.stop') {
+                  stops.push(input);
+                  return {};
+                }
+                throw new Error(`Unexpected ${operation}`);
+              },
+            }),
+          newSessionId: () => sessionId,
+          newTurnId: () => turn.turnId,
+          openSessionAttachment: async (input) => attachment.bind(input),
+        });
+        await registry.create({ cwd: '/workspace', mcpServers: [] });
+        const prompt = registry.prompt(
+          { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
+          promptContext([]),
+        );
+        const outcome = prompt
+          .then(
+            (value) => value,
+            (error) => error,
+          )
+          .then((value) => {
+            settled = true;
+            return value;
+          });
+        await waitFor(() => started);
+        attachment.failAttachment(new RuntimeHostPermanentReconnectError('Host identity changed'));
+        const cleanup =
+          action === 'cancel'
+            ? registry.cancel({ sessionId })
+            : action === 'close'
+              ? registry.close({ sessionId })
+              : action === 'dispose'
+                ? registry.dispose()
+                : Promise.resolve();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(settled, false);
+        if (admission === 'started') start.resolve({ kind: 'started', turn });
+        else
+          start.reject(
+            new RuntimeHostRequestInterruptedError(
+              'turn.start',
+              'command',
+              'dispatched',
+              'connection_lost',
+            ),
+          );
+        await waitFor(() => settled);
+        const result = await outcome;
+        if (action === 'prompt') assert.ok(result instanceof RequestError);
+        else assert.deepEqual(result, { stopReason: 'cancelled' });
+        await cleanup;
+        assert.deepEqual(
+          stops,
+          admission === 'started' ? [{ sessionId, turnId: turn.turnId, runId: turn.runId }] : [],
+        );
         await registry.dispose();
       });
     }
@@ -735,6 +830,77 @@ describe('ACP Session registry', () => {
     }
     assert.deepEqual(await prompt, { stopReason: 'cancelled' });
     assert.deepEqual(calls, ['stop', 'connection.close']);
+  });
+
+  test('shutdown closes the connection when an outcome-unknown query never settles', async () => {
+    const sessionId = 'session-pending-query-on-shutdown';
+    const turn = {
+      sessionId,
+      turnId: 'turn-pending-query',
+      runId: 'run-pending-query',
+      status: 'completed' as const,
+      terminalEventId: 'terminal-pending-query',
+    };
+    const start = deferred<unknown>();
+    const query = deferred<unknown>();
+    const attachment = new FakeAcpSessionAttachment(sessionId);
+    const calls: string[] = [];
+    let queries = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession(sessionId);
+            if (operation === 'turn.start') return start.promise;
+            if (operation === 'turn.query') {
+              queries += 1;
+              return query.promise;
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          close: async () => {
+            calls.push('connection.close');
+          },
+        }),
+      newSessionId: () => sessionId,
+      newTurnId: () => turn.turnId,
+      openSessionAttachment: async (input) => attachment.bind(input),
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    const prompt = registry.prompt(
+      { sessionId, prompt: [{ type: 'text', text: 'run' }] },
+      promptContext([]),
+    );
+    await waitFor(() => attachment.nextCalls(turn.turnId) === 1);
+    const disposal = registry.dispose();
+    start.reject(
+      new RuntimeHostRequestInterruptedError(
+        'turn.start',
+        'command',
+        'dispatched',
+        'connection_lost',
+      ),
+    );
+    await waitFor(() => queries === 1);
+    let settled = false;
+    const outcome = Promise.all([disposal, prompt]).then((value) => {
+      settled = true;
+      return value;
+    });
+    let settledBeforeQuerySettlement = false;
+    let closedBeforeQuerySettlement = false;
+    try {
+      await waitFor(() => settled);
+      settledBeforeQuerySettlement = true;
+      closedBeforeQuerySettlement = calls.includes('connection.close');
+    } finally {
+      query.resolve(turn);
+      await outcome;
+    }
+    assert.equal(settledBeforeQuerySettlement, true);
+    assert.equal(closedBeforeQuerySettlement, true);
+    assert.deepEqual(await prompt, { stopReason: 'cancelled' });
+    assert.deepEqual(calls, ['connection.close']);
   });
 
   for (const timing of ['before start returns', 'after start returns'] as const) {
@@ -1106,7 +1272,9 @@ describe('ACP Session registry', () => {
         { sessionId: 'session-reattach', prompt: [{ type: 'text', text: 'first' }] },
         promptContext([]),
       ),
-      /subscription failed/u,
+      {
+        data: { source: 'runtime_host', operation: 'subscription.open', code: 'internal_failure' },
+      },
     );
     assert.deepEqual(
       await registry.prompt(
@@ -1684,7 +1852,8 @@ describe('ACP Session registry', () => {
     try {
       await waitFor(() => closed);
       assert.deepEqual(await prompt, { stopReason: 'cancelled' });
-      assert.deepEqual(notifications, []);
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0]?.update.sessionUpdate, 'agent_message_chunk');
     } finally {
       read.resolve({
         kind: 'session',
@@ -1693,6 +1862,131 @@ describe('ACP Session registry', () => {
       await closing;
       await registry.dispose();
     }
+  });
+
+  for (const failure of ['failed', 'stalled'] as const) {
+    test(`keeps live prompt streaming after ${failure} configuration refresh`, async () => {
+      const sessionId = 'refresh-live';
+      const attachment = new FakeAcpSessionAttachment(sessionId);
+      const read = deferred<unknown>();
+      const notifications: SessionNotification[] = [];
+      let reads = 0;
+      let stops = 0;
+      let settled = false;
+      const registry = new AcpSessionRegistry({
+        connect: async () =>
+          fakeConnection({
+            request: async (operation) => {
+              if (operation === 'session.create') return catalogSession(sessionId);
+              if (operation === 'session.catalog.query') {
+                reads += 1;
+                if (reads === 1) return read.promise;
+                return {
+                  kind: 'session',
+                  session: catalogSession(sessionId, '/workspace', {
+                    revision: 3,
+                    permissionMode: 'bypass',
+                  }),
+                };
+              }
+              if (operation === 'turn.stop') {
+                stops += 1;
+                return {};
+              }
+              const turn = { sessionId, turnId: 'turn', runId: 'run', status: 'running' as const };
+              attachment.setRoot(turn);
+              return { kind: 'started', turn };
+            },
+          }),
+        newSessionId: () => sessionId,
+        newTurnId: () => 'turn',
+        openSessionAttachment: async (input) => attachment.bind(input),
+      });
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      const prompt = registry.prompt(
+        { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
+        promptContext(notifications),
+      );
+      const outcome = prompt.then(
+        (value) => {
+          settled = true;
+          return value;
+        },
+        (error) => {
+          settled = true;
+          return error;
+        },
+      );
+      await waitFor(() => attachment.nextCalls('turn') === 1);
+      attachment.setMetadataRevision(2);
+      await waitFor(() => reads === 1);
+      if (failure === 'failed') read.reject(new Error('catalog unavailable'));
+      attachment.emit(
+        'turn',
+        sessionEvent('turn', { type: 'text_delta', messageId: 'answer', text: 'still streaming' }),
+      );
+      try {
+        await waitFor(() =>
+          notifications.some(({ update }) => update.sessionUpdate === 'agent_message_chunk'),
+        );
+        assert.equal(settled, false);
+        assert.equal(stops, 0);
+        assert.equal(attachment.closeCalls, 0);
+        attachment.emit('turn', sessionEvent('turn', { type: 'complete', stopReason: 'end_turn' }));
+        await waitFor(() => settled);
+        assert.deepEqual(await outcome, { stopReason: 'end_turn' });
+        if (failure === 'failed') {
+          attachment.setMetadataRevision(3);
+          await waitFor(() =>
+            notifications.some(({ update }) => update.sessionUpdate === 'config_option_update'),
+          );
+          assert.equal(reads, 2);
+        }
+      } finally {
+        read.resolve({ kind: 'session', session: catalogSession(sessionId) });
+        attachment.setRoot(null);
+        await registry.dispose();
+        await outcome;
+      }
+    });
+  }
+
+  test('maps observation failures to stable ACP errors', async () => {
+    const sessionId = 'observation-failure';
+    const attachment = new FakeAcpSessionAttachment(sessionId);
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession(sessionId);
+            return { kind: 'started' };
+          },
+        }),
+      newSessionId: () => sessionId,
+      newTurnId: () => 'turn',
+      openSessionAttachment: async (input) => attachment.bind(input),
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    const prompt = registry.prompt(
+      { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
+      promptContext([]),
+    );
+    const rejected = assert.rejects(prompt, (error: unknown) => {
+      assert.ok(error instanceof RequestError);
+      assert.deepEqual(error.data, {
+        source: 'runtime_host',
+        operation: 'subscription.open',
+        code: 'subscription_failure',
+        reason: 'connection_closed',
+      });
+      return true;
+    });
+    await waitFor(() => attachment.nextCalls('turn') === 1);
+    attachment.failAttachment(
+      new RuntimeHostSubscriptionError('connection_closed', 'Recovery exhausted'),
+    );
+    await rejected;
+    await registry.dispose();
   });
 
   test('rejects non-owned and invalid configuration requests before Host I/O', async () => {
