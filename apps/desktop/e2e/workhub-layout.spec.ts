@@ -349,6 +349,9 @@ test('WorkHub keeps the submitted prompt visible while its agent is still runnin
   await workhub.getByRole('button', { name: /^(发送|Send)$/ }).click();
   await expect(followups).toHaveText([queuedTexts[0]]);
   await workhub.locator(COMPOSER_INPUT).fill(queuedTexts[1]);
+  // Queue projection can arrive before the previous send IPC releases admission.
+  // Keyboard submission must wait for the same readiness as clicking Send.
+  await awaitSendReady(workhub);
   await workhub.locator(COMPOSER_INPUT).press('Enter');
   await expect(followups).toHaveText(queuedTexts);
   const shortcuts = workhub.getByRole('button', { name: '发送快捷键', exact: true });
@@ -366,6 +369,7 @@ test('WorkHub keeps the submitted prompt visible while its agent is still runnin
   }
   await expect(workhub.locator('.maka-bubble-streaming')).toContainText('Fake backend waiting');
   await workhub.locator(COMPOSER_INPUT).fill('立即调整方向，保持当前任务');
+  await awaitSendReady(workhub);
   await workhub.locator(COMPOSER_INPUT).press('Shift+Enter');
   await expect(workhub.locator('.maka-bubble-streaming')).toContainText('Acknowledged steering: 立即调整方向，保持当前任务');
   await expect(workhub.locator('.maka-user-message').filter({ hasText: '立即调整方向，保持当前任务' })).toHaveCount(1);
