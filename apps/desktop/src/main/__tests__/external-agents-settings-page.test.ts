@@ -287,19 +287,15 @@ test('agent list uses a brand mark and opens a setup detail with a back action',
   assert.equal(page.document.querySelectorAll('input').length, 0);
 });
 
-test('saved program exposes file selection and disables setup while confirming a new path', async () => {
+test('saved program exposes file selection without an advanced path editor', async () => {
   const page = await mount();
   assert.equal(page.document.querySelectorAll('input').length, 0);
   assert.equal(page.document.querySelector('details'), null);
   assert.equal(page.button('Choose existing program').closest('details'), null);
   assert.match(page.document.body.textContent ?? '', /Already have ACP/);
   await act(async () => page.button('Choose existing program').click());
-  assert.equal(page.document.querySelector('input')?.value, '/existing/agy_acp_server.par');
-  assert.equal(page.button('Check connection').disabled, true);
-  assert.equal(page.button('Sign in with Google').disabled, true);
-  await act(async () => page.button('Cancel').click());
   assert.equal(page.document.querySelectorAll('input').length, 0);
-  assert.equal(page.button('Check connection').disabled, false);
+  assert.deepEqual(page.updates, ['/existing/agy_acp_server.par']);
   assert.equal(page.starts.length, 0);
 });
 
@@ -336,13 +332,11 @@ test('a late installed result never overwrites a newer saved configuration', asy
   assert.deepEqual(page.updates, []);
 });
 
-test('choosing an existing executable presents its path for saving without installing', async () => {
+test('choosing an existing executable saves it without installing', async () => {
   const page = await mount();
   assert.equal(page.button('Choose existing program').closest('details'), null);
   await act(async () => page.button('Choose existing program').click());
-  assert.equal(page.document.querySelector('input')?.value, '/existing/agy_acp_server.par');
-  assert.equal(page.button('Reinstall').disabled, true);
-  await act(async () => page.button('Save').click());
   assert.deepEqual(page.updates, ['/existing/agy_acp_server.par']);
+  assert.equal(page.document.querySelector('input'), null);
   assert.deepEqual(page.starts, []);
 });

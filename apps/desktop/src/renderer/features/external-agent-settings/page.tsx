@@ -20,9 +20,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Badge, Banner, HStack, Link, List, ListItem, Text } from '@astryxdesign/core';
 import { ChevronRight, ICON_SIZE } from '@maka/ui/icons';
-import { SettingsExpandableRow } from '../../application/contracts/settings-presentation/settings-expandable-row.js';
 import { SettingsRouteHeader } from '../../application/contracts/settings-presentation/settings-route-header.js';
-import { Button, TextInput, useUiLocale } from '@maka/ui';
+import { Button, useUiLocale } from '@maka/ui';
 import type {
   AppSettings,
   UpdateAppSettingsInput,
@@ -107,13 +106,8 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
   );
   const copy = getExternalAgentsCopy(useUiLocale());
   const saved = props.settings.externalAgents.antigravity.executable;
-  const [path, setPath] = useState(saved);
-  const [editingPath, setEditingPath] = useState(false);
   const [connectionVerified, setConnectionVerified] = useState(false);
   const verifiedPath = useRef<string | undefined>(undefined);
-  const validPath =
-    path.trim() === '' ||
-    (path.trim().startsWith('/') && !/[\x00-\x1f]/u.test(path) && path.trim().length <= 4096);
   const [available, setAvailable] = useState<boolean>();
   const [availabilityRetry, setAvailabilityRetry] = useState(0);
   const [projection, setProjection] = useState<ExternalAgentSetupProjection>();
@@ -126,7 +120,6 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
   if (configuration.current.executable !== saved) configuration.current = { executable: saved };
   const attemptBasis = useRef(configuration.current);
   useEffect(() => {
-    setPath(saved);
     setConnectionVerified(verifiedPath.current === saved);
     setProjection(undefined);
     setError(false);
@@ -155,36 +148,18 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
   }, [host, availabilityRetry, services]);
   const current = projection?.expectedExecutable === saved ? projection : undefined;
   const isCurrent = (id: string) => mounted.current && attempt.current === id;
-  async function save() {
-    if (!available || !validPath || !guard.begin('save')) return;
-    setBusy(true);
-    setError(false);
-    verifiedPath.current = undefined;
-    setProjection(undefined);
-    try {
-      const result = await props.onUpdate({
-        externalAgents: { antigravity: { executable: path.trim() } },
-      });
-      if (mounted.current) {
-        setPath(result.settings.externalAgents.antigravity.executable);
-        setEditingPath(false);
-      }
-    } catch {
-      if (mounted.current) setError(true);
-    } finally {
-      if (mounted.current) setBusy(false);
-      guard.finish();
-    }
-  }
   async function selectExisting() {
     if (!available || !guard.begin('select')) return;
     const basis = configuration.current;
     setBusy(true);
+    setError(false);
     try {
       const selected = await services.selectExecutable(host);
       if (!selected || !mounted.current || configuration.current !== basis) return;
-      setPath(selected);
-      setEditingPath(true);
+      verifiedPath.current = undefined;
+      setConnectionVerified(false);
+      setProjection(undefined);
+      await props.onUpdate({ externalAgents: { antigravity: { executable: selected } } });
     } catch {
       if (mounted.current) setError(true);
     } finally {
@@ -193,7 +168,7 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
     }
   }
   async function start(action: ExternalAgentSetupAction) {
-    if (!available || (action !== 'install' && !saved) || editingPath || path !== saved || !guard.begin(action)) return;
+    if (!available || (action !== 'install' && !saved) || !guard.begin(action)) return;
     const id = services.createAttemptId();
     attempt.current = id;
     if (action === 'check') setConnectionVerified(false);
@@ -217,8 +192,8 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
               verifiedPath.current = result.installedExecutable;
               const updated = await props.onUpdate({ externalAgents: { antigravity: { executable: result.installedExecutable } } });
               if (!isCurrent(id)) return;
-              setPath(updated.settings.externalAgents.antigravity.executable);
-              setEditingPath(false);
+              if (updated.settings.externalAgents.antigravity.executable !== result.installedExecutable)
+                return;
             }
             setConnectionVerified(true);
           }
@@ -255,11 +230,7 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
       ? copy.loading
       : !available
         ? copy.unavailable
-        : path !== saved
-          ? copy.unsaved
-          : !saved && current?.action !== 'install'
-            ? copy.unconfigured
-            : !current
+        : !current
               ? copy.unchecked
               : current.phase === 'failed'
                 ? copy.failures[current.failure!]
@@ -268,7 +239,7 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
                     ? copy.authenticated
                     : copy.connected
                   : copy[current.phase];
-  const canStart = Boolean(available && saved && path === saved && !editingPath);
+  const canStart = Boolean(available && saved);
   const activeAction = busy && attempt.current ? guard.current : undefined;
   const retryAction =
     current && ['failed', 'cancelled'].includes(current.phase) ? current.action : undefined;
@@ -290,7 +261,7 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
             : 'secondary'
         }
         label={retryAction === action ? copy.retry : action === 'install' ? saved ? copy.reinstall : copy.install : action === 'check' ? copy.check : current?.action === 'login' && current.phase === 'succeeded' ? copy.reverify : copy.login}
-        isDisabled={busy || (action === 'install' ? !available || editingPath || path !== saved : !canStart)}
+        isDisabled={busy || (action === 'install' ? !available : !canStart)}
         onClick={() => void start(action)}
       />
     );
@@ -346,62 +317,16 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
             </HStack>
           }
         />
-        {editingPath && (
-        <SettingsExpandableRow
-          label={copy.executable}
-          value={
-            saved ? (
-              <code className="settingsReadOnlyValue providerEndpointValue" data-mono="true">
-                {saved}
-              </code>
-            ) : (
-              copy.notConfigured
-            )
-          }
-          actionLabel={saved ? copy.changePath : copy.setPath}
-          isEditing={editingPath}
-          isDisabled={busy || !available}
-          canSave={validPath && path.trim() !== saved}
-          saveLabel={copy.save}
-          cancelLabel={copy.cancel}
-          onEdit={() => setEditingPath(true)}
-          onCancel={() => {
-            setPath(saved);
-            setEditingPath(false);
-          }}
-          onSave={save}
-        >
-          <TextInput
-            label={copy.executable}
-            isLabelHidden
-            value={path}
-            onChange={setPath}
-            isDisabled={busy || !available}
-            placeholder="/path/to/agy_acp_server.par"
-          />
-          <Text type="supporting" color="secondary">
-            {copy.pathHelp}
-          </Text>
-          {!validPath && <Banner role="alert" status="error" title={copy.invalidPath} />}
-          <Link
-            href={ANTIGRAVITY_ACP_RELEASE.url}
-            target="_blank"
-            rel="noreferrer noopener"
-          >
-            {copy.downloadAcp}
-          </Link>
-        </SettingsExpandableRow>
-        )}
         {saved && <SettingsRow
           label={copy.connectionStatus}
-          description={<span role="status" aria-live="polite">{editingPath ? copy.unsaved : current?.action === 'check' ? status : connectionVerified ? copy.connectionVerified : copy.unchecked}</span>}
+          description={<span role="status" aria-live="polite">{current?.action === 'check' ? status : connectionVerified ? copy.connectionVerified : copy.unchecked}</span>}
           end={setupAction('check')}
         />}
       </SettingsSection>
       <SettingsSection title={copy.accountTitle} description={copy.accountDescription}>
         <SettingsRow
           label={copy.googleAccount}
-          description={<span role="status" aria-live="polite">{!saved || editingPath ? copy.accountBeforeSave : current?.action === 'login' ? status : copy.accountUnchecked}</span>}
+          description={<span role="status" aria-live="polite">{!saved ? copy.accountBeforeSave : current?.action === 'login' ? status : copy.accountUnchecked}</span>}
           end={setupAction('login')}
         />
       </SettingsSection>

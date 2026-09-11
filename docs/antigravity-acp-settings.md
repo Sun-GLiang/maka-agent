@@ -21,13 +21,13 @@
 
 Settings → External Agents configures Antigravity on a local macOS arm64 Runtime Host. Install downloads Google's pinned ACP 1.1.1 distribution, verifies the archive and both executables, extracts into the Host state root under `external-agents/antigravity/1.1.1`, checks the connection, and saves the executable path through the existing Settings mutation. Download source links directly to Google's archive. The existing RuntimePolicy proxy configuration is used for downloads.
 
-The Program section always shows Choose existing program beside Install/Reinstall, with a visible explanation that existing ACP installations can be reused. Selecting a file opens an inline path confirmation/editor with Save and Cancel. There is no Advanced settings foldout; the full path stays hidden outside confirmation. A saved path is read on reopening but is not an authentication claim. There is no disk-wide or PATH discovery. The installer reuses a matching verified managed version without another download. Existing custom paths are only replaced by an explicit install/save action, and late install responses cannot replace newer configuration. The Antigravity desktop application alone does not provide this ACP connection.
+The Program section always shows Choose existing program beside Install/Reinstall, with a visible explanation that existing ACP installations can be reused. Selecting a file saves the native picker result through the existing Settings mutation; there is no separate path editor or Advanced settings foldout. A saved path is read on reopening but is not an authentication claim. There is no disk-wide or PATH discovery. The installer reuses a matching verified managed version without another download. Existing custom paths are only replaced by an explicit install or file selection, and late install responses cannot replace newer configuration. The Antigravity desktop application alone does not provide this ACP connection.
 
-Only the executable path is persisted in RuntimePolicy document schema 4. Schemas 2 and 3 migrate with an empty path. Setup requests compare the saved path before admission; editing it invalidates displayed results. Connection success does not establish authentication. Official credentials remain under the official process's control, outside Maka's credential store.
+Only the executable path is persisted in RuntimePolicy document schema 4. Schemas 2 and 3 migrate with an empty path. Setup requests compare the saved path before admission; changing it invalidates displayed results. Connection success does not establish authentication. Official credentials remain under the official process's control, outside Maka's credential store.
 
 The Host directly uses ACP SDK 1.4.0. Setup initializes the process without file or terminal capabilities and never creates a session or sends a prompt. Login selects the observed `oauth-personal` method. Its stderr authorization link is forwarded through the existing Desktop `oauth_presentation` capability. The subprocess environment sets `BROWSER=/usr/bin/true` to suppress the official process's own browser launch and `ANTIGRAVITY_HARNESS_PATH` to its sibling helper. No raw authentication output is retained by Maka.
 
-One setup attempt, including installation, runs at a time. Installation has a 15-minute timeout, bounded download size, SHA-256 verification and per-attempt staging cleanup. Cancelling does not remove a completed managed installation. A config-save failure leaves the verified installation available for retry. One attempt runs at a time. Duplicate IDs return the existing attempt; retries use new IDs. Page/Host changes, client disconnect, timeout, drain and shutdown cancel the attempt. Terminal results follow bounded process-tree cleanup, including SIGKILL escalation. Failed cleanup drains the Host. Terminal attempt history is in memory and bounded to 32 records. Handshake timeout is 30 seconds; authentication timeout is five minutes.
+One setup attempt, including installation, runs at a time. Installation has a 15-minute timeout, bounded download size, SHA-256 verification and per-attempt staging cleanup. Cancelling does not remove a completed managed installation. A config-save failure leaves the verified installation available for retry. Duplicate IDs return the existing attempt; retries use new IDs. Page/Host changes, client disconnect, timeout, drain and shutdown cancel the attempt. Terminal results follow bounded process-tree cleanup, including SIGKILL escalation. Failed cleanup drains the Host. Terminal attempt history is in memory and bounded to 32 records. Handshake timeout is 30 seconds; authentication timeout is five minutes.
 
 ## Official behavior observed on 2026-09-10
 
@@ -46,61 +46,28 @@ agy_acp_server.par    9d900b93031fc42397f88206e14eba4193729bbef631a70b18e7a19631
 localharness_external e0a8ef9d80a1ffb178f945159dda33f73d4a5be65516642542352584b834fa2a
 ```
 
-## Successful real-agent acceptance on 2026-09-11
+## Real acceptance on 2026-09-11
 
-The same official ACP 1.1.1 distribution was exercised through the built Desktop and its real Runtime Host in an isolated application data directory. The Google account holder completed browser authorization; no credentials were copied into Maka or into fixtures. A separate sanitized SDK probe confirmed protocol 1, agent version `agy_acp_server_1.1.1`, an empty successful `authenticate` result (`{}`), and completed process cleanup.
+The official ACP 1.1.1 distribution was exercised through the built Desktop and real local Runtime Host using isolated application data. No credentials, raw authentication output or private account details were recorded.
 
-- **Initial login:** the official SDK authenticate request completed successfully, and Desktop displayed “Google 登录已完成。” only after setup cleanup. No `agy_acp_server.par` or `localharness_external` process remained.
-- **Restart:** Desktop and its Host were both stopped and restarted. The saved executable path survived; login status initially remained unverified. A connection check succeeded without claiming authentication. A subsequent login succeeded without another browser authorization, exercising the official credential state.
-- **Cancel and retry:** a real login was cancelled while connecting. Desktop reached the cancelled state, the process exited, and Retry completed a new successful login.
-- **Page departure:** returning to the agent list during login released the process. Reopening setup showed unverified status rather than a stale result.
-- **Client quit request:** SIGTERM was delivered to the isolated Desktop while an official setup process was observed running. The setup process exited; remaining test-application processes were subsequently stopped separately.
-- **Host shutdown:** SIGTERM was delivered to the owning Host while its official setup process was observed running. Both Host and setup process exited; the Desktop generation reset without retaining the old result.
+- A production installer run downloaded Google's full archive and verified it. Desktop cancellation removed staging and preserved the prior configuration; retry installed both executables, completed the ACP handshake and saved the managed path.
+- With the verified official program, Desktop completed connection checking and Google login. A subsequent login was cancelled while its ACP process was live; Retry completed a fresh login.
+- Restart, page departure, client shutdown and Host shutdown preserved configuration as designed and released owned server/helper processes. Every observed success, failure and cancellation terminal state left no temporary process.
+- At the user's request, the final login sequence reused the verified program in `/tmp` instead of repeating the slow full download. Managed download and automatic-save evidence came from the earlier run.
+- The final flattened UI keeps Install/Reinstall and Choose existing program visible. The native picker selection saves directly; no path editor or Advanced settings section remains.
 
-These are PR1 setup checks only: no external task, prompt, model selection or session restoration was exercised. Switching to a different configured Host target remains covered by controlled generation/ownership tests, not a separate real remote-Host acceptance run.
+These are PR1 setup checks only. No external task, prompt, model selection, session restoration or remote-Host flow was exercised.
 
-![Desktop after successful official Google authentication](./images/pr/antigravity-login-success.png)
+![Current External Agents list](images/pr/antigravity-current-list.png)
+
+![Current unconfigured Antigravity setup](images/pr/antigravity-current-install.png)
+
+![Current configured Antigravity setup](images/pr/antigravity-current-configured.png)
+
+The [successful Google login screenshot](images/pr/antigravity-current-login-success.png) predates the final visual flattening and is retained only as authentication evidence.
 
 ## Regression evidence
 
-Controlled tests use real SDK stdio subprocesses for handshake, split authentication output, rejection, crash, timeout, browser failure, cancellation and a helper ignoring SIGTERM. Coordinator tests cover deduplication, saved-path admission, platform/ownership restrictions, disconnect/drain and browser addressing. Desktop tests cover all three locales, double-click guards, stale Host generations, changed configuration and retry with a new attempt.
+Controlled tests cover strict policy migration, installer integrity and cleanup, real SDK stdio boundaries, setup admission/deduplication/cancellation, delayed browser presentation, all three UI locales, native existing-program selection, Settings persistence and stale Host/configuration results.
 
-The affected package builds, Desktop type checks, renderer architecture check against main, protocol epoch check (141 → 142 after merging current main), third-party notices check, existing OAuth tests and the CLI ACP server regression suite pass. No task execution, model catalog, session restoration or additional workspace package is introduced.
-
-On 2026-09-11, full repository build and typecheck, lint, format, Desktop/UI Knip and ASF header checks passed. The first full `npm test` run found an outdated CLI remote-owner exclusion assertion and four Host failures (three readiness timeouts and one Run-state assertion). The CLI assertion now includes all three local-only setup operations; no remote grants were added. The complete CLI suite then passed (926 passed, 3 skipped). All four affected Host files passed with file concurrency 1 (58 tests), and the complete Host suite passed independently with its normal test command (1,842 passed, 12 skipped). Other workspace suites passed in the initial full run. The original concurrent `npm test` invocation was not green; these independent reruns are recorded separately rather than claiming a clean full concurrent run.
-
-After merging upstream main `898ac52d9`, the compatibility epoch is 142 (main is 141). The test build, full typecheck, lint, format and renderer architecture check against upstream/main passed. The full workspace test run passed everywhere except one existing filesystem queue-identity test that relies on fixed 50 ms waits. Its file passed independently (15 tests), and the complete Runtime suite then passed independently (3,405 passed, 13 skipped), without changing that test or production filesystem code. Host (1,859 passed, 12 skipped), Desktop (2,503 passed) and CLI (934 passed, 3 skipped) passed in the full run.
-
-## Managed installation follow-up
-
-The approved UI revision extends PR1 with managed installation; it supersedes the original no-auto-install boundary. Compatibility epoch is 143. Controlled installer tests cover real ZIP extraction, executable hashes and permissions, cached reuse, tampered/truncated/oversized data, stalled-download cancellation and staging cleanup. Host tests cover empty-path install admission, single-attempt deduplication, handshake-only verification and strict result decoding. Desktop tests cover automatic Settings persistence, stale configuration rejection and selecting an existing program.
-
-Managed-install acceptance used both a direct production installer run and the built Desktop with an isolated real Host. Google's full archive downloaded and verified successfully. Desktop cancellation removed its staging directory and preserved the previously saved path; retry installed both official executables, completed an ACP handshake, and saved the managed absolute path via Settings. No ACP server/helper remained. A subsequent sign-in was started but the page was changed before its final result was recorded; it is not counted as a new successful real-login acceptance. The earlier successful same-version authentication record above remains separate.
-
-Validation: full build/typecheck, lint, format, Desktop Knip and renderer architecture passed. The complete Host suite passed (1,865 passed, 12 skipped), Desktop passed (2,506 tests), and CLI passed (934 passed, 3 skipped). The final focused installer/setup/IPC/UI suite passed 40 tests, including the added cancel/disconnect/drain checks.
-
-
-## PR1 follow-up checklist
-
-- [x] Browser presentation covers the Host initialization/authentication window: setup uses a six-minute bounded expectation, released earlier on terminal result or cancellation. Regular model OAuth keeps its 30-second timeout. Controlled IPC tests cover a link arriving after 320 seconds, cancellation, failure, abandoned expiry and the regular OAuth timeout.
-- [x] Complete the user-approved current Desktop acceptance using the existing verified official program: save its path → check connection → Google login success → cancel a running login → Retry → Google login success, with no temporary server/helper at terminal results. The user explicitly waived repeating the slow download and requested reuse of the program in `/tmp`; earlier managed installation/automatic-save evidence remains separate.
-- [ ] Complete latest-head CI and PR review.
-- [ ] Merge PR1.
-
-The previous head `b10421741` passed all applicable CI checks (CLI Eval was conditionally skipped). Reassess CI on the follow-up head. Issue #5103 now scopes official behavior verification to each dependent PR: PR1 initialization/authentication; PR2 task execution and restoration feasibility; PR3 full restoration/replay; PR4 dynamic configuration. PR1 does not claim task/session/model/restore acceptance.
-
-
-## Current Desktop acceptance — 2026-09-11
-
-Built commit `f79f1e4a1` and launched a fresh isolated local Desktop/Host on macOS arm64. Started a real official download from the Install button. Downloading worked but was slow; cancellation returned the cancelled state, removed staging, and left the executable configuration empty. Repeated with the system's local HTTP proxy configured through Settings. The user then explicitly requested skipping the slow download and using the verified official program already in `/tmp`.
-
-Reused the previously installed official ACP 1.1.1 server and matching helper, rechecking both SHA-256 values against the pinned distribution. Saved the path through Advanced settings in the new isolated configuration. The connection check succeeded without claiming login, and no server/helper remained.
-
-Google login reached browser authorization and then the actual Desktop terminal state “本次 Google 登录验证成功。”; no server/helper remained. Started another login, observed a live ACP server PID before clicking Cancel, observed “已取消设置操作。”, and verified no server/helper remained. Clicked Retry and observed another successful authentication terminal state with no remaining processes. A further login also succeeded and supplied the current-layout screenshot below.
-
-![Current Desktop: successful Google login](images/pr/antigravity-current-login-success.png)
-
-This completes the revised acceptance requested by the user: existing verified program → Settings save → connection → login → cancel → retry/login. It does not claim a fresh full archive download or automatic path save in this run; those remain covered by the earlier managed-install acceptance above. No raw authentication output, credentials or private account details were recorded.
-
-
-UI follow-up: removed the Advanced settings foldout and made existing-program selection visible in both configured and unconfigured states. The current renderer screenshots and 15 page tests cover the flattened layout, inline path confirmation and action guards.
+Compatibility epoch is 143 (merged main is 141). Full build/typecheck, lint, format, Desktop Knip, renderer architecture, protocol compatibility and third-party notice checks passed during PR verification. Complete affected Host, Desktop and CLI suites passed; current follow-up changes additionally pass the 15 focused Settings page tests and renderer architecture check. GitHub CI remains the final source of truth for the latest head.

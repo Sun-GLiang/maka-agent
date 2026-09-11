@@ -6,7 +6,7 @@ Generated against `@astryxdesign/core@0.5.2` (194 component exports).
 
 Wiki bar: Design Conventions · API Use-the-System · Theming · Container Padding.
 
-**Totals:** 272 files — blocker 0, reimplementation 0, polish 2, aligned 270.
+**Totals:** 271 files — blocker 0, reimplementation 0, polish 2, aligned 269.
 
 ## Exclusions (explicit)
 
@@ -35,7 +35,6 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | `apps/desktop/src/renderer/app.tsx` | other | Theme | aligned — uses Astryx (Theme) | aligned |
 | `apps/desktop/src/renderer/application/contracts/feature-services.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/application/contracts/settings-presentation/runtime-host-settings-target.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
-| `apps/desktop/src/renderer/application/contracts/settings-presentation/settings-expandable-row.tsx` | other | Button, HStack, Text | aligned — uses Astryx (Button, HStack, Text) | aligned |
 | `apps/desktop/src/renderer/application/contracts/settings-presentation/settings-route-header.tsx` | other | HStack, Heading, IconButton, Text, Toolbar, VStack | aligned — uses Astryx (HStack, Heading, IconButton, Text, Toolbar, VStack) | aligned |
 | `apps/desktop/src/renderer/application/contracts/settings-presentation/settings-section.tsx` | other | Divider, HStack, Heading, Item, Text, VStack | aligned — uses Astryx (Divider, HStack, Heading, Item, Text, VStack) | aligned |
 | `apps/desktop/src/renderer/cascade-layers.css` | styles | n/a (css) | aligned — no off-rhythm control heights flagged | aligned |
@@ -55,7 +54,7 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | `apps/desktop/src/renderer/features/connection-settings/services-context.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/conversation/controller/session-local-messages.tsx` | shell-chrome-or-panel | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/conversation/controller/transcript-reading-position-controller.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
-| `apps/desktop/src/renderer/features/external-agent-settings/page.tsx` | other | Badge, Banner, Button, HStack, Link, List, ListItem, Text, TextInput | aligned — uses Astryx (Badge, Banner, Button, HStack, Link, List, ListItem, Text) | aligned |
+| `apps/desktop/src/renderer/features/external-agent-settings/page.tsx` | other | Badge, Banner, Button, HStack, Link, List, ListItem, Text | aligned — uses Astryx (Badge, Banner, Button, HStack, Link, List, ListItem, Text) | aligned |
 | `apps/desktop/src/renderer/features/goals/services-context.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/goals/ui/goal-dialog.tsx` | dialog-overlay | Button, Dialog, DialogHeader, HStack, Layout, LayoutContent, LayoutFooter, Text, TextArea, TextInput, VStack | aligned — uses Astryx (Button, Dialog, DialogHeader, HStack, Layout, LayoutContent, LayoutFooter, Text) | aligned |
 | `apps/desktop/src/renderer/features/goals/ui/goal-host.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
@@ -162,7 +161,7 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | `apps/desktop/src/renderer/settings/runtime-host-project-directory-editor.tsx` | settings-module | Button, TextInput | aligned — uses Astryx (Button, TextInput) | aligned |
 | `apps/desktop/src/renderer/settings/runtime-host-settings-target.tsx` | settings-module | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/settings/runtime-host-ssh-terminal-dialog.tsx` | settings-module | Banner, Button, Dialog, DialogHeader, Layout, LayoutContent, LayoutFooter | aligned — uses Astryx (Banner, Button, Dialog, DialogHeader, Layout, LayoutContent, LayoutFooter) | aligned |
-| `apps/desktop/src/renderer/settings/settings-expandable-row.tsx` | settings-module | none | aligned — no raw controls; no Astryx JSX usage | aligned |
+| `apps/desktop/src/renderer/settings/settings-expandable-row.tsx` | settings-module | Button, HStack, Text | aligned — uses Astryx (Button, HStack, Text) | aligned |
 | `apps/desktop/src/renderer/settings/settings-modal.tsx` | settings-page | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/settings/settings-route-header.tsx` | settings-module | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/settings/settings-rows.tsx` | settings-module | none | aligned — no raw controls; no Astryx JSX usage | aligned |

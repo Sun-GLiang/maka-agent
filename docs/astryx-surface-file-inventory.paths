@@ -6,7 +6,6 @@ apps/desktop/src/renderer/app-shell.tsx
 apps/desktop/src/renderer/app.tsx
 apps/desktop/src/renderer/application/contracts/feature-services.tsx
 apps/desktop/src/renderer/application/contracts/settings-presentation/runtime-host-settings-target.tsx
-apps/desktop/src/renderer/application/contracts/settings-presentation/settings-expandable-row.tsx
 apps/desktop/src/renderer/application/contracts/settings-presentation/settings-route-header.tsx
 apps/desktop/src/renderer/application/contracts/settings-presentation/settings-section.tsx
 apps/desktop/src/renderer/cascade-layers.css

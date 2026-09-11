@@ -3475,12 +3475,17 @@
       "src/renderer/settings/settings-expandable-row.tsx": {
         "bridgePaths": {},
         "environmentCapabilities": {},
-        "hookCalls": {},
+        "hookCalls": {
+          "useEffect": 1,
+          "useRef": 3
+        },
         "lifecycleMethods": {},
         "unresolvedDependencies": 0,
         "actionFactories": [],
         "dependencyPaths": {
-          "../application/contracts/settings-presentation/settings-expandable-row.js": 1
+          "./settings-section": 1,
+          "@astryxdesign/core": 1,
+          "react": 1
         }
       },
       "src/renderer/settings/settings-modal.tsx": {
