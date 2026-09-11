@@ -21,7 +21,7 @@
 
 Settings → External Agents configures Antigravity on a local macOS arm64 Runtime Host. Install downloads Google's pinned ACP 1.1.1 distribution, verifies the archive and both executables, extracts into the Host state root under `external-agents/antigravity/1.1.1`, checks the connection, and saves the executable path through the existing Settings mutation. Download source links directly to Google's archive. The existing RuntimePolicy proxy configuration is used for downloads.
 
-Already-installed programs can be selected with the native file picker and saved; advanced settings retain manual path entry. A saved path is read on reopening but is not an authentication claim. There is no disk-wide or PATH discovery. The installer reuses a matching verified managed version without another download. Existing custom paths are only replaced by an explicit install/save action, and late install responses cannot replace newer configuration. The Antigravity desktop application alone does not provide this ACP connection.
+The Program section always shows Choose existing program beside Install/Reinstall, with a visible explanation that existing ACP installations can be reused. Selecting a file opens an inline path confirmation/editor with Save and Cancel. There is no Advanced settings foldout; the full path stays hidden outside confirmation. A saved path is read on reopening but is not an authentication claim. There is no disk-wide or PATH discovery. The installer reuses a matching verified managed version without another download. Existing custom paths are only replaced by an explicit install/save action, and late install responses cannot replace newer configuration. The Antigravity desktop application alone does not provide this ACP connection.
 
 Only the executable path is persisted in RuntimePolicy document schema 4. Schemas 2 and 3 migrate with an empty path. Setup requests compare the saved path before admission; editing it invalidates displayed results. Connection success does not establish authentication. Official credentials remain under the official process's control, outside Maka's credential store.
 
@@ -101,3 +101,6 @@ Google login reached browser authorization and then the actual Desktop terminal 
 ![Current Desktop: successful Google login](images/pr/antigravity-current-login-success.png)
 
 This completes the revised acceptance requested by the user: existing verified program → Settings save → connection → login → cancel → retry/login. It does not claim a fresh full archive download or automatic path save in this run; those remain covered by the earlier managed-install acceptance above. No raw authentication output, credentials or private account details were recorded.
+
+
+UI follow-up: removed the Advanced settings foldout and made existing-program selection visible in both configured and unconfigured states. The current renderer screenshots and 15 page tests cover the flattened layout, inline path confirmation and action guards.

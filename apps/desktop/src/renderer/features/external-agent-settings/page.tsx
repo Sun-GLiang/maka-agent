@@ -289,7 +289,7 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
             ? 'primary'
             : 'secondary'
         }
-        label={retryAction === action ? copy.retry : action === 'install' ? copy.install : action === 'check' ? copy.check : current?.action === 'login' && current.phase === 'succeeded' ? copy.reverify : copy.login}
+        label={retryAction === action ? copy.retry : action === 'install' ? saved ? copy.reinstall : copy.install : action === 'check' ? copy.check : current?.action === 'login' && current.phase === 'succeeded' ? copy.reverify : copy.login}
         isDisabled={busy || (action === 'install' ? !available || editingPath || path !== saved : !canStart)}
         onClick={() => void start(action)}
       />
@@ -322,7 +322,7 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
           }}
         />
       )}
-      <SettingsSection title={copy.programTitle}>
+      <SettingsSection title={copy.programTitle} description={copy.existingProgramHelp}>
         <SettingsRow
           label={copy.programName}
           description={
@@ -341,28 +341,12 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
           }
           end={
             <HStack gap={2} vAlign="center">
-              {!saved && setupAction('install')}
-              {!saved && <Button variant="secondary" label={copy.selectExisting} isDisabled={busy || !available} onClick={() => void selectExisting()} />}
+              {setupAction('install')}
+              <Button variant="secondary" label={copy.selectExisting} isDisabled={busy || !available} onClick={() => void selectExisting()} />
             </HStack>
           }
         />
-        {saved && <SettingsRow
-          label={copy.connectionStatus}
-          description={<span role="status" aria-live="polite">{editingPath ? copy.unsaved : current?.action === 'check' ? status : connectionVerified ? copy.connectionVerified : copy.unchecked}</span>}
-          end={setupAction('check')}
-        />}
-      </SettingsSection>
-      <SettingsSection title={copy.accountTitle} description={copy.accountDescription}>
-        <SettingsRow
-          label={copy.googleAccount}
-          description={<span role="status" aria-live="polite">{!saved || editingPath ? copy.accountBeforeSave : current?.action === 'login' ? status : copy.accountUnchecked}</span>}
-          end={setupAction('login')}
-        />
-      </SettingsSection>
-      <details className="externalAgentAdvanced" open={editingPath || undefined}>
-      <summary>{copy.advanced}</summary>
-      <SettingsSection>
-        {saved && <HStack gap={2} vAlign="center"><Button variant="secondary" label={copy.selectExisting} isDisabled={busy || !available} onClick={() => void selectExisting()} />{setupAction('install')}</HStack>}
+        {editingPath && (
         <SettingsExpandableRow
           label={copy.executable}
           value={
@@ -407,8 +391,21 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
             {copy.downloadAcp}
           </Link>
         </SettingsExpandableRow>
+        )}
+        {saved && <SettingsRow
+          label={copy.connectionStatus}
+          description={<span role="status" aria-live="polite">{editingPath ? copy.unsaved : current?.action === 'check' ? status : connectionVerified ? copy.connectionVerified : copy.unchecked}</span>}
+          end={setupAction('check')}
+        />}
       </SettingsSection>
-      </details>
+      <SettingsSection title={copy.accountTitle} description={copy.accountDescription}>
+        <SettingsRow
+          label={copy.googleAccount}
+          description={<span role="status" aria-live="polite">{!saved || editingPath ? copy.accountBeforeSave : current?.action === 'login' ? status : copy.accountUnchecked}</span>}
+          end={setupAction('login')}
+        />
+      </SettingsSection>
+
     </SettingsPage>
   );
 }

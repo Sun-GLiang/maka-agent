@@ -60,15 +60,6 @@
   }
 }
 
-.externalAgentAdvanced {
-  border-top: 1px solid var(--border);
-}
-
-.externalAgentAdvanced > summary {
-  cursor: pointer;
-  padding-block: 16px;
-}
-
 .externalAgentRelease {
   display: flex;
   flex-wrap: wrap;

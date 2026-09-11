@@ -287,12 +287,14 @@ test('agent list uses a brand mark and opens a setup detail with a back action',
   assert.equal(page.document.querySelectorAll('input').length, 0);
 });
 
-test('saved program uses the model detail edit row and disables setup while editing', async () => {
+test('saved program exposes file selection and disables setup while confirming a new path', async () => {
   const page = await mount();
   assert.equal(page.document.querySelectorAll('input').length, 0);
-  assert.match(page.document.body.textContent ?? '', /Program path/);
-  await act(async () => page.button('Change').click());
-  assert.equal(page.document.querySelector('input')?.value, '/agent/agy_acp_server.par');
+  assert.equal(page.document.querySelector('details'), null);
+  assert.equal(page.button('Choose existing program').closest('details'), null);
+  assert.match(page.document.body.textContent ?? '', /Already have ACP/);
+  await act(async () => page.button('Choose existing program').click());
+  assert.equal(page.document.querySelector('input')?.value, '/existing/agy_acp_server.par');
   assert.equal(page.button('Check connection').disabled, true);
   assert.equal(page.button('Sign in with Google').disabled, true);
   await act(async () => page.button('Cancel').click());
@@ -335,10 +337,11 @@ test('a late installed result never overwrites a newer saved configuration', asy
 });
 
 test('choosing an existing executable presents its path for saving without installing', async () => {
-  const page = await mount({ executable: '' });
+  const page = await mount();
+  assert.equal(page.button('Choose existing program').closest('details'), null);
   await act(async () => page.button('Choose existing program').click());
   assert.equal(page.document.querySelector('input')?.value, '/existing/agy_acp_server.par');
-  assert.equal(page.button('Install').disabled, true);
+  assert.equal(page.button('Reinstall').disabled, true);
   await act(async () => page.button('Save').click());
   assert.deepEqual(page.updates, ['/existing/agy_acp_server.par']);
   assert.deepEqual(page.starts, []);
