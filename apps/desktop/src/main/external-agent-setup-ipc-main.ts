@@ -35,7 +35,9 @@ export function registerExternalAgentSetupIpc(deps: {
     'startExternalAgentSetup' | 'queryExternalAgentSetup' | 'cancelExternalAgentSetup'
   >;
   presentation: RuntimeHostOAuthPresentation;
+  selectExecutable?: () => Promise<string | undefined>;
 }): void {
+  deps.ipcMain.handle('external-agents:select-executable', () => deps.selectExecutable?.());
   let pending: { id: string; expectation: OAuthPresentationExpectation } | undefined;
   const clear = (id: string) => {
     if (pending?.id !== id) return;

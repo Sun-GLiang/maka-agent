@@ -59,6 +59,7 @@ test('setup IPC registers an expectation before start and releases it on termina
   let attempts = 0;
   const input = { attemptId: 'attempt-1', action: 'login' as const, expectedExecutable: '/agent' };
   registerExternalAgentSetupIpc({
+    selectExecutable: async () => "/existing/agy_acp_server.par",
     ipcMain: {
       handle: (channel, listener) => {
         handlers.set(channel, listener);
@@ -81,6 +82,8 @@ test('setup IPC registers an expectation before start and releases it on termina
   });
   const invoke = (channel: string, input: unknown) =>
     handlers.get(channel)!({} as IpcMainInvokeEvent, input);
+  assert.equal(await invoke('external-agents:select-executable', undefined), '/existing/agy_acp_server.par');
+  assert.deepEqual(opened, []);
   await invoke('external-agents:setup:start', input);
   assert.equal(attempts, 1);
   assert.equal(opened.length, 1);

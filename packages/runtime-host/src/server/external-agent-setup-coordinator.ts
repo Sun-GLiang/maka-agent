@@ -63,6 +63,10 @@ export class HostExternalAgentSetupCoordinator {
       onCleanupFailure(): void;
       acquireResidency(): OperationResidency;
       capabilities: Pick<HostClientCapabilityCoordinator, 'callService'>;
+      install?(input: {
+        signal: AbortSignal;
+        onProgress(phase: 'downloading' | 'installing', percent: number): void;
+      }): Promise<string>;
       run?: typeof runAntigravitySetup;
       platform?: string;
       arch?: string;
@@ -96,10 +100,11 @@ export class HostExternalAgentSetupCoordinator {
       if (this.draining) return failure('host_draining');
       if (context.inputClosedSignal?.aborted) return failure('operation_unavailable');
       const executable = snapshot.policy.externalAgents.antigravity.executable;
-      if (!executable || executable !== input.expectedExecutable)
+      if ((input.action !== 'install' && !executable) || executable !== input.expectedExecutable)
         return failure('operation_conflict');
+      if (input.action === 'install' && !this.deps.install) return failure('operation_unavailable');
       const attempt: Attempt = {
-        projection: { ...input, phase: 'connecting' },
+        projection: { ...input, phase: input.action === 'install' ? 'downloading' : 'connecting' },
         owner: context.connectionId,
         abort: new AbortController(),
         done: Promise.resolve(),
@@ -148,6 +153,27 @@ export class HostExternalAgentSetupCoordinator {
     residency: OperationResidency,
   ): Promise<void> {
     try {
+      if (attempt.projection.action === 'install') {
+        const installedExecutable = await this.deps.install!({
+          signal: attempt.abort.signal,
+          onProgress: (phase, downloadPercent) => {
+            if (!attempt.abort.signal.aborted)
+              attempt.projection = { ...attempt.projection, phase, downloadPercent };
+          },
+        });
+        attempt.abort.signal.throwIfAborted();
+        await (this.deps.run ?? runAntigravitySetup)({
+          executable: installedExecutable,
+          action: 'check',
+          signal: attempt.abort.signal,
+          onAuthorizationUrl: async () => {
+            throw new AcpSetupError('authentication_unavailable');
+          },
+        });
+        attempt.abort.signal.throwIfAborted();
+        attempt.projection = { ...attempt.projection, phase: 'succeeded', installedExecutable };
+        return;
+      }
       await (this.deps.run ?? runAntigravitySetup)({
         executable,
         action: attempt.projection.action,

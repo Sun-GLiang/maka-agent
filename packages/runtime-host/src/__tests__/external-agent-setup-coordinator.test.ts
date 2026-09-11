@@ -231,3 +231,114 @@ test('protocol is strict, failure has a producer-visible code, and remote grants
       false,
     );
 });
+
+test('install admits an empty saved path, reports progress and checks without authentication', async () => {
+  const installing = deferred();
+  let downloads = 0;
+  const checks: string[] = [];
+  const coordinator = new HostExternalAgentSetupCoordinator({
+    readPolicy: async () => ({ ...policy, policy: createDefaultRuntimePolicy() }),
+    platform: 'darwin',
+    arch: 'arm64',
+    acquireResidency: () => ({ release() {} }),
+    onCleanupFailure() {},
+    capabilities: {
+      callService: async () => {
+        throw new Error('must not open browser');
+      },
+    },
+    install: async ({ onProgress }) => {
+      downloads++;
+      onProgress('downloading', 50);
+      await installing.promise;
+      return '/managed/agy_acp_server.par';
+    },
+    run: async ({ action, executable }) => {
+      checks.push(`${action}:${executable}`);
+    },
+  });
+  const request = { ...input, action: 'install' as const, expectedExecutable: '' };
+  try {
+    await coordinator.handlers['external_agents.setup.start'](request, context);
+    await coordinator.handlers['external_agents.setup.start'](request, context);
+    assert.equal(downloads, 1);
+    assert.equal((await projection(coordinator)).downloadPercent, 50);
+    installing.resolve();
+    for (let i = 0; i < 30 && (await projection(coordinator)).phase !== 'succeeded'; i++)
+      await new Promise((r) => setTimeout(r, 5));
+    const result = await projection(coordinator);
+    assert.equal(result.phase, 'succeeded');
+    assert.equal(result.installedExecutable, '/managed/agy_acp_server.par');
+    assert.deepEqual(checks, ['check:/managed/agy_acp_server.par']);
+    assert.deepEqual(decodeExternalAgentSetupProjection(result), result);
+  } finally {
+    installing.resolve();
+    await coordinator.close();
+  }
+});
+test('installation projection rejects invented progress, phase and output paths', () => {
+  const base = {
+    ...input,
+    action: 'install',
+    phase: 'succeeded',
+    installedExecutable: '/managed/agy_acp_server.par',
+  };
+  for (const invalid of [
+    { ...base, installedExecutable: undefined },
+    { ...base, installedExecutable: 'relative' },
+    { ...base, action: 'login' },
+    { ...base, downloadPercent: 101 },
+    { ...input, phase: 'downloading' },
+  ])
+    assert.throws(() => decodeExternalAgentSetupProjection(invalid));
+});
+
+for (const reason of ['cancel', 'disconnect', 'drain'] as const) {
+  test(`installation ${reason} retains ownership until cleanup and never starts ACP`, async () => {
+    const cleanup = deferred();
+    let released = false;
+    let checked = false;
+    const coordinator = new HostExternalAgentSetupCoordinator({
+      readPolicy: async () => policy,
+      platform: 'darwin',
+      arch: 'arm64',
+      acquireResidency: () => ({
+        release() {
+          released = true;
+        },
+      }),
+      onCleanupFailure() {},
+      capabilities: { callService: async () => ({ kind: 'presented' }) },
+      install: async () => {
+        await cleanup.promise;
+        return '/managed/agy_acp_server.par';
+      },
+      run: async () => {
+        checked = true;
+      },
+    });
+    try {
+      await coordinator.handlers['external_agents.setup.start'](
+        { ...input, action: 'install' },
+        context,
+      );
+      if (reason === 'cancel')
+        await coordinator.handlers['external_agents.setup.cancel'](
+          { attemptId: input.attemptId },
+          context,
+        );
+      if (reason === 'disconnect') coordinator.releaseConnection(context.connectionId);
+      if (reason === 'drain') coordinator.beginDrain();
+      assert.equal((await projection(coordinator)).phase, 'cancelling');
+      assert.equal(released, false);
+      cleanup.resolve();
+      await coordinator.close();
+      assert.equal((await projection(coordinator)).phase, 'cancelled');
+      assert.equal(checked, false);
+      assert.equal(released, true);
+    } finally {
+      cleanup.resolve();
+      await coordinator.close();
+    }
+  });
+}

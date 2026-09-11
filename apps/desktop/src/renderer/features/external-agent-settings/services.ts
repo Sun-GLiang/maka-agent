@@ -29,6 +29,7 @@ export interface ExternalAgentSettingsHost {
 export interface ExternalAgentSettingsServices {
   isAvailable(host: ExternalAgentSettingsHost): Promise<boolean>;
   createAttemptId(): string;
+  selectExecutable(host: ExternalAgentSettingsHost): Promise<string | undefined>;
   start(
     input: ExternalAgentSetupStart,
     host: ExternalAgentSettingsHost,

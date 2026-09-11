@@ -31,7 +31,7 @@ const LOGIN_TIMEOUT_MS = 5 * 60_000;
 
 export async function runAntigravitySetup(input: {
   executable: string;
-  action: ExternalAgentSetupAction;
+  action: Exclude<ExternalAgentSetupAction, 'install'>;
   signal: AbortSignal;
   onAuthorizationUrl(url: string): Promise<void>;
 }): Promise<void> {

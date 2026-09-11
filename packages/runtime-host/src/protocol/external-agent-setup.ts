@@ -26,8 +26,18 @@ import {
 import { invalidProtocolFrame } from './errors.js';
 import { defineOperation } from './operation-spec.js';
 
-export type ExternalAgentSetupAction = 'check' | 'login';
+// Official ACP Registry, pinned to the distribution verified for this integration.
+export const ANTIGRAVITY_ACP_RELEASE = {
+  version: '1.1.1',
+  url: 'https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-agy_acp_server_1.1.1-darwin-arm64.zip',
+  archiveBytes: 316_014_828,
+  sha256: 'fdfa915652cdb7ba8085cc8fffed072cbe009251aa2c951aabdda07a8c28a189',
+} as const;
+
+export type ExternalAgentSetupAction = 'check' | 'login' | 'install';
 export type ExternalAgentSetupPhase =
+  | 'downloading'
+  | 'installing'
   | 'connecting'
   | 'awaiting_authorization'
   | 'cancelling'
@@ -35,6 +45,9 @@ export type ExternalAgentSetupPhase =
   | 'failed'
   | 'cancelled';
 export const EXTERNAL_AGENT_SETUP_FAILURES = [
+  'download_failed',
+  'integrity_failed',
+  'installation_failed',
   'executable_unavailable',
   'helper_unavailable',
   'connection_failed',
@@ -58,6 +71,8 @@ export interface ExternalAgentSetupAttempt {
 export interface ExternalAgentSetupProjection extends ExternalAgentSetupStart {
   readonly phase: ExternalAgentSetupPhase;
   readonly failure?: ExternalAgentSetupFailure;
+  readonly installedExecutable?: string;
+  readonly downloadPercent?: number;
 }
 const errors = [
   'host_not_ready',
@@ -120,12 +135,15 @@ export function decodeExternalAgentSetupStart(value: unknown): ExternalAgentSetu
   return startFields(item);
 }
 function startFields(item: Record<string, unknown>): ExternalAgentSetupStart {
-  if (item.action !== 'check' && item.action !== 'login')
+  if (item.action !== 'check' && item.action !== 'login' && item.action !== 'install')
     throw invalidProtocolFrame('Invalid setup action');
   return {
     attemptId: requireEntityId(item.attemptId, 'attemptId'),
     action: item.action,
-    expectedExecutable: requireString(item.expectedExecutable, 'expectedExecutable', 4096),
+    expectedExecutable:
+      item.action === 'install' && item.expectedExecutable === ''
+        ? ''
+        : requireString(item.expectedExecutable, 'expectedExecutable', 4096),
   };
 }
 export function decodeExternalAgentSetupAttempt(value: unknown): ExternalAgentSetupAttempt {
@@ -137,10 +155,12 @@ export function decodeExternalAgentSetupProjection(value: unknown): ExternalAgen
     value,
     'setup projection',
     ['attemptId', 'action', 'expectedExecutable', 'phase'],
-    ['failure'],
+    ['failure', 'installedExecutable', 'downloadPercent'],
   );
   if (
     ![
+      'downloading',
+      'installing',
       'connecting',
       'awaiting_authorization',
       'cancelling',
@@ -156,8 +176,30 @@ export function decodeExternalAgentSetupProjection(value: unknown): ExternalAgen
       : item.failure !== undefined
   )
     throw invalidProtocolFrame('Invalid setup failure');
+  if ((item.phase === 'downloading' || item.phase === 'installing') && item.action !== 'install')
+    throw invalidProtocolFrame('Invalid installation phase');
+  if (
+    item.downloadPercent !== undefined &&
+    (item.action !== 'install' ||
+      !Number.isInteger(item.downloadPercent) ||
+      (item.downloadPercent as number) < 0 ||
+      (item.downloadPercent as number) > 100)
+  )
+    throw invalidProtocolFrame('Invalid download progress');
+  if (item.action === 'install' && item.phase === 'succeeded') {
+    const path = requireString(item.installedExecutable, 'installedExecutable', 4096);
+    if (!path.startsWith('/') || /[\x00-\x1f]/u.test(path))
+      throw invalidProtocolFrame('Invalid installed path');
+  } else if (item.installedExecutable !== undefined)
+    throw invalidProtocolFrame('Unexpected installed path');
   return {
     ...startFields(item),
+    ...(item.installedExecutable !== undefined
+      ? { installedExecutable: item.installedExecutable as string }
+      : {}),
+    ...(item.downloadPercent !== undefined
+      ? { downloadPercent: item.downloadPercent as number }
+      : {}),
     phase: item.phase as ExternalAgentSetupPhase,
     ...(item.phase === 'failed' ? { failure: item.failure as ExternalAgentSetupFailure } : {}),
   };

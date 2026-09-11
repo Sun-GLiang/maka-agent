@@ -98,6 +98,7 @@ async function mount(
     IS_REACT_ACT_ENVIRONMENT: true,
   });
   const starts: ExternalAgentSetupStart[] = [];
+  const updates: string[] = [];
   const cancels: string[] = [];
   Object.assign(window, {
     maka: {
@@ -108,6 +109,7 @@ async function mount(
         }),
       },
       externalAgents: {
+        selectExecutable: async () => '/existing/agy_acp_server.par',
         start: async (value: ExternalAgentSetupStart) => {
           starts.push(value);
           return input.start ? input.start(value) : { ...value, phase: 'succeeded' };
@@ -140,7 +142,11 @@ async function mount(
                 services,
                 children: createElement(ExternalAgentsSettingsPage, {
                   settings: { ...settings, externalAgents: { antigravity: { executable } } },
-                  onUpdate: async () => ({ settings }),
+                  onUpdate: async (patch: import('@maka/core/settings').UpdateAppSettingsInput) => {
+                    const executable = patch.externalAgents?.antigravity.executable ?? settings.externalAgents.antigravity.executable;
+                    updates.push(executable);
+                    return { settings: { ...settings, externalAgents: { antigravity: { executable } } } };
+                  },
                 }),
               }),
             }),
@@ -161,6 +167,7 @@ async function mount(
   return {
     document,
     starts,
+    updates,
     cancels,
     render,
     button: (label: string) => {
@@ -189,7 +196,7 @@ for (const [locale, label] of [
     assert.match(page.document.body.textContent ?? '', /Connection successful|连接成功|連線成功/);
     assert.doesNotMatch(
       page.document.body.textContent ?? '',
-      /Google sign-in completed|Google 登录已完成|Google 登入已完成/,
+      /Google sign-in verified for this attempt|本次 Google 登录验证成功|本次 Google 登入驗證成功/,
     );
   });
 }
@@ -213,7 +220,7 @@ test('Host generation change cancels an in-flight start and ignores its late res
     await pending;
   });
   assert.equal(page.cancels.length, 2, 'cancel again after delayed admission');
-  assert.doesNotMatch(page.document.body.textContent ?? '', /Google sign-in completed/);
+  assert.doesNotMatch(page.document.body.textContent ?? '', /Google sign-in verified for this attempt/);
 });
 test('changing saved configuration clears the previous success', async () => {
   const page = await mount();
@@ -236,13 +243,13 @@ test('browser failure can retry with a fresh attempt and authenticate independen
   assert.equal(page.starts.length, 2);
   assert.notEqual(page.starts[0].attemptId, page.starts[1].attemptId);
   assert.equal(page.starts[1].action, 'login');
-  assert.match(page.document.body.textContent ?? '', /Google sign-in completed/);
+  assert.match(page.document.body.textContent ?? '', /Google sign-in verified for this attempt/);
 });
 
 test('clearing the saved configuration disables setup', async () => {
   const page = await mount();
   await page.render('generation-1', '');
-  assert.equal(page.button('Check connection').disabled, true);
+  assert.equal(page.button('Install').disabled, false);
   assert.equal(page.button('Sign in with Google').disabled, true);
   assert.equal(page.starts.length, 0);
 });
@@ -294,14 +301,45 @@ test('saved program uses the model detail edit row and disables setup while edit
   assert.equal(page.starts.length, 0);
 });
 
-test('first setup explains the separate program and offers the official download', async () => {
+test('first setup offers managed install and an official source without exposing a path editor', async () => {
   const page = await mount({ executable: '' });
-  assert.match(page.document.body.textContent ?? '', /desktop app alone is not enough/);
-  const download = page.document.querySelector('a[href*="dl.google.com/agy-extensions/"]');
-  assert.ok(download);
-  assert.match(download.textContent ?? '', /macOS Apple Silicon/);
-  assert.ok(page.document.querySelector('input'));
-  assert.equal(page.button('Save').disabled, true);
-  assert.equal(page.button('Check connection').disabled, true);
+  assert.match(page.document.body.textContent ?? '', /configure its path automatically/);
+  assert.ok(page.document.querySelector('a[href*="dl.google.com/agy-extensions/"]'));
+  assert.equal(page.document.querySelector('input'), null);
+  assert.equal(page.button('Install').disabled, false);
+  assert.equal(page.button('Choose existing program').disabled, false);
   assert.equal(page.button('Sign in with Google').disabled, true);
+});
+
+test('installed output is saved through existing settings mutation, then connection becomes verified', async () => {
+  const path = '/managed/agy_acp_server.par';
+  const page = await mount({ executable: '', start: async (input) => ({ ...input, phase: 'succeeded', installedExecutable: path }) });
+  await act(async () => { page.button('Install').click(); page.button('Install').click(); });
+  assert.equal(page.starts.length, 1);
+  assert.equal(page.starts[0].action, 'install');
+  assert.equal(page.starts[0].expectedExecutable, '');
+  assert.deepEqual(page.updates, [path]);
+  await page.render('generation-1', path);
+  assert.match(page.document.body.textContent ?? '', /Connection successful/);
+  assert.equal(page.button('Sign in with Google').disabled, false);
+});
+
+test('a late installed result never overwrites a newer saved configuration', async () => {
+  let finish!: (value: ExternalAgentSetupProjection) => void;
+  const pending = new Promise<ExternalAgentSetupProjection>(r => { finish = r; });
+  const page = await mount({ executable: '', start: () => pending });
+  await act(async () => page.button('Install').click());
+  await page.render('generation-1', '/chosen/agy_acp_server.par');
+  await act(async () => { finish({ ...page.starts[0], phase: 'succeeded', installedExecutable: '/managed/agy_acp_server.par' }); await pending; });
+  assert.deepEqual(page.updates, []);
+});
+
+test('choosing an existing executable presents its path for saving without installing', async () => {
+  const page = await mount({ executable: '' });
+  await act(async () => page.button('Choose existing program').click());
+  assert.equal(page.document.querySelector('input')?.value, '/existing/agy_acp_server.par');
+  assert.equal(page.button('Install').disabled, true);
+  await act(async () => page.button('Save').click());
+  assert.deepEqual(page.updates, ['/existing/agy_acp_server.par']);
+  assert.deepEqual(page.starts, []);
 });

@@ -32,6 +32,7 @@ import type {
   ExternalAgentSetupAction,
   ExternalAgentSetupProjection,
 } from '@maka/runtime-host/protocol';
+import { ANTIGRAVITY_ACP_RELEASE } from '@maka/runtime-host/protocol';
 import { getExternalAgentsCopy } from '../../locales/settings-external-agents-copy.js';
 import {
   SettingsPage,
@@ -107,8 +108,9 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
   const copy = getExternalAgentsCopy(useUiLocale());
   const saved = props.settings.externalAgents.antigravity.executable;
   const [path, setPath] = useState(saved);
-  const [editingPath, setEditingPath] = useState(!saved);
+  const [editingPath, setEditingPath] = useState(false);
   const [connectionVerified, setConnectionVerified] = useState(false);
+  const verifiedPath = useRef<string | undefined>(undefined);
   const validPath =
     path.trim() === '' ||
     (path.trim().startsWith('/') && !/[\x00-\x1f]/u.test(path) && path.trim().length <= 4096);
@@ -125,7 +127,7 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
   const attemptBasis = useRef(configuration.current);
   useEffect(() => {
     setPath(saved);
-    setConnectionVerified(false);
+    setConnectionVerified(verifiedPath.current === saved);
     setProjection(undefined);
     setError(false);
   }, [saved]);
@@ -157,6 +159,7 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
     if (!available || !validPath || !guard.begin('save')) return;
     setBusy(true);
     setError(false);
+    verifiedPath.current = undefined;
     setProjection(undefined);
     try {
       const result = await props.onUpdate({
@@ -173,8 +176,24 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
       guard.finish();
     }
   }
+  async function selectExisting() {
+    if (!available || !guard.begin('select')) return;
+    const basis = configuration.current;
+    setBusy(true);
+    try {
+      const selected = await services.selectExecutable(host);
+      if (!selected || !mounted.current || configuration.current !== basis) return;
+      setPath(selected);
+      setEditingPath(true);
+    } catch {
+      if (mounted.current) setError(true);
+    } finally {
+      if (mounted.current) setBusy(false);
+      guard.finish();
+    }
+  }
   async function start(action: ExternalAgentSetupAction) {
-    if (!available || !saved || editingPath || path !== saved || !guard.begin(action)) return;
+    if (!available || (action !== 'install' && !saved) || editingPath || path !== saved || !guard.begin(action)) return;
     const id = services.createAttemptId();
     attempt.current = id;
     if (action === 'check') setConnectionVerified(false);
@@ -193,8 +212,16 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
       while (isCurrent(id)) {
         if (configuration.current === basis) {
           setProjection(result);
-          if (result.phase === 'succeeded' || result.phase === 'awaiting_authorization')
+          if (result.phase === 'succeeded' || result.phase === 'awaiting_authorization') {
+            if (action === 'install' && result.phase === 'succeeded' && result.installedExecutable) {
+              verifiedPath.current = result.installedExecutable;
+              const updated = await props.onUpdate({ externalAgents: { antigravity: { executable: result.installedExecutable } } });
+              if (!isCurrent(id)) return;
+              setPath(updated.settings.externalAgents.antigravity.executable);
+              setEditingPath(false);
+            }
             setConnectionVerified(true);
+          }
         }
         if (['succeeded', 'failed', 'cancelled'].includes(result.phase)) break;
         await new Promise((resolve) => setTimeout(resolve, 250));
@@ -230,14 +257,14 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
         ? copy.unavailable
         : path !== saved
           ? copy.unsaved
-          : !saved
+          : !saved && current?.action !== 'install'
             ? copy.unconfigured
             : !current
               ? copy.unchecked
               : current.phase === 'failed'
                 ? copy.failures[current.failure!]
                 : current.phase === 'succeeded'
-                  ? current.action === 'login'
+                  ? current.action === 'install' ? copy.installed : current.action === 'login'
                     ? copy.authenticated
                     : copy.connected
                   : copy[current.phase];
@@ -258,12 +285,12 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
     return (
       <Button
         variant={
-          canStart && !busy && (action === 'check' ? !connectionVerified : connectionVerified)
+          !busy && (action === 'install' ? available && !saved : canStart && (action === 'check' ? !connectionVerified : connectionVerified && current?.phase !== 'succeeded'))
             ? 'primary'
             : 'secondary'
         }
-        label={retryAction === action ? copy.retry : action === 'check' ? copy.check : copy.login}
-        isDisabled={busy || !canStart}
+        label={retryAction === action ? copy.retry : action === 'install' ? copy.install : action === 'check' ? copy.check : current?.action === 'login' && current.phase === 'succeeded' ? copy.reverify : copy.login}
+        isDisabled={busy || (action === 'install' ? !available || editingPath || path !== saved : !canStart)}
         onClick={() => void start(action)}
       />
     );
@@ -274,7 +301,6 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
         title={copy.title}
         subtitle={copy.agentDescription}
         logo={<AntigravityLogo />}
-        badge={<Badge variant="neutral" label={saved ? copy.configured : copy.notConfigured} />}
         backLabel={copy.backToAgents}
         onBack={props.onBack}
         isBackDisabled={busy && !attempt.current}
@@ -296,10 +322,47 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
           }}
         />
       )}
-      {!saved && available && (
-        <Banner status="info" title={copy.setupHelpTitle} description={copy.setupHelp} />
-      )}
-      <SettingsSection title={copy.setupTitle}>
+      <SettingsSection title={copy.programTitle}>
+        <SettingsRow
+          label={copy.programName}
+          description={
+            <div>
+              <span role="status" aria-live="polite">
+                {current?.action === 'install' ? `${status}${current.downloadPercent !== undefined && current.phase === 'downloading' ? ` ${current.downloadPercent}%` : ''}` : saved ? copy.programConfigured : copy.installHelp}
+              </span>
+              <div className="externalAgentRelease">
+                <Text type="supporting" color="secondary">{copy.release}</Text>
+                <Link href={ANTIGRAVITY_ACP_RELEASE.url} target="_blank" rel="noreferrer noopener">{copy.source} · dl.google.com</Link>
+              </div>
+              {current?.action === 'install' && current.phase === 'downloading' && (
+                <progress className="externalAgentDownloadProgress" max={100} value={current.downloadPercent ?? 0} aria-label={copy.downloading} />
+              )}
+            </div>
+          }
+          end={
+            <HStack gap={2} vAlign="center">
+              {!saved && setupAction('install')}
+              {!saved && <Button variant="secondary" label={copy.selectExisting} isDisabled={busy || !available} onClick={() => void selectExisting()} />}
+            </HStack>
+          }
+        />
+        {saved && <SettingsRow
+          label={copy.connectionStatus}
+          description={<span role="status" aria-live="polite">{editingPath ? copy.unsaved : current?.action === 'check' ? status : connectionVerified ? copy.connectionVerified : copy.unchecked}</span>}
+          end={setupAction('check')}
+        />}
+      </SettingsSection>
+      <SettingsSection title={copy.accountTitle} description={copy.accountDescription}>
+        <SettingsRow
+          label={copy.googleAccount}
+          description={<span role="status" aria-live="polite">{!saved || editingPath ? copy.accountBeforeSave : current?.action === 'login' ? status : copy.accountUnchecked}</span>}
+          end={setupAction('login')}
+        />
+      </SettingsSection>
+      <details className="externalAgentAdvanced" open={editingPath || undefined}>
+      <summary>{copy.advanced}</summary>
+      <SettingsSection>
+        {saved && <HStack gap={2} vAlign="center"><Button variant="secondary" label={copy.selectExisting} isDisabled={busy || !available} onClick={() => void selectExisting()} />{setupAction('install')}</HStack>}
         <SettingsExpandableRow
           label={copy.executable}
           value={
@@ -337,44 +400,15 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
           </Text>
           {!validPath && <Banner role="alert" status="error" title={copy.invalidPath} />}
           <Link
-            href="https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-agy_acp_server_1.1.1-darwin-arm64.zip"
+            href={ANTIGRAVITY_ACP_RELEASE.url}
             target="_blank"
             rel="noreferrer noopener"
           >
             {copy.downloadAcp}
           </Link>
         </SettingsExpandableRow>
-        <SettingsRow
-          label={copy.connectionStatus}
-          description={
-            <span role="status" aria-live="polite">
-              {!saved || editingPath
-                ? copy.connectionBeforeSave
-                : current?.action === 'check'
-                  ? status
-                  : connectionVerified
-                    ? copy.connectionVerified
-                    : copy.unchecked}
-            </span>
-          }
-          end={setupAction('check')}
-        />
       </SettingsSection>
-      <SettingsSection title={copy.accountTitle} description={copy.accountDescription}>
-        <SettingsRow
-          label={copy.googleAccount}
-          description={
-            <span role="status" aria-live="polite">
-              {!saved || editingPath
-                ? copy.accountBeforeSave
-                : current?.action === 'login'
-                  ? status
-                  : copy.accountUnchecked}
-            </span>
-          }
-          end={setupAction('login')}
-        />
-      </SettingsSection>
+      </details>
     </SettingsPage>
   );
 }

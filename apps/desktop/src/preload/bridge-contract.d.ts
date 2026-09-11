@@ -1401,6 +1401,7 @@ export interface MakaBridge {
     subscribeChanges(handler: (statuses: McpServerStatus[]) => void): () => void;
   };
   externalAgents: {
+    selectExecutable(host: DesktopRuntimeHostRef): Promise<string | undefined>;
     start(input: OperationInput<'external_agents.setup.start'>, host: DesktopRuntimeHostRef): Promise<OperationOutput<'external_agents.setup.start'>>;
     query(attemptId: string, host: DesktopRuntimeHostRef): Promise<OperationOutput<'external_agents.setup.query'>>;
     cancel(attemptId: string, host: DesktopRuntimeHostRef): Promise<OperationOutput<'external_agents.setup.cancel'>>;

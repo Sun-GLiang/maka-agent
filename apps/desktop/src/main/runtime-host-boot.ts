@@ -1641,7 +1641,12 @@ function registerHostClientIpc(
     mainWindowController,
     showItemInFolder: (path) => shell.showItemInFolder(path),
   });
-  registerExternalAgentSetupIpc({ ipcMain: scopedIpc, client, presentation: oauthPresentation });
+  registerExternalAgentSetupIpc({ ipcMain: scopedIpc, client, presentation: oauthPresentation,
+    selectExecutable: async () => {
+      const result = await mainWindowController.showOpenDialog({ properties: ['openFile'] });
+      return result.canceled ? undefined : result.filePaths[0];
+    },
+  });
   registerRuntimeHostOAuthIpc({
     ipcMain: scopedIpc,
     client,

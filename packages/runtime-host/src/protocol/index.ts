@@ -101,7 +101,8 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 142 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 143 as const;
+// 143: Antigravity setup supports managed installation and download progress.
 // 142: Local Antigravity setup adds RuntimePolicy configuration and setup operations.
 // 141: WorkHub root admissions bind model Intent/Recall decisions before actions.
 // 140: Plugin Platform queries expose scoped Command contribution projections.

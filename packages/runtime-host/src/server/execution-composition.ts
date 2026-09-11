@@ -186,6 +186,10 @@ import { MemoryExtractionSessionLane } from './memory-extraction-session-lane.js
 import { type HostMessageRootPort, HostMessageCoordinator } from './message-coordinator.js';
 import { HostNetworkProxyCoordinator } from './network-proxy-coordinator.js';
 import { HostOAuthExecutionAuthority } from './oauth-execution-authority.js';
+import { join } from 'node:path';
+import { toRuntimePolicyProxy } from './runtime-policy-proxy.js';
+import { installAntigravity } from './acp/antigravity-install.js';
+import { createProxiedFetchTransport } from '@maka/runtime/network/scoped-fetch-transport';
 import { HostExternalAgentSetupCoordinator } from './external-agent-setup-coordinator.js';
 import { HostOAuthCoordinator, type HostOAuthCoordinatorInput } from './oauth-coordinator.js';
 import { HostPlanCoordinator } from './plan-coordinator.js';
@@ -1366,6 +1370,27 @@ export async function createExecutionRuntimeHostComposition(
       grants: stores.interactionStore,
     });
     externalAgentSetup = new HostExternalAgentSetupCoordinator({
+      install: async (input) => {
+        const proxy = await runtimePolicyStores.operations.resolveNetworkProxyExecution({});
+        if (proxy.kind === 'credential_not_configured')
+          throw new Error('Proxy credential unavailable');
+        const transport = createProxiedFetchTransport(
+          toRuntimePolicyProxy(proxy.networkProxy, proxy.secretMaterial.networkProxy?.secret),
+        );
+        try {
+          return await installAntigravity({
+            ...input,
+            fetch: transport.fetch,
+            directory: join(
+              context.owner.capability.canonicalPath,
+              'external-agents',
+              'antigravity',
+            ),
+          });
+        } finally {
+          await transport.close();
+        }
+      },
       readPolicy: () => runtimePolicyStores.runtimePolicy.getSnapshot(),
       acquireResidency: () => context.acquireResidency('external-agent-setup'),
       onCleanupFailure: () => {

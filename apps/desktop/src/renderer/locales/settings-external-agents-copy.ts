@@ -20,6 +20,20 @@
 import type { UiLocale, UiCatalog } from '@maka/core/ui-locale';
 import type { ExternalAgentSetupFailure } from '@maka/runtime-host/protocol';
 const en = {
+  programTitle: "Program",
+  programName: "Antigravity ACP",
+  install: "Install",
+  installHelp: "Download the official program from Google and configure its path automatically.",
+  programConfigured: "A program path is saved. Check the connection to verify it is available.",
+  selectExisting: "Choose existing program",
+  advanced: "Advanced settings",
+  source: "Download source",
+  release: "Official download: v1.1.1 · macOS Apple Silicon · 316 MB",
+  downloading: "Downloading official ACP…",
+  installing: "Installing and checking the connection…",
+  installed: "Installed and connected.",
+  reverify: "Verify sign-in again",
+
   title: 'Antigravity',
   accountUnchecked: 'Sign-in has not been verified. Sign in with Google to continue.',
   accountBeforeSave: 'Configure the program connection above before signing in.',
@@ -63,10 +77,14 @@ const en = {
   awaiting_authorization: 'Complete Google sign-in in your browser.',
   cancelling: 'Cancelling and releasing the process…',
   connected: 'Connection successful. Sign-in has not been verified.',
-  authenticated: 'Google sign-in completed.',
+  authenticated: 'Google sign-in verified for this attempt.',
   cancelled: 'Setup cancelled.',
   error: 'The operation failed. Check the saved path and Host connection, then retry.',
   failures: {
+    download_failed: "Official download failed. Check network or proxy settings and retry.",
+    integrity_failed: "The program did not match the verified official distribution. Use a complete official copy or retry installation.",
+    installation_failed: "Installation failed. Check available disk space and directory permissions, then retry.",
+
     executable_unavailable:
       'The executable is missing or cannot run. Check the saved path and executable permissions.',
     helper_unavailable:
@@ -84,6 +102,20 @@ const en = {
   } satisfies Record<ExternalAgentSetupFailure, string>,
 };
 const zh = {
+  programTitle: "程序",
+  programName: "Antigravity ACP",
+  install: "安装",
+  installHelp: "从 Google 下载官方程序，安装后自动配置，无需填写路径。",
+  programConfigured: "已保存程序位置，可检查连接以确认程序可用。",
+  selectExisting: "选择已有程序",
+  advanced: "高级设置",
+  source: "下载来源",
+  release: "官方下载：v1.1.1 · macOS Apple 芯片 · 316 MB",
+  downloading: "正在下载官方 ACP…",
+  installing: "正在安装并检查连接…",
+  installed: "安装完成，连接成功。",
+  reverify: "重新验证登录",
+
   title: 'Antigravity',
   accountUnchecked: '登录状态尚未验证，使用 Google 登录后继续。',
   accountBeforeSave: '请先完成上方的程序连接配置，再登录。',
@@ -124,10 +156,14 @@ const zh = {
   awaiting_authorization: '请在浏览器中完成 Google 登录。',
   cancelling: '正在取消并释放进程…',
   connected: '连接成功，登录状态尚未验证。',
-  authenticated: 'Google 登录已完成。',
+  authenticated: '本次 Google 登录验证成功。',
   cancelled: '已取消设置操作。',
   error: '操作失败，请检查已保存路径和 Host 连接后重试。',
   failures: {
+    download_failed: "官方下载失败，请检查网络或代理设置后重试。",
+    integrity_failed: "程序与已验证的官方版本不匹配，请使用完整官方程序或重试安装。",
+    installation_failed: "安装失败，请检查可用磁盘空间和目录权限后重试。",
+
     executable_unavailable: '可执行文件不存在或无法运行，请检查已保存路径及执行权限。',
     helper_unavailable: '匹配的 localharness_external 缺失或无法运行，请保留完整的官方分发目录。',
     connection_failed: 'ACP 连接失败，请确认程序和 helper 来自同一官方分发版本。',
@@ -140,6 +176,20 @@ const zh = {
   } satisfies Record<ExternalAgentSetupFailure, string>,
 };
 const zhTW: typeof en = {
+  programTitle: "程式",
+  programName: "Antigravity ACP",
+  install: "安裝",
+  installHelp: "從 Google 下載官方程式，安裝後自動設定，無需填寫路徑。",
+  programConfigured: "已儲存程式位置，可檢查連線以確認程式可用。",
+  selectExisting: "選擇已有程式",
+  advanced: "進階設定",
+  source: "下載來源",
+  release: "官方下載：v1.1.1 · macOS Apple 晶片 · 316 MB",
+  downloading: "正在下載官方 ACP…",
+  installing: "正在安裝並檢查連線…",
+  installed: "安裝完成，連線成功。",
+  reverify: "重新驗證登入",
+
   title: 'Antigravity',
   accountUnchecked: '登入狀態尚未驗證，使用 Google 登入後繼續。',
   accountBeforeSave: '請先完成上方的程式連線設定，再登入。',
@@ -181,10 +231,14 @@ const zhTW: typeof en = {
   awaiting_authorization: '請在瀏覽器中完成 Google 登入。',
   cancelling: '正在取消並釋放程序…',
   connected: '連線成功，登入狀態尚未驗證。',
-  authenticated: 'Google 登入已完成。',
+  authenticated: '本次 Google 登入驗證成功。',
   cancelled: '已取消設定操作。',
   error: '操作失敗，請檢查已儲存路徑和 Host 連線後重試。',
   failures: {
+    download_failed: "官方下載失敗，請檢查網路或代理設定後重試。",
+    integrity_failed: "程式與已驗證的官方版本不符，請使用完整官方程式或重試安裝。",
+    installation_failed: "安裝失敗，請檢查可用磁碟空間與目錄權限後重試。",
+
     executable_unavailable: '執行檔不存在或無法執行，請檢查已儲存路徑及執行權限。',
     helper_unavailable: '相符的 localharness_external 缺失或無法執行，請保留完整的官方分發目錄。',
     connection_failed: 'ACP 連線失敗，請確認程式與 helper 來自同一官方分發版本。',

@@ -24,6 +24,7 @@ export function createDesktopExternalAgentSettingsServices(
     window.maka,
 ): ExternalAgentSettingsServices {
   return {
+    selectExecutable: (host) => bridge().externalAgents.selectExecutable(host),
     createAttemptId: () => crypto.randomUUID(),
     async isAvailable(host) {
       const [info, profiles] = await Promise.all([

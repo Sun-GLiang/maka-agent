@@ -3250,6 +3250,7 @@ const makaBridge = {
     },
   },
   externalAgents: {
+    selectExecutable(host) { return invokeSelectedRuntimeHost(host, 'external-agents:select-executable'); },
     start(input, host) { return invokeSelectedRuntimeHost(host, 'external-agents:setup:start', input); },
     query(attemptId, host) { return invokeSelectedRuntimeHost(host, 'external-agents:setup:query', { attemptId }); },
     cancel(attemptId, host) { return invokeSelectedRuntimeHost(host, 'external-agents:setup:cancel', { attemptId }); },
