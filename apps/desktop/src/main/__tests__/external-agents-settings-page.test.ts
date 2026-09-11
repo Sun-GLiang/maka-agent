@@ -99,6 +99,9 @@ async function mount(
   });
   const starts: ExternalAgentSetupStart[] = [];
   const updates: string[] = [];
+  const updateGuards: Array<
+    import('@maka/core/settings').RuntimeHostSettingsUpdateGuard | undefined
+  > = [];
   const cancels: string[] = [];
   Object.assign(window, {
     maka: {
@@ -142,9 +145,13 @@ async function mount(
                 services,
                 children: createElement(ExternalAgentsSettingsPage, {
                   settings: { ...settings, externalAgents: { antigravity: { executable } } },
-                  onUpdate: async (patch: import('@maka/core/settings').UpdateAppSettingsInput) => {
+                  onUpdate: async (
+                    patch: import('@maka/core/settings').UpdateAppSettingsInput,
+                    guard?: import('@maka/core/settings').RuntimeHostSettingsUpdateGuard,
+                  ) => {
                     const executable = patch.externalAgents?.antigravity.executable ?? settings.externalAgents.antigravity.executable;
                     updates.push(executable);
+                    updateGuards.push(guard);
                     return { settings: { ...settings, externalAgents: { antigravity: { executable } } } };
                   },
                 }),
@@ -168,6 +175,7 @@ async function mount(
     document,
     starts,
     updates,
+    updateGuards,
     cancels,
     render,
     button: (label: string) => {
@@ -317,6 +325,7 @@ test('installed output is saved through existing settings mutation, then connect
   assert.equal(page.starts[0].action, 'install');
   assert.equal(page.starts[0].expectedExecutable, '');
   assert.deepEqual(page.updates, [path]);
+  assert.deepEqual(page.updateGuards, [{ expectedExternalAgentExecutable: '' }]);
   await page.render('generation-1', path);
   assert.match(page.document.body.textContent ?? '', /Connection successful/);
   assert.equal(page.button('Sign in with Google').disabled, false);

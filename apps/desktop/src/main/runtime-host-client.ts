@@ -435,8 +435,16 @@ export class DesktopRuntimeHostClient {
   async updateRuntimePolicy(
     buildOperation: (policy: RuntimePolicy) => RuntimePolicyMutation,
   ): Promise<OperationOutput<"runtime.policy.query">> {
+    return this.updateRuntimePolicyIf(() => true, buildOperation);
+  }
+
+  async updateRuntimePolicyIf(
+    accepts: (policy: RuntimePolicy) => boolean,
+    buildOperation: (policy: RuntimePolicy) => RuntimePolicyMutation,
+  ): Promise<OperationOutput<"runtime.policy.query">> {
     for (let attempt = 0; attempt < MAX_OPTIMISTIC_ATTEMPTS; attempt += 1) {
       const current = await this.queryRuntimePolicy();
+      if (!accepts(current.policy)) return current;
       const result = await this.request("runtime.policy.mutate", {
         expectedRevision: current.revision,
         operation: buildOperation(current.policy),

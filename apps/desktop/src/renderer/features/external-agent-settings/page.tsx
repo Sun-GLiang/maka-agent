@@ -24,6 +24,7 @@ import { SettingsRouteHeader } from '../../application/contracts/settings-presen
 import { Button, useUiLocale } from '@maka/ui';
 import type {
   AppSettings,
+  RuntimeHostSettingsUpdateGuard,
   UpdateAppSettingsInput,
   UpdateAppSettingsResult,
 } from '@maka/core/settings';
@@ -48,7 +49,10 @@ import { useExternalAgentSettingsServices } from './services.js';
 
 type Props = {
   settings: AppSettings;
-  onUpdate(patch: UpdateAppSettingsInput): Promise<UpdateAppSettingsResult>;
+  onUpdate(
+    patch: UpdateAppSettingsInput,
+    guard?: RuntimeHostSettingsUpdateGuard,
+  ): Promise<UpdateAppSettingsResult>;
 };
 export function ExternalAgentsSettingsPage(props: Props) {
   return (
@@ -190,7 +194,10 @@ function AntigravitySetup(props: Props & { onBack(): void }) {
           if (result.phase === 'succeeded' || result.phase === 'awaiting_authorization') {
             if (action === 'install' && result.phase === 'succeeded' && result.installedExecutable) {
               verifiedPath.current = result.installedExecutable;
-              const updated = await props.onUpdate({ externalAgents: { antigravity: { executable: result.installedExecutable } } });
+              const updated = await props.onUpdate(
+                { externalAgents: { antigravity: { executable: result.installedExecutable } } },
+                { expectedExternalAgentExecutable: basis.executable },
+              );
               if (!isCurrent(id)) return;
               if (updated.settings.externalAgents.antigravity.executable !== result.installedExecutable)
                 return;

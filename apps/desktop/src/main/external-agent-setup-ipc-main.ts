@@ -28,11 +28,6 @@ import type {
   OAuthPresentationExpectation,
 } from './runtime-host-oauth-presentation.js';
 
-// Cover the Host's 30-second initialization plus five-minute authentication window,
-// with admission headroom. Terminal queries and cancellation release this earlier;
-// the bounded fallback also releases abandoned Desktop expectations.
-const SETUP_PRESENTATION_TIMEOUT_MS = 6 * 60_000;
-
 export function registerExternalAgentSetupIpc(deps: {
   ipcMain: ReconnectableReadIpcMain;
   client: Pick<
@@ -53,10 +48,15 @@ export function registerExternalAgentSetupIpc(deps: {
     const input = decodeExternalAgentSetupStart(raw);
     if (input.action === 'login' && pending?.id !== input.attemptId) {
       if (pending) throw new Error('Another external agent login is in progress');
-      pending = {
+      const login = {
         id: input.attemptId,
-        expectation: deps.presentation.expect(input.attemptId, input.attemptId, SETUP_PRESENTATION_TIMEOUT_MS),
+        expectation: deps.presentation.expect(input.attemptId, input.attemptId),
       };
+      pending = login;
+      const release = () => {
+        if (pending === login) clear(login.id);
+      };
+      void login.expectation.presented.then(release, release);
     }
     try {
       const result = await deps.client.startExternalAgentSetup(input);
@@ -72,6 +72,9 @@ export function registerExternalAgentSetupIpc(deps: {
     'external-agents:setup:query',
     async (_event, raw: unknown) => {
       const { attemptId } = decodeExternalAgentSetupAttempt(raw);
+      // Renderer liveness renews this exact slot. A consumed or expired slot is
+      // never recreated, and an unrelated query cannot extend it.
+      if (pending?.id === attemptId) pending.expectation.renew();
       try {
         const result = await deps.client.queryExternalAgentSetup(attemptId);
         if (['succeeded', 'failed', 'cancelled'].includes(result.phase)) clear(attemptId);

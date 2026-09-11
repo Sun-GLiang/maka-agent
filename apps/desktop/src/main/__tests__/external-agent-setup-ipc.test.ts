@@ -87,6 +87,11 @@ test('setup IPC registers an expectation before start and releases it on termina
   await invoke('external-agents:setup:start', input);
   assert.equal(attempts, 1);
   assert.equal(opened.length, 1);
+  // A query after presentation must not recreate a setup slot or interfere
+  // with a regular model OAuth expectation.
+  const concurrent = presentation.expect('model-after-presentation');
+  await invoke('external-agents:setup:query', { attemptId: input.attemptId });
+  concurrent.cancel();
   phase = 'succeeded';
   await invoke('external-agents:setup:query', { attemptId: input.attemptId });
   await invoke('external-agents:setup:start', { ...input, attemptId: 'attempt-2' });
@@ -116,17 +121,24 @@ test('setup accepts a delayed authorization link and clears terminal, cancelled 
     channel === 'external-agents:setup:start' ? input : { attemptId: input.attemptId });
   const present = () => presentation.openExternal('https://accounts.google.com/delayed', input.attemptId, new AbortController().signal);
   await invoke('external-agents:setup:start');
-  // Initialization can take 30 seconds, followed by up to five minutes of authentication.
-  t.mock.timers.tick(320_000);
+  // Active renderer polling keeps the presentation lease alive while the Host
+  // initializes and waits for authentication.
+  for (let elapsed = 0; elapsed < 320_000; elapsed += 20_000) {
+    t.mock.timers.tick(20_000);
+    await invoke('external-agents:setup:query');
+  }
   await present();
   assert.equal(opened.length, 1);
+  const concurrent = presentation.expect('model-after-presentation');
+  await invoke('external-agents:setup:query');
+  concurrent.cancel();
   phase = 'succeeded';
   await invoke('external-agents:setup:query');
   for (const terminal of ['failed', 'cancelled'] as const) {
     input = { ...input, attemptId: terminal };
     phase = 'connecting';
     await invoke('external-agents:setup:start');
-    t.mock.timers.tick(35_000);
+    t.mock.timers.tick(20_000);
     if (terminal === 'cancelled') await invoke('external-agents:setup:cancel');
     else { phase = 'failed'; await invoke('external-agents:setup:query'); }
     await assert.rejects(present(), /no matching OAuth presentation/);
@@ -134,11 +146,34 @@ test('setup accepts a delayed authorization link and clears terminal, cancelled 
   input = { ...input, attemptId: 'abandoned' };
   phase = 'connecting';
   await invoke('external-agents:setup:start');
-  t.mock.timers.tick(360_000);
+  t.mock.timers.tick(20_000);
+  await handlers.get('external-agents:setup:query')!(
+    {} as IpcMainInvokeEvent,
+    { attemptId: 'unrelated-attempt' },
+  );
+  t.mock.timers.tick(10_000);
   await assert.rejects(present(), /no matching OAuth presentation/);
+  // A late query for the expired setup cannot renew or cancel a newer slot;
+  // state binding also prevents the stale setup URL from consuming it.
+  const next = presentation.expect('next-model', 'next-model');
+  await invoke('external-agents:setup:query');
+  await assert.rejects(present(), /belongs to another attempt/);
+  await invoke('external-agents:setup:cancel');
+  await presentation.openExternal(
+    'https://accounts.google.com/next',
+    'next-model',
+    new AbortController().signal,
+  );
+  assert.deepEqual(await next.presented, { stateHint: 'next-model' });
+  input = { ...input, attemptId: 'next-setup' };
+  await invoke('external-agents:setup:start');
+  t.mock.timers.tick(30_000);
+  await Promise.resolve();
+  input = { ...input, attemptId: 'setup-after-abandonment' };
+  await invoke('external-agents:setup:start');
   await invoke('external-agents:setup:cancel');
   const regular = presentation.expect('regular-oauth');
   t.mock.timers.tick(30_000);
   await assert.rejects(regular.presented, /did not present OAuth authorization/);
-  assert.equal(opened.length, 1);
+  assert.equal(opened.length, 2);
 });

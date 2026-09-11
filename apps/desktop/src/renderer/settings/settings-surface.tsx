@@ -42,6 +42,7 @@ import { ICON_SIZE, ArrowLeft } from '@maka/ui/icons';
 import type {
   AppSettings,
   RuntimeHostAppSettings,
+  RuntimeHostSettingsUpdateGuard,
   ChatDefaultPermissionMode,
   SettingsSection,
   ThemePalette,
@@ -597,7 +598,10 @@ function SettingsSurfaceContent(
     }
   }
 
-  async function updateSettings(patch: Parameters<typeof window.maka.settings.update>[0]) {
+  async function updateSettings(
+    patch: Parameters<typeof window.maka.settings.update>[0],
+    guard?: RuntimeHostSettingsUpdateGuard,
+  ) {
     const uiLocaleTicket = props.uiLocaleUpdateGate.begin(
       patch.personalization?.uiLocale !== undefined,
     );
@@ -618,7 +622,7 @@ function SettingsSurfaceContent(
         ? undefined
         : ++clientSettingsTicketRef.current;
       const result = host
-        ? await window.maka.settings.update(patch, host)
+        ? await window.maka.settings.update(patch, host, guard)
         : await window.maka.settings.updateClient(patch);
       if (hostTicket && !runtimeHostRequestAuthority.isCurrentTarget(hostTicket)) {
         throw new Error(copy.runtimeHostUnavailable);
@@ -1079,7 +1083,10 @@ function SettingsPageBody(props: {
   themePref: ThemePreference;
   themePalette: ThemePalette;
   onRefreshConnections(): Promise<void>;
-  onUpdateSettings(patch: Parameters<typeof window.maka.settings.update>[0]): Promise<UpdateAppSettingsResult>;
+  onUpdateSettings(
+    patch: Parameters<typeof window.maka.settings.update>[0],
+    guard?: RuntimeHostSettingsUpdateGuard,
+  ): Promise<UpdateAppSettingsResult>;
   onReloadSettings(): Promise<void>;
   onReloadClientSettings(): Promise<void>;
   onRetryRuntimeHost(): Promise<void>;

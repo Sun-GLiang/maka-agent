@@ -1,0 +1,5 @@
+{
+  "epoch": 144,
+  "files": ["packages/runtime-host/src/protocol/index.ts"],
+  "reason": "Only corrects compatibility history comments: epoch 143 remains reserved by pre-merge Antigravity builds and epoch 142 names the merged Skill query refusals. The exported epoch and all protocol behavior remain unchanged."
+}

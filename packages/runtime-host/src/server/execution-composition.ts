@@ -191,6 +191,7 @@ import { HostNetworkProxyCoordinator } from './network-proxy-coordinator.js';
 import { HostOAuthExecutionAuthority } from './oauth-execution-authority.js';
 import { join } from 'node:path';
 import { toRuntimePolicyProxy } from './runtime-policy-proxy.js';
+import { AcpSetupError } from './acp/connection.js';
 import { installAntigravity } from './acp/antigravity-install.js';
 import { createProxiedFetchTransport } from '@maka/runtime/network/scoped-fetch-transport';
 import { HostExternalAgentSetupCoordinator } from './external-agent-setup-coordinator.js';
@@ -1406,8 +1407,7 @@ export async function createExecutionRuntimeHostComposition(
     externalAgentSetup = new HostExternalAgentSetupCoordinator({
       install: async (input) => {
         const proxy = await runtimePolicyStores.operations.resolveNetworkProxyExecution({});
-        if (proxy.kind === 'credential_not_configured')
-          throw new Error('Proxy credential unavailable');
+        if (proxy.kind === 'credential_not_configured') throw new AcpSetupError('download_failed');
         const transport = createProxiedFetchTransport(
           toRuntimePolicyProxy(proxy.networkProxy, proxy.secretMaterial.networkProxy?.secret),
         );

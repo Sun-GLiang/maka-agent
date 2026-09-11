@@ -726,6 +726,11 @@ export type UpdateAppSettingsInput = Partial<{
   subagents: SubagentSettings;
 }>;
 
+/** Preconditions for a Host-owned Settings write that must not be retried past a semantic change. */
+export interface RuntimeHostSettingsUpdateGuard {
+  readonly expectedExternalAgentExecutable?: string;
+}
+
 export type PersonalizationSettingsWarning =
   | 'override-attempt'
   | 'sensitive-pattern'

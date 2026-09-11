@@ -27,6 +27,7 @@ export interface OAuthExternalPresentation {
 
 export interface OAuthPresentationExpectation {
   readonly presented: Promise<OAuthExternalPresentation>;
+  renew(): void;
   cancel(reason?: unknown): void;
 }
 
@@ -52,11 +53,12 @@ export class RuntimeHostOAuthPresentation implements OAuthPresentationBackend {
     // The timeout can fire before waitForPresentation attaches. Keep a no-op
     // handler; the real waiter still observes the same rejection.
     void presented.catch(() => undefined);
-    const timer = setTimeout(() => {
-      if (this.#pending?.attemptId !== attemptId) return;
+    const expire = () => {
+      if (this.#pending !== pending) return;
       this.#pending = undefined;
       rejectPresented(new Error('Runtime Host did not present OAuth authorization'));
-    }, timeoutMs);
+    };
+    let timer = setTimeout(expire, timeoutMs);
     const pending: PendingPresentation = {
       attemptId,
       expectedStateHint,
@@ -75,6 +77,11 @@ export class RuntimeHostOAuthPresentation implements OAuthPresentationBackend {
     this.#pending = pending;
     return {
       presented,
+      renew: () => {
+        if (this.#pending !== pending) return;
+        clearTimeout(timer);
+        timer = setTimeout(expire, timeoutMs);
+      },
       cancel: (reason = new Error('OAuth presentation cancelled')) => {
         if (this.#pending === pending) pending.reject(reason);
       },

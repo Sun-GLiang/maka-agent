@@ -19,7 +19,7 @@
 
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, rename, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { Readable, Transform } from 'node:stream';
@@ -58,16 +58,43 @@ export async function installAntigravity(
   const timeout = AbortSignal.timeout(15 * 60_000);
   const signal = AbortSignal.any([input.signal, timeout]);
   const destination = join(input.directory, ANTIGRAVITY_ACP_RELEASE.version);
+  const previous = join(input.directory, `.${ANTIGRAVITY_ACP_RELEASE.version}.previous`);
   let staging: string | undefined;
   try {
     signal.throwIfAborted();
     await mkdir(input.directory, { recursive: true, mode: 0o700 });
+    // Recover the only crash window in replacement publication: the verified
+    // old directory was moved aside, but the verified new one was not yet named.
+    try {
+      await lstat(previous);
+      try {
+        await lstat(destination);
+        await rm(previous, { recursive: true, force: true });
+      } catch (error) {
+        if (!hasCode(error, 'ENOENT')) throw error;
+        await rename(previous, destination);
+      }
+    } catch (error) {
+      if (!hasCode(error, 'ENOENT')) throw error;
+    }
+    // The Host serializes installer admission, so these can only belong to
+    // attempts interrupted before their finally block ran.
+    for (const name of await readdir(input.directory)) {
+      signal.throwIfAborted();
+      if (name.startsWith('.install-'))
+        await rm(join(input.directory, name), { recursive: true, force: true });
+    }
     try {
       await lstat(destination);
       await verifyInstallation(destination, signal, files);
       return join(destination, files[0][0]);
     } catch (error) {
-      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+      signal.throwIfAborted();
+      if (
+        !(error instanceof AcpSetupError && error.failure === 'integrity_failed') &&
+        !hasCode(error, 'ENOENT')
+      )
+        throw error;
     }
     staging = await mkdtemp(join(input.directory, '.install-'));
     const archive = join(staging, 'download.zip');
@@ -114,19 +141,7 @@ export async function installAntigravity(
     await verifyInstallation(expanded, signal, files);
     for (const [name] of files) await chmod(join(expanded, name), 0o700);
     signal.throwIfAborted();
-    try {
-      await rename(expanded, destination);
-    } catch (error) {
-      if (
-        !(
-          error instanceof Error &&
-          'code' in error &&
-          ['EEXIST', 'ENOTEMPTY'].includes(String(error.code))
-        )
-      )
-        throw error;
-      await verifyInstallation(destination, signal, files);
-    }
+    await publishInstallation(expanded, destination, previous, signal, files);
     return join(destination, files[0][0]);
   } catch (error) {
     if (error instanceof AcpSetupError) throw error;
@@ -143,6 +158,50 @@ export async function installAntigravity(
     }
   }
 }
+
+async function publishInstallation(
+  expanded: string,
+  destination: string,
+  previous: string,
+  signal: AbortSignal,
+  files: readonly (readonly [string, string])[],
+): Promise<void> {
+  let displaced = false;
+  try {
+    await rename(destination, previous);
+    displaced = true;
+  } catch (error) {
+    if (!hasCode(error, 'ENOENT')) throw error;
+  }
+  try {
+    await rename(expanded, destination);
+  } catch (error) {
+    if (hasCode(error, 'EEXIST', 'ENOTEMPTY')) {
+      try {
+        await verifyInstallation(destination, signal, files);
+      } catch (verificationError) {
+        if (displaced) {
+          await rm(destination, { recursive: true, force: true });
+          await rename(previous, destination);
+          displaced = false;
+        }
+        throw verificationError;
+      }
+    } else {
+      if (displaced) {
+        await rename(previous, destination);
+        displaced = false;
+      }
+      throw error;
+    }
+  }
+  if (displaced) await rm(previous, { recursive: true, force: true });
+}
+
+function hasCode(error: unknown, ...codes: string[]): boolean {
+  return error instanceof Error && 'code' in error && codes.includes(String(error.code));
+}
+
 async function verifyInstallation(
   directory: string,
   signal: AbortSignal,

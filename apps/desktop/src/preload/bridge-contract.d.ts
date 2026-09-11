@@ -33,6 +33,7 @@ import type {
   AppIconTarget,
   AppSettings,
   RuntimeHostAppSettings,
+  RuntimeHostSettingsUpdateGuard,
   ChatDefaultsSettings,
   SettingsTestResult,
   UpdateAppSettingsInput,
@@ -1410,7 +1411,11 @@ export interface MakaBridge {
     getClient(): Promise<AppSettings>;
     get(host?: DesktopRuntimeHostRef): Promise<RuntimeHostAppSettings>;
     updateClient(patch: UpdateAppSettingsInput): Promise<UpdateAppSettingsResult>;
-    update(patch: UpdateAppSettingsInput, host?: DesktopRuntimeHostRef): Promise<UpdateAppSettingsResult<RuntimeHostAppSettings>>;
+    update(
+      patch: UpdateAppSettingsInput,
+      host?: DesktopRuntimeHostRef,
+      guard?: RuntimeHostSettingsUpdateGuard,
+    ): Promise<UpdateAppSettingsResult<RuntimeHostAppSettings>>;
     subscribeClientChanged(handler: () => void): () => void;
     subscribeExternalChanged(handler: () => void, host?: DesktopRuntimeHostRef): () => void;
     testNetworkProxy(input?: TestProxyInput, host?: DesktopRuntimeHostRef): Promise<SettingsTestResult>;

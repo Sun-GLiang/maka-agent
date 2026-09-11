@@ -20,7 +20,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { mkdtemp, writeFile, readFile, readdir, rm, stat } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  writeFile,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  symlink,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -85,12 +95,19 @@ test(
       assert.equal(requests, 1);
       assert.ok(phases.includes('installing'));
       assert.deepEqual(await readdir(input.directory), ['1.1.1']);
-      await writeFile(executable, 'tampered');
-      await assert.rejects(
-        installAntigravity(input, evidence),
-        (e: unknown) => e instanceof AcpSetupError && e.failure === 'integrity_failed',
-      );
-      assert.equal(requests, 1, 'never silently replace a mismatched existing installation');
+      for (const name of ['agy_acp_server.par', 'localharness_external']) {
+        await writeFile(join(input.directory, '1.1.1', name), 'tampered');
+        assert.equal(await installAntigravity(input, evidence), executable);
+        assert.equal(await readFile(executable, 'utf8'), 'test server');
+        assert.equal(
+          await readFile(join(input.directory, '1.1.1', 'localharness_external'), 'utf8'),
+          'test helper',
+        );
+      }
+      await rm(join(input.directory, '1.1.1', 'localharness_external'));
+      assert.equal(await installAntigravity(input, evidence), executable);
+      assert.equal(requests, 4, 'repairs corrupted and incomplete managed installations');
+      assert.deepEqual(await readdir(input.directory), ['1.1.1']);
     }),
 );
 test(
@@ -166,5 +183,87 @@ test('rejects modified extracted members even when the archive hash matches', su
       (e: unknown) => e instanceof AcpSetupError && e.failure === 'integrity_failed',
     );
     assert.deepEqual(await readdir(directory), []);
+  }),
+);
+
+test(
+  'sweeps interrupted staging even on cached reuse without following symlinks',
+  supported,
+  async () =>
+    fixture(async ({ root, zip, evidence }) => {
+      const directory = join(root, 'managed');
+      let requests = 0;
+      const input = {
+        directory,
+        signal: new AbortController().signal,
+        fetch: (async () => {
+          requests++;
+          return new Response(new Uint8Array(zip));
+        }) as typeof fetch,
+        onProgress() {},
+      };
+      await mkdir(join(directory, '.install-crashed'), { recursive: true });
+      await writeFile(join(directory, '.install-crashed', 'download.zip'), 'partial');
+      const executable = await installAntigravity(input, evidence);
+      assert.deepEqual(await readdir(directory), ['1.1.1']);
+      await symlink(root, join(directory, '.install-link'));
+      await writeFile(join(directory, 'unrelated'), 'keep');
+      assert.equal(await installAntigravity(input, evidence), executable);
+      assert.equal(requests, 1);
+      assert.equal(await readFile(join(root, 'agy_acp_server.par'), 'utf8'), 'test server');
+      assert.deepEqual((await readdir(directory)).sort(), ['1.1.1', 'unrelated']);
+    }),
+);
+
+test(
+  'failed replacement preserves the damaged copy and permits a later retry',
+  supported,
+  async () =>
+    fixture(async ({ root, zip, evidence }) => {
+      const directory = join(root, 'managed');
+      const input = {
+        directory,
+        signal: new AbortController().signal,
+        fetch: (async () => new Response(new Uint8Array(zip))) as typeof fetch,
+        onProgress() {},
+      };
+      const executable = await installAntigravity(input, evidence);
+      await writeFile(executable, 'damaged');
+      await assert.rejects(
+        installAntigravity(
+          {
+            ...input,
+            fetch: (async () =>
+              new Response(new Uint8Array(Buffer.alloc(zip.length)))) as typeof fetch,
+          },
+          evidence,
+        ),
+        (e: unknown) => e instanceof AcpSetupError && e.failure === 'integrity_failed',
+      );
+      assert.equal(await readFile(executable, 'utf8'), 'damaged');
+      assert.deepEqual(await readdir(directory), ['1.1.1']);
+      await installAntigravity(input, evidence);
+      assert.equal(await readFile(executable, 'utf8'), 'test server');
+    }),
+);
+
+test('recovers a displaced installation after an interrupted replacement', supported, async () =>
+  fixture(async ({ root, zip, evidence }) => {
+    const directory = join(root, 'managed');
+    let requests = 0;
+    const input = {
+      directory,
+      signal: new AbortController().signal,
+      fetch: (async () => {
+        requests++;
+        return new Response(new Uint8Array(zip));
+      }) as typeof fetch,
+      onProgress() {},
+    };
+    const executable = await installAntigravity(input, evidence);
+    await rename(join(directory, '1.1.1'), join(directory, '.1.1.1.previous'));
+    assert.equal(await installAntigravity(input, evidence), executable);
+    assert.equal(requests, 1);
+    assert.deepEqual(await readdir(directory), ['1.1.1']);
   }),
 );
