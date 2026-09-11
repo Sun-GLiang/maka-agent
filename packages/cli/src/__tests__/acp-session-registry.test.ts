@@ -2614,7 +2614,7 @@ function fakeConnection(
   } = {},
 ): AcpSessionRegistryConnection {
   return {
-    hostEpoch: 'host-1',
+    reconnecting: true,
     request: async (operation, input) =>
       operation === 'connection.catalog.query'
         ? connectionCatalogPage(overrides.thinkingLevels ?? THINKING_LEVELS)

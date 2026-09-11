@@ -35,3 +35,12 @@ Session remains owned and can accept another prompt or be closed.
 
 Local resource links must identify regular files. Filesystem admission rejects
 non-regular files, including POSIX FIFOs, before reading their content.
+
+Interaction mapping remains deferred to the next ACP capability increment. If a
+pending permission, question, form, sandbox-boundary, or client-capability request
+is observed, the adapter rejects the affected prompt with JSON-RPC `-32603` and
+`error.data.code: unsupported_interaction` (`error.data.kind` identifies the request).
+It retires the attachment and uses the existing failure path to request Stop for
+that prompt's exact Host Turn. It does not answer or approve the interaction;
+Host remains responsible for settlement. A failed Stop retains the Host diagnostic.
+The durable Session remains owned and can be prompted again or closed.

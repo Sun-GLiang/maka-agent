@@ -92,7 +92,7 @@ type AcpSessionRegistryLifecycleOperation =
 export interface AcpSessionRegistryConnection
   extends Pick<
     RuntimeHostReconnectingConnection,
-    'request' | 'openSessionSubscription' | 'openSessionSubscriptionOnce' | 'close'
+    'reconnecting' | 'request' | 'openSessionSubscription' | 'openSessionSubscriptionOnce' | 'close'
   > {}
 
 export interface AcpSessionAttachment {
@@ -903,7 +903,16 @@ async function openRuntimeHostSessionAttachment(
     now: Date.now,
     onTurnStarted: () => undefined,
     onRuntimeResourceChanged: () => undefined,
-    onInteractionPending: () => undefined,
+    onInteractionPending: (pending) => {
+      // Full interaction mapping belongs to the next ACP capability increment.
+      // Retire observation so the prompt's existing failure path stops its exact Turn.
+      input.onFailed(
+        RequestError.internalError(
+          { source: 'adapter', code: 'unsupported_interaction', kind: pending.request.kind },
+          'This ACP adapter does not support interactions yet; the prompt failed',
+        ),
+      );
+    },
     onInteractionResolved: () => undefined,
     onTranscriptSettlement: () => undefined,
     onTranscriptReplaced: input.onTranscriptReplaced,

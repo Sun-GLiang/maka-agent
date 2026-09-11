@@ -142,6 +142,26 @@ describe('ACP Session event mapper', () => {
     );
   });
 
+  test('suppresses late text and thinking after cancellation completes', async () => {
+    const notifications: SessionNotification[] = [];
+    const mapper = eventMapper(notifications);
+    await mapper.accept(event({ type: 'text_delta', messageId: 'answer', text: 'before' }));
+    assert.equal(await mapper.cancel(), 'cancelled');
+    const delivered = notifications.length;
+    for (const type of [
+      'text_delta',
+      'text_complete',
+      'thinking_delta',
+      'thinking_complete',
+    ] as const) {
+      assert.equal(
+        await mapper.accept(event({ type, messageId: 'answer', text: 'late' })),
+        'cancelled',
+      );
+    }
+    assert.equal(notifications.length, delivered);
+  });
+
   test('emits exactly one terminal result', async () => {
     const mapper = eventMapper([]);
     assert.equal(
