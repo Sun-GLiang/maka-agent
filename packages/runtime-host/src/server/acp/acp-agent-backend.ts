@@ -36,12 +36,28 @@ import type {
   BackendSendInput,
   HostedFormSettlement,
 } from '@maka/core/backend-types';
+import { truncateUtf8 } from '@maka/core/diagnostic-log';
 import type { FormRequestEvent, SessionEvent, ToolResultContent } from '@maka/core/events';
+import { redactSecrets } from '@maka/core/redaction';
 import type { SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
 import { AcpConnectionError, createAcpConnection, type AcpConnectionOwner } from './connection.js';
 
 const CANCEL_TIMEOUT_MS = 15_000;
 const MAX_TEXT_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_ACP_ERROR_MESSAGE_BYTES = 2 * 1024;
+const MAX_ACP_STDERR_BYTES = 8 * 1024;
+
+type AcpFailureStage = 'connection' | 'initialize' | 'session_new' | 'prompt' | 'transport';
+
+class AcpAgentExecutionError extends Error {
+  constructor(
+    readonly stage: AcpFailureStage,
+    readonly original: unknown,
+  ) {
+    super(errorMessage(original), { cause: original });
+    this.name = 'AcpAgentExecutionError';
+  }
+}
 
 interface ToolSnapshot {
   readonly id: string;
@@ -106,6 +122,7 @@ export class AcpAgentBackend implements AgentBackend {
   private lost = false;
   private disposed = false;
   private unavailableReported = false;
+  private stderrTail = '';
 
   constructor(input: AcpAgentBackendInput) {
     this.input = input;
@@ -117,6 +134,7 @@ export class AcpAgentBackend implements AgentBackend {
     if (this.disposed || this.lost) throw new Error('ACP Session is no longer available');
     if (this.current) throw new Error('ACP Session is busy');
     if (input.attachments?.length) throw new Error('ACP supports project files and text only');
+    this.stderrTail = '';
     const queue = new EventQueue();
     let settlePrompt!: () => void;
     const promptSettled = new Promise<void>((resolvePrompt) => {
@@ -207,21 +225,26 @@ export class AcpAgentBackend implements AgentBackend {
   }
 
   private async initialize(cancellationSignal: AbortSignal): Promise<void> {
-    const owner = (this.input.createConnection ?? createAcpConnection)({
-      executable: this.input.executable,
-      cwd: dirname(this.input.executable),
-      env: {
-        ...this.input.env,
-        BROWSER: '/usr/bin/true',
-        PYTHONUNBUFFERED: '1',
-        ANTIGRAVITY_HARNESS_PATH: resolve(dirname(this.input.executable), 'localharness_external'),
-      },
-      onStderr: () => {},
-      configureClient: (app) => this.configureClient(app),
-    });
-    this.owner = owner;
-    this.connection = owner.connection;
+    let stage: AcpFailureStage = 'connection';
     try {
+      const owner = (this.input.createConnection ?? createAcpConnection)({
+        executable: this.input.executable,
+        cwd: dirname(this.input.executable),
+        env: {
+          ...this.input.env,
+          BROWSER: '/usr/bin/true',
+          PYTHONUNBUFFERED: '1',
+          ANTIGRAVITY_HARNESS_PATH: resolve(
+            dirname(this.input.executable),
+            'localharness_external',
+          ),
+        },
+        onStderr: (chunk) => this.captureStderr(chunk),
+        configureClient: (app) => this.configureClient(app),
+      });
+      this.owner = owner;
+      this.connection = owner.connection;
+      stage = 'initialize';
       const initialized = await owner.connection.agent.request(
         methods.agent.initialize,
         {
@@ -234,6 +257,7 @@ export class AcpAgentBackend implements AgentBackend {
         { cancellationSignal },
       );
       if (initialized.protocolVersion !== 1) throw new Error('Unsupported ACP protocol version');
+      stage = 'session_new';
       const session = await owner.connection.agent.request(
         methods.agent.session.new,
         { cwd: this.cwd, mcpServers: [] },
@@ -243,8 +267,16 @@ export class AcpAgentBackend implements AgentBackend {
       void owner.failed.catch((error) => this.failConnection(error));
     } catch (error) {
       this.markUnavailable();
-      await this.releaseOwner();
-      throw error;
+      const failure = new AcpAgentExecutionError(stage, error);
+      try {
+        await this.releaseOwner();
+      } catch (cleanupError) {
+        throw new AcpAgentExecutionError(
+          stage,
+          new AggregateError([error, cleanupError], errorMessage(error)),
+        );
+      }
+      throw failure;
     }
   }
 
@@ -343,7 +375,11 @@ export class AcpAgentBackend implements AgentBackend {
       }
       // A transport failure after cancel is not an acknowledged cancellation.
       this.markUnavailable();
-      active.queue.fail(error);
+      const failure =
+        error instanceof AcpAgentExecutionError
+          ? error
+          : new AcpAgentExecutionError(active.promptDispatched ? 'prompt' : 'transport', error);
+      this.failActiveTurn(active, failure);
     } finally {
       active.settlePrompt();
     }
@@ -536,10 +572,54 @@ export class AcpAgentBackend implements AgentBackend {
     if (this.disposed) return;
     this.markUnavailable();
     const active = this.current;
-    if (active)
-      active.queue.fail(
-        error instanceof Error ? error : new AcpConnectionError('connection_failed'),
+    if (active) {
+      this.failActiveTurn(
+        active,
+        new AcpAgentExecutionError(
+          'transport',
+          error instanceof Error ? error : new AcpConnectionError('connection_failed'),
+        ),
       );
+    }
+  }
+
+  private failActiveTurn(
+    active: NonNullable<AcpAgentBackend['current']>,
+    failure: AcpAgentExecutionError,
+  ): void {
+    const code = `acp_${failure.stage}_failed`;
+    const details: Record<string, unknown> = { stage: failure.stage };
+    const jsonRpcCode = errorCode(failure.original);
+    if (jsonRpcCode !== undefined) details.jsonRpcCode = jsonRpcCode;
+    const stderr = this.safeStderr();
+    if (stderr) details.stderr = stderr;
+    active.queue.push(
+      event(active.turnId, 'error', {
+        recoverable: false,
+        code,
+        reason: code,
+        message: `Antigravity ACP ${failure.stage} failed: ${safeErrorMessage(failure.original)}`,
+        details,
+      }),
+    );
+    active.queue.push(
+      event(active.turnId, 'complete', {
+        stopReason: 'error',
+        providerStopReason: code,
+      }),
+    );
+    active.queue.finish();
+  }
+
+  private captureStderr(chunk: Buffer): void {
+    this.stderrTail = utf8Tail(
+      redactSecrets(`${this.stderrTail}${chunk.toString('utf8')}`),
+      MAX_ACP_STDERR_BYTES,
+    );
+  }
+
+  private safeStderr(): string {
+    return truncateUtf8(redactSecrets(this.stderrTail.trim()), MAX_ACP_STDERR_BYTES);
   }
 
   private async releaseOwner(): Promise<void> {
@@ -565,6 +645,38 @@ export class AcpAgentBackend implements AgentBackend {
     this.unavailableReported = true;
     this.input.onUnavailable();
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function utf8Tail(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.byteLength <= maxBytes) return value;
+  let start = bytes.byteLength - maxBytes;
+  while (start < bytes.byteLength && (bytes[start]! & 0xc0) === 0x80) start += 1;
+  return bytes.subarray(start).toString('utf8');
+}
+
+function safeErrorMessage(error: unknown): string {
+  return truncateUtf8(redactSecrets(errorMessage(error)), MAX_ACP_ERROR_MESSAGE_BYTES);
+}
+
+function errorCode(error: unknown): string | number | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === 'number' && Number.isFinite(code)) return code;
+  if (typeof code === 'string' && code.length > 0) {
+    return truncateUtf8(redactSecrets(code), 256);
+  }
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) {
+      const nestedCode = errorCode(nested);
+      if (nestedCode !== undefined) return nestedCode;
+    }
+  }
+  return undefined;
 }
 
 function promptText(input: BackendSendInput): string {

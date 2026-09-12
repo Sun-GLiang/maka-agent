@@ -129,6 +129,84 @@ test('stop cancels startup before a prompt can be dispatched', async () => {
   );
 });
 
+for (const scenario of [
+  { method: methods.agent.initialize, stage: 'initialize' },
+  { method: methods.agent.session.new, stage: 'session_new' },
+  { method: methods.agent.session.prompt, stage: 'prompt' },
+] as const) {
+  test(`reports ${scenario.stage} failures as a terminal, redacted ACP diagnostic`, async () => {
+    let unavailable = 0;
+    const failure = Object.assign(new Error('Internal error'), { code: -32603 });
+    const connection = {
+      agent: {
+        async request(method: unknown) {
+          if (method === scenario.method) throw failure;
+          if (method === methods.agent.initialize) {
+            return { protocolVersion: 1, agentCapabilities: {}, authMethods: [] };
+          }
+          if (method === methods.agent.session.new) return { sessionId: 'acp-session-1' };
+          throw new Error('unexpected request');
+        },
+        notify: async () => undefined,
+      },
+    } as unknown as ClientConnection;
+    const owner: AcpConnectionOwner = {
+      connection,
+      failed: new Promise<never>(() => {}),
+      closed: Promise.resolve(),
+      dispose: async () => undefined,
+    };
+    const backend = new AcpAgentBackend({
+      sessionId: 'session-1',
+      cwd: process.cwd(),
+      executable: '/agent',
+      env: {},
+      releaseResidency: () => undefined,
+      onCleanupFailure: () => assert.fail('cleanup should succeed'),
+      onUnavailable: () => {
+        unavailable += 1;
+      },
+      createConnection: (input) => {
+        input.onStderr(
+          Buffer.from(`${'x'.repeat(16 * 1024)}\nAuthorization: Bearer private-fixture-token`),
+        );
+        return owner;
+      },
+    });
+
+    const events = await collectEvents(backend.send({ turnId: 'turn-1', text: 'hello' }));
+    const error = events.find(
+      (event): event is Extract<SessionEvent, { type: 'error' }> => event.type === 'error',
+    );
+
+    assert.equal(unavailable, 1);
+    assert.equal(error?.code, `acp_${scenario.stage}_failed`);
+    assert.equal(error?.reason, `acp_${scenario.stage}_failed`);
+    assert.equal(error?.message, `Antigravity ACP ${scenario.stage} failed: Internal error`);
+    const details = error?.details;
+    if (!details || Array.isArray(details)) assert.fail('expected structured ACP diagnostics');
+    assert.equal(details.stage, scenario.stage);
+    assert.equal(details.jsonRpcCode, -32603);
+    const stderr = String(details.stderr);
+    assert.equal(stderr.endsWith('Authorization: Bearer [redacted]'), true);
+    assert.equal(stderr.includes('private-fixture-token'), false);
+    assert.ok(Buffer.byteLength(stderr) <= 8 * 1024);
+    assert.deepEqual(
+      events.filter((event) => event.type === 'complete'),
+      [
+        {
+          type: 'complete',
+          id: events.at(-1)?.id,
+          turnId: 'turn-1',
+          ts: events.at(-1)?.ts,
+          stopReason: 'error',
+          providerStopReason: `acp_${scenario.stage}_failed`,
+        },
+      ],
+    );
+  });
+}
+
 async function collectEvents(stream: AsyncIterable<SessionEvent>): Promise<SessionEvent[]> {
   const events: SessionEvent[] = [];
   for await (const event of stream) events.push(event);
