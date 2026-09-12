@@ -122,61 +122,50 @@ describe('ACP Session event mapper', () => {
     assert.equal(notifications.length, 1);
   });
 
-  test('ends on authoritative abort and nonrecoverable error but not recoverable errors', async () => {
-    const failed = eventMapper([]);
-    assert.equal(
-      await failed.accept(event({ type: 'error', recoverable: true, message: 'retry' })),
-      undefined,
-    );
-    assert.equal(
-      await failed.accept(event({ type: 'error', recoverable: false, message: 'failed' })),
-      'end_turn',
-    );
-    assert.equal(
-      await failed.accept(event({ type: 'complete', stopReason: 'end_turn' })),
-      'end_turn',
-    );
-    assert.equal(
-      await eventMapper([]).accept(event({ type: 'abort', reason: 'crash' })),
-      'end_turn',
-    );
-  });
-
-  test('suppresses late text and thinking after cancellation completes', async () => {
+  test('leaves terminal classification to the Runtime Host Session channel', async () => {
     const notifications: SessionNotification[] = [];
     const mapper = eventMapper(notifications);
-    await mapper.accept(event({ type: 'text_delta', messageId: 'answer', text: 'before' }));
-    assert.equal(await mapper.cancel(), 'cancelled');
-    const delivered = notifications.length;
-    for (const type of [
-      'text_delta',
-      'text_complete',
-      'thinking_delta',
-      'thinking_complete',
-    ] as const) {
-      assert.equal(
-        await mapper.accept(event({ type, messageId: 'answer', text: 'late' })),
-        'cancelled',
-      );
-    }
-    assert.equal(notifications.length, delivered);
+    await mapper.accept(event({ type: 'error', recoverable: true, message: 'retry' }));
+    await mapper.accept(event({ type: 'error', recoverable: false, message: 'failed' }));
+    await mapper.accept(event({ type: 'complete', stopReason: 'end_turn' }));
+    await mapper.accept(event({ type: 'abort', reason: 'crash' }));
+    await mapper.accept(event({ type: 'text_delta', messageId: 'answer', text: 'projected' }));
+
+    assert.deepEqual(
+      notifications.map(({ update }) => update),
+      [chunk('agent_message_chunk', 'answer', 'projected')],
+    );
   });
 
-  test('emits exactly one terminal result', async () => {
-    const mapper = eventMapper([]);
-    assert.equal(
-      await mapper.accept(event({ type: 'complete', stopReason: 'max_tokens' })),
-      'end_turn',
-    );
-    assert.equal(await mapper.accept(event({ type: 'abort', reason: 'crash' })), 'end_turn');
-    assert.equal(await mapper.cancel(), 'end_turn');
+  test('flush waits for every already accepted notification', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let delivered = false;
+    const mapper = new AcpSessionEventMapper({
+      sessionId: 'session-1',
+      notify: async () => {
+        await pending;
+        delivered = true;
+      },
+    });
 
-    const cancelled = eventMapper([]);
-    assert.equal(await cancelled.cancel(), 'cancelled');
-    assert.equal(
-      await cancelled.accept(event({ type: 'complete', stopReason: 'end_turn' })),
-      'cancelled',
+    const accepting = mapper.accept(
+      event({ type: 'text_delta', messageId: 'answer', text: 'pending' }),
     );
+    let flushed = false;
+    const flushing = mapper.flush().then(() => {
+      flushed = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(delivered, false);
+    assert.equal(flushed, false);
+    release();
+    await flushing;
+    assert.equal(delivered, true);
+    assert.equal(flushed, true);
+    await accepting;
   });
 });
 

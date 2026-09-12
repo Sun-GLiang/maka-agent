@@ -24,14 +24,15 @@ import type { InteractionRequest } from '@maka/core/interaction';
 import type { StoredMessage } from '@maka/core/session';
 import {
   SESSION_CONTINUITY_SCHEMA_VERSION,
+  type SessionCatalogProjection,
   type SessionContinuitySnapshot,
   type SubscriptionFrame,
 } from '@maka/runtime-host/protocol';
-import type {
-  RuntimeHostSessionSubscription,
-  RuntimeHostConnection,
+import {
+  RuntimeHostRequestInterruptedError,
+  type RuntimeHostConnection,
+  type RuntimeHostSessionSubscription,
 } from '@maka/runtime-host/client';
-import type { SessionCatalogProjection } from '@maka/runtime-host/protocol';
 import { runMakaAcpStdioServer } from '../acp/stdio-server.js';
 
 describe('Maka ACP stdio server', () => {
@@ -50,21 +51,13 @@ describe('Maka ACP stdio server', () => {
       let first: FakeSubscription | undefined;
       let opens = 0;
       const stops: unknown[] = [];
-      const snapshot = (projectionRevision = 1): SessionContinuitySnapshot => ({
-        schemaVersion: SESSION_CONTINUITY_SCHEMA_VERSION,
-        session: {
+      const snapshot = (projectionRevision = 1): SessionContinuitySnapshot =>
+        continuitySnapshot({
           sessionId: created!.id,
-          metadataRevision: 1,
+          projectionRevision,
+          rootTurn: root ?? null,
           status: 'running',
-          createdAt: 1,
-          isArchived: false,
-        },
-        projectionRevision,
-        rootTurn: root ?? null,
-        goal: null,
-        queue: { hostEpoch: 'host-1', queueRevision: 0, steering: [], followup: [] },
-        interactions: { pending: [] },
-      });
+        });
       const connection = {
         request: async (operation: string, input: { sessionId: string; turnId: string }) => {
           if (operation === 'session.create')
@@ -190,6 +183,322 @@ describe('Maka ACP stdio server', () => {
       }
     });
   }
+
+  test('retains ACP cancellation until the real channel recovers an outcome-unknown start', {
+    timeout: 5_000,
+  }, async () => {
+    const stdin = new PassThrough();
+    let sessionId: string | undefined;
+    let session: SessionCatalogProjection | undefined;
+    let admitted:
+      | {
+          sessionId: string;
+          turnId: string;
+          runId: string;
+          status: 'running';
+        }
+      | undefined;
+    let rejectStart!: (error: Error) => void;
+    const start = new Promise<never>((_resolve, reject) => {
+      rejectStart = reject;
+    });
+    let first: FakeSubscription | undefined;
+    let opens = 0;
+    let turnQueries = 0;
+    const stops: unknown[] = [];
+    const snapshot = (
+      projectionRevision: number,
+      rootTurn: SessionContinuitySnapshot['rootTurn'],
+    ): SessionContinuitySnapshot =>
+      continuitySnapshot({ sessionId: sessionId!, projectionRevision, rootTurn });
+    const connection = {
+      request: async (operation: string, input: { sessionId: string; turnId: string }) => {
+        if (operation === 'session.create') {
+          sessionId = input.sessionId;
+          return (session = sessionProjection({ id: sessionId }));
+        }
+        if (operation === 'connection.catalog.query') return connectionCatalogPage();
+        if (operation === 'session.catalog.query') return { kind: 'session', session };
+        if (operation === 'turn.start') {
+          admitted = {
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            runId: 'run-unknown-start',
+            status: 'running',
+          };
+          return start;
+        }
+        if (operation === 'turn.query') {
+          turnQueries += 1;
+          return new Promise<never>(() => undefined);
+        }
+        if (operation === 'turn.stop') {
+          stops.push(input);
+          return {};
+        }
+        assert.fail(`Unexpected operation: ${operation}`);
+      },
+      openSessionSubscription: async () => {
+        opens += 1;
+        if (opens === 1) {
+          first = new FakeSubscription(snapshot(1, null), Promise.resolve([]));
+          return first;
+        }
+        assert.ok(admitted);
+        return new FakeSubscription(
+          snapshot(2, admitted),
+          Promise.resolve([]),
+          'subscription-recovered',
+        );
+      },
+      close: async () => undefined,
+    } as unknown as RuntimeHostConnection;
+    const harness = createHarness([], { stdin, connection });
+    const run = harness.run();
+    const response = () =>
+      (
+        harness.stdoutMessages() as Array<{
+          id?: number;
+          result?: { stopReason?: string };
+        }>
+      ).find(({ id }) => id === 2);
+    const send = (value: unknown) => stdin.write(`${JSON.stringify(value)}\n`);
+
+    try {
+      send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'session/new',
+        params: { cwd: '/workspace', mcpServers: [] },
+      });
+      await waitFor(() =>
+        harness.stdoutMessages().some((message) => (message as { id?: number }).id === 1),
+      );
+      send({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/prompt',
+        params: { sessionId: sessionId!, prompt: [{ type: 'text', text: 'Hello' }] },
+      });
+      await waitFor(() => Boolean(admitted && first));
+      send({
+        jsonrpc: '2.0',
+        method: 'session/cancel',
+        params: { sessionId: sessionId! },
+      });
+      rejectStart(
+        new RuntimeHostRequestInterruptedError(
+          'turn.start',
+          'command',
+          'dispatched',
+          'connection_lost',
+        ),
+      );
+      await waitFor(() => turnQueries === 1);
+      first!.push({
+        kind: 'subscription.closed',
+        hostEpoch: 'host-1',
+        subscriptionId: 'subscription-1',
+        sequence: 1,
+        reason: 'slow_consumer',
+      });
+
+      await waitFor(() => stops.length === 1 && Boolean(response()));
+      assert.deepEqual(stops, [
+        {
+          sessionId: admitted!.sessionId,
+          turnId: admitted!.turnId,
+          runId: admitted!.runId,
+        },
+      ]);
+      assert.deepEqual(response()?.result, { stopReason: 'cancelled' });
+    } finally {
+      stdin.end();
+      await run;
+    }
+  });
+
+  test('publishes a local configuration commit before a newer external revision', {
+    timeout: 5_000,
+  }, async () => {
+    const stdin = new PassThrough();
+    let sessionId: string | undefined;
+    let initial: SessionCatalogProjection | undefined;
+    let committed: SessionCatalogProjection | undefined;
+    let external: SessionCatalogProjection | undefined;
+    let turn:
+      | {
+          sessionId: string;
+          turnId: string;
+          runId: string;
+          status: 'running';
+        }
+      | undefined;
+    const snapshot = (
+      projectionRevision: number,
+      metadataRevision: number,
+      rootTurn: SessionContinuitySnapshot['rootTurn'],
+    ): SessionContinuitySnapshot =>
+      continuitySnapshot({ sessionId: sessionId!, projectionRevision, metadataRevision, rootTurn });
+    let releaseLocalProjection!: (catalog: ReturnType<typeof connectionCatalogPage>) => void;
+    const localProjection = new Promise<ReturnType<typeof connectionCatalogPage>>((resolve) => {
+      releaseLocalProjection = resolve;
+    });
+    let catalogReads = 0;
+    let sessionReads = 0;
+    let subscription: FakeSubscription | undefined;
+    const connection = {
+      request: async (operation: string, input: unknown) => {
+        if (operation === 'session.create') {
+          sessionId = (input as { sessionId: string }).sessionId;
+          initial = sessionProjection({ id: sessionId });
+          committed = sessionProjection({
+            id: sessionId,
+            revision: 2,
+            permissionMode: 'bypass',
+          });
+          external = sessionProjection({
+            id: sessionId,
+            revision: 3,
+            permissionMode: 'ask',
+          });
+          return initial;
+        }
+        if (operation === 'connection.catalog.query') {
+          catalogReads += 1;
+          return catalogReads === 2 ? localProjection : connectionCatalogPage();
+        }
+        if (operation === 'session.catalog.query') {
+          sessionReads += 1;
+          return { kind: 'session', session: sessionReads === 1 ? initial! : external! };
+        }
+        if (operation === 'session.configuration.update') {
+          assert.deepEqual(input, {
+            sessionId: sessionId!,
+            expectedRevision: 1,
+            patch: { permissionMode: 'bypass' },
+          });
+          return { kind: 'committed', session: committed! };
+        }
+        if (operation === 'turn.start') {
+          const request = input as { sessionId: string; turnId: string };
+          turn = {
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            runId: 'run-configuration-order',
+            status: 'running',
+          };
+          return { kind: 'started', turn };
+        }
+        assert.fail(`Unexpected operation: ${operation}`);
+      },
+      openSessionSubscription: async () => {
+        subscription = new FakeSubscription(snapshot(1, 1, null), Promise.resolve([]));
+        return subscription;
+      },
+      close: async () => undefined,
+    } as unknown as RuntimeHostConnection;
+    const harness = createHarness([], { stdin, connection });
+    const run = harness.run();
+    const send = (id: number, method: string, params: unknown) =>
+      stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+    const response = (id: number) =>
+      (
+        harness.stdoutMessages() as Array<{
+          id?: number;
+          result?: { configOptions?: Array<{ id?: string; currentValue?: string }> };
+        }>
+      ).find((message) => message.id === id);
+    const configurationUpdates = () =>
+      (
+        harness.stdoutMessages() as Array<{
+          method?: string;
+          params?: {
+            update?: {
+              sessionUpdate?: string;
+              configOptions?: Array<{ id?: string; currentValue?: string }>;
+            };
+          };
+        }>
+      ).filter(
+        (message) =>
+          message.method === 'session/update' &&
+          message.params?.update?.sessionUpdate === 'config_option_update',
+      );
+    let sequence = 0;
+    let terminalPushed = false;
+    const pushSnapshot = (next: SessionContinuitySnapshot) => {
+      subscription!.push({
+        kind: 'subscription.session_projection',
+        hostEpoch: 'host-1',
+        subscriptionId: 'subscription-1',
+        sequence: ++sequence,
+        snapshot: next,
+      });
+    };
+
+    try {
+      send(1, 'session/new', { cwd: '/workspace', mcpServers: [] });
+      await waitFor(() => Boolean(response(1)));
+      send(2, 'session/prompt', {
+        sessionId: sessionId!,
+        prompt: [{ type: 'text', text: 'Attach this Session' }],
+      });
+      await waitFor(() => Boolean(turn && subscription));
+
+      send(3, 'session/set_config_option', {
+        sessionId: sessionId!,
+        configId: 'permission_mode',
+        value: 'bypass',
+      });
+      await waitFor(() => catalogReads === 2);
+
+      pushSnapshot(snapshot(2, 3, turn!));
+      await waitFor(() => subscription!.nextCalls >= 2);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(configurationUpdates(), []);
+
+      releaseLocalProjection(connectionCatalogPage());
+      await waitFor(() => configurationUpdates().length === 2 && Boolean(response(3)));
+
+      assert.deepEqual(
+        configurationUpdates().map(
+          ({ params }) =>
+            params?.update?.configOptions?.find(({ id }) => id === 'permission_mode')?.currentValue,
+        ),
+        ['bypass', 'ask'],
+      );
+      assert.equal(
+        response(3)?.result?.configOptions?.find(({ id }) => id === 'permission_mode')
+          ?.currentValue,
+        'bypass',
+      );
+      assert.equal(sessionReads, 2);
+
+      terminalPushed = true;
+      pushSnapshot(
+        snapshot(3, 3, {
+          ...turn!,
+          status: 'completed',
+          terminalEventId: 'terminal-configuration-order',
+        }),
+      );
+      await waitFor(() => Boolean(response(2)));
+    } finally {
+      releaseLocalProjection(connectionCatalogPage());
+      if (subscription && turn && !terminalPushed) {
+        pushSnapshot(
+          snapshot(3, 3, {
+            ...turn,
+            status: 'completed',
+            terminalEventId: 'terminal-configuration-order',
+          }),
+        );
+      }
+      stdin.end();
+      await run;
+    }
+  });
 
   test('answers initialize without connecting a Runtime Host', async () => {
     const harness = createHarness([
@@ -576,6 +885,30 @@ function sessionProjection(
     collaborationMode: 'agent',
     orchestrationMode: 'default',
     ...overrides,
+  };
+}
+
+function continuitySnapshot(input: {
+  readonly sessionId: string;
+  readonly projectionRevision: number;
+  readonly metadataRevision?: number;
+  readonly rootTurn: SessionContinuitySnapshot['rootTurn'];
+  readonly status?: 'active' | 'running';
+}): SessionContinuitySnapshot {
+  return {
+    schemaVersion: SESSION_CONTINUITY_SCHEMA_VERSION,
+    session: {
+      sessionId: input.sessionId,
+      metadataRevision: input.metadataRevision ?? 1,
+      status: input.status ?? (input.rootTurn ? 'running' : 'active'),
+      createdAt: 1,
+      isArchived: false,
+    },
+    projectionRevision: input.projectionRevision,
+    rootTurn: input.rootTurn,
+    goal: null,
+    queue: { hostEpoch: 'host-1', queueRevision: 0, steering: [], followup: [] },
+    interactions: { pending: [] },
   };
 }
 

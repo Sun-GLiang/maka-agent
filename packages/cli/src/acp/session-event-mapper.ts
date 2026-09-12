@@ -22,7 +22,6 @@ import {
   RequestError,
   type SessionNotification,
   type SessionUpdate,
-  type StopReason,
 } from '@agentclientprotocol/sdk';
 import type { SessionEvent } from '@maka/core/events';
 import type { StoredMessage } from '@maka/core/session';
@@ -34,13 +33,12 @@ export interface AcpSessionEventMapperOptions {
   readonly notify: (notification: SessionNotification) => Promise<void>;
 }
 
-/** Serializes one ACP prompt's live projection and terminal outcome. */
+/** Serializes one ACP prompt's live projection delivery. */
 export class AcpSessionEventMapper {
   readonly #sessionId: string;
   readonly #notify: (notification: SessionNotification) => Promise<void>;
   readonly #streams = new Map<string, string>();
   #tail: Promise<unknown> = Promise.resolve();
-  #terminal: StopReason | undefined;
   #failure: RequestError | undefined;
 
   constructor(options: AcpSessionEventMapperOptions) {
@@ -48,10 +46,9 @@ export class AcpSessionEventMapper {
     this.#notify = options.notify;
   }
 
-  accept(event: SessionEvent): Promise<StopReason | undefined> {
+  accept(event: SessionEvent): Promise<void> {
     return this.#enqueue(async () => {
       if (this.#failure) throw this.#failure;
-      if (this.#terminal) return this.#terminal;
       switch (event.type) {
         case 'text_delta':
           await this.#acceptText(
@@ -73,26 +70,15 @@ export class AcpSessionEventMapper {
         case 'thinking_complete':
           await this.#acceptText('thinking', event.messageId, event.text);
           break;
-        case 'complete':
-          this.#terminal = 'end_turn';
-          break;
-        case 'error':
-          if (!event.recoverable) this.#terminal = 'end_turn';
-          break;
-        case 'abort':
-          this.#terminal = 'end_turn';
-          break;
         default:
           break;
       }
-      return this.#terminal;
     });
   }
 
   replaceTranscript(turnId: string, messages: readonly StoredMessage[]): Promise<void> {
     return this.#enqueue(async () => {
       if (this.#failure) throw this.#failure;
-      if (this.#terminal) return;
       for (const message of messages) {
         if (message.turnId !== turnId || message.type !== 'assistant') continue;
         await this.#acceptText('thinking', message.id, message.thinking?.text ?? '');
@@ -101,11 +87,9 @@ export class AcpSessionEventMapper {
     });
   }
 
-  cancel(): Promise<StopReason> {
-    return this.#enqueue(async () => {
-      this.#terminal ??= 'cancelled';
-      return this.#terminal;
-    });
+  /** Waits until every notification already accepted by this mapper has settled. */
+  flush(): Promise<void> {
+    return this.#tail.then(() => undefined);
   }
 
   async #acceptText(kind: StreamKind, hostMessageId: string, nextText: string): Promise<void> {
