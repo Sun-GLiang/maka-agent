@@ -271,6 +271,7 @@ export class AgentRun {
   private requestCompositionIndex: Map<string, RequestCompositionSnapshot> | undefined;
   private requestCompositionIndexRead: Promise<void> | undefined;
   private failureClass: string | undefined;
+  private declaredFailureClass: string | undefined;
   private failureMessage: string | undefined;
   private lastTs = 0;
   private sawCompletion = false;
@@ -1307,8 +1308,10 @@ export class AgentRun {
       return;
     }
     this.finalStatus = { status: 'blocked', blockedReason: 'unknown' };
+    const declaredFailureClass = runtimeFailureClass(error);
+    if (declaredFailureClass) this.declaredFailureClass = declaredFailureClass;
     this.markRunFailed(
-      error instanceof Error ? error.name : 'unknown',
+      declaredFailureClass ?? (error instanceof Error ? error.name : 'unknown'),
       error instanceof Error ? error.message : String(error),
     );
   }
@@ -1708,7 +1711,7 @@ export class AgentRun {
       this.terminalClaim?.owner === 'stop' || this.stopped || finalStatus?.status === 'aborted'
         ? 'cancelled'
         : 'failed';
-    const failureClass = 'missing_terminal_event';
+    const failureClass = this.declaredFailureClass ?? 'missing_terminal_event';
     const failureMessage = this.failureMessage ?? 'run finalized without a terminal RuntimeEvent';
     if (status === 'failed') {
       this.failureClass = failureClass;
@@ -2009,6 +2012,20 @@ function redactTraceString(value: string): string {
 
 function errorMessage(error: unknown): string {
   return redactTraceString(error instanceof Error ? error.message : String(error));
+}
+
+function runtimeFailureClass(error: unknown): string | undefined {
+  if (error && typeof error === 'object') {
+    const declared = (error as { runtimeFailureClass?: unknown }).runtimeFailureClass;
+    if (
+      typeof declared === 'string' &&
+      declared.length <= 128 &&
+      /^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(declared)
+    ) {
+      return declared;
+    }
+  }
+  return undefined;
 }
 
 function sameRequestCompositionSurface(

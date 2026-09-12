@@ -10503,12 +10503,14 @@ describe('SessionManager permission mode updates', () => {
     assert.strictEqual(output.budget.projectedBytes <= output.budget.maxBytes, true);
   });
 
-  test('backend build failure after user append writes a failed terminal run fact', async () => {
+  test('backend build failure preserves its diagnostic class in the terminal run fact', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
     const backends = new BackendRegistry();
     backends.register('ai-sdk', () => {
-      throw new Error('backend init failed');
+      throw Object.assign(new Error('ACP setup: authentication_failed'), {
+        runtimeFailureClass: 'acp_setup_authentication_failed',
+      });
     });
     const manager = new SessionManager({
       store,
@@ -10522,7 +10524,7 @@ describe('SessionManager permission mode updates', () => {
 
     await expectRejects(
       drain(manager.sendMessage(session.id, { turnId: 'turn-1', text: 'hello' })),
-      /backend init failed/,
+      /ACP setup: authentication_failed/,
     );
 
     const header = await store.readHeader(session.id);
@@ -10540,7 +10542,7 @@ describe('SessionManager permission mode updates', () => {
     const [run] = await runStore.listSessionInvocations(session.id);
     if (!run) throw new Error('AgentRunStore run was not created');
     assert.strictEqual(runtimeInvocationOutcome(run), 'failed');
-    assert.strictEqual(runtimeInvocationFailureClass(run), 'missing_terminal_event');
+    assert.strictEqual(runtimeInvocationFailureClass(run), 'acp_setup_authentication_failed');
     const terminalEvents = (await runStore.readRuntimeEvents(session.id, run.runId)).filter(
       isTerminalRuntimeEvent,
     );
@@ -10548,7 +10550,7 @@ describe('SessionManager permission mode updates', () => {
     assert.strictEqual(terminalEvents[0]?.status, 'failed');
     assert.strictEqual(
       terminalEvents[0]?.actions?.stateDelta?.failureClass,
-      'missing_terminal_event',
+      'acp_setup_authentication_failed',
     );
     assert.strictEqual(
       (await manager.getMessages(session.id)).some((message) => message.type === 'user'),
@@ -10923,6 +10925,7 @@ describe('SessionManager permission mode updates', () => {
     const [turn] = await manager.listTurns(session.id);
     assert.strictEqual(turn?.status, 'failed');
     assert.strictEqual(turn?.errorClass, 'tool_failed');
+    assert.strictEqual(turn?.failureMessage, 'Tool failed');
   });
 
   test('stopSession records renderer abort source for diagnostics', async () => {

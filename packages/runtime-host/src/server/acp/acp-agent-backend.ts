@@ -339,6 +339,17 @@ export class AcpAgentBackend implements AgentBackend {
       this.flushCompletedMessages(active);
       const message = [...active.textByMessage.values()].join('').trim();
       const executionFailed = message.startsWith('Agent execution error:');
+      if (executionFailed) {
+        active.queue.push(
+          event(active.turnId, 'error', {
+            recoverable: false,
+            code: 'acp_agent_execution_failed',
+            reason: 'acp_agent_execution_failed',
+            message: safeErrorMessage(message),
+            details: { stage: 'prompt', providerStopReason: response.stopReason },
+          }),
+        );
+      }
       const stopReason = executionFailed
         ? 'error'
         : response.stopReason === 'cancelled'

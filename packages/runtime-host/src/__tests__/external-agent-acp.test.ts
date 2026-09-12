@@ -132,7 +132,7 @@ test('setup passes the admitted proxy to the child and preserves controlled laun
     assert.equal(base.ALL_PROXY, 'socks5://unwanted.invalid:1080');
     await assertStopped(root);
   }));
-test('proxy environment supports IPv6 and rejects SOCKS without exposing credentials', () => {
+test('proxy environment protects local ACP WebSockets and rejects unsupported SOCKS', () => {
   const proxy = {
     enabled: true,
     type: 'https' as const,
@@ -145,9 +145,17 @@ test('proxy environment supports IPv6 and rejects SOCKS without exposing credent
   assert.throws(() => createAntigravityEnvironment({}, { ...proxy, type: 'socks5' }), {
     message: 'ACP setup: proxy_unsupported',
   });
-  const base = { HTTP_PROXY: 'http://existing.invalid:7897' };
-  assert.deepEqual(createAntigravityEnvironment(base, null), base);
-  assert.notEqual(createAntigravityEnvironment(base, null), base);
+  const base: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://existing.invalid:7897' };
+  const direct = createAntigravityEnvironment(base, null);
+  assert.equal(direct.HTTP_PROXY, base.HTTP_PROXY);
+  assert.equal(direct.NO_PROXY, 'localhost,127.0.0.1,::1');
+  assert.equal(direct.no_proxy, direct.NO_PROXY);
+  assert.equal(base.NO_PROXY, undefined);
+  assert.notEqual(direct, base);
+  assert.equal(
+    new AcpSetupError('authentication_failed').runtimeFailureClass,
+    'acp_setup_authentication_failed',
+  );
 });
 test('login consumes a split stderr URL and waits for authenticate completion', () =>
   fixture('login', async (executable, root) => {

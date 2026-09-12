@@ -20,13 +20,19 @@
 import type { ProxiedFetchProxy } from '@maka/runtime/network/scoped-fetch-transport';
 import { AcpSetupError } from './connection.js';
 
+const ACP_LOCAL_BYPASS = ['localhost', '127.0.0.1', '::1'] as const;
+
 /** Only the child receives proxy credentials; never persist or project this environment. */
 export function createAntigravityEnvironment(
   base: NodeJS.ProcessEnv,
   proxy: ProxiedFetchProxy | null,
 ): NodeJS.ProcessEnv {
   const env = { ...base };
-  if (!proxy?.enabled) return env;
+  if (!proxy?.enabled) {
+    const bypass = mergeBypassLists(env.NO_PROXY, env.no_proxy, ACP_LOCAL_BYPASS);
+    env.NO_PROXY = env.no_proxy = bypass;
+    return env;
+  }
   // Official 1.1.1 fails session/new with "python-socks is required". Do not
   // reinterpret a SOCKS endpoint as HTTP or silently use a different network route.
   if (proxy.type === 'socks5') throw new AcpSetupError('proxy_unsupported');
@@ -44,4 +50,16 @@ export function createAntigravityEnvironment(
   delete env.all_proxy;
   env.NO_PROXY = env.no_proxy = proxy.bypassList.join(',');
   return env;
+}
+
+function mergeBypassLists(
+  upper: string | undefined,
+  lower: string | undefined,
+  required: readonly string[],
+): string {
+  return [upper, lower, ...required]
+    .flatMap((value) => value?.split(',') ?? [])
+    .map((value) => value.trim())
+    .filter((value, index, all) => value.length > 0 && all.indexOf(value) === index)
+    .join(',');
 }

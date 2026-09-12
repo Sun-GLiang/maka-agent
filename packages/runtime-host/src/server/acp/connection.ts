@@ -35,8 +35,12 @@ import type { ExternalAgentSetupFailure } from '../../protocol/external-agent-se
 
 /** Only public failure codes leave this boundary; raw agent output may contain credentials. */
 export class AcpSetupError extends Error {
+  readonly runtimeFailureClass: string;
+
   constructor(readonly failure: ExternalAgentSetupFailure) {
     super(`ACP setup: ${failure}`);
+    this.name = 'AcpSetupError';
+    this.runtimeFailureClass = `acp_setup_${failure}`;
   }
 }
 

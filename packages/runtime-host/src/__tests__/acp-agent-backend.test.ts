@@ -19,7 +19,12 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { methods, type ClientConnection, type ToolCallContent } from '@agentclientprotocol/sdk';
+import {
+  methods,
+  type ClientApp,
+  type ClientConnection,
+  type ToolCallContent,
+} from '@agentclientprotocol/sdk';
 import type { SessionEvent } from '@maka/core/events';
 import type { AcpConnectionOwner } from '../server/acp/connection.js';
 import { decodeCanonicalToolResultContent } from '@maka/core/tool-result-record-schema';
@@ -61,6 +66,99 @@ test('maps every ACP terminal reason to a canonical durable outcome', () => {
   assert.equal(mapAcpStopReason('max_tokens'), 'max_tokens');
   assert.equal(mapAcpStopReason('max_turn_requests'), 'step_limit');
   assert.equal(mapAcpStopReason('refusal'), 'error');
+});
+
+test('reports an Agent execution error message as an explicit prompt diagnostic', async () => {
+  let acceptUpdate:
+    | ((input: {
+        params: {
+          sessionId: string;
+          update: {
+            sessionUpdate: 'agent_message_chunk';
+            content: { type: 'text'; text: string };
+          };
+        };
+      }) => void)
+    | undefined;
+  const connection = {
+    agent: {
+      async request(method: unknown) {
+        if (method === methods.agent.initialize) {
+          return { protocolVersion: 1, agentCapabilities: {}, authMethods: [] };
+        }
+        if (method === methods.agent.session.new) return { sessionId: 'acp-session-1' };
+        if (method === methods.agent.session.prompt) {
+          acceptUpdate?.({
+            params: {
+              sessionId: 'acp-session-1',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: {
+                  type: 'text',
+                  text: 'Agent execution error: request failed (code 403): unavailable in location',
+                },
+              },
+            },
+          });
+          return { stopReason: 'end_turn' };
+        }
+        throw new Error('unexpected request');
+      },
+      notify: async () => undefined,
+    },
+  } as unknown as ClientConnection;
+  const owner: AcpConnectionOwner = {
+    connection,
+    failed: new Promise<never>(() => {}),
+    closed: Promise.resolve(),
+    dispose: async () => undefined,
+  };
+  const backend = new AcpAgentBackend({
+    sessionId: 'session-1',
+    cwd: process.cwd(),
+    executable: '/agent',
+    env: {},
+    releaseResidency: () => undefined,
+    onCleanupFailure: () => assert.fail('cleanup should succeed'),
+    onUnavailable: () => assert.fail('the reusable connection remains available'),
+    createConnection: (input) => {
+      const app = {
+        onNotification(method: unknown, handler: unknown) {
+          if (method === methods.client.session.update) {
+            acceptUpdate = handler as typeof acceptUpdate;
+          }
+          return app;
+        },
+        onRequest() {
+          return app;
+        },
+      } as unknown as ClientApp;
+      input.configureClient?.(app);
+      return owner;
+    },
+  });
+
+  const events = await collectEvents(backend.send({ turnId: 'turn-1', text: 'hello' }));
+  const error = events.find(
+    (candidate): candidate is Extract<SessionEvent, { type: 'error' }> =>
+      candidate.type === 'error',
+  );
+  assert.equal(error?.code, 'acp_agent_execution_failed');
+  assert.equal(error?.reason, 'acp_agent_execution_failed');
+  assert.equal(
+    error?.message,
+    'Agent execution error: request failed (code 403): unavailable in location',
+  );
+  assert.deepEqual(error?.details, { stage: 'prompt', providerStopReason: 'end_turn' });
+  assert.deepEqual(
+    events
+      .filter((candidate) => candidate.type === 'complete')
+      .map((candidate) => ({
+        stopReason: candidate.stopReason,
+        providerStopReason: candidate.providerStopReason,
+      })),
+    [{ stopReason: 'error', providerStopReason: 'end_turn' }],
+  );
 });
 
 test('stop cancels startup before a prompt can be dispatched', async () => {
