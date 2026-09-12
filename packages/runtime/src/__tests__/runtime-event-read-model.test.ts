@@ -350,6 +350,22 @@ describe('projectRuntimeEventsToStoredMessages', () => {
     ]);
   });
 
+  test('ACP assistant text survives projection without a native model', () => {
+    const acpInvocation: RuntimeInvocationRecord = {
+      ...invocation,
+      opening: {
+        ...invocation.opening,
+        route: { provenance: 'runtime', backendKind: 'acp', externalAgentId: 'antigravity' },
+      },
+    };
+    const out = projectRuntimeEventsToStoredMessages(baseEvents(), { invocations: [acpInvocation] });
+    const assistant = out.messages.find((message) => message.type === 'assistant');
+    assert.ok(assistant);
+    assert.equal(assistant.text, 'The file says: file contents');
+    assert.equal(assistant.modelId, undefined);
+    assert.deepEqual(decodeCanonicalMessage(JSON.parse(JSON.stringify(assistant))), assistant);
+  });
+
   test('full RuntimeEvent turn projects legacy-compatible rows', () => {
     const out = projectRuntimeEventsToStoredMessages(baseEvents(), { invocations: [invocation] });
 

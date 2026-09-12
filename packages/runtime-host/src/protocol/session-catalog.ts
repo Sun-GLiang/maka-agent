@@ -102,9 +102,7 @@ const PROJECTION_REQUIRED_FIELDS = [
   'status',
   'backend',
   'llmConnectionId',
-  'llmConnectionSlug',
   'connectionLocked',
-  'model',
   'permissionMode',
   'collaborationMode',
   'orchestrationMode',
@@ -126,6 +124,9 @@ const PROJECTION_FIELDS = [
   'thinkingLevel',
   'lastReadMessageId',
   'liveRunState',
+  'externalAgentId',
+  'llmConnectionSlug',
+  'model',
 ] as const;
 
 export type SessionCatalogRevision = `sha256:${string}`;
@@ -141,6 +142,7 @@ export type SessionCatalogQueryInput =
 
 export type SessionModelTarget =
   | { readonly kind: 'default' }
+  | { readonly kind: 'external_agent'; readonly acpAgentId: 'antigravity' }
   | {
       readonly kind: 'explicit';
       readonly connectionId: string;
@@ -236,10 +238,11 @@ export interface SessionCatalogProjection {
   readonly revisionIndex?: number;
   readonly revisionState?: 'preparing' | 'committed';
   readonly backend: PersistedBackendKind;
+  readonly externalAgentId?: 'antigravity';
   readonly llmConnectionId: string | null;
-  readonly llmConnectionSlug: string;
+  readonly llmConnectionSlug?: string;
   readonly connectionLocked: boolean;
-  readonly model: string;
+  readonly model?: string;
   readonly thinkingLevel?: ThinkingLevel;
   readonly permissionMode: PermissionMode;
   readonly collaborationMode: CollaborationMode;
@@ -760,22 +763,44 @@ export function decodeSessionCatalogProjection(value: unknown): SessionCatalogPr
     ...optionalRevisionIndex(record),
     ...optionalRevisionState(record),
     backend: backend(record.backend),
+    ...(record.externalAgentId === undefined
+      ? {}
+      : { externalAgentId: externalAgentId(record.externalAgentId) }),
     llmConnectionId:
       record.llmConnectionId === null
         ? null
         : requireEntityId(record.llmConnectionId, 'Session Connection id'),
-    llmConnectionSlug: requireUtf8String(
-      record.llmConnectionSlug,
-      'Session connection slug',
-      SESSION_CATALOG_CONNECTION_SLUG_MAX_BYTES,
-    ),
+    ...(record.llmConnectionSlug === undefined
+      ? {}
+      : {
+          llmConnectionSlug: requireUtf8String(
+            record.llmConnectionSlug,
+            'Session connection slug',
+            SESSION_CATALOG_CONNECTION_SLUG_MAX_BYTES,
+          ),
+        }),
     connectionLocked: boolean(record.connectionLocked, 'Session connection lock'),
-    model: requireUtf8String(record.model, 'Session model', SESSION_CATALOG_MODEL_MAX_BYTES),
+    ...(record.model === undefined
+      ? {}
+      : { model: requireUtf8String(record.model, 'Session model', SESSION_CATALOG_MODEL_MAX_BYTES) }),
     ...optionalThinkingLevel(record),
     permissionMode: permissionMode(record.permissionMode),
     collaborationMode: collaborationMode(record.collaborationMode),
     orchestrationMode: orchestrationMode(record.orchestrationMode),
   };
+  if (
+    (projection.backend === 'acp' &&
+      (projection.externalAgentId !== 'antigravity' ||
+        projection.llmConnectionId !== null ||
+        projection.llmConnectionSlug !== undefined ||
+        projection.model !== undefined)) ||
+    (projection.backend !== 'acp' &&
+      (projection.externalAgentId !== undefined ||
+        projection.llmConnectionSlug === undefined ||
+        projection.model === undefined))
+  ) {
+    throw invalidProtocolFrame('Invalid Session execution target');
+  }
   requireEncodedByteLimit(
     projection,
     'Session catalog projection',
@@ -811,6 +836,13 @@ function modelTarget(value: unknown): SessionModelTarget {
   if (target.kind === 'default') {
     requireExactRecord(target, 'default Session model target', ['kind']);
     return { kind: 'default' };
+  }
+  if (target.kind === 'external_agent') {
+    const exact = requireExactRecord(target, 'external Agent Session target', [
+      'kind',
+      'acpAgentId',
+    ]);
+    return { kind: 'external_agent', acpAgentId: externalAgentId(exact.acpAgentId) };
   }
   if (target.kind === 'explicit') {
     const exact = requireExactRecord(target, 'explicit Session model target', [
@@ -997,9 +1029,14 @@ function optionalThinkingLevel(
 // header's durable backend, and rows written by builds that shipped
 // FakeBackend still hold it (#3211).
 function backend(value: unknown): SessionCatalogProjection['backend'] {
-  if (value !== 'ai-sdk' && value !== 'fake') {
+  if (value !== 'ai-sdk' && value !== 'acp' && value !== 'fake') {
     throw invalidProtocolFrame('Invalid Session backend');
   }
+  return value;
+}
+
+function externalAgentId(value: unknown): 'antigravity' {
+  if (value !== 'antigravity') throw invalidProtocolFrame('Invalid external Agent identity');
   return value;
 }
 

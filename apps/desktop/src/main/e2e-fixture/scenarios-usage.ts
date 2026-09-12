@@ -254,7 +254,7 @@ export function usageStatsRecords(now: number): {
         const cacheRead = message.cacheRead ?? 0;
         const cacheMiss = message.cacheMissInput ?? Math.max(0, inputTokens - cacheRead);
         const cacheWrite = message.cacheCreation ?? 0;
-        const modelId = modelByTurn.get(message.turnId) ?? session.model;
+        const modelId = modelByTurn.get(message.turnId) ?? session.model!;
         // Run/attempt ids must match SAFE_ID_PATTERN ([A-Za-z0-9_-]); no colons.
         const runId = `run-${message.id}`;
         modelCalls.push({
@@ -273,8 +273,8 @@ export function usageStatsRecords(now: number): {
               route: {
                 provenance: 'runtime',
                 backendKind: 'fake',
-                llmConnectionId: session.llmConnectionSlug,
-                llmConnectionSlug: session.llmConnectionSlug,
+                llmConnectionId: session.llmConnectionSlug!,
+                llmConnectionSlug: session.llmConnectionSlug!,
                 modelId,
               },
               configuration: {
@@ -300,8 +300,8 @@ export function usageStatsRecords(now: number): {
             step: 0,
             attempt: 0,
             callKind: 'main',
-            connectionSlug: session.llmConnectionSlug,
-            providerId: session.llmConnectionSlug,
+            connectionSlug: session.llmConnectionSlug!,
+            providerId: session.llmConnectionSlug!,
             modelId,
             startedAt: message.ts - 2_000,
             completedAt: message.ts,

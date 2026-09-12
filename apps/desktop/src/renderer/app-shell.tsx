@@ -610,6 +610,7 @@ function AppShellContent({
   const [helpOpen, closeHelp, openHelp] = useKeyboardHelp();
   const [paletteOpen, openPalette, closePalette] = useCommandPalette();
   const composerRef = useRef<ComposerHandle>(null);
+  const [newChatExecutor, setNewChatExecutor] = useState<'maka' | 'antigravity'>('maka');
   const openComposerModelPicker = useCallback(() => {
     composerRef.current?.openModelPicker();
   }, []);
@@ -1238,7 +1239,9 @@ function AppShellContent({
   );
   const taskReadinessNotice = Conversation.deriveTaskReadinessNotice(taskReadiness.snapshot, uiLocale);
   const taskSubmissionHardBlocked =
-    !activeId && !taskEntry.selectors.target;
+    (!activeId && !taskEntry.selectors.target) ||
+    ((!activeId && newChatExecutor === 'antigravity') || activeSession?.backend === 'acp') &&
+      pendingAttachments.length > 0;
   // The titlebar names the directory the ACTIVE session runs in, so it reads
   // the same projected project state the picker does — `projectInfo` already
   // resolves to the session's own cwd once a session owns it.
@@ -1510,6 +1513,7 @@ function AppShellContent({
     showModelSetupToast,
     toastApi,
     newChatModel: newChatModel ?? null,
+    newChatExecutor,
     pendingNewChatThinkingLevel: newChatThinkingLevel ?? null,
     newChatPermissionChoice: newTaskPermissionChoice,
     clearNewChatPermissionChoice: clearNewTaskPermissionChoice,
@@ -2596,7 +2600,11 @@ function AppShellContent({
                       ? undefined
                       : attachFilePaths
                   }
-                  modelLabel={activeModelLabel ?? newChatModelLabel}
+                  modelLabel={
+                    activeSession?.backend === 'acp' || (!activeId && newChatExecutor === 'antigravity')
+                      ? 'Agent default'
+                      : activeModelLabel ?? newChatModelLabel
+                  }
                   activeSession={activeSessionForView}
                   activeModelConnectionId={activeSessionForModelControls?.llmConnectionId}
                   activeModelConnectionSlug={activeSessionForModelControls?.llmConnectionSlug}
@@ -2617,6 +2625,8 @@ function AppShellContent({
                     if (activeId) void setSessionThinkingLevel(activeId, level ?? null);
                   }}
                   {...{ newChatModel, newChatProviderType, newChatThinkingLevels, newChatThinkingLevel }}
+                  newChatExecutor={newChatExecutor}
+                  onNewChatExecutorChange={setNewChatExecutor}
                   onPickNewChatModel={(input) => {
                     setPendingNewChatModel(input);
                     if (modelSettingsOwnsComposerHost) saveComposerDefaults({ model: input });
@@ -2625,7 +2635,9 @@ function AppShellContent({
                   onOpenModelSettings={modelSettingsOwnsComposerHost
                     ? () => openSettingsSection('models')
                     : undefined}
-                  noModelConnection={!activeId && connections.length === 0}
+                  noModelConnection={
+                    !activeId && newChatExecutor !== 'antigravity' && connections.length === 0
+                  }
                   noModelHint={!modelSettingsOwnsComposerHost && composerProfileName
                     ? shellCopy.configureModelsOnHost(composerProfileName)
                     : undefined}

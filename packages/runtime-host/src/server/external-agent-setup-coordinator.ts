@@ -83,6 +83,19 @@ export class HostExternalAgentSetupCoordinator {
     },
   ) {}
 
+  /** Freeze one verified launch configuration for a newly activated ACP Session. */
+  async prepareExecution(): Promise<{ readonly executable: string; readonly env: NodeJS.ProcessEnv }> {
+    if (this.draining) throw new AcpSetupError('connection_failed');
+    const snapshot = await this.deps.readPolicy();
+    this.observePolicy(snapshot);
+    if (this.verifiedGeneration !== this.configurationGeneration) {
+      throw new AcpSetupError('authentication_failed');
+    }
+    const executable = this.executable ?? '';
+    if (!executable) throw new AcpSetupError('executable_unavailable');
+    return { executable, env: (await this.deps.resolveEnvironment?.()) ?? process.env };
+  }
+
   /** Observe every committed policy change, including changes while no setup query is running. */
   observePolicy(snapshot: RuntimePolicySnapshot): void {
     if (snapshot.revision < this.configurationRevision) return;

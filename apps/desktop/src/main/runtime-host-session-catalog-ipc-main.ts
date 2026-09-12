@@ -306,6 +306,15 @@ export function resolveDesktopSessionCreateInput(input: CreateSessionRequestInpu
 }
 
 function normalizeModelTarget(input: CreateSessionRequestInput | undefined): SessionModelTarget {
+  if (input?.executionBackend === 'acp' || input?.externalAgentId !== undefined) {
+    if (input.executionBackend !== 'acp' || input.externalAgentId !== 'antigravity') {
+      throw new Error('ACP execution requires the Antigravity Agent identity');
+    }
+    if (input.llmConnectionId !== undefined || input.llmConnectionSlug !== undefined || input.model !== undefined) {
+      throw new Error('ACP execution cannot include a native model target');
+    }
+    return { kind: 'external_agent', acpAgentId: 'antigravity' };
+  }
   const connectionId = normalizeOptionalString(input?.llmConnectionId, 'model connection id');
   const slug = normalizeOptionalString(input?.llmConnectionSlug, 'model connection');
   const model = normalizeOptionalString(input?.model, 'model');

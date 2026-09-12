@@ -2076,11 +2076,11 @@ function choiceFor(
   assert.ok(source.llmConnectionId);
   return {
     connectionId: source.llmConnectionId,
-    connectionSlug: source.llmConnectionSlug,
+    connectionSlug: source.llmConnectionSlug!,
     providerType: 'openai',
     providerLabel: 'OpenAI',
-    model: source.model,
-    label: source.model,
+    model: source.model!,
+    label: source.model!,
     isDefault: true,
     thinkingLevels: [],
     ...overrides,

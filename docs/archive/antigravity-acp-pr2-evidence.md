@@ -81,3 +81,18 @@
 原有进程树终止工具在父进程退出后无法追溯从未观察到、且已脱离原进程组的 daemon。不得将已知 helper 的清理测试宣称为任意 daemon 的生命周期保证；官方任务崩溃时的进程清理仍属于后续真机 gate。
 
 本轮曾以真实本地 helper 和针对该 PID 的 `SIGKILL` / `EPERM` 注入复现“已发现逃逸 helper 存活，dispose 却成功”的缺陷；现已修复为保留进程身份并验证退出后才成功。回归覆盖重试、身份变化、未知身份和不再向已释放的旧进程组发送信号。
+
+## 后续验证更新（2026-09-12）
+
+本节更新前文的验证状态。用户要求保持 VPN 设置不变；此次验证未修改 VPN 设置。
+
+- 官方 ACP 1.1.1 的实际多文件编辑、diff 和独立 fixture 测试通过。
+- 在不同进程中调用 resume 和 load 的可行性探测通过，三个 probe 进程组均已清理；PR2 尚不实现跨进程恢复。
+- 新增 AcpAgentBackend 的真实双轮 smoke 返回 `PR2_FIRST_OK` 和 `PR2_SECOND_OK`，两轮均以 end_turn 结束，释放 residency 且未报告清理失败。
+- 修复没有原生 modelId 时丢弃 ACP assistant 文本的问题：新增回归先失败，修复后通过。Runtime read-model 74 项、SessionManager 166 项、Core/Storage/Host catalog 103 项相关测试通过，Desktop typecheck 通过。
+
+尚未通过：完整 Desktop 端到端验收、Renderer architecture 检查（AppShell 新增状态及代码量超过冻结限额）。格式检查、完整受影响测试集及 CLI ACP 回归尚待补齐。后端 smoke 不能代替 Desktop 任务创建、工具与表单显示、取消和重启后的历史验收。
+
+另一个开发 worktree 的 schema version 14 启动错误不属于此次 PR2 隔离实例；多个 Electron 应用身份重合导致窗口选择混淆。窗口控制接口仍超时，完整 UI 证据未取得。
+
+当前任务执行实现仍是 Draft：会话可用性投影、原生专用操作准入、混合有序工具内容、ACP 原始停止原因、启动阶段取消、配置失效及完整生命周期仍需要按计划逐项核对。

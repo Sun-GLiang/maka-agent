@@ -1436,7 +1436,13 @@ export class AgentRun {
       kind: 'invocation_opened',
       protocol: 'invocation_opened_v1',
       route:
-        this.header.llmConnectionId === undefined
+        this.header.backend === 'acp'
+          ? {
+              provenance: 'unknown',
+              backendKind: 'acp',
+              externalAgentId: this.header.externalAgentId,
+            }
+          : this.header.llmConnectionId === undefined
           ? {
               provenance: 'unknown',
               backendKind: this.header.backend,

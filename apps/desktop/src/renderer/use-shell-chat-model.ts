@@ -248,7 +248,7 @@ export function useShellChatModel(options: {
     newChatModel?.model,
   );
   const composerSupportsVision = composerModelSupportsVision({
-    active: activeSession
+    active: activeSession?.llmConnectionSlug && activeModel
       ? {
           llmConnectionId: activeSession.llmConnectionId,
           llmConnectionSlug: activeSession.llmConnectionSlug,

@@ -2072,6 +2072,7 @@ export class SessionManager {
           header,
         })
       ).providerStateIdentity;
+      if (!header.model) throw new Error('ACP continuation replay is not supported');
       admissionRoute = {
         invocations,
         targetProviderStateIdentity,
@@ -3847,7 +3848,13 @@ export class SessionManager {
       kind: 'invocation_opened',
       protocol: 'invocation_opened_v1',
       route:
-        session.llmConnectionId === undefined
+        session.backend === 'acp'
+          ? {
+              provenance: 'unknown',
+              backendKind: 'acp',
+              externalAgentId: session.externalAgentId,
+            }
+          : session.llmConnectionId === undefined
           ? {
               provenance: 'unknown',
               backendKind: session.backend,

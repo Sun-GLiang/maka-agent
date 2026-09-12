@@ -193,6 +193,7 @@ import { HostOAuthExecutionAuthority } from './oauth-execution-authority.js';
 import { join } from 'node:path';
 import { toRuntimePolicyProxy } from './runtime-policy-proxy.js';
 import { AcpSetupError } from './acp/connection.js';
+import { AcpAgentBackend } from './acp/acp-agent-backend.js';
 import { installAntigravity } from './acp/antigravity-install.js';
 import { createAntigravityEnvironment } from './acp/antigravity-environment.js';
 import { createProxiedFetchTransport } from '@maka/runtime/network/scoped-fetch-transport';
@@ -409,6 +410,14 @@ export async function createExecutionRuntimeHostComposition(
       storageRoot: context.owner.capability.canonicalPath,
     });
     const backends = new BackendRegistry();
+    // ACP Sessions are process-local in PR2. A persisted Session that existed
+    // before this Host started remains readable, but must never create a fresh
+    // external Session or resend its last prompt after a restart.
+    const unavailableAcpSessionsAfterRestart = new Set(
+      (await stores.sessionStore.listHeaders())
+        .filter((header) => header.backend === 'acp')
+        .map((header) => header.id),
+    );
     // `fake` is a retired backend kind: this build never writes it, but a
     // session or Automation persisted by an older one still can, and activation
     // dispatches straight off that durable value. Registering an explicit
@@ -1103,6 +1112,7 @@ export async function createExecutionRuntimeHostComposition(
     };
     resolveAvailableToolNames = async (sessionId: string): Promise<string[]> => {
       const header = await stores.sessionStore.readHeaderSnapshot(sessionId);
+      if (header.backend === 'acp') return [];
       if (header.subagentRuntime) {
         if (!header.subagentParent) {
           throw new Error('Subagent runtime snapshot requires a linked child session');
@@ -1117,7 +1127,7 @@ export async function createExecutionRuntimeHostComposition(
         }
         const { surface } = await resolveInteractiveToolSurface({
           connectionRef: sessionExecutionConnectionRef(header),
-          modelId: header.model,
+          modelId: header.model!,
           hostTools: [],
           boundTools: tools,
         });
@@ -1135,7 +1145,7 @@ export async function createExecutionRuntimeHostComposition(
         ]);
         const { runtimePolicy, surface } = await resolveInteractiveToolSurface({
           connectionRef: sessionExecutionConnectionRef(header),
-          modelId: header.model,
+          modelId: header.model!,
           hostTools: [...hostTools, ...graphTools],
           childTools: childAgentTools.childTools,
           parentAgentTools: childAgentTools.parentTools,
@@ -1264,6 +1274,7 @@ export async function createExecutionRuntimeHostComposition(
     sessionEffects = sessionEffectCoordinator;
     const resolveChildTools = async (sessionId: string) => {
       const header = await stores.sessionStore.readHeader(sessionId);
+      if (header.backend === 'acp') throw new Error('ACP Sessions cannot execute child Agents');
       const shell = resolveTurnShellPlan(
         (await runtimePolicyStores.runtimePolicy.getSnapshot()).policy.shell,
       );
@@ -1274,7 +1285,7 @@ export async function createExecutionRuntimeHostComposition(
       }).childTools;
       const { surface } = await resolveInteractiveToolSurface({
         connectionRef: sessionExecutionConnectionRef(header),
-        modelId: header.model,
+        modelId: header.model!,
         hostTools: [],
         childTools,
       });
@@ -1443,6 +1454,35 @@ export async function createExecutionRuntimeHostComposition(
         context.requestDrain();
       },
       capabilities: clientCapabilities,
+    });
+    backends.register('acp', {
+      prepare: async (backendContext) => {
+        if (backendContext.header.externalAgentId !== 'antigravity') {
+          throw new Error('ACP Session has no supported external Agent identity');
+        }
+        if (unavailableAcpSessionsAfterRestart.has(backendContext.header.id)) {
+          throw new Error(
+            'ACP Session history is readable, but its external process is no longer available; start a new task',
+          );
+        }
+        const launch = await externalAgentSetup!.prepareExecution();
+        return {
+          build: (buildContext) => {
+            const residency = context.acquireResidency('acp-agent');
+            return new AcpAgentBackend({
+              sessionId: buildContext.sessionId,
+              cwd: buildContext.header.cwd,
+              executable: launch.executable,
+              env: launch.env,
+              releaseResidency: () => residency.release(),
+              onCleanupFailure: () => {
+                context.retainUntilProcessExit();
+                context.requestDrain();
+              },
+            });
+          },
+        };
+      },
     });
     oauth = new HostOAuthCoordinator({
       runtimePolicy: runtimePolicyStores,
@@ -2955,6 +2995,9 @@ function isActiveWorkHubRoot(
 function sessionExecutionConnectionRef(
   header: Pick<SessionHeader, 'llmConnectionId' | 'llmConnectionSlug'>,
 ): ExecutionConnectionRef {
+  if (header.llmConnectionSlug === undefined) {
+    throw new Error('Session has no native model connection');
+  }
   return header.llmConnectionId === undefined
     ? { kind: 'catalog_slug', connectionSlug: header.llmConnectionSlug }
     : {

@@ -265,17 +265,19 @@ export type RuntimeInvocationRoute =
   | {
       provenance: 'runtime';
       backendKind: PersistedBackendKind;
-      llmConnectionId: string;
-      llmConnectionSlug: string;
-      modelId: string;
+      llmConnectionId?: string;
+      llmConnectionSlug?: string;
+      modelId?: string;
+      externalAgentId?: 'antigravity';
       /** Frozen provider endpoint and credential ownership; absent on non-provider runs. */
       providerStateIdentity?: `sha256:${string}`;
     }
   | {
       provenance: 'unknown';
       backendKind: PersistedBackendKind;
-      llmConnectionSlug: string;
-      modelId: string;
+      llmConnectionSlug?: string;
+      modelId?: string;
+      externalAgentId?: 'antigravity';
     };
 
 /** Execution configuration frozen before an invocation's first dispatch. */
@@ -759,12 +761,12 @@ const INVOCATION_OPENED_CONTENT_SHAPE = defineObjectShape<RuntimeEventInvocation
 const INVOCATION_ROUTE_RUNTIME_SHAPE = defineObjectShape<
   Extract<RuntimeInvocationRoute, { provenance: 'runtime' }>
 >()(
-  ['provenance', 'backendKind', 'llmConnectionId', 'llmConnectionSlug', 'modelId'],
-  ['providerStateIdentity'],
+  ['provenance', 'backendKind'],
+  ['llmConnectionId', 'llmConnectionSlug', 'modelId', 'externalAgentId', 'providerStateIdentity'],
 );
 const INVOCATION_ROUTE_UNKNOWN_SHAPE = defineObjectShape<
   Extract<RuntimeInvocationRoute, { provenance: 'unknown' }>
->()(['provenance', 'backendKind', 'llmConnectionSlug', 'modelId'], []);
+>()(['provenance', 'backendKind'], ['llmConnectionSlug', 'modelId', 'externalAgentId']);
 const INVOCATION_CONFIGURATION_SHAPE = defineObjectShape<RuntimeInvocationConfiguration>()(
   [
     'cwd',
@@ -1144,17 +1146,24 @@ function isRuntimeInvocationOpened(value: unknown): value is RuntimeEventInvocat
 
 function isRuntimeInvocationRoute(value: unknown): value is RuntimeInvocationRoute {
   if (!isRecord(value)) return false;
-  if (
-    !isPersistedBackendKind(value.backendKind) ||
+  if (!isPersistedBackendKind(value.backendKind)) return false;
+  const acp = value.backendKind === 'acp';
+  if (acp) {
+    if (
+      value.externalAgentId !== 'antigravity' ||
+      value.llmConnectionId !== undefined ||
+      value.llmConnectionSlug !== undefined ||
+      (value.modelId !== undefined && !isNonEmptyString(value.modelId))
+    ) return false;
+  } else if (
+    value.externalAgentId !== undefined ||
     !isNonEmptyString(value.llmConnectionSlug) ||
     !isNonEmptyString(value.modelId)
-  ) {
-    return false;
-  }
+  ) return false;
   if (value.provenance === 'runtime') {
     return (
       hasExactShape(value, INVOCATION_ROUTE_RUNTIME_SHAPE) &&
-      isNonEmptyString(value.llmConnectionId) &&
+      (acp ? value.llmConnectionId === undefined : isNonEmptyString(value.llmConnectionId)) &&
       (value.providerStateIdentity === undefined || isSha256Digest(value.providerStateIdentity))
     );
   }
@@ -1162,7 +1171,7 @@ function isRuntimeInvocationRoute(value: unknown): value is RuntimeInvocationRou
 }
 
 function isPersistedBackendKind(value: unknown): value is PersistedBackendKind {
-  return value === 'ai-sdk' || value === 'fake';
+  return value === 'ai-sdk' || value === 'acp' || value === 'fake';
 }
 
 function isRuntimeInvocationConfiguration(value: unknown): value is RuntimeInvocationConfiguration {

@@ -20,7 +20,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
-import { client, ndJsonStream, type ClientConnection } from '@agentclientprotocol/sdk';
+import {
+  client,
+  ndJsonStream,
+  type ClientApp,
+  type ClientConnection,
+} from '@agentclientprotocol/sdk';
 import {
   RetainedProcessTreeDescendants,
   terminateProcessTree,
@@ -63,6 +68,8 @@ interface AcpConnectionInput {
   cwd: string;
   env: NodeJS.ProcessEnv;
   onStderr(chunk: Buffer): void;
+  /** Registers connection-lifetime client callbacks before stdio is attached. */
+  configureClient?(app: ClientApp): void;
   /** Narrow OS identity seam; the Host's native process-lifetime query is used by default. */
   readProcessIdentity?(pid: number): Promise<string | undefined>;
 }
@@ -116,7 +123,9 @@ export function createAcpConnection(input: AcpConnectionInput): AcpConnectionOwn
       fail('connection_failed');
     }
   });
-  const connection = client({ name: 'maka-desktop' }).connect(
+  const app = client({ name: 'maka-desktop' });
+  input.configureClient?.(app);
+  const connection = app.connect(
     ndJsonStream(
       Writable.toWeb(stdin) as WritableStream<Uint8Array>,
       Readable.toWeb(stdout) as ReadableStream<Uint8Array>,

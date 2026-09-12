@@ -23,6 +23,8 @@
 
 import type { MessageContent } from './events.js';
 import type {
+  BackendKind,
+  ExternalAgentId,
   SessionBlockedReason,
   SessionStatus,
   SessionToolProfile,
@@ -53,17 +55,13 @@ export interface CreateSessionInput {
   projectId?: string | null;
   /** If omitted, runtime auto-derives a placeholder; users may rename later. */
   name?: string;
-  /**
-   * No `backend`: a live build has exactly one, so the field carried no choice
-   * — only the chance of writing the retired `'fake'` into a new row (#3211).
-   * The store stamps every new header instead. Sessions derived from an older
-   * one (branch, revision, subagent) no longer inherit its backend; a copy of a
-   * legacy row is a real session whose connection slug resolves to nothing,
-   * which is what the readiness projection already says about it.
-   */
+  /** Omitted for the native Maka route. Only live backend kinds are writable. */
+  executionBackend?: BackendKind;
+  /** Required for ACP creation and forbidden for native Maka creation. */
+  externalAgentId?: ExternalAgentId;
   /** Immutable Connection entity identity. Omitted only while copying legacy state. */
   llmConnectionId?: string;
-  llmConnectionSlug: string;
+  llmConnectionSlug?: string;
   /** Falls back to the connection's defaultModel if omitted. */
   model?: string;
   /** Per-model reasoning-depth variant; `undefined` = model default. */

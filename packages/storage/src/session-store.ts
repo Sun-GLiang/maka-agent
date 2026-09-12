@@ -1297,6 +1297,18 @@ function buildSessionHeader(
   sessionId: string = randomUUID(),
   conversationCopy?: SessionConversationCopy,
 ): SessionHeader {
+  const backend = input.executionBackend ?? 'ai-sdk';
+  if (
+    (backend === 'acp' &&
+      (input.externalAgentId !== 'antigravity' ||
+        input.llmConnectionId !== undefined ||
+        input.llmConnectionSlug !== undefined ||
+        input.model !== undefined)) ||
+    (backend !== 'acp' &&
+      (input.externalAgentId !== undefined || input.llmConnectionSlug === undefined))
+  ) {
+    throw new Error('ACP backend and external Agent identity must be supplied together');
+  }
   if (
     input.projectId !== undefined &&
     input.projectId !== null &&
@@ -1339,14 +1351,15 @@ function buildSessionHeader(
     ...(input.revisionIndex !== undefined ? { revisionIndex: input.revisionIndex } : {}),
     ...(input.revisionState ? { revisionState: input.revisionState } : {}),
     hasUnread: false,
-    backend: 'ai-sdk',
+    backend,
+    ...(input.externalAgentId === undefined ? {} : { externalAgentId: input.externalAgentId }),
     ...(input.llmConnectionId === undefined ? {} : { llmConnectionId: input.llmConnectionId }),
-    llmConnectionSlug: input.llmConnectionSlug,
+    ...(input.llmConnectionSlug === undefined ? {} : { llmConnectionSlug: input.llmConnectionSlug }),
     // A subagent Session's route is chosen by the spawn that created it and is
     // never re-targeted, so it is born frozen. Every other Session freezes on
     // its first user Message.
     connectionLocked: input.subagentParent !== undefined,
-    model: input.model ?? 'default',
+    ...(backend === 'acp' ? {} : { model: input.model ?? 'default' }),
     ...(input.toolProfile !== undefined ? { toolProfile: input.toolProfile } : {}),
     permissionMode: input.permissionMode,
     collaborationMode: input.collaborationMode ?? 'agent',
@@ -1403,11 +1416,20 @@ export function normalizeSessionHeader(
     (header.lastReadMessageId === undefined || typeof header.lastReadMessageId === 'string') &&
     typeof header.hasUnread === 'boolean' &&
     isPersistedBackendKind(header.backend) &&
+    ((header.backend === 'acp' &&
+      header.externalAgentId === 'antigravity' &&
+      header.llmConnectionId === undefined &&
+      header.llmConnectionSlug === undefined &&
+      header.model === undefined) ||
+      (header.backend !== 'acp' &&
+        header.externalAgentId === undefined &&
+        typeof header.llmConnectionSlug === 'string' &&
+        typeof header.model === 'string')) &&
     (header.llmConnectionId === undefined ||
       (typeof header.llmConnectionId === 'string' && header.llmConnectionId.length > 0)) &&
-    typeof header.llmConnectionSlug === 'string' &&
+    (header.llmConnectionSlug === undefined || typeof header.llmConnectionSlug === 'string') &&
     typeof header.connectionLocked === 'boolean' &&
-    typeof header.model === 'string' &&
+    (header.model === undefined || typeof header.model === 'string') &&
     (header.toolProfile === undefined || isSessionToolProfile(header.toolProfile)) &&
     isPermissionMode(header.permissionMode) &&
     isCollaborationMode(header.collaborationMode) &&
@@ -1563,7 +1585,7 @@ function isValidSubagentSessionLineage(header: SessionHeader): boolean {
  * FakeBackend fail `normalizeSessionHeader` and read back as malformed (#3211).
  */
 function isPersistedBackendKind(value: unknown): value is SessionHeader['backend'] {
-  return value === 'ai-sdk' || value === 'fake';
+  return value === 'ai-sdk' || value === 'acp' || value === 'fake';
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -1638,10 +1660,11 @@ function toSummary(header: SessionHeader): SessionSummary {
     ...(header.revisionIndex !== undefined ? { revisionIndex: header.revisionIndex } : {}),
     ...(header.revisionState ? { revisionState: header.revisionState } : {}),
     backend: header.backend,
+    ...(header.externalAgentId === undefined ? {} : { externalAgentId: header.externalAgentId }),
     ...(header.llmConnectionId === undefined ? {} : { llmConnectionId: header.llmConnectionId }),
-    llmConnectionSlug: header.llmConnectionSlug,
+    ...(header.llmConnectionSlug === undefined ? {} : { llmConnectionSlug: header.llmConnectionSlug }),
     connectionLocked: header.connectionLocked,
-    model: header.model,
+    ...(header.model === undefined ? {} : { model: header.model }),
     permissionMode: header.permissionMode,
     collaborationMode: header.collaborationMode ?? 'agent',
     orchestrationMode: header.orchestrationMode ?? 'default',

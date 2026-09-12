@@ -141,7 +141,8 @@ export function useSessionSettingIntent<Owner extends { sessionId?: string }>(in
     setSessionThinkingLevel: (sessionId: string, thinkingLevel: ThinkingLevel | null) => {
       const pending = intent.overlayByChannel.modelConfiguration[sessionId];
       const session = input.sessions.find((candidate) => candidate.id === sessionId);
-      const currentModelTarget = session?.llmConnectionId
+      const currentModelTarget =
+        session?.llmConnectionId && session.llmConnectionSlug && session.model
         ? {
             llmConnectionId: session.llmConnectionId,
             llmConnectionSlug: session.llmConnectionSlug,

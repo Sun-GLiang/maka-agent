@@ -294,13 +294,15 @@ export interface SessionHeader {
 
   // Backend / model config
   backend: PersistedBackendKind;
+  /** Present exactly when `backend === 'acp'`. */
+  externalAgentId?: ExternalAgentId;
   /** Immutable Connection entity identity. Optional only on legacy Session records. */
   llmConnectionId?: string;
-  llmConnectionSlug: string;
+  llmConnectionSlug?: string;
   /** True once the Session's first UserMessage is durable. One-way. */
   connectionLocked: boolean;
   /** Sticky session default model id, captured when the session is created. */
-  model: string;
+  model?: string;
   /** Immutable versioned prompt/tool contract for non-product execution surfaces. */
   toolProfile?: SessionToolProfile;
   /** Per-model reasoning-depth variant; `undefined` = model default. Cleared on model switch. */
@@ -341,7 +343,7 @@ export function isWorkHubCoordinationSessionTarget(
  * shipped build may choose it, so it is not a member here. Values read back
  * from durable state use {@link PersistedBackendKind} instead.
  */
-export type BackendKind = 'ai-sdk';
+export type BackendKind = 'ai-sdk' | 'acp';
 
 /**
  * The backend value a persisted record may carry.
@@ -356,6 +358,9 @@ export type BackendKind = 'ai-sdk';
  * Never write this type: writers take {@link BackendKind}.
  */
 export type PersistedBackendKind = BackendKind | 'fake';
+
+/** External program identity captured when an ACP Session is created. */
+export type ExternalAgentId = 'antigravity';
 
 export interface SessionSummary {
   id: string;
@@ -405,9 +410,11 @@ export interface SessionSummary {
   revisionIndex?: number;
   revisionState?: 'preparing' | 'committed';
   backend: PersistedBackendKind;
+  /** Present exactly when `backend === 'acp'`. */
+  externalAgentId?: ExternalAgentId;
   /** Immutable Connection entity identity. Optional only on legacy summaries. */
   llmConnectionId?: string;
-  llmConnectionSlug: string;
+  llmConnectionSlug?: string;
   /**
    * True once the session has user messages — its connection/model is
    * sticky and compatibility projections never select a replacement target.
@@ -415,7 +422,7 @@ export interface SessionSummary {
    */
   connectionLocked: boolean;
   /** Sticky session default model id for renderer/header display. */
-  model: string;
+  model?: string;
   /** Per-model reasoning-depth variant; `undefined` = model default. Cleared on model switch. */
   thinkingLevel?: import('./model-thinking.js').ThinkingLevel;
   permissionMode: PermissionMode;
@@ -812,8 +819,8 @@ export interface AssistantMessage {
    * semantic thinking → text → tools fallback.
    */
   contentOrder?: AssistantStepContentKind[];
-  /** Actual model used for this turn. */
-  modelId: string;
+  /** Actual model used for this turn, when the executor reports one. */
+  modelId?: string;
 }
 
 export interface AssistantThinkingPart {
@@ -1252,8 +1259,8 @@ const USER_MESSAGE_SHAPE = defineObjectShape<UserMessage>()(
   ],
 );
 const ASSISTANT_MESSAGE_SHAPE = defineObjectShape<AssistantMessage>()(
-  ['type', 'id', 'turnId', 'ts', 'text', 'modelId'],
-  ['thinking', 'contentOrder', 'providerOptions'],
+  ['type', 'id', 'turnId', 'ts', 'text'],
+  ['modelId', 'thinking', 'contentOrder', 'providerOptions'],
 );
 const TOOL_CALL_MESSAGE_SHAPE = defineObjectShape<ToolCallMessage>()(
   ['type', 'id', 'turnId', 'ts', 'toolName', 'args'],
@@ -1544,7 +1551,7 @@ function decodeMessage(
         hasExactShape(message, ASSISTANT_MESSAGE_SHAPE) &&
         hasMessageEnvelope(message, true) &&
         typeof message.text === 'string' &&
-        typeof message.modelId === 'string' &&
+        (message.modelId === undefined || typeof message.modelId === 'string') &&
         (message.providerOptions === undefined || isRecord(message.providerOptions)) &&
         (message.thinking === undefined || isAssistantThinking(message.thinking)) &&
         (message.contentOrder === undefined ||

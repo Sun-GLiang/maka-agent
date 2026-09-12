@@ -65,7 +65,14 @@ installMainProcessLogCapture(mainProcessLogBuffer, () => recoveryJournal?.markDi
 // dev name yields a distinct root (and thus a distinct runtime-host rootId,
 // socket/pipe namespace, and single-instance lock) without touching any
 // path logic. See https://github.com/maka-agent/maka-agent/issues/2252.
-app.setName(app.isPackaged ? 'Maka' : 'Maka Dev');
+const isolatedE2eAppName = process.env.MAKA_E2E_APP_NAME?.trim();
+app.setName(
+  app.isPackaged
+    ? 'Maka'
+    : isIsolatedE2e && isolatedE2eAppName
+      ? isolatedE2eAppName
+      : 'Maka Dev',
+);
 
 // Electron otherwise quits implicitly when the last BrowserWindow closes.
 // Startup and fatal-recovery surfaces can be the only window, so keep process

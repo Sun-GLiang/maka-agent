@@ -936,7 +936,7 @@ class ScheduledTaskMutationError extends Error {
 }
 
 function executionTemplateFromHeader(header: SessionHeader): ScheduledTaskExecutionTemplate {
-  if (!header.llmConnectionId) {
+  if (!header.llmConnectionId || !header.llmConnectionSlug || !header.model) {
     throw new Error(SCHEDULED_AGENT_RUN_IDENTITY_REQUIRED);
   }
   return {

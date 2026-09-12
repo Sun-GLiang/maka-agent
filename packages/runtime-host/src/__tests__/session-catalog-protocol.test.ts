@@ -25,6 +25,7 @@ import {
   decodeHostFrame,
   decodeSessionCatalogItem,
   decodeSessionCatalogQueryResult,
+  decodeSessionCreateInput,
   HOST_OPERATION_SPECS,
   SESSION_CATALOG_PAGE_MAX_ITEMS,
   SESSION_CATALOG_RUNNING_TURN_MAX_ITEMS,
@@ -32,6 +33,22 @@ import {
 } from '../protocol/index.js';
 
 describe('Session catalog protocol', () => {
+  test('decodes a closed Antigravity execution target', () => {
+    const input = {
+      sessionId: 'session-acp',
+      workspace: { kind: 'host_path' as const, path: '/workspace' },
+      modelTarget: { kind: 'external_agent' as const, acpAgentId: 'antigravity' as const },
+    };
+    assert.deepEqual(decodeSessionCreateInput(input), input);
+    assert.throws(
+      () =>
+        decodeSessionCreateInput({
+          ...input,
+          modelTarget: { kind: 'external_agent', acpAgentId: 'other' },
+        }),
+      isProtocolError,
+    );
+  });
   test('publishes canonical catalog activity without the redundant last-used timestamp', () => {
     const catalog = projection();
 

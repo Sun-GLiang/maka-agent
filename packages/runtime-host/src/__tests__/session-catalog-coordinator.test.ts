@@ -551,6 +551,39 @@ test('creation rejects reserved execution labels before claiming a Session ident
   assert.equal(fixture.drainRequests(), 0);
 });
 
+test('ACP creation bypasses native model resolution and persists the external Agent target', async () => {
+  let persisted: Parameters<CatalogStores['createStableSession']>[0] | undefined;
+  const fixture = createFixture({
+    stores: {
+      createStableSession: async (input) => {
+        persisted = input;
+        return { kind: 'existing', record: headerSnapshot(sessionHeader(input.sessionId, []), 1) };
+      },
+    },
+    runtimePolicy: {
+      ...runtimePolicyFixture({}),
+      operations: {
+        resolveExecutionConnection: async () => {
+          assert.fail('ACP creation must not resolve a native model connection');
+        },
+      },
+    },
+  });
+  const outcome = await fixture.coordinator.handlers['session.create'](
+    {
+      sessionId: fixture.sessionId,
+      workspace: { kind: 'host_path', path: process.cwd() },
+      modelTarget: { kind: 'external_agent', acpAgentId: 'antigravity' },
+    },
+    context,
+  );
+  assert.equal(outcome.ok, true);
+  assert.equal(persisted?.input.executionBackend, 'acp');
+  assert.equal(persisted?.input.externalAgentId, 'antigravity');
+  assert.equal(persisted?.input.llmConnectionSlug, undefined);
+  assert.equal(persisted?.input.model, undefined);
+});
+
 test('ordinary creation rejects the reserved WorkHub Coordination Session identity', async () => {
   let probeAttempts = 0;
   const fixture = createFixture({

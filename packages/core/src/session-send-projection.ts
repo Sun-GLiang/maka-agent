@@ -51,9 +51,9 @@ export interface SessionSendProjectionSession {
    */
   backend: string;
   llmConnectionId?: string;
-  llmConnectionSlug: string;
+  llmConnectionSlug?: string;
   /** Sticky session model captured when the session was created. */
-  model: string;
+  model?: string;
   /** True once the session has user messages; locked sessions never rebind. */
   connectionLocked: boolean;
 }
@@ -106,6 +106,7 @@ function sessionOwnConnectionBlockReason(
   // forever (#3211). They are refused here — and at activation — rather than
   // rewritten, because their `llmConnectionSlug` still points at nothing.
   if (session.backend === 'fake') return 'fake_backend';
+  if (session.backend === 'acp') return undefined;
   const slug = session.llmConnectionSlug;
   if (!slug) return 'missing_default_connection';
   if (!ownConnection) return 'connection_missing';
@@ -128,6 +129,7 @@ function ownConnectionBlockReason(
   | 'connection_identity_mismatch'
   | undefined {
   if (session.backend === 'fake') return 'fake_backend';
+  if (session.backend === 'acp') return undefined;
   if (!session.llmConnectionId) return 'legacy_connection_identity';
   const identified =
     connections.find((entry) => entry.connectionId === session.llmConnectionId) ?? null;

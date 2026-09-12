@@ -883,9 +883,9 @@ export class HostWorkHubCoordinationCoordinator {
         configuration: {
           backend: record.header.backend,
           llmConnectionId: record.header.llmConnectionId,
-          llmConnectionSlug: record.header.llmConnectionSlug,
+          llmConnectionSlug: record.header.llmConnectionSlug!,
           connectionLocked: record.header.connectionLocked,
-          model: record.header.model,
+          model: record.header.model!,
           thinkingLevel: record.header.thinkingLevel,
           permissionMode: COORDINATION_PERMISSION_MODE,
           collaborationMode: COORDINATION_COLLABORATION_MODE,

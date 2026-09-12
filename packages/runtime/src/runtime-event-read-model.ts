@@ -735,7 +735,7 @@ function projectText(
 
   if (event.role === 'model') {
     const invocation = state.invocations.get(event.runId);
-    if (!invocation?.opening.route.modelId) {
+    if (!invocation || (!invocation.opening.route.modelId && invocation.opening.route.backendKind !== 'acp')) {
       diagnostic(
         state,
         event,
@@ -756,7 +756,7 @@ function projectText(
         ? { providerOptions: structuredClone(event.content.providerOptions) }
         : {}),
       ...(contentOrder ? { contentOrder } : {}),
-      modelId: invocation.opening.route.modelId,
+      ...(invocation.opening.route.modelId ? { modelId: invocation.opening.route.modelId } : {}),
     });
     attachPendingThinking(event, state, messages, assistantId);
     return true;

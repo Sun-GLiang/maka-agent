@@ -1300,9 +1300,9 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
     (message) => !durableMessageIds.has(message.id),
   );
   // Inherited model (read-only): the fork's once created, else the source's.
-  const activeModel = companion
+  const activeModel = companion?.llmConnectionSlug && companion.model
     ? { llmConnectionSlug: companion.llmConnectionSlug, model: companion.model }
-    : sourceSession
+    : sourceSession?.llmConnectionSlug && sourceSession.model
       ? { llmConnectionSlug: sourceSession.llmConnectionSlug, model: sourceSession.model }
       : undefined;
   const companionPermissionOverlay = companion?.id

@@ -889,6 +889,8 @@ export class RuntimeContinuationPlanner {
           `continuation provider replay version is unsupported for ${edge.childRunId}`,
         );
       }
+      const targetModelId = state.claim.targetOpening.route.modelId;
+      if (!targetModelId) throw new Error('ACP continuation replay is not supported');
       const edgeReplay = buildContinuationReplayPlan({
         prefixes: segments.slice(0, childIndex) as [
           ImmutableRuntimePrefixV1,
@@ -901,7 +903,7 @@ export class RuntimeContinuationPlanner {
             state.claim.targetOpening.route.provenance === 'runtime'
               ? state.claim.targetOpening.route.providerStateIdentity
               : undefined,
-          targetModelId: state.claim.targetOpening.route.modelId,
+          targetModelId,
         },
       });
       if (

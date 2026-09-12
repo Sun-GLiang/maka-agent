@@ -488,9 +488,9 @@ describe('SessionManager Plan control boundaries', () => {
         configuration: {
           backend: child.backend,
           llmConnectionId: 'test-connection-id',
-          llmConnectionSlug: child.llmConnectionSlug,
+          llmConnectionSlug: child.llmConnectionSlug!,
           connectionLocked: true,
-          model: child.model,
+          model: child.model!,
           thinkingLevel: child.thinkingLevel,
           permissionMode: child.permissionMode,
           collaborationMode: 'plan',
@@ -569,8 +569,8 @@ describe('SessionManager graph operator provisioning', () => {
     const provisioned = await provision;
     assert.strictEqual(provisioned.created, true);
     assert.strictEqual(provisioned.header.name, 'Fast graph reader');
-    assert.strictEqual(provisioned.header.llmConnectionSlug, 'worker-connection');
-    assert.strictEqual(provisioned.header.model, 'worker-model');
+    assert.strictEqual(provisioned.header.llmConnectionSlug!, 'worker-connection');
+    assert.strictEqual(provisioned.header.model!, 'worker-model');
     assert.strictEqual(provisioned.header.thinkingLevel, 'low');
     assert.strictEqual(provisioned.header.subagentRuntime?.presetId, 'fast-reader');
     assert.strictEqual(provisioned.provision.agentId, LOCAL_READ_AGENT_ID);
@@ -639,9 +639,9 @@ describe('SessionManager graph operator provisioning', () => {
         configuration: {
           backend: parent.backend,
           llmConnectionId: 'test-connection-id',
-          llmConnectionSlug: parent.llmConnectionSlug,
+          llmConnectionSlug: parent.llmConnectionSlug!,
           connectionLocked: true,
-          model: parent.model,
+          model: parent.model!,
           thinkingLevel: parent.thinkingLevel,
           permissionMode: 'ask',
           collaborationMode: parent.collaborationMode ?? 'agent',
@@ -2520,9 +2520,9 @@ describe('SessionManager child-session runtime primitive', () => {
     });
     const child = await store.readHeader(result.childSessionId);
 
-    assert.strictEqual(child.llmConnectionSlug, 'worker-connection');
+    assert.strictEqual(child.llmConnectionSlug!, 'worker-connection');
     assert.strictEqual(child.llmConnectionId, '33333333-3333-4333-8333-333333333333');
-    assert.strictEqual(child.model, 'worker-model');
+    assert.strictEqual(child.model!, 'worker-model');
     assert.strictEqual(child.thinkingLevel, 'low');
     assert.strictEqual(child.subagentRuntime?.presetId, 'fast-reader');
     assert.strictEqual(child.subagentRuntime?.agentName, 'Fast reader');
@@ -4072,9 +4072,9 @@ describe('SessionManager manual compaction and quiescent session changes', () =>
     const baseConfiguration = {
       backend: session.backend,
       llmConnectionId: 'test-connection-id',
-      llmConnectionSlug: session.llmConnectionSlug,
+      llmConnectionSlug: session.llmConnectionSlug!,
       connectionLocked: true,
-      model: session.model,
+      model: session.model!,
       thinkingLevel: session.thinkingLevel,
       permissionMode: session.permissionMode,
       collaborationMode: session.collaborationMode ?? 'agent',
@@ -4140,9 +4140,9 @@ describe('SessionManager manual compaction and quiescent session changes', () =>
     const configuration = {
       backend: session.backend,
       llmConnectionId: 'test-connection-id',
-      llmConnectionSlug: session.llmConnectionSlug,
+      llmConnectionSlug: session.llmConnectionSlug!,
       connectionLocked: true,
-      model: session.model,
+      model: session.model!,
       thinkingLevel: session.thinkingLevel,
       permissionMode: session.permissionMode,
       collaborationMode: session.collaborationMode ?? 'agent',
@@ -4257,9 +4257,9 @@ describe('SessionManager manual compaction and quiescent session changes', () =>
         configuration: {
           backend: session.backend,
           llmConnectionId: 'test-connection-id',
-          llmConnectionSlug: session.llmConnectionSlug,
+          llmConnectionSlug: session.llmConnectionSlug!,
           connectionLocked: true,
-          model: session.model,
+          model: session.model!,
           thinkingLevel: session.thinkingLevel,
           permissionMode: session.permissionMode,
           collaborationMode: session.collaborationMode ?? 'agent',
@@ -4288,7 +4288,7 @@ describe('SessionManager manual compaction and quiescent session changes', () =>
     const activatedModels: string[] = [];
     const backends = new BackendRegistry();
     backends.register('ai-sdk', (ctx) => {
-      activatedModels.push(ctx.header.model);
+      activatedModels.push(ctx.header.model!);
       return new TestBackend(ctx);
     });
     const manager = new SessionManager({
@@ -4310,7 +4310,7 @@ describe('SessionManager manual compaction and quiescent session changes', () =>
       configuration: {
         backend: session.backend,
         llmConnectionId: 'test-connection-id',
-        llmConnectionSlug: session.llmConnectionSlug,
+        llmConnectionSlug: session.llmConnectionSlug!,
         connectionLocked: true,
         model: 'new-model',
         thinkingLevel: session.thinkingLevel,
@@ -5634,8 +5634,8 @@ describe('SessionManager permission mode updates', () => {
       backendKind: header.backend,
       llmConnectionId: header.llmConnectionId,
       providerStateIdentity,
-      llmConnectionSlug: header.llmConnectionSlug,
-      modelId: header.model,
+      llmConnectionSlug: header.llmConnectionSlug!,
+      modelId: header.model!,
       cwd: header.cwd,
       permissionMode: header.permissionMode,
       orchestrationMode: 'swarm',
@@ -5780,8 +5780,8 @@ describe('SessionManager permission mode updates', () => {
             provenance: 'runtime',
             backendKind: 'ai-sdk',
             llmConnectionId: header.llmConnectionId,
-            llmConnectionSlug: header.llmConnectionSlug,
-            modelId: header.model,
+            llmConnectionSlug: header.llmConnectionSlug!,
+            modelId: header.model!,
             providerStateIdentity,
           },
         },
@@ -5880,12 +5880,12 @@ describe('SessionManager permission mode updates', () => {
         sessionId: ctx.sessionId,
         header: ctx.header,
         connection: {
-          slug: ctx.header.llmConnectionSlug,
+          slug: ctx.header.llmConnectionSlug!,
           providerType: 'anthropic',
-          defaultModel: ctx.header.model,
+          defaultModel: ctx.header.model!,
         },
         apiKey: 'sk-test',
-        modelId: ctx.header.model,
+        modelId: ctx.header.model!,
         modelFactory: () => model,
         tools: [
           {
@@ -6655,8 +6655,8 @@ describe('SessionManager permission mode updates', () => {
       turnId: sourceTurnId,
       status: 'failed',
       backendKind: header.backend,
-      llmConnectionSlug: header.llmConnectionSlug,
-      modelId: header.model,
+      llmConnectionSlug: header.llmConnectionSlug!,
+      modelId: header.model!,
       cwd: header.cwd,
       permissionMode: header.permissionMode,
       createdAt: 1,
@@ -12261,7 +12261,7 @@ class CompactingTestBackend extends TestBackend {
         ...(run.opening.route.provenance === 'runtime'
           ? { connectionId: run.opening.route.llmConnectionId }
           : {}),
-        modelId: run.opening.route.modelId,
+        modelId: run.opening.route.modelId!,
       })),
     });
     return compactHistoryResult();
@@ -14387,14 +14387,14 @@ function testInvocationOpening(header: TestRunHeader): RuntimeEventInvocationOpe
         ? {
             provenance: 'unknown',
             backendKind: header.backendKind,
-            llmConnectionSlug: header.llmConnectionSlug,
+            llmConnectionSlug: header.llmConnectionSlug!,
             modelId: header.modelId,
           }
         : {
             provenance: 'runtime',
             backendKind: header.backendKind,
             llmConnectionId: header.llmConnectionId,
-            llmConnectionSlug: header.llmConnectionSlug,
+            llmConnectionSlug: header.llmConnectionSlug!,
             modelId: header.modelId,
             ...(header.providerStateIdentity
               ? { providerStateIdentity: header.providerStateIdentity }

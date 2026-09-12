@@ -383,6 +383,9 @@ export const Composer = forwardRef<
      * choose the new-chat model inline instead of only via Settings · 模型.
      */
     newChatModel?: { llmConnectionId: string; llmConnectionSlug: string; model: string };
+    /** Execution owner for the next task. Existing Sessions keep their durable owner. */
+    newChatExecutor?: 'maka' | 'antigravity';
+    onNewChatExecutorChange?(executor: 'maka' | 'antigravity'): void;
     newChatProviderType?: ProviderType;
     onPickNewChatModel?(input: {
       llmConnectionId: string;
@@ -1480,6 +1483,9 @@ export const Composer = forwardRef<
   const queuedMessages = projectComposerMessageQueue(props.queuedMessages ?? [], props.pendingMessages ?? []);
   const queueCount = queuedMessages.length;
   const modelChipLabel = props.modelLabel?.trim() || copy.selectModel;
+  const externalAgentSelected =
+    props.activeSession?.backend === 'acp' ||
+    (!props.activeSession && props.newChatExecutor === 'antigravity');
   // Mid-turn the model and thinking menus stay mounted but locked, each
   // carrying the reason in its own words (model vs thinking level) — the
   // lock is one state with two wordings, not two locks.
@@ -2104,7 +2110,36 @@ export const Composer = forwardRef<
                   its explanation, so the footer never reflows when a turn
                   starts or ends. */}
               <div className="maka-model-selection-controls">
-                {props.activeSession ? (
+                {!props.activeSession && props.onNewChatExecutorChange ? (
+                  <DropdownMenu
+                    placement="above"
+                    hasChevron={false}
+                    className="maka-composer-quiet-menu"
+                    button={{
+                      label: props.newChatExecutor === 'antigravity' ? 'Antigravity' : 'Maka',
+                      icon: <Sparkles size={ICON_SIZE.meta} aria-hidden="true" />,
+                      variant: 'ghost',
+                      size: 'sm',
+                      tooltip: 'Choose task executor',
+                      className: 'maka-new-chat-executor-selector',
+                      'aria-label': 'Task executor',
+                    }}
+                  >
+                    <DropdownMenuRadioGroup
+                      label="Task executor"
+                      value={props.newChatExecutor ?? 'maka'}
+                      onChange={(value) =>
+                        props.onNewChatExecutorChange?.(value as 'maka' | 'antigravity')
+                      }
+                    >
+                      <DropdownMenuRadioItem value="maka" label="Maka" />
+                      <DropdownMenuRadioItem value="antigravity" label="Antigravity" />
+                    </DropdownMenuRadioGroup>
+                  </DropdownMenu>
+                ) : null}
+                {externalAgentSelected ? (
+                  <ModelChipStatic label="Agent default" />
+                ) : props.activeSession ? (
                   <ChatModelSwitcher
                     presentation={props.modelPickerPresentation}
                     activeSession={props.activeSession}
@@ -2147,7 +2182,7 @@ export const Composer = forwardRef<
                     showUnavailableStatus={props.showStaticModelUnavailableStatus}
                   />
                 )}
-                {props.activeSession ? (
+                {!externalAgentSelected && props.activeSession ? (
                   <ThinkingLevelSelector
                     levels={props.activeThinkingLevels ?? []}
                     current={props.activeThinkingLevel}
@@ -2155,13 +2190,13 @@ export const Composer = forwardRef<
                     disabled={!modelSwitchAvailability.available}
                     disabledReason={thinkingSwitcherDisabledReason}
                   />
-                ) : (
+                ) : !externalAgentSelected ? (
                   <ThinkingLevelSelector
                     levels={props.newChatThinkingLevels ?? []}
                     current={props.newChatThinkingLevel}
                     onChange={props.onNewChatThinkingLevelChange}
                   />
-                )}
+                ) : null}
                 {props.contextUsage ? <ContextUsageAction {...props.contextUsage} /> : null}
               </div>
               {/* The project decides where a NEW chat starts, which makes it a

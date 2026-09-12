@@ -58,3 +58,5 @@ export {
   clearPending,
 } from '@maka/ui/pending-items';
 export { desktopSlashCommandPresentation } from './model/slash-command-presentation.js';
+
+export { newTaskExecutorTarget } from './model/new-task-executor-target.js';

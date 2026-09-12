@@ -1125,3 +1125,31 @@ function makeInput(overrides: Partial<CreateSessionInput> = {}): CreateSessionIn
     ...overrides,
   };
 }
+
+test('persists an ACP execution identity without a native model route', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-acp-session-'));
+  const store = createSessionStore(root);
+  try {
+    const created = await store.create({
+      cwd: root,
+      executionBackend: 'acp',
+      externalAgentId: 'antigravity',
+      permissionMode: 'ask',
+      name: 'Antigravity task',
+    });
+    assert.equal(created.backend, 'acp');
+    assert.equal(created.externalAgentId, 'antigravity');
+    assert.equal(created.llmConnectionId, undefined);
+    assert.equal(created.llmConnectionSlug, undefined);
+    assert.equal(created.model, undefined);
+    const summary = (await store.list()).find((session) => session.id === created.id);
+    assert.ok(summary);
+    assert.equal(summary.backend, 'acp');
+    assert.equal(summary.externalAgentId, 'antigravity');
+    assert.equal(summary.llmConnectionSlug, undefined);
+    assert.equal(summary.model, undefined);
+  } finally {
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});

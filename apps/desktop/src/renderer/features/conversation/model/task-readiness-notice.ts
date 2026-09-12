@@ -26,10 +26,11 @@ import { getTaskReadinessCopy } from '../../../locales/task-readiness-copy.js';
 
 /** Selects the stored model target for the renderer's readiness probe. */
 export function resolveTaskReadinessModelTarget(
-  session: { llmConnectionSlug: string; model: string } | undefined,
+  session: { backend?: string; llmConnectionSlug?: string; model?: string } | undefined,
   _sendOutcome: SessionSendProjection | undefined,
   newTaskTarget: { llmConnectionSlug: string; model: string } | undefined,
 ): { connectionSlug?: string; model?: string } {
+  if (session?.backend === 'acp') return {};
   return optionalModelTarget(
     session?.llmConnectionSlug ?? newTaskTarget?.llmConnectionSlug,
     session?.model ?? newTaskTarget?.model,

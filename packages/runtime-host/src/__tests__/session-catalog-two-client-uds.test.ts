@@ -386,7 +386,7 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
             modelTarget: {
               kind: 'explicit',
               connectionId: relocatedSession.llmConnectionId!,
-              connectionSlug: relocatedSession.llmConnectionSlug,
+              connectionSlug: relocatedSession.llmConnectionSlug!,
               model: WIRE_OVERSIZED_MODEL_ID,
             },
           },

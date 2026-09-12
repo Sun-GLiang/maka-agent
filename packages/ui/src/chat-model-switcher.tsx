@@ -336,7 +336,7 @@ export function ChatModelSwitcher(props: {
   const currentConnectionSlug =
     props.activeModelConnectionSlug ?? props.activeSession.llmConnectionSlug;
   const currentModel = props.activeModel ?? props.activeSession.model;
-  const currentValue = currentConnectionId
+  const currentValue = currentConnectionId && currentConnectionSlug && currentModel
     ? exactModelChoiceValue(
         currentConnectionId,
         currentConnectionSlug,
@@ -360,7 +360,7 @@ export function ChatModelSwitcher(props: {
       exactModelChoiceValue(choice.connectionId, choice.connectionSlug, choice.model) ===
       currentValue,
   );
-  const displayLabel = props.activeModelLabel ?? currentModel;
+  const displayLabel = props.activeModelLabel ?? currentModel ?? 'Model';
   const title = props.disabledReason ?? copy.switchAriaLabel;
   const announceWarning = menuOpen && props.hasConversationHistory === true;
   const pick = async (next: { llmConnectionSlug: string; llmConnectionId: string; model: string }) => {

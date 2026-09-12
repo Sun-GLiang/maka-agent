@@ -115,7 +115,8 @@ function blockedNotice(
       connection.connectionId === session.llmConnectionId &&
       connection.slug === session.llmConnectionSlug,
   );
-  const name = own?.name ?? session.llmConnectionSlug;
+  const name = own?.name ?? session.llmConnectionSlug ?? 'Model connection';
+  const model = session.model ?? 'Model';
   const healthCopy = getDesktopConversationCopy(input.locale).health;
   const copy = healthCopy.blocked[outcome.reason];
   const identityRecovery =
@@ -136,8 +137,8 @@ function blockedNotice(
     tone: 'destructive',
     label: copy.label,
     tooltip: opensModelPicker
-      ? copy.tooltip(name, session.model)
-      : (copy.settingsTooltip?.(name, session.model) ?? copy.tooltip(name, session.model)),
+      ? copy.tooltip(name, model)
+      : (copy.settingsTooltip?.(name, model) ?? copy.tooltip(name, model)),
     ...(opensModelPicker && copy.actionLabel ? { actionLabel: copy.actionLabel } : {}),
     ...(opensModelPicker && input.modelPickerDisabled ? { actionDisabled: true } : {}),
     onClickTarget: opensModelPicker ? 'model_picker' : 'models',

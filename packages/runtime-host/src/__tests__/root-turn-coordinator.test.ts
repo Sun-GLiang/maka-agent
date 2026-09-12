@@ -682,8 +682,8 @@ test('startup recovery closes a ScheduledTask Run after its pending fire was set
           provenance: 'runtime',
           backendKind: 'fake',
           llmConnectionId: session.llmConnectionId!,
-          llmConnectionSlug: session.llmConnectionSlug,
-          modelId: session.model,
+          llmConnectionSlug: session.llmConnectionSlug!,
+          modelId: session.model!,
         },
         configuration: {
           cwd: session.cwd,
@@ -767,8 +767,8 @@ test('startup recovery commits the catalog facts a crashed Turn wrote no project
           provenance: 'runtime',
           backendKind: 'fake',
           llmConnectionId: session.llmConnectionId!,
-          llmConnectionSlug: session.llmConnectionSlug,
-          modelId: session.model,
+          llmConnectionSlug: session.llmConnectionSlug!,
+          modelId: session.model!,
         },
         configuration: {
           cwd: session.cwd,

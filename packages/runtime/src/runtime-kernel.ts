@@ -763,6 +763,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
         abortSignal: execution.abortController.signal,
       })
     ).providerStateIdentity;
+    if (!header.model) throw new Error('ACP continuation replay is not supported');
     const admissionRoute: ContinuationReplayAdmissionRoute = {
       invocations: sessionRuns,
       targetProviderStateIdentity,
@@ -3085,7 +3086,13 @@ function continuationTargetOpeningForExecution(input: {
     kind: 'invocation_opened',
     protocol: 'invocation_opened_v1',
     route:
-      sessionHeader.llmConnectionId === undefined
+      sessionHeader.backend === 'acp'
+        ? {
+            provenance: 'unknown',
+            backendKind: 'acp',
+            externalAgentId: sessionHeader.externalAgentId,
+          }
+        : sessionHeader.llmConnectionId === undefined
         ? {
             provenance: 'unknown',
             backendKind: sessionHeader.backend,

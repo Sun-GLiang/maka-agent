@@ -364,7 +364,9 @@ export class HostSessionCatalogCoordinator {
     const prepared = await prepareCreate(input);
     return this.#workspaceResolver.runWithUsageRecorded(input.workspace, async (workspace) => {
       const [model, policy] = await Promise.all([
-        this.#resolveModel(input.modelTarget, input.thinkingLevel),
+        input.modelTarget.kind === 'external_agent'
+          ? Promise.resolve(undefined)
+          : this.#resolveModel(input.modelTarget, input.thinkingLevel),
         this.#readRuntimePolicy(),
       ]);
       return {
@@ -375,9 +377,13 @@ export class HostSessionCatalogCoordinator {
           ...(workspace.projectId === null ? {} : { projectId: workspace.projectId }),
           name: prepared.name,
           labels: [...prepared.labels],
-          llmConnectionId: model.connectionId,
-          llmConnectionSlug: model.connectionSlug,
-          model: model.model,
+          ...(input.modelTarget.kind === 'external_agent'
+            ? { executionBackend: 'acp' as const, externalAgentId: input.modelTarget.acpAgentId }
+            : {
+                llmConnectionId: model!.connectionId,
+                llmConnectionSlug: model!.connectionSlug,
+                model: model!.model,
+              }),
           ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }),
           ...(input.toolProfile === undefined ? {} : { toolProfile: input.toolProfile }),
           permissionMode: prepared.permissionMode ?? policy.policy.chatDefaults.permissionMode,
@@ -599,7 +605,9 @@ export class HostSessionCatalogCoordinator {
           input.workspace,
           async (workspace) => {
             const [model, policy] = await Promise.all([
-              this.#resolveModel(input.modelTarget, input.thinkingLevel),
+              input.modelTarget.kind === 'external_agent'
+                ? Promise.resolve(undefined)
+                : this.#resolveModel(input.modelTarget, input.thinkingLevel),
               this.#readRuntimePolicy(),
             ]);
             const createInput: CreateSessionInput = {
@@ -607,9 +615,13 @@ export class HostSessionCatalogCoordinator {
               ...(workspace.projectId === null ? {} : { projectId: workspace.projectId }),
               name: prepared.name,
               labels: [...prepared.labels],
-              llmConnectionId: model.connectionId,
-              llmConnectionSlug: model.connectionSlug,
-              model: model.model,
+              ...(input.modelTarget.kind === 'external_agent'
+                ? { executionBackend: 'acp' as const, externalAgentId: input.modelTarget.acpAgentId }
+                : {
+                    llmConnectionId: model!.connectionId,
+                    llmConnectionSlug: model!.connectionSlug,
+                    model: model!.model,
+                  }),
               ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }),
               ...(input.toolProfile === undefined ? {} : { toolProfile: input.toolProfile }),
               permissionMode: prepared.permissionMode ?? policy.policy.chatDefaults.permissionMode,
@@ -1200,7 +1212,17 @@ export class HostSessionCatalogCoordinator {
     current: SessionHeader,
     patch: SessionConfigurationUpdateInput['patch'],
   ): Promise<ResolvedSessionConfiguration> {
-    if (current.llmConnectionId === undefined && patch.modelTarget === undefined) {
+    if (current.backend === 'acp') {
+      throw new SessionOperationFailure(
+        'operation_conflict',
+        'External Agent execution target is fixed for this Session',
+      );
+    }
+    if (
+      current.llmConnectionSlug === undefined ||
+      current.model === undefined ||
+      (current.llmConnectionId === undefined && patch.modelTarget === undefined)
+    ) {
       throw new SessionOperationFailure(
         'operation_conflict',
         'Legacy Session configuration requires an explicit account selection',
@@ -1318,7 +1340,9 @@ function createRequestFingerprint(
     prepared.labels,
     input.modelTarget.kind === 'default'
       ? ['default']
-      : [
+      : input.modelTarget.kind === 'external_agent'
+        ? ['external_agent', input.modelTarget.acpAgentId]
+        : [
           'explicit',
           input.modelTarget.connectionId,
           input.modelTarget.connectionSlug,
@@ -1396,10 +1420,11 @@ export function projectSessionCatalogRecord(
     ...(header.revisionIndex === undefined ? {} : { revisionIndex: header.revisionIndex }),
     ...(header.revisionState === undefined ? {} : { revisionState: header.revisionState }),
     backend: header.backend,
+    ...(header.externalAgentId === undefined ? {} : { externalAgentId: header.externalAgentId }),
     llmConnectionId: header.llmConnectionId ?? null,
-    llmConnectionSlug: header.llmConnectionSlug,
+    ...(header.llmConnectionSlug === undefined ? {} : { llmConnectionSlug: header.llmConnectionSlug }),
     connectionLocked: header.connectionLocked,
-    model: header.model,
+    ...(header.model === undefined ? {} : { model: header.model }),
     ...(header.thinkingLevel === undefined ? {} : { thinkingLevel: header.thinkingLevel }),
     permissionMode: header.permissionMode,
     collaborationMode: header.collaborationMode ?? 'agent',

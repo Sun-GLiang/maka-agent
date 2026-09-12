@@ -889,6 +889,9 @@ type ExecutionRouteHeader = Pick<
 >;
 
 function executionConnectionRef(header: ExecutionRouteHeader) {
+  if (header.llmConnectionSlug === undefined) {
+    throw new AuxiliaryModelCallConfigurationError('Session has no native model connection');
+  }
   return header.llmConnectionId === undefined
     ? { kind: 'catalog_slug' as const, connectionSlug: header.llmConnectionSlug }
     : {
@@ -977,6 +980,9 @@ export async function resolveExecutionTarget(
   oauthCredentials: HostOAuthExecutionAuthority,
   createFetchTransport: (proxy: ProxiedFetchProxy | null) => ProxiedFetchTransport,
 ): Promise<ResolvedExecutionTarget> {
+  if (header.llmConnectionSlug === undefined || header.model === undefined) {
+    throw new AuxiliaryModelCallConfigurationError('Session has no native model route');
+  }
   const resolved = await runtimePolicy.operations.resolveExecutionConnection(
     executionConnectionRef(header),
   );

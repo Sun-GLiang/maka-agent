@@ -280,12 +280,19 @@ function transcriptOpeningEvent(input: {
   const opening: RuntimeEventInvocationOpenedContent = {
     kind: 'invocation_opened',
     protocol: 'invocation_opened_v1',
-    route: {
-      provenance: 'unknown',
-      backendKind: input.header.backend,
-      llmConnectionSlug: input.header.llmConnectionSlug,
-      modelId: input.header.model,
-    },
+    route:
+      input.header.backend === 'acp'
+        ? {
+            provenance: 'unknown',
+            backendKind: 'acp',
+            externalAgentId: input.header.externalAgentId,
+          }
+        : {
+            provenance: 'unknown',
+            backendKind: input.header.backend,
+            llmConnectionSlug: input.header.llmConnectionSlug,
+            modelId: input.header.model,
+          },
     configuration: {
       cwd: input.header.cwd,
       permissionMode: input.header.permissionMode,

@@ -189,6 +189,7 @@ export function createAppShellChatActions(deps: {
   ) => void;
   toastApi: ToastApi;
   newChatModel: PendingNewChatModel;
+  newChatExecutor?: 'maka' | 'antigravity';
   pendingNewChatThinkingLevel: PendingNewChatThinkingLevel;
   /**
    * The user's explicit choice for this draft, or undefined when they made
@@ -230,6 +231,7 @@ export function createAppShellChatActions(deps: {
     showModelSetupToast,
     toastApi,
     newChatModel,
+    newChatExecutor = 'maka',
     pendingNewChatThinkingLevel,
     newChatPermissionChoice,
     clearNewChatPermissionChoice,
@@ -462,13 +464,7 @@ export function createAppShellChatActions(deps: {
         if (pending?.length) preflightAttachmentItems(pending);
         const session = await window.maka.newTasks.create(initialNewTaskTarget, {
           name: DEFAULT_SESSION_NAME,
-          ...(newChatModel
-            ? {
-                llmConnectionId: newChatModel.llmConnectionId,
-                llmConnectionSlug: newChatModel.llmConnectionSlug,
-                model: newChatModel.model,
-              }
-            : {}),
+          ...Conversation.newTaskExecutorTarget(newChatExecutor, newChatModel),
           ...(pendingNewChatThinkingLevel ? { thinkingLevel: pendingNewChatThinkingLevel } : {}),
           ...(newChatPermissionChoice ? { permissionMode: newChatPermissionChoice } : {}),
           collaborationMode: newChatCollaborationMode,
