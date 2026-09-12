@@ -435,8 +435,16 @@ export class DesktopRuntimeHostClient {
   async updateRuntimePolicy(
     buildOperation: (policy: RuntimePolicy) => RuntimePolicyMutation,
   ): Promise<OperationOutput<"runtime.policy.query">> {
+    return this.updateRuntimePolicyIf(() => true, buildOperation);
+  }
+
+  async updateRuntimePolicyIf(
+    accepts: (policy: RuntimePolicy) => boolean,
+    buildOperation: (policy: RuntimePolicy) => RuntimePolicyMutation,
+  ): Promise<OperationOutput<"runtime.policy.query">> {
     for (let attempt = 0; attempt < MAX_OPTIMISTIC_ATTEMPTS; attempt += 1) {
       const current = await this.queryRuntimePolicy();
+      if (!accepts(current.policy)) return current;
       const result = await this.request("runtime.policy.mutate", {
         expectedRevision: current.revision,
         operation: buildOperation(current.policy),
@@ -544,6 +552,18 @@ export class DesktopRuntimeHostClient {
     input: OperationInput<"connection.onboarding.save">,
   ): Promise<OperationOutput<"connection.onboarding.save">> {
     return this.request("connection.onboarding.save", input);
+  }
+
+  startExternalAgentSetup(input: OperationInput<"external_agents.setup.start">): Promise<OperationOutput<"external_agents.setup.start">> {
+    return this.request("external_agents.setup.start", input);
+  }
+
+  queryExternalAgentSetup(attemptId: string): Promise<OperationOutput<"external_agents.setup.query">> {
+    return this.request("external_agents.setup.query", { attemptId });
+  }
+
+  cancelExternalAgentSetup(attemptId: string): Promise<OperationOutput<"external_agents.setup.cancel">> {
+    return this.request("external_agents.setup.cancel", { attemptId });
   }
 
   startOAuthLogin(
@@ -1013,6 +1033,20 @@ export class DesktopRuntimeHostClient {
     return requireSessionProjection(result.session);
   }
 
+  exportSessionBundle(input: {
+    readonly sessionId: string;
+    readonly destination: string;
+    readonly expectedSubtreeDigest?: string;
+  }): Promise<{ readonly sessionCount: number; readonly compressedBytes: number }> {
+    return this.request("session-bundle.export", input);
+  }
+
+  importSessionBundle(input: {
+    readonly source: string;
+  }): Promise<{ readonly sessionCount: number; readonly artifactFiles: number }> {
+    return this.request("session-bundle.import", input);
+  }
+
   updateSessionMetadata(
     sessionId: string,
     patch: SessionMetadataPatch,
@@ -1331,11 +1365,14 @@ export class DesktopRuntimeHostClient {
 
   prepareHostRetirement(
     mode: RuntimeHostRetirementMode,
+    options?: { readonly timeoutMs?: number; readonly allowCooperativeHandoff?: boolean },
   ): Promise<RuntimeHostRetirementPreparation> {
     return prepareConnectedRuntimeHostRetirement(
       this.connection,
       mode,
-      RUNTIME_HOST_RETIREMENT_TIMEOUT_MS,
+      options?.timeoutMs ?? RUNTIME_HOST_RETIREMENT_TIMEOUT_MS,
+      undefined,
+      options,
     );
   }
 
