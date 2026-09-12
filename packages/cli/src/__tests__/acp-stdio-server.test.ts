@@ -29,6 +29,7 @@ import {
   type SubscriptionFrame,
 } from '@maka/runtime-host/protocol';
 import {
+  RuntimeHostOperationError,
   RuntimeHostRequestInterruptedError,
   type RuntimeHostConnection,
   type RuntimeHostSessionSubscription,
@@ -184,139 +185,194 @@ describe('Maka ACP stdio server', () => {
     });
   }
 
-  test('retains ACP cancellation until the real channel recovers an outcome-unknown start', {
-    timeout: 5_000,
-  }, async () => {
-    const stdin = new PassThrough();
-    let sessionId: string | undefined;
-    let session: SessionCatalogProjection | undefined;
-    let admitted:
-      | {
-          sessionId: string;
-          turnId: string;
-          runId: string;
-          status: 'running';
-        }
-      | undefined;
-    let rejectStart!: (error: Error) => void;
-    const start = new Promise<never>((_resolve, reject) => {
-      rejectStart = reject;
-    });
-    let first: FakeSubscription | undefined;
-    let opens = 0;
-    let turnQueries = 0;
-    const stops: unknown[] = [];
-    const snapshot = (
-      projectionRevision: number,
-      rootTurn: SessionContinuitySnapshot['rootTurn'],
-    ): SessionContinuitySnapshot =>
-      continuitySnapshot({ sessionId: sessionId!, projectionRevision, rootTurn });
-    const connection = {
-      request: async (operation: string, input: { sessionId: string; turnId: string }) => {
-        if (operation === 'session.create') {
-          sessionId = input.sessionId;
-          return (session = sessionProjection({ id: sessionId }));
-        }
-        if (operation === 'connection.catalog.query') return connectionCatalogPage();
-        if (operation === 'session.catalog.query') return { kind: 'session', session };
-        if (operation === 'turn.start') {
-          admitted = {
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            runId: 'run-unknown-start',
-            status: 'running',
-          };
-          return start;
-        }
-        if (operation === 'turn.query') {
-          turnQueries += 1;
-          return new Promise<never>(() => undefined);
-        }
-        if (operation === 'turn.stop') {
-          stops.push(input);
-          return {};
-        }
-        assert.fail(`Unexpected operation: ${operation}`);
-      },
-      openSessionSubscription: async () => {
-        opens += 1;
-        if (opens === 1) {
-          first = new FakeSubscription(snapshot(1, null), Promise.resolve([]));
-          return first;
-        }
-        assert.ok(admitted);
-        return new FakeSubscription(
-          snapshot(2, admitted),
-          Promise.resolve([]),
-          'subscription-recovered',
-        );
-      },
-      close: async () => undefined,
-    } as unknown as RuntimeHostConnection;
-    const harness = createHarness([], { stdin, connection });
-    const run = harness.run();
-    const response = () =>
-      (
-        harness.stdoutMessages() as Array<{
-          id?: number;
-          result?: { stopReason?: string };
-        }>
-      ).find(({ id }) => id === 2);
-    const send = (value: unknown) => stdin.write(`${JSON.stringify(value)}\n`);
-
-    try {
-      send({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'session/new',
-        params: { cwd: '/workspace', mcpServers: [] },
+  for (const { queryOutcome, recovery } of [
+    { queryOutcome: 'pending', recovery: 'running' },
+    { queryOutcome: 'pending', recovery: 'absent' },
+    { queryOutcome: 'internal_failure', recovery: 'running' },
+    { queryOutcome: 'internal_failure', recovery: 'held_empty' },
+    { queryOutcome: 'internal_failure', recovery: 'terminal' },
+    { queryOutcome: 'internal_failure', recovery: 'absent' },
+    { queryOutcome: 'internal_failure', recovery: 'other_turn' },
+    { queryOutcome: 'internal_failure', recovery: 'failed' },
+    { queryOutcome: 'not_found', recovery: 'none' },
+  ] as const) {
+    test(`settles outcome-unknown ACP cancellation with ${queryOutcome} query and ${recovery} recovery`, {
+      timeout: 5_000,
+    }, async () => {
+      const stdin = new PassThrough();
+      let sessionId: string | undefined;
+      let session: SessionCatalogProjection | undefined;
+      let admitted:
+        | {
+            sessionId: string;
+            turnId: string;
+            runId: string;
+            status: 'running';
+          }
+        | undefined;
+      let rejectStart!: (error: Error) => void;
+      const start = new Promise<never>((_resolve, reject) => {
+        rejectStart = reject;
       });
-      await waitFor(() =>
-        harness.stdoutMessages().some((message) => (message as { id?: number }).id === 1),
-      );
-      send({
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'session/prompt',
-        params: { sessionId: sessionId!, prompt: [{ type: 'text', text: 'Hello' }] },
+      let releaseRecovery!: (messages: StoredMessage[]) => void;
+      const recoveryTranscript = new Promise<StoredMessage[]>((resolve) => {
+        releaseRecovery = resolve;
       });
-      await waitFor(() => Boolean(admitted && first));
-      send({
-        jsonrpc: '2.0',
-        method: 'session/cancel',
-        params: { sessionId: sessionId! },
-      });
-      rejectStart(
-        new RuntimeHostRequestInterruptedError(
-          'turn.start',
-          'command',
-          'dispatched',
-          'connection_lost',
-        ),
-      );
-      await waitFor(() => turnQueries === 1);
-      first!.push({
-        kind: 'subscription.closed',
-        hostEpoch: 'host-1',
-        subscriptionId: 'subscription-1',
-        sequence: 1,
-        reason: 'slow_consumer',
-      });
-
-      await waitFor(() => stops.length === 1 && Boolean(response()));
-      assert.deepEqual(stops, [
-        {
-          sessionId: admitted!.sessionId,
-          turnId: admitted!.turnId,
-          runId: admitted!.runId,
+      let first: FakeSubscription | undefined;
+      let opens = 0;
+      let turnQueries = 0;
+      const stops: unknown[] = [];
+      const snapshot = (
+        projectionRevision: number,
+        rootTurn: SessionContinuitySnapshot['rootTurn'],
+      ): SessionContinuitySnapshot =>
+        continuitySnapshot({ sessionId: sessionId!, projectionRevision, rootTurn });
+      const connection = {
+        request: async (operation: string, input: { sessionId: string; turnId: string }) => {
+          if (operation === 'session.create') {
+            sessionId = input.sessionId;
+            return (session = sessionProjection({ id: sessionId }));
+          }
+          if (operation === 'connection.catalog.query') return connectionCatalogPage();
+          if (operation === 'session.catalog.query') return { kind: 'session', session };
+          if (operation === 'turn.start') {
+            admitted = {
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              runId: 'run-unknown-start',
+              status: 'running',
+            };
+            return start;
+          }
+          if (operation === 'turn.query') {
+            turnQueries += 1;
+            if (turnQueries > 1) {
+              if (recovery === 'held_empty') return admitted;
+              assert.ok(recovery === 'absent' || recovery === 'other_turn');
+              throw new RuntimeHostOperationError(
+                'turn.query',
+                'not_found',
+                'Turn was not admitted',
+              );
+            }
+            if (queryOutcome !== 'pending') {
+              throw new RuntimeHostOperationError('turn.query', queryOutcome, 'Query failed');
+            }
+            return new Promise<never>(() => undefined);
+          }
+          if (operation === 'turn.stop') {
+            stops.push(input);
+            return {};
+          }
+          assert.fail(`Unexpected operation: ${operation}`);
         },
-      ]);
-      assert.deepEqual(response()?.result, { stopReason: 'cancelled' });
-    } finally {
-      stdin.end();
-      await run;
-    }
-  });
+        openSessionSubscription: async () => {
+          opens += 1;
+          if (opens === 1) {
+            first = new FakeSubscription(snapshot(1, null), Promise.resolve([]));
+            return first;
+          }
+          assert.ok(admitted);
+          if (recovery === 'failed') throw new Error('Session attachment permanently failed');
+          const root: SessionContinuitySnapshot['rootTurn'] =
+            recovery === 'absent' || recovery === 'held_empty'
+              ? null
+              : recovery === 'terminal'
+                ? { ...admitted, status: 'completed', terminalEventId: 'terminal-unknown-start' }
+                : recovery === 'other_turn'
+                  ? { ...admitted, turnId: 'unrelated-turn', runId: 'unrelated-run' }
+                  : admitted;
+          return new FakeSubscription(
+            snapshot(2, root),
+            recovery === 'held_empty' ? recoveryTranscript : Promise.resolve([]),
+            'subscription-recovered',
+          );
+        },
+        close: async () => undefined,
+      } as unknown as RuntimeHostConnection;
+      const harness = createHarness([], { stdin, connection });
+      const run = harness.run();
+      const response = () =>
+        (
+          harness.stdoutMessages() as Array<{
+            id?: number;
+            result?: { stopReason?: string };
+          }>
+        ).find(({ id }) => id === 2);
+      const send = (value: unknown) => stdin.write(`${JSON.stringify(value)}\n`);
+      const startRecovery = () =>
+        first!.push({
+          kind: 'subscription.closed',
+          hostEpoch: 'host-1',
+          subscriptionId: 'subscription-1',
+          sequence: 1,
+          reason: 'slow_consumer',
+        });
+
+      try {
+        send({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'session/new',
+          params: { cwd: '/workspace', mcpServers: [] },
+        });
+        await waitFor(() =>
+          harness.stdoutMessages().some((message) => (message as { id?: number }).id === 1),
+        );
+        send({
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'session/prompt',
+          params: { sessionId: sessionId!, prompt: [{ type: 'text', text: 'Hello' }] },
+        });
+        await waitFor(() => Boolean(admitted && first));
+        send({
+          jsonrpc: '2.0',
+          method: 'session/cancel',
+          params: { sessionId: sessionId! },
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        if (recovery === 'held_empty') {
+          // The replacement snapshot precedes the lost start reply; hydration completes later.
+          startRecovery();
+          await waitFor(() => opens === 2);
+        }
+        rejectStart(
+          new RuntimeHostRequestInterruptedError(
+            'turn.start',
+            'command',
+            'dispatched',
+            'connection_lost',
+          ),
+        );
+        await waitFor(() => turnQueries === 1);
+        if (recovery !== 'none') {
+          await new Promise((resolve) => setImmediate(resolve));
+          assert.equal(response(), undefined, 'cancellation must wait for the channel recovery');
+          if (recovery === 'held_empty') releaseRecovery([]);
+          else startRecovery();
+        }
+
+        await waitFor(() => Boolean(response()));
+        assert.equal(opens, recovery === 'none' ? 1 : 2);
+        assert.deepEqual(
+          stops,
+          recovery === 'running' || recovery === 'held_empty'
+            ? [{ sessionId: admitted!.sessionId, turnId: admitted!.turnId, runId: admitted!.runId }]
+            : [],
+        );
+        assert.equal(
+          turnQueries,
+          recovery === 'absent' || recovery === 'other_turn' || recovery === 'held_empty' ? 2 : 1,
+        );
+        assert.deepEqual(response()?.result, { stopReason: 'cancelled' });
+      } finally {
+        releaseRecovery([]);
+        stdin.end();
+        await run;
+      }
+    });
+  }
 
   test('publishes a local configuration commit before a newer external revision', {
     timeout: 5_000,

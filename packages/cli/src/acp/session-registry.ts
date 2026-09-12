@@ -319,24 +319,7 @@ export class AcpSessionRegistry {
           error instanceof RuntimeHostRequestInterruptedError && error.dispatch === 'dispatched'
         );
         if (!active.admissionSettled) {
-          void connection.request('turn.query', { sessionId: active.sessionId, turnId }).then(
-            (turn) => {
-              active.startedTurn = turn;
-              active.admissionSettled = true;
-              this.#wake(active);
-            },
-            (queryError: unknown) => {
-              // A retryable query interruption still leaves subscription
-              // recovery as a fact source. Any permanent failure ends this
-              // local attempt without claiming that Host rejected admission.
-              if (
-                !(queryError instanceof RuntimeHostRequestInterruptedError && queryError.retryable)
-              ) {
-                active.admissionSettled = true;
-              }
-              this.#wake(active);
-            },
-          );
+          this.#queryPromptAdmission(active, connection);
         }
         this.#wake(active);
         attachment.failTurn(turnId, error);
@@ -456,6 +439,26 @@ export class AcpSessionRegistry {
     }
   }
 
+  #queryPromptAdmission(active: ActiveAcpPrompt, connection: AcpSessionRegistryConnection): void {
+    void connection
+      .request('turn.query', { sessionId: active.sessionId, turnId: active.turnId })
+      .then(
+        (turn) => {
+          active.startedTurn = turn;
+          active.admissionSettled = true;
+          this.#wake(active);
+        },
+        (error: unknown) => {
+          // A failed query leaves channel recovery as a source of the exact
+          // Turn identity. Only authoritative absence settles admission.
+          if (error instanceof RuntimeHostOperationError && error.code === 'not_found') {
+            active.admissionSettled = true;
+          }
+          this.#wake(active);
+        },
+      );
+  }
+
   async #ensureAttachment(
     sessionId: string,
     connection: AcpSessionRegistryConnection,
@@ -532,7 +535,24 @@ export class AcpSessionRegistry {
       onTranscriptSettlement: () => undefined,
       onGoalChanged: () => undefined,
       onFailed: failAttachment,
-      onRecovered: () => undefined,
+      onRecovered: () => {
+        for (const active of this.#activePrompts.get(sessionId) ?? []) {
+          if (
+            active.attachment !== attachment ||
+            !active.startRequestSettled ||
+            active.admissionSettled
+          ) {
+            continue;
+          }
+          // Recovery may hydrate a snapshot taken before start admission.
+          // An absent root needs a fresh query; a matching root can be stopped
+          // directly by the existing cancellation task.
+          if (attachment?.snapshot.rootTurn?.turnId !== active.turnId) {
+            this.#queryPromptAdmission(active, connection);
+          }
+          this.#wake(active);
+        }
+      },
     })
       .then(({ channel }) => {
         channel.activate();
