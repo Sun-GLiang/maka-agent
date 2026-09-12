@@ -35,12 +35,25 @@ Session remains owned and can accept another prompt or be closed.
 
 Local resource links must identify regular files. Filesystem admission rejects
 non-regular files, including POSIX FIFOs, before reading their content.
+After live attachment succeeds, the adapter uploads each linked file through the
+Host's existing Session Artifact protocol and uses its canonical attachment
+reference for Turn admission. Cancellation or close during an upload aborts staged
+content and prevents that prompt from starting a Turn.
+
+When a dispatched start loses its response, the adapter retries admission queries
+with bounded deadlines instead of replaying the start. Only a matching Turn or
+authoritative `not_found` settles admission. Exhausted reads report `outcome_unknown`;
+explicit cancellation still returns `cancelled`, with the failed Stop diagnostic
+retained. Shutdown can cancel an initial attachment waiting for transcript hydration
+or reconnection without waiting for the Host to become available.
 
 Interaction mapping remains deferred to the next ACP capability increment. If a
 pending permission, question, form, sandbox-boundary, or client-capability request
-is observed, the adapter rejects the affected prompt with JSON-RPC `-32603` and
+belongs to an active ACP prompt, the adapter rejects it with JSON-RPC `-32603` and
 `error.data.code: unsupported_interaction` (`error.data.kind` identifies the request).
 It retires the attachment and uses the existing failure path to request Stop for
 that prompt's exact Host Turn. It does not answer or approve the interaction;
 Host remains responsible for settlement. A failed Stop retains the Host diagnostic.
 The durable Session remains owned and can be prompted again or closed.
+Interactions belonging to another client's Turn keep the idle attachment available
+so ACP cancellation and close can still stop the observed root.

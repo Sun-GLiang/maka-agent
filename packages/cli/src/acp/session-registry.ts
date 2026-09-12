@@ -71,15 +71,19 @@ import {
   validateAcpSessionConfigOptionRequest,
 } from './session-configuration.js';
 import { AcpSessionEventMapper } from './session-event-mapper.js';
-import { mapAcpPromptContent } from './prompt-content.js';
+import { mapAcpPromptContent, publishAcpPromptAttachments } from './prompt-content.js';
 
 const ACP_SESSION_CURSOR_MAX_BYTES = 8 * 1024;
+const ADMISSION_QUERY_MAX_ATTEMPTS = 5;
+const ADMISSION_QUERY_TIMEOUT_MS = 1_000;
+const ADMISSION_QUERY_RETRY_MS = 25;
 
 type AcpSessionRegistryOperation =
   | 'connection.catalog.query'
   | 'session.create'
   | 'session.catalog.query'
   | 'session.configuration.update'
+  | 'artifact.ingest'
   | 'subscription.open'
   | 'turn.start'
   | 'turn.stop';
@@ -122,6 +126,8 @@ interface ActiveAcpPrompt {
   dispatchStarted: boolean;
   startRequestSettled: boolean;
   admissionSettled: boolean;
+  admissionQuery?: Promise<void>;
+  admissionFailure?: RequestError;
   startedTurn?: TurnSnapshot;
   cancelled: boolean;
   finished: boolean;
@@ -136,6 +142,7 @@ export class AcpSessionRegistry {
   readonly #inFlightOperations = new Set<Promise<unknown>>();
   readonly #ownedSessionIds = new Set<string>();
   readonly #attachments = new Map<string, Promise<RuntimeHostSessionChannel>>();
+  readonly #attachmentOpenControllers = new Map<string, AbortController>();
   readonly #attachmentConfigurations = new Map<string, AcpAttachmentConfiguration>();
   readonly #pendingConfigSets = new Map<string, Set<Promise<unknown>>>();
   readonly #activePrompts = new Map<string, Set<ActiveAcpPrompt>>();
@@ -294,6 +301,25 @@ export class AcpSessionRegistry {
       this.#wake(active);
       if (active.cancelled) return { stopReason: await this.#cancelledStopReason(active) };
 
+      try {
+        startInput = {
+          ...startInput,
+          content: await publishAcpPromptAttachments(content, {
+            sessionId: params.sessionId,
+            connection,
+            assertActive: () => {
+              if (active.cancelled) throw new Error('ACP prompt cancelled before Turn admission');
+              this.#assertOpen('turn.start');
+              this.#assertOwned(params.sessionId);
+            },
+          }),
+        };
+      } catch (error) {
+        if (error instanceof RequestError) throw error;
+        throw requestErrorFromRuntimeHost(error, 'artifact.ingest');
+      }
+      if (active.cancelled) return { stopReason: await this.#cancelledStopReason(active) };
+
       const observation = this.#consumePromptEvents(active, attachment.eventsForTurn(turnId));
       // Mark the observer as handled immediately: turn.start may still be in flight
       // when the live subscription reports a failure.
@@ -337,6 +363,7 @@ export class AcpSessionRegistry {
       active.stopTask ??= this.#stopPromptWhenObservable(active);
       await active.stopTask.catch(() => undefined);
       if (active.cancelled) return { stopReason: await this.#cancelledStopReason(active) };
+      if (active.admissionFailure) throw active.admissionFailure;
       if (error instanceof RequestError) throw error;
       throw requestErrorFromRuntimeHost(error, 'subscription.open');
     } finally {
@@ -370,6 +397,7 @@ export class AcpSessionRegistry {
   #cancelSession(sessionId: string): Promise<PromiseSettledResult<void>[]> {
     const active = [...(this.#activePrompts.get(sessionId) ?? [])];
     const cancellations = active.map((prompt) => this.#cancelPrompt(prompt));
+    this.#attachmentOpenControllers.get(sessionId)?.abort();
     const attachment = this.#attachments.get(sessionId);
     if (attachment) {
       cancellations.push(
@@ -399,6 +427,14 @@ export class AcpSessionRegistry {
 
   async #cancelPrompt(active: ActiveAcpPrompt): Promise<void> {
     active.cancelled = true;
+    this.#wake(active);
+    if (
+      [...(this.#activePrompts.get(active.sessionId) ?? [])].every(
+        (prompt) => prompt.cancelled && !prompt.dispatchStarted,
+      )
+    ) {
+      this.#attachmentOpenControllers.get(active.sessionId)?.abort();
+    }
     active.stopTask ??= this.#stopPromptWhenObservable(active);
     await Promise.all([
       active.mapper.flush(),
@@ -435,28 +471,76 @@ export class AcpSessionRegistry {
         return;
       }
       if (active.admissionSettled && active.startRequestSettled) return;
+      if (active.admissionFailure) {
+        console.error('[acp] Host Turn admission remains unknown:', active.admissionFailure);
+        throw active.admissionFailure;
+      }
       await this.#waitForPromptChange(active);
     }
   }
 
   #queryPromptAdmission(active: ActiveAcpPrompt, connection: AcpSessionRegistryConnection): void {
-    void connection
-      .request('turn.query', { sessionId: active.sessionId, turnId: active.turnId })
-      .then(
-        (turn) => {
+    // Recovery and the lost start response can both request this read. Keep one
+    // bounded retry task; neither a healthy subscription nor a failed query
+    // establishes whether a dispatched start was admitted.
+    active.admissionQuery ??= this.#readPromptAdmission(active, connection);
+  }
+
+  async #readPromptAdmission(
+    active: ActiveAcpPrompt,
+    connection: AcpSessionRegistryConnection,
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < ADMISSION_QUERY_MAX_ATTEMPTS; attempt += 1) {
+      if (active.finished || active.admissionSettled || (this.#closing && attempt > 0)) return;
+      const observed = active.attachment?.snapshot.rootTurn;
+      if (observed?.turnId === active.turnId) {
+        active.startedTurn = observed;
+        active.admissionSettled = true;
+        this.#wake(active);
+        return;
+      }
+      try {
+        const turn = await connection.request(
+          'turn.query',
+          { sessionId: active.sessionId, turnId: active.turnId },
+          ADMISSION_QUERY_TIMEOUT_MS,
+        );
+        if (!active.finished && !active.admissionSettled) {
           active.startedTurn = turn;
           active.admissionSettled = true;
           this.#wake(active);
-        },
-        (error: unknown) => {
-          // A failed query leaves channel recovery as a source of the exact
-          // Turn identity. Only authoritative absence settles admission.
-          if (error instanceof RuntimeHostOperationError && error.code === 'not_found') {
-            active.admissionSettled = true;
-          }
+        }
+        return;
+      } catch (error) {
+        if (error instanceof RuntimeHostOperationError && error.code === 'not_found') {
+          active.admissionSettled = true;
           this.#wake(active);
-        },
-      );
+          return;
+        }
+        lastError = error;
+      }
+      if (active.finished || active.admissionSettled || this.#closing) return;
+      if (attempt + 1 < ADMISSION_QUERY_MAX_ATTEMPTS) {
+        await this.#waitForPromptChange(active, ADMISSION_QUERY_RETRY_MS * 2 ** attempt);
+      }
+    }
+    if (active.attachment?.snapshot.rootTurn?.turnId === active.turnId) {
+      this.#wake(active);
+      return;
+    }
+    active.admissionFailure = RequestError.internalError(
+      {
+        source: 'runtime_host',
+        operation: 'turn.query',
+        code: 'outcome_unknown',
+        reason: 'admission_query_failed',
+        attempts: ADMISSION_QUERY_MAX_ATTEMPTS,
+        cause: runtimeHostErrorData(lastError, 'turn.query'),
+      },
+      'Runtime Host Turn admission could not be established; Stop could not be confirmed',
+    );
+    this.#wake(active);
   }
 
   async #ensureAttachment(
@@ -466,6 +550,8 @@ export class AcpSessionRegistry {
   ): Promise<RuntimeHostSessionChannel> {
     const existing = this.#attachments.get(sessionId);
     if (existing) return existing;
+    const openingController = new AbortController();
+    this.#attachmentOpenControllers.set(sessionId, openingController);
     const configuration: AcpAttachmentConfiguration = {
       notify,
       // Setters can outlive an absent or failed attachment. Their responses
@@ -485,6 +571,7 @@ export class AcpSessionRegistry {
     };
     task = RuntimeHostSessionChannel.open({
       connection,
+      signal: openingController.signal,
       openInitialSessionSubscription: connection.openSessionSubscriptionOnce.bind(connection),
       sessionId,
       now: Date.now,
@@ -522,6 +609,15 @@ export class AcpSessionRegistry {
         }
       },
       onInteractionPending: (pending) => {
+        if (
+          ![...(this.#activePrompts.get(sessionId) ?? [])].some(
+            (active) => active.turnId === pending.turnId && active.dispatchStarted,
+          )
+        ) {
+          // An idle attachment may observe another client's Turn. Retain its
+          // identity so a later ACP cancel/close can still stop that root.
+          return;
+        }
         // Full interaction mapping belongs to the next ACP capability increment.
         // Retire observation so the prompt's existing failure path stops its exact Turn.
         failAttachment(
@@ -575,6 +671,11 @@ export class AcpSessionRegistry {
         }
         if (error instanceof RequestError) throw error;
         throw requestErrorFromRuntimeHost(error, 'subscription.open');
+      })
+      .finally(() => {
+        if (this.#attachmentOpenControllers.get(sessionId) === openingController) {
+          this.#attachmentOpenControllers.delete(sessionId);
+        }
       });
     this.#attachments.set(sessionId, task);
     return task;
@@ -592,10 +693,8 @@ export class AcpSessionRegistry {
     }
     for (const active of this.#activePrompts.get(sessionId) ?? []) {
       if (active.attachment !== attachment) continue;
-      // Recovery has ended, so no future subscription fact can settle an
-      // outcome-unknown admission. A pending start response may still provide
-      // the exact identity and is handled before cancellation can retire.
-      active.admissionSettled = true;
+      // Losing observation cannot settle a dispatched start. Its pending
+      // response or bounded admission query still owns the exact Stop identity.
       attachment.failTurn(active.turnId, error);
       this.#wake(active);
     }
@@ -646,8 +745,17 @@ export class AcpSessionRegistry {
     active.waiters.clear();
   }
 
-  #waitForPromptChange(active: ActiveAcpPrompt): Promise<void> {
-    return new Promise((resolve) => active.waiters.add(resolve));
+  #waitForPromptChange(active: ActiveAcpPrompt, timeoutMs?: number): Promise<void> {
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const wake = () => {
+        if (timer !== undefined) clearTimeout(timer);
+        active.waiters.delete(wake);
+        resolve();
+      };
+      active.waiters.add(wake);
+      if (timeoutMs !== undefined) timer = setTimeout(wake, timeoutMs);
+    });
   }
 
   #assertOwned(sessionId: string): void {

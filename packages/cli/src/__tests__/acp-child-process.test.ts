@@ -19,14 +19,19 @@
 
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { realpath } from 'node:fs/promises';
+import { realpath, writeFile } from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
+import { pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
 import { methods, type SessionNotification } from '@agentclientprotocol/sdk';
 import { waitFor } from '@maka/core/test-only/async-primitives';
 import { connectRuntimeHost } from '@maka/runtime-host/client';
-import { RUNTIME_HOST_PROTOCOL_VERSION } from '@maka/runtime-host/protocol';
+import {
+  ARTIFACT_INGEST_CHUNK_MAX_BYTES,
+  RUNTIME_HOST_PROTOCOL_VERSION,
+} from '@maka/runtime-host/protocol';
 import { getRuntimeHostSession } from '../runtime-host-session-update.js';
 import {
   pipeCapturedStdout,
@@ -331,6 +336,68 @@ describe('Maka ACP child process', () => {
       },
       { startRuntimeHost: true },
     );
+  });
+
+  test('publishes local resource links as Session Artifacts before prompting the real Host', {
+    timeout: 30_000,
+  }, async () => {
+    const model = await startAcpModelFixture();
+    try {
+      await withAcpChildProcessHarness(
+        async (harness) => {
+          const path = join(harness.workspaceRoot, 'notes.txt');
+          const contents = 'x'.repeat(ARTIFACT_INGEST_CHUNK_MAX_BYTES + 7);
+          await writeFile(path, contents);
+          await harness.withClient(async ({ context }) => {
+            await context.request(methods.agent.initialize, { protocolVersion: 1 });
+            const { sessionId } = await context.request(methods.agent.session.new, {
+              cwd: harness.workspaceRoot,
+              mcpServers: [],
+            });
+            assert.deepEqual(
+              await context.request(methods.agent.session.prompt, {
+                sessionId,
+                prompt: [
+                  { type: 'text', text: 'COMPLETE_ME' },
+                  {
+                    type: 'resource_link',
+                    uri: pathToFileURL(path).href,
+                    name: 'notes.txt',
+                    mimeType: 'text/plain',
+                  },
+                ],
+              }),
+              { stopReason: 'end_turn' },
+            );
+            const connected = await connectRuntimeHost({
+              rootPath: harness.workspaceRoot,
+              protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+            });
+            if (connected.kind !== 'connected') assert.fail('Host connection unavailable');
+            try {
+              const listed = await connected.connection.request('artifact.query', {
+                kind: 'list_start',
+                sessionId,
+              });
+              assert.equal(listed.kind, 'page');
+              if (listed.kind !== 'page') assert.fail('Expected Artifact page');
+              assert.equal(listed.artifacts.length, 1);
+              assert.equal(listed.artifacts[0]!.name, 'notes.txt');
+              assert.equal(listed.artifacts[0]!.sizeBytes, contents.length);
+            } finally {
+              await connected.connection.close();
+            }
+            await context.request(methods.agent.session.close, { sessionId });
+          });
+        },
+        {
+          startRuntimeHost: true,
+          model: { id: 'attachment-fixture', thinkingLevels: [], baseUrl: model.baseUrl },
+        },
+      );
+    } finally {
+      await model.close();
+    }
   });
 
   test('Host admission rejects an extra attachment before starting a Turn and close releases capacity', {

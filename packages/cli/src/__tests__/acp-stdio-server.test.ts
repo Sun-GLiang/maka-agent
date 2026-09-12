@@ -29,8 +29,11 @@ import {
   type SubscriptionFrame,
 } from '@maka/runtime-host/protocol';
 import {
+  createRuntimeHostReconnectingConnection,
+  isRuntimeHostReconnectingConnection,
   RuntimeHostOperationError,
   RuntimeHostRequestInterruptedError,
+  RuntimeHostSubscriptionError,
   type RuntimeHostConnection,
   type RuntimeHostSessionSubscription,
 } from '@maka/runtime-host/client';
@@ -198,7 +201,10 @@ describe('Maka ACP stdio server', () => {
   ] as const) {
     test(`settles outcome-unknown ACP cancellation with ${queryOutcome} query and ${recovery} recovery`, {
       timeout: 5_000,
-    }, async () => {
+    }, async (t) => {
+      // Drive admission retries explicitly; unrelated test load must not let
+      // a backoff timer expose query facts before this case releases recovery.
+      t.mock.timers.enable({ apis: ['setTimeout'] });
       const stdin = new PassThrough();
       let sessionId: string | undefined;
       let session: SessionCatalogProjection | undefined;
@@ -218,9 +224,15 @@ describe('Maka ACP stdio server', () => {
       const recoveryTranscript = new Promise<StoredMessage[]>((resolve) => {
         releaseRecovery = resolve;
       });
+      let releaseFailedRecoveryQuery!: () => void;
+      const failedRecoveryQuery = new Promise<void>((resolve) => {
+        releaseFailedRecoveryQuery = resolve;
+      });
       let first: FakeSubscription | undefined;
       let opens = 0;
       let turnQueries = 0;
+      let queryTimeoutMs: number | undefined;
+      let rejectPendingQuery: ((error: Error) => void) | undefined;
       const stops: unknown[] = [];
       const snapshot = (
         projectionRevision: number,
@@ -228,7 +240,11 @@ describe('Maka ACP stdio server', () => {
       ): SessionContinuitySnapshot =>
         continuitySnapshot({ sessionId: sessionId!, projectionRevision, rootTurn });
       const connection = {
-        request: async (operation: string, input: { sessionId: string; turnId: string }) => {
+        request: async (
+          operation: string,
+          input: { sessionId: string; turnId: string },
+          timeoutMs?: number,
+        ) => {
           if (operation === 'session.create') {
             sessionId = input.sessionId;
             return (session = sessionProjection({ id: sessionId }));
@@ -248,7 +264,10 @@ describe('Maka ACP stdio server', () => {
             turnQueries += 1;
             if (turnQueries > 1) {
               if (recovery === 'held_empty') return admitted;
-              assert.ok(recovery === 'absent' || recovery === 'other_turn');
+              assert.ok(
+                recovery === 'absent' || recovery === 'other_turn' || recovery === 'failed',
+              );
+              if (recovery === 'failed') await failedRecoveryQuery;
               throw new RuntimeHostOperationError(
                 'turn.query',
                 'not_found',
@@ -258,7 +277,25 @@ describe('Maka ACP stdio server', () => {
             if (queryOutcome !== 'pending') {
               throw new RuntimeHostOperationError('turn.query', queryOutcome, 'Query failed');
             }
-            return new Promise<never>(() => undefined);
+            assert.ok(timeoutMs !== undefined && timeoutMs > 0, 'admission query needs a deadline');
+            queryTimeoutMs = timeoutMs;
+            return new Promise<never>((_resolve, reject) => {
+              const timer = setTimeout(() => {
+                rejectPendingQuery?.(
+                  new RuntimeHostRequestInterruptedError(
+                    'turn.query',
+                    'query',
+                    'dispatched',
+                    'timeout',
+                  ),
+                );
+              }, timeoutMs);
+              rejectPendingQuery = (error) => {
+                clearTimeout(timer);
+                rejectPendingQuery = undefined;
+                reject(error);
+              };
+            });
           }
           if (operation === 'turn.stop') {
             stops.push(input);
@@ -288,7 +325,16 @@ describe('Maka ACP stdio server', () => {
             'subscription-recovered',
           );
         },
-        close: async () => undefined,
+        close: async () => {
+          rejectPendingQuery?.(
+            new RuntimeHostRequestInterruptedError(
+              'turn.query',
+              'query',
+              'dispatched',
+              'connection_lost',
+            ),
+          );
+        },
       } as unknown as RuntimeHostConnection;
       const harness = createHarness([], { stdin, connection });
       const run = harness.run();
@@ -353,6 +399,21 @@ describe('Maka ACP stdio server', () => {
           else startRecovery();
         }
 
+        if (queryOutcome === 'pending' && recovery === 'absent') {
+          await waitFor(() => opens === 2);
+          assert.ok(queryTimeoutMs);
+          // The recovered empty snapshot cannot settle a request still in flight.
+          // Honour the transport deadline, then advance the bounded retry delay.
+          for (let attempt = 0; attempt < 3 && !response(); attempt += 1) {
+            t.mock.timers.tick(queryTimeoutMs);
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+        }
+        if (recovery === 'failed') {
+          await waitFor(() => turnQueries === 2);
+          assert.equal(response(), undefined, 'subscription failure does not establish absence');
+          releaseFailedRecoveryQuery();
+        }
         await waitFor(() => Boolean(response()));
         assert.equal(opens, recovery === 'none' ? 1 : 2);
         assert.deepEqual(
@@ -363,11 +424,17 @@ describe('Maka ACP stdio server', () => {
         );
         assert.equal(
           turnQueries,
-          recovery === 'absent' || recovery === 'other_turn' || recovery === 'held_empty' ? 2 : 1,
+          recovery === 'absent' ||
+            recovery === 'other_turn' ||
+            recovery === 'held_empty' ||
+            recovery === 'failed'
+            ? 2
+            : 1,
         );
         assert.deepEqual(response()?.result, { stopReason: 'cancelled' });
       } finally {
         releaseRecovery([]);
+        releaseFailedRecoveryQuery();
         stdin.end();
         await run;
       }
@@ -580,6 +647,96 @@ describe('Maka ACP stdio server', () => {
       },
     ]);
     assert.equal(harness.connectCalls(), 0);
+  });
+
+  test('EOF aborts a first attachment waiting for real connection recovery during hydration', async () => {
+    const stdin = new PassThrough();
+    let sessionId: string | undefined;
+    let subscription: FakeSubscription | undefined;
+    let disconnect!: () => void;
+    const closed = new Promise<void>((resolve) => {
+      disconnect = resolve;
+    });
+    let rejectTranscript!: (error: Error) => void;
+    const transcript = new Promise<StoredMessage[]>((_resolve, reject) => {
+      rejectTranscript = reject;
+    });
+    let reconnectSignal: AbortSignal | undefined;
+    let turnStarts = 0;
+    const initial = {
+      rootId: 'root-1',
+      hostEpoch: 'host-1',
+      connectionId: 'connection-1',
+      selectedProtocol: 0,
+      compositionId: 'maka.interactive',
+      compositionRevision: '1',
+      closed,
+      request: async (operation: string, input: { sessionId: string }) => {
+        if (operation === 'session.create') {
+          sessionId = input.sessionId;
+          return sessionProjection({ id: sessionId });
+        }
+        if (operation === 'connection.catalog.query') return connectionCatalogPage();
+        if (operation === 'turn.start') turnStarts += 1;
+        assert.fail(`Unexpected operation ${operation}`);
+      },
+      openSessionSubscription: async () => {
+        subscription = new FakeSubscription(
+          continuitySnapshot({ sessionId: sessionId!, projectionRevision: 1, rootTurn: null }),
+          transcript,
+        );
+        return subscription;
+      },
+      subscribeConfigurationChanges: () => () => undefined,
+      subscribeConnectionCatalogChanges: () => () => undefined,
+      subscribeProjectCatalogChanges: () => () => undefined,
+      subscribeSessionCatalogChanges: () => () => undefined,
+      subscribeScheduledTaskChanges: () => () => undefined,
+      close: async () => disconnect(),
+    } as unknown as RuntimeHostConnection;
+    const connection = await createRuntimeHostReconnectingConnection({
+      initialConnection: initial,
+      connect: async (signal) => {
+        reconnectSignal = signal;
+        return new Promise<RuntimeHostConnection>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+      backoff: { wait: async () => undefined },
+    });
+    const harness = createHarness([], { stdin, connection });
+    let finished = false;
+    const run = harness.run().then((code) => {
+      finished = true;
+      return code;
+    });
+    const send = (id: number, method: string, params: unknown) =>
+      stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+    try {
+      send(1, 'session/new', { cwd: '/workspace', mcpServers: [] });
+      await waitFor(() =>
+        harness.stdoutMessages().some((message) => (message as { id?: number }).id === 1),
+      );
+      send(2, 'session/prompt', {
+        sessionId: sessionId!,
+        prompt: [{ type: 'text', text: 'attach' }],
+      });
+      await waitFor(() => Boolean(subscription && subscription.nextCalls > 0));
+      disconnect();
+      rejectTranscript(new RuntimeHostSubscriptionError('connection_closed', 'Host disconnected'));
+      await waitFor(() => Boolean(reconnectSignal) && subscription!.closeCalls > 0);
+      stdin.end();
+      await waitFor(() => finished);
+      assert.equal(await run, 0);
+      assert.equal(reconnectSignal?.aborted, true);
+      assert.equal(turnStarts, 0);
+    } finally {
+      stdin.end();
+      // Also releases the old implementation on a red test, without masking
+      // the assertion that EOF itself must complete teardown.
+      await connection.close();
+      await run;
+    }
   });
 
   test('returns zero after normal EOF without connecting a Runtime Host', async () => {
@@ -839,6 +996,7 @@ function createHarness(
             return {
               connection: {
                 ...connection,
+                request: connection.request.bind(connection),
                 reconnecting: true,
                 hostEpoch: connection.hostEpoch ?? 'host-1',
                 openSessionSubscription:
@@ -846,11 +1004,12 @@ function createHarness(
                   (async () => {
                     throw new Error('Unexpected Session attachment');
                   }),
-                openSessionSubscriptionOnce:
-                  connection.openSessionSubscription?.bind(connection) ??
-                  (async () => {
-                    throw new Error('Unexpected Session attachment');
-                  }),
+                openSessionSubscriptionOnce: isRuntimeHostReconnectingConnection(connection)
+                  ? connection.openSessionSubscriptionOnce.bind(connection)
+                  : (connection.openSessionSubscription?.bind(connection) ??
+                    (async () => {
+                      throw new Error('Unexpected Session attachment');
+                    })),
                 subscribeConnectionAvailability: () => () => undefined,
               },
               close: () => connection.close(),
@@ -1001,6 +1160,7 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
     reject(error: Error): void;
   }> = [];
   nextCalls = 0;
+  closeCalls = 0;
   #closed = false;
   #failure: Error | undefined;
 
@@ -1056,6 +1216,7 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
   }
 
   async close(): Promise<void> {
+    this.closeCalls += 1;
     this.#closed = true;
     for (const waiter of this.#waiters.splice(0)) {
       waiter.resolve({ done: true, value: undefined });
