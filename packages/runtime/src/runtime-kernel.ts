@@ -43,6 +43,7 @@ import {
   type TokenUsageEvent,
 } from '@maka/core/events';
 import type {
+  PersistedBackendKind,
   SessionBlockedReason,
   SessionHeader,
   SessionHeaderPatch,
@@ -205,7 +206,9 @@ export interface RuntimeKernelLike {
   ): AgentRunHandoffRequest | undefined;
   updateCachedHeader(sessionId: string, header: SessionHeader): void;
   invalidateBackend(sessionId: string): Promise<void>;
-  invalidateCachedBackends(): Promise<void>;
+  invalidateCachedBackends(options?: {
+    readonly excludeKinds?: readonly PersistedBackendKind[];
+  }): Promise<void>;
   disposeBackend(sessionId: string): Promise<void>;
 }
 
@@ -2237,11 +2240,24 @@ export class RuntimeKernel implements RuntimeKernelLike {
     await this.flushBackendInvalidation(sessionId);
   }
 
-  async invalidateCachedBackends(): Promise<void> {
+  async invalidateCachedBackends(options?: {
+    readonly excludeKinds?: readonly PersistedBackendKind[];
+  }): Promise<void> {
+    const excluded = new Set(options?.excludeKinds ?? []);
     const sessionIds = new Set(
-      [...this.backendGenerations.values()].map((generation) => generation.sessionId),
+      [...this.backendGenerations.values()]
+        .filter((generation) => !excluded.has(generation.cachedHeader.backend))
+        .map((generation) => generation.sessionId),
     );
-    for (const sessionId of this.backendInvalidations.keys()) sessionIds.add(sessionId);
+    for (const sessionId of this.backendInvalidations.keys()) {
+      const generations = this.backendGenerationsFor(sessionId);
+      if (
+        !generations.length ||
+        generations.some((entry) => !excluded.has(entry.cachedHeader.backend))
+      ) {
+        sessionIds.add(sessionId);
+      }
+    }
     await Promise.all(
       [...sessionIds].map(async (sessionId) => {
         const failedGeneration = this.backendGenerationsFor(sessionId).find(
@@ -3093,22 +3109,22 @@ function continuationTargetOpeningForExecution(input: {
             externalAgentId: sessionHeader.externalAgentId,
           }
         : sessionHeader.llmConnectionId === undefined
-        ? {
-            provenance: 'unknown',
-            backendKind: sessionHeader.backend,
-            llmConnectionSlug: sessionHeader.llmConnectionSlug,
-            modelId: sessionHeader.model,
-          }
-        : {
-            provenance: 'runtime',
-            backendKind: sessionHeader.backend,
-            llmConnectionId: sessionHeader.llmConnectionId,
-            llmConnectionSlug: sessionHeader.llmConnectionSlug,
-            modelId: sessionHeader.model,
-            ...(input.targetProviderStateIdentity
-              ? { providerStateIdentity: input.targetProviderStateIdentity }
-              : {}),
-          },
+          ? {
+              provenance: 'unknown',
+              backendKind: sessionHeader.backend,
+              llmConnectionSlug: sessionHeader.llmConnectionSlug,
+              modelId: sessionHeader.model,
+            }
+          : {
+              provenance: 'runtime',
+              backendKind: sessionHeader.backend,
+              llmConnectionId: sessionHeader.llmConnectionId,
+              llmConnectionSlug: sessionHeader.llmConnectionSlug,
+              modelId: sessionHeader.model,
+              ...(input.targetProviderStateIdentity
+                ? { providerStateIdentity: input.targetProviderStateIdentity }
+                : {}),
+            },
     configuration: {
       cwd: sessionHeader.cwd,
       permissionMode: sessionHeader.permissionMode,

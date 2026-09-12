@@ -358,7 +358,9 @@ describe('projectRuntimeEventsToStoredMessages', () => {
         route: { provenance: 'runtime', backendKind: 'acp', externalAgentId: 'antigravity' },
       },
     };
-    const out = projectRuntimeEventsToStoredMessages(baseEvents(), { invocations: [acpInvocation] });
+    const out = projectRuntimeEventsToStoredMessages(baseEvents(), {
+      invocations: [acpInvocation],
+    });
     const assistant = out.messages.find((message) => message.type === 'assistant');
     assert.ok(assistant);
     assert.equal(assistant.text, 'The file says: file contents');

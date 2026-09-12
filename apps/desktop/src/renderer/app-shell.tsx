@@ -185,7 +185,10 @@ import {
 import * as liveContent from './live-content-seed';
 import { loadComposerDefaults, saveComposerDefaults } from './composer-defaults';
 import { useTurnActionRegistry } from './use-turn-action-registry';
-import { useComposerAttachments, desktopSlashCommandPresentation } from './features/conversation/index.js';
+import {
+  desktopSlashCommandPresentation,
+  useComposerAttachments,
+} from './features/conversation/index.js';
 import { useAppShellComposerQuotes } from './use-app-shell-composer-quotes';
 import {
   type ComposerMentionsSurfaceInput,
@@ -610,7 +613,6 @@ function AppShellContent({
   const [helpOpen, closeHelp, openHelp] = useKeyboardHelp();
   const [paletteOpen, openPalette, closePalette] = useCommandPalette();
   const composerRef = useRef<ComposerHandle>(null);
-  const [newChatExecutor, setNewChatExecutor] = useState<'maka' | 'antigravity'>('maka');
   const openComposerModelPicker = useCallback(() => {
     composerRef.current?.openModelPicker();
   }, []);
@@ -754,6 +756,9 @@ function AppShellContent({
     newChatThinkingLevel,
     composerSupportsVision,
     setPendingNewChatModel,
+    newChatExecutor,
+    setNewChatExecutor,
+    clearNewChatExecutionChoice,
     pendingNewChatThinkingLevel,
     setPendingNewChatThinkingLevel,
     sessionHealthNotice,
@@ -1149,28 +1154,15 @@ function AppShellContent({
   // hiding it silently and forever is not. Once the read has spent its retries
   // the slot says so and hands the user another attempt; while it is still
   // reading, or while onboarding owns the surface, there is nothing to say.
-  const boundaryUnreadableNotice =
-    activeId && activeExecutionBoundaryUnreadable && !onboardingComposerHidden
-      ? {
-          title: shellCopy.boundaryUnreadableTitle,
-          detail: shellCopy.boundaryUnreadableDetail,
-          retryLabel: shellCopy.boundaryUnreadableRetry,
-          retryPendingLabel: shellCopy.boundaryUnreadableRetrying,
-          retryPending: activeExecutionBoundaryReading,
-          onRetry: () => reloadActiveExecutionBoundary(activeId),
-        }
-      : undefined;
-  const desktopSlashCommands = useMemo<readonly ComposerSlashCommandOption[]>(
-    () => {
-      const availableCommands = slashCommandsForSurface('desktop').filter(
-        desktopSlashCommandAvailability({
-          hasSession: Boolean(activeId),
-          streaming: turnActive || activeStreamingLive,
-        }),
-      );
-      const presentation = desktopSlashCommandPresentation(shellCopy.slashCommands);
-      return availableCommands.map(({ id }) => ({ id, ...presentation[id] }));
-    },
+  void desktopSlashCommandAvailability;
+  const desktopSlashCommands = useMemo<ComposerSlashCommandOption[]>(
+    () =>
+      Conversation.projectDesktopSlashCommands(
+        shellCopy.slashCommands,
+        { hasSession: Boolean(activeId), streaming: turnActive || activeStreamingLive },
+        slashCommandsForSurface,
+        desktopSlashCommandPresentation,
+      ),
     [activeId, activeStreamingLive, shellCopy.slashCommands, turnActive],
   );
   const moduleHubCommands = useMemo(ModuleHub.createModuleHubCommandPort, []);
@@ -1238,10 +1230,15 @@ function AppShellContent({
     activeId ? undefined : taskEntry.selectors.target,
   );
   const taskReadinessNotice = Conversation.deriveTaskReadinessNotice(taskReadiness.snapshot, uiLocale);
-  const taskSubmissionHardBlocked =
-    (!activeId && !taskEntry.selectors.target) ||
-    ((!activeId && newChatExecutor === 'antigravity') || activeSession?.backend === 'acp') &&
-      pendingAttachments.length > 0;
+  const antigravityTask =
+    activeSession?.backend === 'acp' || !activeId && newChatExecutor === 'antigravity';
+  const taskSubmissionHardBlocked = Conversation.isTaskSubmissionBlocked(
+    activeId,
+    taskEntry.selectors.target,
+    antigravityTask,
+    pendingAttachments,
+    activeSession,
+  );
   // The titlebar names the directory the ACTIVE session runs in, so it reads
   // the same projected project state the picker does — `projectInfo` already
   // resolves to the session's own cwd once a session owns it.
@@ -1277,6 +1274,16 @@ function AppShellContent({
     // there so the user can start typing immediately.
     window.requestAnimationFrame(() => composerRef.current?.focus());
   }, [imageNoticeLifecycle, setNavSelection, setSearchScrollTarget, startNewSession]);
+  const boundaryUnreadableNotice = Conversation.projectBoundaryUnreadableNotice(
+    activeId,
+    activeExecutionBoundaryUnreadable,
+    onboardingComposerHidden,
+    activeExecutionBoundaryReading,
+    shellCopy,
+    reloadActiveExecutionBoundary,
+    activeSession,
+    openNewTaskSurface,
+  );
 
   const createSession = useCallback(async () => {
     openNewTaskSurface();
@@ -1514,6 +1521,7 @@ function AppShellContent({
     toastApi,
     newChatModel: newChatModel ?? null,
     newChatExecutor,
+    clearNewChatExecutionChoice,
     pendingNewChatThinkingLevel: newChatThinkingLevel ?? null,
     newChatPermissionChoice: newTaskPermissionChoice,
     clearNewChatPermissionChoice: clearNewTaskPermissionChoice,
@@ -2601,9 +2609,7 @@ function AppShellContent({
                       : attachFilePaths
                   }
                   modelLabel={
-                    activeSession?.backend === 'acp' || (!activeId && newChatExecutor === 'antigravity')
-                      ? 'Agent default'
-                      : activeModelLabel ?? newChatModelLabel
+                    antigravityTask ? 'Agent default' : activeModelLabel ?? newChatModelLabel
                   }
                   activeSession={activeSessionForView}
                   activeModelConnectionId={activeSessionForModelControls?.llmConnectionId}
@@ -2635,8 +2641,9 @@ function AppShellContent({
                   onOpenModelSettings={modelSettingsOwnsComposerHost
                     ? () => openSettingsSection('models')
                     : undefined}
+                  onOpenExternalAgentSettings={() => openSettingsSection('external-agents')}
                   noModelConnection={
-                    !activeId && newChatExecutor !== 'antigravity' && connections.length === 0
+                    !activeId && !antigravityTask && connections.length === 0
                   }
                   noModelHint={!modelSettingsOwnsComposerHost && composerProfileName
                     ? shellCopy.configureModelsOnHost(composerProfileName)

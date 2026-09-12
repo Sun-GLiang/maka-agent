@@ -488,6 +488,9 @@ type ShellCopy = {
     boundaryUnreadableDetail: string;
     boundaryUnreadableRetry: string;
     boundaryUnreadableRetrying: string;
+    antigravityHistoryOnlyTitle: string;
+    antigravityHistoryOnlyDetail: string;
+    antigravityHistoryOnlyNewTask: string;
     permissionModeStreaming: string;
     permissionModeRunning: string;
     permissionModeWaiting: string;
@@ -1224,6 +1227,9 @@ const SHELL_COPY_BY_LOCALE = {
       loading: '加载中',
       goToModels: '去模型',
       boundaryUnreadableTitle: '暂时读不到这个任务的权限',
+      antigravityHistoryOnlyTitle: 'Antigravity 会话已结束',
+      antigravityHistoryOnlyDetail: '历史记录仍可查看，但外部 Agent 会话在应用重启或连接中断后无法继续。',
+      antigravityHistoryOnlyNewTask: '新建任务',
       boundaryUnreadableDetail: '在读到之前，这里暂时不能输入。可以重试，或先切换到别的任务。',
       boundaryUnreadableRetry: '重试',
       boundaryUnreadableRetrying: '重试中…',
@@ -1725,6 +1731,9 @@ const SHELL_COPY_BY_LOCALE = {
       loading: '載入中',
       goToModels: '去模型',
       boundaryUnreadableTitle: '暫時讀不到這個任務的權限',
+      antigravityHistoryOnlyTitle: 'Antigravity 會話已結束',
+      antigravityHistoryOnlyDetail: '歷史記錄仍可查看，但外部 Agent 會話在應用程式重啟或連線中斷後無法繼續。',
+      antigravityHistoryOnlyNewTask: '建立新任務',
       boundaryUnreadableDetail: '在讀到之前，這裡暫時不能輸入。可以重試，或先切換到別的任務。',
       boundaryUnreadableRetry: '重試',
       boundaryUnreadableRetrying: '重試中…',
@@ -2272,6 +2281,9 @@ const SHELL_COPY_BY_LOCALE = {
       loading: 'Loading',
       goToModels: 'Go to Models',
       boundaryUnreadableTitle: 'Could not read this task’s permissions',
+      antigravityHistoryOnlyTitle: 'Antigravity session ended',
+      antigravityHistoryOnlyDetail: 'History remains readable, but the external Agent session cannot continue after an app restart or connection loss.',
+      antigravityHistoryOnlyNewTask: 'New task',
       boundaryUnreadableDetail:
         'Until they can be read, you cannot type here. Try again, or switch to another task.',
       boundaryUnreadableRetry: 'Try again',

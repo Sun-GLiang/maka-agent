@@ -33,7 +33,7 @@ import type {
   OperationOutcome,
 } from '../protocol/index.js';
 import type { ContextOperationHandlerMap } from './operation-dispatcher.js';
-import { runtimeHostExternalTurnUnavailableReason } from './host-session-availability.js';
+import { runtimeHostExecutionUnavailableReason } from './host-session-availability.js';
 import type {
   HostedExecutionAdmission,
   HostedExecutionAuthority,
@@ -199,7 +199,9 @@ export class HostContextCoordinator {
     if (header.isArchived) {
       return sessionArchived('Cannot compact an archived Session');
     }
-    const unavailableReason = runtimeHostExternalTurnUnavailableReason(header);
+    const unavailableReason = runtimeHostExecutionUnavailableReason(header, {
+      kind: 'context_compact',
+    });
     if (unavailableReason) return operationUnavailable(unavailableReason);
     if (
       (await this.#runtime.listTurns(input.sessionId)).some((turn) => turn.turnId === input.turnId)

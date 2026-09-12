@@ -185,6 +185,7 @@ export interface HostSessionCatalogCoordinatorOptions {
   readonly continuity: SessionContinuity;
   readonly workspaceResolver: HostWorkspaceResolver;
   readonly requestDrain: () => void;
+  readonly isAcpSessionAvailable?: (sessionId: string) => boolean;
   readonly sessionAccessAuthority?: Pick<
     RuntimeHostAccessAuthority,
     'activeSessionGrantForPrincipal'
@@ -296,6 +297,7 @@ export class HostSessionCatalogCoordinator {
   readonly #continuity: SessionContinuity;
   readonly #workspaceResolver: HostWorkspaceResolver;
   readonly #requestDrain: () => void;
+  readonly #isAcpSessionAvailable: (sessionId: string) => boolean;
   readonly #sessionAccessAuthority:
     | Pick<RuntimeHostAccessAuthority, 'activeSessionGrantForPrincipal'>
     | undefined;
@@ -309,6 +311,7 @@ export class HostSessionCatalogCoordinator {
     this.#continuity = options.continuity;
     this.#workspaceResolver = options.workspaceResolver;
     this.#requestDrain = options.requestDrain;
+    this.#isAcpSessionAvailable = options.isAcpSessionAvailable ?? (() => true);
     this.#sessionAccessAuthority = options.sessionAccessAuthority;
   }
 
@@ -479,6 +482,7 @@ export class HostSessionCatalogCoordinator {
     return projectSessionCatalogRecord(
       record,
       projectCatalogLiveRunState(this.#manager.runningTurnIds(record.header.id)),
+      this.#isAcpSessionAvailable(record.header.id),
     );
   }
 
@@ -616,7 +620,10 @@ export class HostSessionCatalogCoordinator {
               name: prepared.name,
               labels: [...prepared.labels],
               ...(input.modelTarget.kind === 'external_agent'
-                ? { executionBackend: 'acp' as const, externalAgentId: input.modelTarget.acpAgentId }
+                ? {
+                    executionBackend: 'acp' as const,
+                    externalAgentId: input.modelTarget.acpAgentId,
+                  }
                 : {
                     llmConnectionId: model!.connectionId,
                     llmConnectionSlug: model!.connectionSlug,
@@ -826,6 +833,12 @@ export class HostSessionCatalogCoordinator {
           return workspaceFailure(
             'operation_conflict',
             'WorkHub Coordination Session workspace requires WorkHub authority',
+          );
+        }
+        if (current.header.backend === 'acp') {
+          return workspaceFailure(
+            'operation_unavailable',
+            'Antigravity Sessions cannot move workspace after creation; start a new task in the target workspace',
           );
         }
         if (current.revision !== input.expectedRevision) {
@@ -1343,11 +1356,11 @@ function createRequestFingerprint(
       : input.modelTarget.kind === 'external_agent'
         ? ['external_agent', input.modelTarget.acpAgentId]
         : [
-          'explicit',
-          input.modelTarget.connectionId,
-          input.modelTarget.connectionSlug,
-          input.modelTarget.model,
-        ],
+            'explicit',
+            input.modelTarget.connectionId,
+            input.modelTarget.connectionSlug,
+            input.modelTarget.model,
+          ],
     input.thinkingLevel ?? null,
     input.toolProfile ?? null,
     prepared.permissionMode ?? ['runtime_default'],
@@ -1360,6 +1373,7 @@ function createRequestFingerprint(
 export function projectSessionCatalogRecord(
   record: SessionCatalogRecord,
   liveRunState?: SessionCatalogLiveRunState,
+  acpSessionAvailable = true,
 ): SessionCatalogItem {
   const { header, summary } = record;
   const projectedLabels = projectCatalogLabels(header.labels);
@@ -1421,8 +1435,17 @@ export function projectSessionCatalogRecord(
     ...(header.revisionState === undefined ? {} : { revisionState: header.revisionState }),
     backend: header.backend,
     ...(header.externalAgentId === undefined ? {} : { externalAgentId: header.externalAgentId }),
+    ...(header.backend === 'acp'
+      ? {
+          executionAvailability: acpSessionAvailable
+            ? ('available' as const)
+            : ('history_only' as const),
+        }
+      : {}),
     llmConnectionId: header.llmConnectionId ?? null,
-    ...(header.llmConnectionSlug === undefined ? {} : { llmConnectionSlug: header.llmConnectionSlug }),
+    ...(header.llmConnectionSlug === undefined
+      ? {}
+      : { llmConnectionSlug: header.llmConnectionSlug }),
     connectionLocked: header.connectionLocked,
     ...(header.model === undefined ? {} : { model: header.model }),
     ...(header.thinkingLevel === undefined ? {} : { thinkingLevel: header.thinkingLevel }),

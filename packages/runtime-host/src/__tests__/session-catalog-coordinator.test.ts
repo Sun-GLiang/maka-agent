@@ -55,6 +55,7 @@ import { HostWorkspaceResolver } from '../server/workspace-resolver.js';
 import {
   HostSessionCatalogCoordinator,
   NoUsableImportModelError,
+  projectSessionCatalogRecord,
   SessionOperationFailure,
   type HostSessionCatalogCoordinatorOptions,
 } from '../server/session-catalog-coordinator.js';
@@ -65,6 +66,23 @@ type CatalogTurnIndex = HostSessionCatalogCoordinatorOptions['turnIndex'];
 type RuntimePolicy = HostSessionCatalogCoordinatorOptions['runtimePolicy'];
 type ConfigurationAuthority = HostSessionCatalogCoordinatorOptions['manager'];
 type SessionContinuity = HostSessionCatalogCoordinatorOptions['continuity'];
+
+test('projects persisted ACP history as unavailable until this Host owns a live Session', () => {
+  const header: SessionHeader = {
+    ...sessionHeader('session-acp-history', []),
+    backend: 'acp',
+    externalAgentId: 'antigravity',
+    llmConnectionId: undefined,
+    llmConnectionSlug: undefined,
+    model: undefined,
+  };
+
+  const history = projectSessionCatalogRecord(catalogRecord(header, 1), undefined, false);
+  const live = projectSessionCatalogRecord(catalogRecord(header, 1), undefined, true);
+  if ('kind' in history || 'kind' in live) assert.fail('ACP projection must be representable');
+  assert.equal(history.executionAvailability, 'history_only');
+  assert.equal(live.executionAvailability, 'available');
+});
 
 const context: ConnectionContext = {
   hostEpoch: 'session-catalog-test-epoch',

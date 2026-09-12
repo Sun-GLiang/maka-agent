@@ -1354,7 +1354,9 @@ function buildSessionHeader(
     backend,
     ...(input.externalAgentId === undefined ? {} : { externalAgentId: input.externalAgentId }),
     ...(input.llmConnectionId === undefined ? {} : { llmConnectionId: input.llmConnectionId }),
-    ...(input.llmConnectionSlug === undefined ? {} : { llmConnectionSlug: input.llmConnectionSlug }),
+    ...(input.llmConnectionSlug === undefined
+      ? {}
+      : { llmConnectionSlug: input.llmConnectionSlug }),
     // A subagent Session's route is chosen by the spawn that created it and is
     // never re-targeted, so it is born frozen. Every other Session freezes on
     // its first user Message.
@@ -1662,7 +1664,9 @@ function toSummary(header: SessionHeader): SessionSummary {
     backend: header.backend,
     ...(header.externalAgentId === undefined ? {} : { externalAgentId: header.externalAgentId }),
     ...(header.llmConnectionId === undefined ? {} : { llmConnectionId: header.llmConnectionId }),
-    ...(header.llmConnectionSlug === undefined ? {} : { llmConnectionSlug: header.llmConnectionSlug }),
+    ...(header.llmConnectionSlug === undefined
+      ? {}
+      : { llmConnectionSlug: header.llmConnectionSlug }),
     connectionLocked: header.connectionLocked,
     ...(header.model === undefined ? {} : { model: header.model }),
     permissionMode: header.permissionMode,

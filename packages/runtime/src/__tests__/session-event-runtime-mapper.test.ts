@@ -170,6 +170,21 @@ describe('mapSessionEventToRuntimeEvent (pure)', () => {
     });
   });
 
+  test('complete retains the provider-native stop reason in durable state', () => {
+    const mapped = mapSessionEventToRuntimeEvent(
+      ev({
+        type: 'complete',
+        stopReason: 'step_limit',
+        providerStopReason: 'max_turn_requests',
+      }),
+      ctx,
+      createSessionEventMapMemory(),
+    );
+
+    assert.equal(mapped.actions?.stateDelta?.providerStopReason, 'max_turn_requests');
+    assert.deepEqual(decodeRuntimeEvent(mapped), mapped);
+  });
+
   test('tool_output_delta and tool_progress map to partial tool-role heartbeats', () => {
     const mem = createSessionEventMapMemory();
     const a = mapSessionEventToRuntimeEvent(

@@ -8884,6 +8884,7 @@ Slug openai-work<cursor>
   test('tells a legacy Session exactly how to choose an account', async () => {
     const terminal = new FakeTerminal(160, 24);
     const { llmConnectionId: _legacyConnectionId, ...legacy } = fakeSessionSummary('session-2');
+    if (!legacy.model || !legacy.llmConnectionSlug) assert.fail('fixture needs a native model');
     const driver = new SlashCommandDriver([legacy]);
     const run = runMakaPiTui({
       title: 'Maka',

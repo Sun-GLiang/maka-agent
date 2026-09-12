@@ -385,6 +385,10 @@ async function resolveResumeTarget(
   const result = await connection.request('session.catalog.query', { kind: 'get', sessionId });
   const session = result.kind === 'session' ? result.session : null;
   if (session && !('kind' in session)) {
+    if (session.backend === 'acp') {
+      throw new Error('Antigravity Sessions are available in the Desktop app only');
+    }
+    if (!session.llmConnectionSlug || !session.model) return exactTuiTarget(resolveTarget(catalog));
     const sessionConnection = catalog.connections.find(
       (candidate) =>
         session.llmConnectionId !== null &&

@@ -17,25 +17,21 @@
  * under the License.
  */
 
-export function newTaskExecutorTarget(
-  executor: string | undefined,
-  model: { llmConnectionId?: string; llmConnectionSlug: string; model: string } | null,
-) {
-  return executor === 'antigravity'
-    ? { executionBackend: 'acp' as const, externalAgentId: 'antigravity' as const }
-    : model ? { llmConnectionId: model.llmConnectionId, llmConnectionSlug: model.llmConnectionSlug, model: model.model } : {};
-}
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { decodeCanonicalToolResultContent } from '../tool-result-record-schema.js';
 
-export function isTaskSubmissionBlocked(
-  activeId: string | undefined,
-  target: unknown,
-  antigravityTask: boolean,
-  attachments: readonly unknown[],
-  session: { executionAvailability?: string } | undefined,
-): boolean {
-  return (
-    (!activeId && !target) ||
-    (antigravityTask && attachments.length > 0) ||
-    session?.executionAvailability === 'history_only'
+test('external tool result decoder preserves ordered mixed snapshots', () => {
+  const content = {
+    kind: 'external_tool',
+    parts: [
+      { kind: 'text', text: 'running' },
+      { kind: 'file_diff', paths: ['a.ts'], diff: '--- a/a.ts\n+++ b/a.ts' },
+      { kind: 'terminal', terminalId: 'terminal-1' },
+    ],
+  };
+  assert.deepEqual(decodeCanonicalToolResultContent(content), content);
+  assert.throws(() =>
+    decodeCanonicalToolResultContent({ ...content, parts: [...content.parts, { kind: 'other' }] }),
   );
-}
+});

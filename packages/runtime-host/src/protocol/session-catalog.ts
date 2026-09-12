@@ -125,6 +125,7 @@ const PROJECTION_FIELDS = [
   'lastReadMessageId',
   'liveRunState',
   'externalAgentId',
+  'executionAvailability',
   'llmConnectionSlug',
   'model',
 ] as const;
@@ -239,6 +240,7 @@ export interface SessionCatalogProjection {
   readonly revisionState?: 'preparing' | 'committed';
   readonly backend: PersistedBackendKind;
   readonly externalAgentId?: 'antigravity';
+  readonly executionAvailability?: 'available' | 'history_only';
   readonly llmConnectionId: string | null;
   readonly llmConnectionSlug?: string;
   readonly connectionLocked: boolean;
@@ -766,6 +768,9 @@ export function decodeSessionCatalogProjection(value: unknown): SessionCatalogPr
     ...(record.externalAgentId === undefined
       ? {}
       : { externalAgentId: externalAgentId(record.externalAgentId) }),
+    ...(record.executionAvailability === undefined
+      ? {}
+      : { executionAvailability: executionAvailability(record.executionAvailability) }),
     llmConnectionId:
       record.llmConnectionId === null
         ? null
@@ -782,7 +787,9 @@ export function decodeSessionCatalogProjection(value: unknown): SessionCatalogPr
     connectionLocked: boolean(record.connectionLocked, 'Session connection lock'),
     ...(record.model === undefined
       ? {}
-      : { model: requireUtf8String(record.model, 'Session model', SESSION_CATALOG_MODEL_MAX_BYTES) }),
+      : {
+          model: requireUtf8String(record.model, 'Session model', SESSION_CATALOG_MODEL_MAX_BYTES),
+        }),
     ...optionalThinkingLevel(record),
     permissionMode: permissionMode(record.permissionMode),
     collaborationMode: collaborationMode(record.collaborationMode),
@@ -791,11 +798,13 @@ export function decodeSessionCatalogProjection(value: unknown): SessionCatalogPr
   if (
     (projection.backend === 'acp' &&
       (projection.externalAgentId !== 'antigravity' ||
+        projection.executionAvailability === undefined ||
         projection.llmConnectionId !== null ||
         projection.llmConnectionSlug !== undefined ||
         projection.model !== undefined)) ||
     (projection.backend !== 'acp' &&
       (projection.externalAgentId !== undefined ||
+        projection.executionAvailability !== undefined ||
         projection.llmConnectionSlug === undefined ||
         projection.model === undefined))
   ) {
@@ -807,6 +816,11 @@ export function decodeSessionCatalogProjection(value: unknown): SessionCatalogPr
     SESSION_CATALOG_RESULT_MAX_BYTES,
   );
   return projection;
+}
+
+function executionAvailability(value: unknown): 'available' | 'history_only' {
+  if (value === 'available' || value === 'history_only') return value;
+  throw invalidProtocolFrame('Invalid Session execution availability');
 }
 
 export function decodeSessionCatalogItem(value: unknown): SessionCatalogItem {

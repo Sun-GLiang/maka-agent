@@ -116,7 +116,7 @@ type SendOptions = MessageContextOptions & {
 
 function copiedArray<K extends string, T>(
   key: K,
-  values: readonly T[] | undefined,
+  values?: readonly T[],
 ): Partial<Record<K, T[]>> {
   return values?.length ? { [key]: [...values] } as Record<K, T[]> : {};
 }
@@ -189,7 +189,8 @@ export function createAppShellChatActions(deps: {
   ) => void;
   toastApi: ToastApi;
   newChatModel: PendingNewChatModel;
-  newChatExecutor?: 'maka' | 'antigravity';
+  newChatExecutor?: string;
+  clearNewChatExecutionChoice?(): void;
   pendingNewChatThinkingLevel: PendingNewChatThinkingLevel;
   /**
    * The user's explicit choice for this draft, or undefined when they made
@@ -231,7 +232,6 @@ export function createAppShellChatActions(deps: {
     showModelSetupToast,
     toastApi,
     newChatModel,
-    newChatExecutor = 'maka',
     pendingNewChatThinkingLevel,
     newChatPermissionChoice,
     clearNewChatPermissionChoice,
@@ -454,7 +454,7 @@ export function createAppShellChatActions(deps: {
           ...(options.displayText ? { displayText: options.displayText } : {}),
           ...copiedArray('quotes', quotes),
           exactTurn,
-          pendingSteering: Boolean(steeringTurnId),
+          pendingSteering: !!steeringTurnId,
           waitForHostAdmission: options.waitForHostAdmission,
           isSurfaceVisible: () => activeIdRef.current === sessionId,
         });
@@ -464,7 +464,7 @@ export function createAppShellChatActions(deps: {
         if (pending?.length) preflightAttachmentItems(pending);
         const session = await window.maka.newTasks.create(initialNewTaskTarget, {
           name: DEFAULT_SESSION_NAME,
-          ...Conversation.newTaskExecutorTarget(newChatExecutor, newChatModel),
+          ...Conversation.newTaskExecutorTarget(deps.newChatExecutor, newChatModel),
           ...(pendingNewChatThinkingLevel ? { thinkingLevel: pendingNewChatThinkingLevel } : {}),
           ...(newChatPermissionChoice ? { permissionMode: newChatPermissionChoice } : {}),
           collaborationMode: newChatCollaborationMode,
@@ -500,6 +500,7 @@ export function createAppShellChatActions(deps: {
           return false;
         }
         unsentSessionId = undefined;
+        deps.clearNewChatExecutionChoice?.();
         // The callback fires only when this send's first message projected;
         // an unreconciled first message stays unreported.
         if (submitted.kind === 'projected') options.onSessionResolved?.(session.id);

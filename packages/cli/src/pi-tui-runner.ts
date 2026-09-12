@@ -1680,12 +1680,15 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   }
 
   const adoptSessionMetadata = (summary: SessionSummary, announceIdentity = true) => {
+    if (summary.backend === 'acp') {
+      throw new Error('Antigravity Sessions are available in the Desktop app only');
+    }
     syncTodoSession();
     cwd = summary.cwd ?? cwd;
     setSessionTitle(summary.name);
-    model = summary.model;
+    model = summary.model ?? model;
     connectionId = summary.llmConnectionId;
-    connectionSlug = summary.llmConnectionSlug;
+    connectionSlug = summary.llmConnectionSlug ?? connectionSlug;
     const identityNotice = sessionConnectionIdentityNotice(
       summary,
       connectionIdentities,

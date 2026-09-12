@@ -162,6 +162,25 @@ export function ToolResultPreview(props: {
     );
   }
 
+  if (content.kind === 'external_tool') {
+    return (
+      <div data-kind="external_tool">
+        {content.parts.map((part, index) =>
+          part.kind === 'terminal' ? (
+            <ToolCodeBlock key={`${part.terminalId}-${index}`} code={`Terminal ${part.terminalId}`} />
+          ) : (
+            <ToolResultPreview
+              key={`${part.kind}-${index}`}
+              content={part}
+              fileDiffActions={props.fileDiffActions}
+              actionIdentity={props.actionIdentity}
+            />
+          ),
+        )}
+      </div>
+    );
+  }
+
   if (content.kind === 'web_search') {
     return (
       <WebSearchPreview query={content.query} provider={content.provider} rows={content.rows} />

@@ -301,7 +301,8 @@ class RuntimeHostMakaSessionDriverImpl implements RuntimeHostMakaSessionDriver {
 
   async createSession(input: CreateSessionRequest): Promise<SessionSummary> {
     if (this.#sessionId) throw new Error('Cannot create a Session while another is active.');
-    if (!input.model) throw new Error('Runtime Host Session creation requires an explicit model');
+    if (!input.model || !input.llmConnectionSlug)
+      throw new Error('Runtime Host Session creation requires an explicit native model target');
     this.#workspace = {
       target: workspaceTargetForCreate(this.#workspace, input, this.#executionLocation),
       hostCwd: input.cwd,
@@ -1374,6 +1375,9 @@ class RuntimeHostMakaSessionDriverImpl implements RuntimeHostMakaSessionDriver {
   }
 
   #adoptConfiguration(session: SessionCatalogProjection): void {
+    if (session.backend === 'acp' || !session.model || !session.llmConnectionSlug) {
+      throw new Error('The CLI cannot operate an external Agent Session');
+    }
     this.#model = session.model;
     this.#llmConnectionId = session.llmConnectionId ?? undefined;
     this.#llmConnectionSlug = session.llmConnectionSlug;

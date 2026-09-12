@@ -45,6 +45,55 @@
   white-space: nowrap;
 }
 
+.maka-new-task-target-menu {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(192px, max-content) minmax(0, 1fr);
+  max-height: min(420px, 70vh);
+  overflow-x: hidden;
+}
+
+/* Composer's shared quiet-menu ceiling is intentionally narrow for ordinary
+   one-column pickers. This picker already gives its popover a bounded 620px
+   width, so let the menu use that space instead of squeezing its two columns
+   into 320px and adding a horizontal scrollbar. */
+.maka-composer-quiet-menu.maka-new-task-target-popup {
+  width: 100%;
+  max-width: none;
+  overflow-x: hidden;
+}
+
+.maka-new-task-executor-rail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-inline-end: var(--border-width-hairline) solid var(--border);
+  padding: var(--space-1);
+}
+
+.maka-new-task-executor-rail > :last-child {
+  margin-block-start: auto;
+}
+
+.maka-new-task-target-options {
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--space-1);
+}
+
+@media (max-width: 520px) {
+  .maka-new-task-target-menu {
+    grid-template-columns: 1fr;
+  }
+
+  .maka-new-task-executor-rail {
+    flex-direction: row;
+    border-inline-end: 0;
+    border-block-end: var(--border-width-hairline) solid var(--border);
+  }
+}
+
 /* Switching can abandon a provider prompt cache, but that is a property of
    the pending action, not the current model. Keep the notice inside the open
    picker so a healthy resting control never looks unhealthy. */

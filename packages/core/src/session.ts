@@ -296,6 +296,8 @@ export interface SessionHeader {
   backend: PersistedBackendKind;
   /** Present exactly when `backend === 'acp'`. */
   externalAgentId?: ExternalAgentId;
+  /** Process-local continuation state for an external-agent Session. Never persisted. */
+  executionAvailability?: 'available' | 'history_only';
   /** Immutable Connection entity identity. Optional only on legacy Session records. */
   llmConnectionId?: string;
   llmConnectionSlug?: string;

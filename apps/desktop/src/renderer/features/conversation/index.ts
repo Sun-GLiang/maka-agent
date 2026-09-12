@@ -58,5 +58,12 @@ export {
   clearPending,
 } from '@maka/ui/pending-items';
 export { desktopSlashCommandPresentation } from './model/slash-command-presentation.js';
+export {
+  projectBoundaryUnreadableNotice,
+  projectDesktopSlashCommands,
+} from './model/shell-composer-projections.js';
 
-export { newTaskExecutorTarget } from './model/new-task-executor-target.js';
+export {
+  isTaskSubmissionBlocked,
+  newTaskExecutorTarget,
+} from './model/new-task-executor-target.js';

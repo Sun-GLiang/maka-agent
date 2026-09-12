@@ -1443,20 +1443,20 @@ export class AgentRun {
               externalAgentId: this.header.externalAgentId,
             }
           : this.header.llmConnectionId === undefined
-          ? {
-              provenance: 'unknown',
-              backendKind: this.header.backend,
-              llmConnectionSlug: this.header.llmConnectionSlug,
-              modelId: this.header.model,
-            }
-          : {
-              provenance: 'runtime',
-              backendKind: this.header.backend,
-              llmConnectionId: this.header.llmConnectionId,
-              llmConnectionSlug: this.header.llmConnectionSlug,
-              modelId: this.header.model,
-              ...(providerStateIdentity ? { providerStateIdentity } : {}),
-            },
+            ? {
+                provenance: 'unknown',
+                backendKind: this.header.backend,
+                llmConnectionSlug: this.header.llmConnectionSlug,
+                modelId: this.header.model,
+              }
+            : {
+                provenance: 'runtime',
+                backendKind: this.header.backend,
+                llmConnectionId: this.header.llmConnectionId,
+                llmConnectionSlug: this.header.llmConnectionSlug,
+                modelId: this.header.model,
+                ...(providerStateIdentity ? { providerStateIdentity } : {}),
+              },
       configuration: {
         cwd: this.header.cwd,
         permissionMode: this.header.permissionMode,

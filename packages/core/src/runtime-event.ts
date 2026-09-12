@@ -1154,12 +1154,14 @@ function isRuntimeInvocationRoute(value: unknown): value is RuntimeInvocationRou
       value.llmConnectionId !== undefined ||
       value.llmConnectionSlug !== undefined ||
       (value.modelId !== undefined && !isNonEmptyString(value.modelId))
-    ) return false;
+    )
+      return false;
   } else if (
     value.externalAgentId !== undefined ||
     !isNonEmptyString(value.llmConnectionSlug) ||
     !isNonEmptyString(value.modelId)
-  ) return false;
+  )
+    return false;
   if (value.provenance === 'runtime') {
     return (
       hasExactShape(value, INVOCATION_ROUTE_RUNTIME_SHAPE) &&

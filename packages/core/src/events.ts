@@ -828,6 +828,14 @@ export type ToolResultContent =
     }
   | { kind: 'json'; value: unknown }
   | { kind: 'file_diff'; paths: string[]; diff: string }
+  | {
+      kind: 'external_tool';
+      parts: ReadonlyArray<
+        | { kind: 'text'; text: string }
+        | { kind: 'file_diff'; paths: string[]; diff: string }
+        | { kind: 'terminal'; terminalId: string }
+      >;
+    }
   | { kind: 'file_write'; path: string; bytes: number }
   | {
       kind: 'archived_tool_result';
@@ -1273,6 +1281,8 @@ export interface CompleteEvent extends BaseEvent {
     | 'permission_handoff'
     | 'step_limit'
     | 'max_tokens';
+  /** Provider-native terminal reason retained for durable diagnostics and exact reloads. */
+  providerStopReason?: string;
   /** Durable result of an explicit context-compaction execution. */
   contextCompactionOutcome?: ContextCompactionOutcome;
 }

@@ -183,6 +183,7 @@ export interface ConversationCopy {
     noModelAction: string;
     /** Explanatory title on the disabled Send button in the no-model state. */
     noModelSendTitle: string;
+    externalAttachmentsUnsupported: string;
   };
   model: {
     thinkingLevel: string;
@@ -198,6 +199,12 @@ export interface ConversationCopy {
     newChatTitle: (label: string) => string;
     configureAriaLabel: (label: string) => string;
     configureTitle: string;
+    executor: string;
+    chooseExecutor: string;
+    makaExecutor: string;
+    antigravityExecutor: string;
+    agentDefault: string;
+    configureExternalAgent: string;
   };
   permissions: {
     mode: Record<PermissionMode, { label: string; hint: string }>;
@@ -499,7 +506,7 @@ const CONVERSATION_COPY = {
       planModeOnTitle: 'Plan 模式已启用，点击关闭',
       swarmModeLabel: 'Swarm', swarmModeOnTitle: 'Swarm 模式已启用，点击关闭',
       graphModeLabel: 'Graph', graphModeOnTitle: 'Graph 模式已启用，点击关闭',
-      noModelHint: '还没有可用的模型连接，无法发送。', noModelAction: '前往模型设置', noModelSendTitle: '先添加一个模型连接才能发送。',
+      noModelHint: '还没有可用的模型连接，无法发送。', noModelAction: '前往模型设置', noModelSendTitle: '先添加一个模型连接才能发送。', externalAttachmentsUnsupported: 'Antigravity 暂不支持附件。附件仍保留在草稿中；移除后即可发送。',
     },
     model: {
       thinkingLevel: '思考级别', thinkingUnsupported: '当前模型不支持思考级别切换', changeThinkingLevel: '切换当前模型的思考级别', defaultLevel: '默认',
@@ -507,7 +514,7 @@ const CONVERSATION_COPY = {
       // Canonical per-chat ladder: 默认 (model default, overriding Settings) / 关 / 低 / 中 / 高 / 超高
       // (minimal/max when offered).
       level: { off: '关', minimal: '最少', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' },
-      switching: '切换中', model: '模型', switchAriaLabel: '切换当前任务模型',
+      switching: '切换中', model: '模型', switchAriaLabel: '切换当前任务模型', executor: '执行者', chooseExecutor: '选择执行者与模型', makaExecutor: 'Maka', antigravityExecutor: 'Antigravity', agentDefault: '使用 Agent 默认', configureExternalAgent: '配置外部 Agent',
       switchWarning: '切换模型可能需要重建服务商提示缓存，使下一次请求更慢或成本更高。',
       newChatAriaLabel: (label) => `选择新任务模型，当前 ${label}`, newChatTitle: (label) => `新任务使用的模型：${label}`,
       configureAriaLabel: (label) => `配置模型连接，当前 ${label}`, configureTitle: '配置模型连接',
@@ -656,7 +663,7 @@ const CONVERSATION_COPY = {
       planModeOnTitle: 'Plan 模式已啟用，點選關閉',
       swarmModeLabel: 'Swarm', swarmModeOnTitle: 'Swarm 模式已啟用，點選關閉',
       graphModeLabel: 'Graph', graphModeOnTitle: 'Graph 模式已啟用，點選關閉',
-      noModelHint: '還沒有可用的模型連線，無法傳送。', noModelAction: '前往模型設定', noModelSendTitle: '先新增一個模型連線才能傳送。',
+      noModelHint: '還沒有可用的模型連線，無法傳送。', noModelAction: '前往模型設定', noModelSendTitle: '先新增一個模型連線才能傳送。', externalAttachmentsUnsupported: 'Antigravity 暫不支援附件。附件仍保留在草稿中；移除後即可傳送。',
     },
     model: {
       thinkingLevel: '思考級別', thinkingUnsupported: '目前模型不支援思考級別切換', changeThinkingLevel: '切換目前模型的思考級別', defaultLevel: '預設',
@@ -664,7 +671,7 @@ const CONVERSATION_COPY = {
       // Canonical per-chat ladder: 預設 (model default, overriding Settings) / 關 / 低 / 中 / 高 / 超高
       // (minimal/max when offered).
       level: { off: '關', minimal: '最少', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' },
-      switching: '切換中', model: '模型', switchAriaLabel: '切換目前任務模型',
+      switching: '切換中', model: '模型', switchAriaLabel: '切換目前任務模型', executor: '執行者', chooseExecutor: '選擇執行者與模型', makaExecutor: 'Maka', antigravityExecutor: 'Antigravity', agentDefault: '使用 Agent 預設', configureExternalAgent: '設定外部 Agent',
       switchWarning: '切換模型可能需要重建服務商提示快取，使下一次請求更慢或成本更高。',
       newChatAriaLabel: (label) => `選擇新任務模型，目前 ${label}`, newChatTitle: (label) => `新任務使用的模型：${label}`,
       configureAriaLabel: (label) => `設定模型連線，目前 ${label}`, configureTitle: '設定模型連線',
@@ -842,12 +849,12 @@ const CONVERSATION_COPY = {
       planModeOnTitle: 'Plan mode is on — click to turn off',
       swarmModeLabel: 'Swarm', swarmModeOnTitle: 'Swarm mode is on — click to turn off',
       graphModeLabel: 'Graph', graphModeOnTitle: 'Graph mode is on — click to turn off',
-      noModelHint: 'No model connection yet, so sending is unavailable.', noModelAction: 'Go to model settings', noModelSendTitle: 'Add a model connection before sending.',
+      noModelHint: 'No model connection yet, so sending is unavailable.', noModelAction: 'Go to model settings', noModelSendTitle: 'Add a model connection before sending.', externalAttachmentsUnsupported: 'Antigravity does not support attachments yet. They remain in the draft; remove them to send.',
     },
     model: {
       thinkingLevel: 'Thinking level', thinkingUnsupported: 'This model does not support thinking-level changes', changeThinkingLevel: 'Change the current model thinking level', defaultLevel: 'Model default',
       level: { off: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Maximum' },
-      switching: 'Switching', model: 'Model', switchAriaLabel: 'Switch model for this task',
+      switching: 'Switching', model: 'Model', switchAriaLabel: 'Switch model for this task', executor: 'Executor', chooseExecutor: 'Choose executor and model', makaExecutor: 'Maka', antigravityExecutor: 'Antigravity', agentDefault: 'Use Agent default', configureExternalAgent: 'Configure external Agent',
       switchWarning: 'Switching may rebuild the provider prompt cache, making the next request slower or more expensive.',
       newChatAriaLabel: (label) => `Choose a model for the new task, currently ${label}`, newChatTitle: (label) => `Model for the new task: ${label}`,
       configureAriaLabel: (label) => `Configure model connections, currently ${label}`, configureTitle: 'Configure model connections',

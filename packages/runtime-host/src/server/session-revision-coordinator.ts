@@ -229,6 +229,12 @@ export class HostSessionRevisionCoordinator {
       const source = await this.#stores.sessionStore.readHeaderRecordSnapshot(
         input.sourceSessionId,
       );
+      if (source.header.backend === 'acp') {
+        return copyFailure(
+          'operation_unavailable',
+          'Antigravity Sessions do not support branches or revisions; start a new task instead',
+        );
+      }
       rootSessionId = source.header.revisionRootSessionId ?? input.sourceSessionId;
     } catch (error) {
       return isSessionNotFoundError(error)

@@ -25,9 +25,9 @@
 
 程序使用 [PR1 固定的官方发行包](../antigravity-acp-settings.md)，未修改官方二进制。SHA-256：
 
-| 文件 | SHA-256 |
-| --- | --- |
-| `agy_acp_server.par` | `9d900b93031fc42397f88206e14eba4193729bbef631a70b18e7a19631a6dfac` |
+| 文件                    | SHA-256                                                            |
+| ----------------------- | ------------------------------------------------------------------ |
+| `agy_acp_server.par`    | `9d900b93031fc42397f88206e14eba4193729bbef631a70b18e7a19631a6dfac` |
 | `localharness_external` | `e0a8ef9d80a1ffb178f945159dda33f73d4a5be65516642542352584b834fa2a` |
 
 在独立临时项目中执行，测试文件为公开的加法函数和断言。RPC 有期限，所有官方进程及 helper 已完成进程树清理。没有写入真实项目文件、改系统代理或切换模型来绕过提供方拒绝。
@@ -96,3 +96,32 @@
 另一个开发 worktree 的 schema version 14 启动错误不属于此次 PR2 隔离实例；多个 Electron 应用身份重合导致窗口选择混淆。窗口控制接口仍超时，完整 UI 证据未取得。
 
 当前任务执行实现仍是 Draft：会话可用性投影、原生专用操作准入、混合有序工具内容、ACP 原始停止原因、启动阶段取消、配置失效及完整生命周期仍需要按计划逐项核对。
+
+## Checklist 实现与回归收口（2026-09-12）
+
+本轮已补齐上述 Draft 项，并保留此前官方二进制验证的边界：
+
+- Host 只允许 ACP live task 接收普通消息；压缩、重生成、分支/修订和工作区迁移均以 `operation_unavailable` 拒绝。CLI 也显式拒绝接管 Desktop-only ACP Session。
+- Session catalog 使用非持久化的 `available | history_only` 投影表达进程内可继续性。Host 重启或 ACP 连接丢失后历史仍可读，但发送被拒绝，Desktop 提供本地化的新建任务入口。
+- 原生模型、凭据和 OAuth 配置更新不再销毁 ACP backend；Host 关闭、任务删除和 ACP 故障仍执行完整清理。
+- 取消覆盖初始化、`session/new`、prompt 和权限等待窗口，整个取消通知受同一超时约束；正常完成会清理定时器。provider 原始 stop reason 写入 durable RuntimeEvent。
+- ACP 工具结果按到达顺序保存文本、全部 diff 和 terminal 引用；Core 严格解码、Runtime 持久化、Desktop/CLI 展示均覆盖新联合类型。
+- 新任务 Composer 合并为左右两栏的执行者/模型选择器。未发送草稿中的 Maka 模型选择会跨执行者浏览保留；首条消息成功投影后下一份草稿恢复 Maka。ACP 附件不会被删除，但发送会被阻止并显示本地化说明。
+- AppShell 的 slash-command 与只读提示投影已移到 conversation feature；冻结的 Hook、依赖和 token 预算检查通过。
+
+验证结果：全工作区 typecheck、lint、Git diff 校验、全部 103 项 Renderer architecture 检查通过。Core 829 项、Runtime Host 1934 项（1922 通过、12 跳过）、Desktop 2550 项、UI 419 项、CLI 937 项（934 通过、3 跳过）及 Eval 的 Node/Python 测试均无失败。首次三工作区并发全量运行中，一个依赖真实模型的 Runtime Host 用例超时；隔离重跑及 Runtime Host 全量串行重跑均通过。
+
+Runtime 全量测试另有两项既有 Zod 递归引用契约在当前依赖环境稳定失败；其余 3431 项通过、13 项跳过，本次新增和受影响 Runtime 用例全部通过。仓库跟踪文件及本轮新增文件均通过格式检查；本地未跟踪的 `output/` 复现材料仍保持原样，因此直接对整个工作目录运行 formatter 会报告其中的证据文件。
+
+## Desktop 官方账号截图验收（2026-09-12）
+
+在 `/tmp/maka-pr2-desktop-e2e-v3` 隔离 user-data 下，以当前 worktree 的 production renderer 启动真实 Electron 窗口并连接官方 ACP 1.1.1。没有修改系统代理、Clash/VPN 配置或 Maka 持久设置；仅在本次 Desktop 进程环境中显式传入机器上既有的 HTTP 代理入口，避开前文已记录的 macOS SOCKS 自动发现问题。Google 登录由官方 ACP 缓存恢复，设置页显示“已验证 Google 登录”。
+
+人工操作与截图结果：
+
+- 新任务执行者/模型双栏选择器正常切换到 Antigravity。根据用户反馈修正了复合菜单仍继承普通单栏菜单 `320px` 上限的问题；修正后外层菜单 `clientWidth === scrollWidth === 620`，两栏内容区 `612 === 612`，横向 overflow 被关闭，中文“配置外部 Agent”完整显示。
+- 真实任务进入 ACP 权限表单，显示 provider 工具 `pwd`、请求者 `Antigravity · ACP` 以及 Allow / Deny 选项。一次性 Allow 后，`pwd` 与 `client_view_file` 工具活动按到达顺序显示，最终文本包含实际 worktree 路径与 `README.md` 第一行。
+- 另一轮一次性 Allow 后运行 `sleep 30`，在工具执行期间点击 Composer“停止”。工具结果显示 `context canceled` / `The request was cancelled by the client.`，轮次显示“已中断”，没有等待命令自然完成。
+- 重启同一 Desktop 实例后重新打开上述成功任务，用户消息、工具活动及最终文本保持可读；Composer 显示“Antigravity 会话已结束”，并提供“新建任务”入口，不能继续向旧进程会话发送消息。
+
+本次截图保存在隔离临时目录 `/tmp/maka-pr2-screenshot-acceptance.QJvM72/`，其中 `06-target-picker-fixed.png`、`16-antigravity-tool-result.png`、`20-antigravity-cancelled.png`、`21-antigravity-history-only-after-restart.png` 分别对应菜单修正、成功工具结果、运行中取消和重启只读历史。附件发送阻断仍由已通过的 Desktop/UI 自动化用例覆盖；原生文件选择器同时受到另一开发 worktree 的 Electron 对话框占用，本轮没有把其他 worktree 的文件带入该隔离任务。

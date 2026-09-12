@@ -52,6 +52,18 @@ const UNCERTAIN_OUTCOME_SHAPE = defineObjectShape<
 >()(['code', 'retrySafe'], []);
 const JSON_SHAPE = defineObjectShape<Result<'json'>>()(['kind', 'value'], []);
 const FILE_DIFF_SHAPE = defineObjectShape<Result<'file_diff'>>()(['kind', 'paths', 'diff'], []);
+const EXTERNAL_TOOL_SHAPE = defineObjectShape<Result<'external_tool'>>()(['kind', 'parts'], []);
+type ExternalToolPart = Result<'external_tool'>['parts'][number];
+const EXTERNAL_TOOL_TEXT_SHAPE = defineObjectShape<Extract<ExternalToolPart, { kind: 'text' }>>()(
+  ['kind', 'text'],
+  [],
+);
+const EXTERNAL_TOOL_DIFF_SHAPE = defineObjectShape<
+  Extract<ExternalToolPart, { kind: 'file_diff' }>
+>()(['kind', 'paths', 'diff'], []);
+const EXTERNAL_TOOL_TERMINAL_SHAPE = defineObjectShape<
+  Extract<ExternalToolPart, { kind: 'terminal' }>
+>()(['kind', 'terminalId'], []);
 const FILE_WRITE_SHAPE = defineObjectShape<Result<'file_write'>>()(['kind', 'path', 'bytes'], []);
 const ARCHIVED_SHAPE = defineObjectShape<Result<'archived_tool_result'>>()(
   [
@@ -228,6 +240,13 @@ function isNonShellToolResultContent(value: unknown): value is ToolResultContent
         isStringArray(value.paths) &&
         typeof value.diff === 'string'
       );
+    case 'external_tool':
+      return (
+        hasExactShape(value, EXTERNAL_TOOL_SHAPE) &&
+        Array.isArray(value.parts) &&
+        value.parts.length > 0 &&
+        value.parts.every(isExternalToolPart)
+      );
     case 'file_write':
       return (
         hasExactShape(value, FILE_WRITE_SHAPE) &&
@@ -295,6 +314,25 @@ function isNonShellToolResultContent(value: unknown): value is ToolResultContent
     default:
       return false;
   }
+}
+
+function isExternalToolPart(value: unknown): value is ExternalToolPart {
+  if (!isRecord(value)) return false;
+  if (value.kind === 'text') {
+    return hasExactShape(value, EXTERNAL_TOOL_TEXT_SHAPE) && typeof value.text === 'string';
+  }
+  if (value.kind === 'file_diff') {
+    return (
+      hasExactShape(value, EXTERNAL_TOOL_DIFF_SHAPE) &&
+      isStringArray(value.paths) &&
+      typeof value.diff === 'string'
+    );
+  }
+  return (
+    value.kind === 'terminal' &&
+    hasExactShape(value, EXTERNAL_TOOL_TERMINAL_SHAPE) &&
+    typeof value.terminalId === 'string'
+  );
 }
 
 function hasValidSubagentResultFields(value: Record<string, unknown>): boolean {

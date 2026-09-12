@@ -31,6 +31,8 @@ import type { RuntimeHostProfileKind } from '@maka/runtime-host/profile-kind';
 import { desktopSessionKey, type DesktopHostRef } from './runtime-host-identity.js';
 
 export interface DesktopSessionSummary extends SessionSummary {
+  /** Process-local ACP execution state; history remains readable after Host restart. */
+  readonly executionAvailability?: 'available' | 'history_only';
   /** Client cache is readable history, not evidence of current Host execution. */
   readonly localState?: 'pending' | 'cached';
   readonly localCreatedAt?: number;

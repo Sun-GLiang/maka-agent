@@ -418,6 +418,10 @@ export async function createExecutionRuntimeHostComposition(
         .filter((header) => header.backend === 'acp')
         .map((header) => header.id),
     );
+    const acpSessionUnavailableReason = (header: SessionHeader): string | undefined =>
+      header.backend === 'acp' && unavailableAcpSessionsAfterRestart.has(header.id)
+        ? 'Antigravity Session history is readable, but its live task is no longer available; start a new task'
+        : undefined;
     // `fake` is a retired backend kind: this build never writes it, but a
     // session or Automation persisted by an older one still can, and activation
     // dispatches straight off that durable value. Registering an explicit
@@ -1405,7 +1409,9 @@ export async function createExecutionRuntimeHostComposition(
       });
     };
     const registerBackendInvalidation = (): void => {
-      observeBackendInvalidation(requireSessionManager(manager).refreshIdleBackends());
+      observeBackendInvalidation(
+        requireSessionManager(manager).refreshIdleBackends({ excludeKinds: ['acp'] }),
+      );
     };
     const registerConfigurationMutation = (): void => {
       hostChanges.publishConfiguration();
@@ -1479,6 +1485,10 @@ export async function createExecutionRuntimeHostComposition(
                 context.retainUntilProcessExit();
                 context.requestDrain();
               },
+              onUnavailable: () => {
+                unavailableAcpSessionsAfterRestart.add(buildContext.sessionId);
+                hostChanges.publishSessionCatalog(buildContext.sessionId);
+              },
             });
           },
         };
@@ -1493,7 +1503,7 @@ export async function createExecutionRuntimeHostComposition(
       acquireResidency: () => context.acquireResidency('oauth'),
       invalidateBackends: () => {
         hostChanges.publishConfiguration();
-        return requireSessionManager(manager).refreshIdleBackends();
+        return requireSessionManager(manager).refreshIdleBackends({ excludeKinds: ['acp'] });
       },
       onFatal: (error) => {
         if (poisonFailure) return;
@@ -1575,6 +1585,7 @@ export async function createExecutionRuntimeHostComposition(
       dependencies.workHubRoutingModel
         ? (input) => workHubCoordination.prepareRoutingDecision(input)
         : undefined,
+      acpSessionUnavailableReason,
     );
     const coordinator = rootCoordinator;
     const pluginModel = createHostPluginModel({
@@ -1986,6 +1997,7 @@ export async function createExecutionRuntimeHostComposition(
       continuity: continuityCoordinator,
       workspaceResolver,
       requestDrain: context.requestDrain,
+      isAcpSessionAvailable: (sessionId) => !unavailableAcpSessionsAfterRestart.has(sessionId),
       ...(context.sessionAccessAuthority
         ? { sessionAccessAuthority: context.sessionAccessAuthority }
         : {}),

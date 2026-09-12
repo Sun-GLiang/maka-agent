@@ -673,6 +673,9 @@ function completeRuntimeEvent(
       ? 'failed'
       : mapCompleteStopReason(stopReason);
   const stateDelta: Record<string, unknown> = { stopReason };
+  if (event.providerStopReason !== undefined) {
+    stateDelta.providerStopReason = event.providerStopReason;
+  }
   if (status === 'failed') {
     stateDelta.failureClass =
       memory.failureClass ?? failureClassFromCompleteStopReason(stopReason) ?? 'runtime_error';

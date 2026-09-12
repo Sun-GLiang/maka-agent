@@ -735,7 +735,10 @@ function projectText(
 
   if (event.role === 'model') {
     const invocation = state.invocations.get(event.runId);
-    if (!invocation || (!invocation.opening.route.modelId && invocation.opening.route.backendKind !== 'acp')) {
+    if (
+      !invocation ||
+      (!invocation.opening.route.modelId && invocation.opening.route.backendKind !== 'acp')
+    ) {
       diagnostic(
         state,
         event,

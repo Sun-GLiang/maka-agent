@@ -61,8 +61,13 @@ export function projectSessionCatalogSummary(
     ...(session.revisionState === undefined ? {} : { revisionState: session.revisionState }),
     backend: session.backend,
     ...(session.externalAgentId === undefined ? {} : { externalAgentId: session.externalAgentId }),
+    ...(session.executionAvailability === undefined
+      ? {}
+      : { executionAvailability: session.executionAvailability }),
     ...(session.llmConnectionId === null ? {} : { llmConnectionId: session.llmConnectionId }),
-    ...(session.llmConnectionSlug === undefined ? {} : { llmConnectionSlug: session.llmConnectionSlug }),
+    ...(session.llmConnectionSlug === undefined
+      ? {}
+      : { llmConnectionSlug: session.llmConnectionSlug }),
     connectionLocked: session.connectionLocked,
     ...(session.model === undefined ? {} : { model: session.model }),
     ...(session.thinkingLevel === undefined ? {} : { thinkingLevel: session.thinkingLevel }),

@@ -4528,6 +4528,66 @@ describe('SessionManager manual compaction and quiescent session changes', () =>
 
     assert.deepStrictEqual(disposed, [cached.id]);
   });
+
+  test('backend refresh can preserve process-local ACP Sessions', async () => {
+    const store = new MemorySessionStore();
+    const disposed: string[] = [];
+    const backends = new BackendRegistry();
+    backends.register(
+      'ai-sdk',
+      (ctx) =>
+        new (class extends TestBackend {
+          override async dispose(): Promise<void> {
+            disposed.push(`native:${this.sessionId}`);
+          }
+        })(ctx),
+    );
+    backends.register('acp', (ctx) => ({
+      kind: 'acp',
+      sessionId: ctx.sessionId,
+      async *send(input) {
+        yield {
+          type: 'complete',
+          id: `${input.turnId}-complete`,
+          turnId: input.turnId,
+          ts: 1,
+          stopReason: 'end_turn',
+        };
+      },
+      async stop() {},
+      async respondToSandboxBoundary() {},
+      async dispose() {
+        disposed.push(`acp:${ctx.sessionId}`);
+      },
+    }));
+    const manager = new SessionManager({
+      store,
+      backends,
+      newId: nextId(),
+      now: nextNow(27_100),
+    });
+    const native = await manager.createSession(makeInput());
+    const acp = await manager.createSession(
+      makeInput({
+        executionBackend: 'acp',
+        externalAgentId: 'antigravity',
+        llmConnectionSlug: undefined,
+        model: undefined,
+      }),
+    );
+    await store.updateHeader(acp.id, {
+      backend: 'acp',
+      externalAgentId: 'antigravity',
+      llmConnectionSlug: undefined,
+      model: undefined,
+    });
+    await drain(manager.sendMessage(native.id, { turnId: 'turn-native', text: 'cache native' }));
+    await drain(manager.sendMessage(acp.id, { turnId: 'turn-acp', text: 'cache ACP' }));
+
+    await manager.refreshIdleBackends({ excludeKinds: ['acp'] });
+
+    assert.deepStrictEqual(disposed, [`native:${native.id}`]);
+  });
 });
 
 describe('SessionManager permission mode updates', () => {

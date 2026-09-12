@@ -84,7 +84,10 @@ export class HostExternalAgentSetupCoordinator {
   ) {}
 
   /** Freeze one verified launch configuration for a newly activated ACP Session. */
-  async prepareExecution(): Promise<{ readonly executable: string; readonly env: NodeJS.ProcessEnv }> {
+  async prepareExecution(): Promise<{
+    readonly executable: string;
+    readonly env: NodeJS.ProcessEnv;
+  }> {
     if (this.draining) throw new AcpSetupError('connection_failed');
     const snapshot = await this.deps.readPolicy();
     this.observePolicy(snapshot);

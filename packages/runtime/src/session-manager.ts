@@ -1131,8 +1131,10 @@ export class SessionManager {
   }
 
   /** Invalidate backend snapshots now, or immediately after active turns settle. */
-  refreshIdleBackends(): Promise<void> {
-    return this.runtimeKernel.invalidateCachedBackends();
+  refreshIdleBackends(options?: {
+    readonly excludeKinds?: readonly PersistedBackendKind[];
+  }): Promise<void> {
+    return this.runtimeKernel.invalidateCachedBackends(options);
   }
 
   disposeSessionBackend(sessionId: string): Promise<void> {
@@ -3855,19 +3857,19 @@ export class SessionManager {
               externalAgentId: session.externalAgentId,
             }
           : session.llmConnectionId === undefined
-          ? {
-              provenance: 'unknown',
-              backendKind: session.backend,
-              llmConnectionSlug: session.llmConnectionSlug,
-              modelId: session.model,
-            }
-          : {
-              provenance: 'runtime',
-              backendKind: session.backend,
-              llmConnectionId: session.llmConnectionId,
-              llmConnectionSlug: session.llmConnectionSlug,
-              modelId: session.model,
-            },
+            ? {
+                provenance: 'unknown',
+                backendKind: session.backend,
+                llmConnectionSlug: session.llmConnectionSlug,
+                modelId: session.model,
+              }
+            : {
+                provenance: 'runtime',
+                backendKind: session.backend,
+                llmConnectionId: session.llmConnectionId,
+                llmConnectionSlug: session.llmConnectionSlug,
+                modelId: session.model,
+              },
       configuration: {
         cwd: session.cwd,
         permissionMode: session.permissionMode,

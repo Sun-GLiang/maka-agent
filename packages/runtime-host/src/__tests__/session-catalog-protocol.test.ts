@@ -49,6 +49,30 @@ describe('Session catalog protocol', () => {
       isProtocolError,
     );
   });
+  test('requires explicit process-local availability only for ACP Sessions', () => {
+    const acp = projection({
+      backend: 'acp',
+      externalAgentId: 'antigravity',
+      executionAvailability: 'history_only',
+      llmConnectionId: null,
+      llmConnectionSlug: undefined,
+      model: undefined,
+    });
+
+    const decoded = decodeSessionCatalogItem(acp);
+    if ('kind' in decoded) assert.fail('ACP projection must be representable');
+    assert.equal(decoded.executionAvailability, 'history_only');
+    assert.equal('llmConnectionSlug' in decoded, false);
+    assert.equal('model' in decoded, false);
+    assert.throws(
+      () => decodeSessionCatalogItem({ ...acp, executionAvailability: undefined }),
+      isProtocolError,
+    );
+    assert.throws(
+      () => decodeSessionCatalogItem({ ...projection(), executionAvailability: 'available' }),
+      isProtocolError,
+    );
+  });
   test('publishes canonical catalog activity without the redundant last-used timestamp', () => {
     const catalog = projection();
 

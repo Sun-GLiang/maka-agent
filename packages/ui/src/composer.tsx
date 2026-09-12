@@ -52,7 +52,7 @@ import {
 import {
   ChatModelSwitcher,
   ModelChipStatic,
-  NewChatModelPicker,
+  NewTaskTargetPicker,
   ThinkingLevelSelector,
 } from './chat-model-switcher.js';
 import { useUiLocale } from './locale-context.js';
@@ -386,6 +386,7 @@ export const Composer = forwardRef<
     /** Execution owner for the next task. Existing Sessions keep their durable owner. */
     newChatExecutor?: 'maka' | 'antigravity';
     onNewChatExecutorChange?(executor: 'maka' | 'antigravity'): void;
+    onOpenExternalAgentSettings?(): void;
     newChatProviderType?: ProviderType;
     onPickNewChatModel?(input: {
       llmConnectionId: string;
@@ -1669,6 +1670,11 @@ export const Composer = forwardRef<
           )}
         </div>
       )}
+      {!props.hidden && externalAgentSelected && (props.pendingAttachments?.length ?? 0) > 0 && (
+        <div className="maka-composer-no-model-hint" role="alert">
+          <span>{copy.externalAttachmentsUnsupported}</span>
+        </div>
+      )}
       {!props.hidden && props.revisionNotice && (
         <div className="maka-composer-revision-notice" role="status" data-revision-notice="true">
           <Pencil size={ICON_SIZE.meta} aria-hidden="true" />
@@ -2111,34 +2117,28 @@ export const Composer = forwardRef<
                   starts or ends. */}
               <div className="maka-model-selection-controls">
                 {!props.activeSession && props.onNewChatExecutorChange ? (
-                  <DropdownMenu
-                    placement="above"
-                    hasChevron={false}
-                    className="maka-composer-quiet-menu"
-                    button={{
-                      label: props.newChatExecutor === 'antigravity' ? 'Antigravity' : 'Maka',
-                      icon: <Sparkles size={ICON_SIZE.meta} aria-hidden="true" />,
-                      variant: 'ghost',
-                      size: 'sm',
-                      tooltip: 'Choose task executor',
-                      className: 'maka-new-chat-executor-selector',
-                      'aria-label': 'Task executor',
-                    }}
-                  >
-                    <DropdownMenuRadioGroup
-                      label="Task executor"
-                      value={props.newChatExecutor ?? 'maka'}
-                      onChange={(value) =>
-                        props.onNewChatExecutorChange?.(value as 'maka' | 'antigravity')
-                      }
-                    >
-                      <DropdownMenuRadioItem value="maka" label="Maka" />
-                      <DropdownMenuRadioItem value="antigravity" label="Antigravity" />
-                    </DropdownMenuRadioGroup>
-                  </DropdownMenu>
-                ) : null}
-                {externalAgentSelected ? (
-                  <ModelChipStatic label="Agent default" />
+                  <NewTaskTargetPicker
+                    executor={props.newChatExecutor ?? 'maka'}
+                    modelLabel={modelChipLabel}
+                    choices={props.modelChoices ?? []}
+                    currentValue={props.newChatModel
+                      ? exactModelChoiceValue(
+                          props.newChatModel.llmConnectionId,
+                          props.newChatModel.llmConnectionSlug,
+                          props.newChatModel.model,
+                        )
+                      : undefined}
+                    currentProviderType={props.newChatProviderType}
+                    renderProviderMark={props.renderProviderMark}
+                    onCommitExecutor={props.onNewChatExecutorChange}
+                    onPickModel={props.onPickNewChatModel ?? (() => undefined)}
+                    onOpenExternalAgentSettings={props.onOpenExternalAgentSettings}
+                  />
+                ) : props.activeSession?.backend === 'acp' ? (
+                  <ModelChipStatic
+                    label={getConversationCopy(locale).model.agentDefault}
+                    showUnavailableStatus={false}
+                  />
                 ) : props.activeSession ? (
                   <ChatModelSwitcher
                     presentation={props.modelPickerPresentation}
@@ -2157,23 +2157,6 @@ export const Composer = forwardRef<
                     hideUnavailableCurrentOption={props.hideUnavailableCurrentModel}
                     renderProviderMark={props.renderProviderMark}
                     onChange={props.onModelChange}
-                  />
-                ) : props.onPickNewChatModel && (props.modelChoices?.length ?? 0) > 0 ? (
-                  <NewChatModelPicker
-                    label={modelChipLabel}
-                    choices={props.modelChoices ?? []}
-                    currentValue={
-                      props.newChatModel
-                        ? exactModelChoiceValue(
-                            props.newChatModel.llmConnectionId,
-                            props.newChatModel.llmConnectionSlug,
-                            props.newChatModel.model,
-                          )
-                        : undefined
-                    }
-                    currentProviderType={props.newChatProviderType}
-                    renderProviderMark={props.renderProviderMark}
-                    onPick={props.onPickNewChatModel}
                   />
                 ) : (
                   <ModelChipStatic

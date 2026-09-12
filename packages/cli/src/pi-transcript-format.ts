@@ -75,6 +75,14 @@ export function formatToolResultContent(content: ToolResultContent): string {
         .join('\n\n');
     case 'file_diff':
       return content.diff;
+    case 'external_tool':
+      return content.parts
+        .map((part) => {
+          if (part.kind === 'text') return part.text;
+          if (part.kind === 'file_diff') return part.diff;
+          return `Terminal: ${part.terminalId}`;
+        })
+        .join('\n\n');
     case 'file_write':
       return `Wrote ${content.bytes} bytes to ${content.path}`;
     case 'summary':

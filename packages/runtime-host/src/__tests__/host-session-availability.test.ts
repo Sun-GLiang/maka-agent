@@ -24,6 +24,7 @@ import {
   WORKHUB_COORDINATION_SESSION_ROLE,
 } from '@maka/core/session';
 import {
+  ACP_NATIVE_OPERATION_UNAVAILABLE_REASON,
   runtimeHostExecutionUnavailableReason,
   runtimeHostSafeBoundaryContinuationUnavailableReason,
   LEGACY_CONNECTION_IDENTITY_EXECUTION_UNAVAILABLE_REASON,
@@ -45,6 +46,21 @@ const base = {
   llmConnectionId: 'connection-workhub',
   backend: 'ai-sdk' as const,
 };
+
+test('ACP Sessions need no native connection and reject native-only execution kinds', () => {
+  const acp = {
+    ...base,
+    id: 'acp-session',
+    role: undefined,
+    backend: 'acp' as const,
+    llmConnectionId: undefined,
+  };
+  assert.equal(runtimeHostExecutionUnavailableReason(acp, { kind: 'external_message' }), undefined);
+  assert.equal(
+    runtimeHostExecutionUnavailableReason(acp, { kind: 'context_compact' }),
+    ACP_NATIVE_OPERATION_UNAVAILABLE_REASON,
+  );
+});
 
 test('WorkHub execution requires the exact reserved id, role, and zero-tool profile', () => {
   assert.equal(

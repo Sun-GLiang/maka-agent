@@ -45,6 +45,11 @@ import { useNewTaskChoice } from './use-new-task-choice.js';
 
 export type { NewChatModel } from './shell-chat-model-selection.js';
 
+type NewTaskExecutionChoice = {
+  executor: 'maka' | 'antigravity';
+  model: NewChatModelCandidate | null;
+};
+
 export type SessionHealthNoticeView = {
   tone: 'info' | 'warning' | 'destructive';
   label: string;
@@ -100,6 +105,9 @@ export function useShellChatModel(options: {
   composerSupportsVision: boolean | undefined;
   pendingNewChatModel: NewChatModelCandidate | null;
   setPendingNewChatModel: (next: NewChatModelCandidate | null) => void;
+  newChatExecutor: 'maka' | 'antigravity';
+  setNewChatExecutor: (executor: 'maka' | 'antigravity') => void;
+  clearNewChatExecutionChoice: () => void;
   pendingNewChatThinkingLevel: ThinkingLevel | null;
   setPendingNewChatThinkingLevel: (next: ThinkingLevel | null) => void;
   sessionHealthNotice: SessionHealthNoticeView | undefined;
@@ -116,16 +124,18 @@ export function useShellChatModel(options: {
     openModelPicker,
   } = options;
   const conversationCopy = getDesktopConversationCopy(uiLocale);
-  const [pendingNewChatModelChoice, setPendingNewChatModel] = useNewTaskChoice<
-    NewChatModelCandidate | null
-  >(
-    options.newTaskKey,
-  );
-  const pendingNewChatModel = pendingNewChatModelChoice !== undefined
-    ? pendingNewChatModelChoice
+  const [executionChoice, setExecutionChoice, clearNewChatExecutionChoice] =
+    useNewTaskChoice<NewTaskExecutionChoice>(options.newTaskKey);
+  const newChatExecutor = executionChoice?.executor ?? 'maka';
+  const pendingNewChatModel = executionChoice !== undefined
+    ? executionChoice.model
     : options.usePersistedComposerDefaults
       ? persistedComposerDefaults?.model ?? null
       : null;
+  const setPendingNewChatModel = (model: NewChatModelCandidate | null): void =>
+    setExecutionChoice({ executor: newChatExecutor, model });
+  const setNewChatExecutor = (executor: 'maka' | 'antigravity'): void =>
+    setExecutionChoice({ executor, model: pendingNewChatModel });
   const activeConnection = activeSession
     ? connections.find(
         (connection) =>
@@ -323,6 +333,9 @@ export function useShellChatModel(options: {
     composerSupportsVision,
     pendingNewChatModel,
     setPendingNewChatModel,
+    newChatExecutor,
+    setNewChatExecutor,
+    clearNewChatExecutionChoice,
     // Resolved, not raw: callers want the level the next chat would actually
     // request, and must not have to re-apply the settings fallback themselves.
     pendingNewChatThinkingLevel: requestedNewChatThinkingLevel,

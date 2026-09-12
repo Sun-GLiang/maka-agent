@@ -37,6 +37,8 @@ export const WORKHUB_COORDINATION_TARGET_UNAVAILABLE_REASON =
   'WorkHub Coordination execution requires the reserved Coordination Session';
 export const LEGACY_CONNECTION_IDENTITY_EXECUTION_UNAVAILABLE_REASON =
   'This Session requires an explicit account selection before it can run.';
+export const ACP_NATIVE_OPERATION_UNAVAILABLE_REASON =
+  'Antigravity Sessions only support new messages in their existing live task.';
 
 export function runtimeHostExternalTurnUnavailableReason(
   header: Pick<
@@ -64,7 +66,7 @@ export function runtimeHostSafeBoundaryContinuationUnavailableReason(
       ? WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON
       : undefined) ??
     (header.transcriptLedgerVersion === 0 ? IMPORT_STAGING_UNAVAILABLE_REASON : undefined) ??
-    (header.llmConnectionId === undefined && header.backend !== 'fake'
+    (header.llmConnectionId === undefined && header.backend !== 'fake' && header.backend !== 'acp'
       ? LEGACY_CONNECTION_IDENTITY_EXECUTION_UNAVAILABLE_REASON
       : undefined) ??
     (header.subagentParent ? CHILD_CONTINUATION_UNAVAILABLE_REASON : undefined)
@@ -111,8 +113,11 @@ export function runtimeHostExecutionUnavailableReason(
       ? WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON
       : undefined) ??
     (header.transcriptLedgerVersion === 0 ? IMPORT_STAGING_UNAVAILABLE_REASON : undefined) ??
-    (header.llmConnectionId === undefined && header.backend !== 'fake'
+    (header.llmConnectionId === undefined && header.backend !== 'fake' && header.backend !== 'acp'
       ? LEGACY_CONNECTION_IDENTITY_EXECUTION_UNAVAILABLE_REASON
+      : undefined) ??
+    (header.backend === 'acp' && execution.kind !== 'external_message'
+      ? ACP_NATIVE_OPERATION_UNAVAILABLE_REASON
       : undefined) ??
     (header.collaborationMode === 'plan' &&
     execution.kind !== 'external_message' &&

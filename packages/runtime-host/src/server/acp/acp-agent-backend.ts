@@ -58,7 +58,9 @@ interface ToolSnapshot {
 
 interface PendingPermission {
   readonly requestId: string;
-  readonly settle: (outcome: { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string }) => void;
+  readonly settle: (
+    outcome: { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string },
+  ) => void;
   readonly hostedSettlement: HostedFormSettlement;
 }
 
@@ -69,6 +71,10 @@ export interface AcpAgentBackendInput {
   readonly env: NodeJS.ProcessEnv;
   readonly releaseResidency: () => void;
   readonly onCleanupFailure: () => void;
+  readonly onUnavailable: () => void;
+  readonly createConnection?: (
+    input: Parameters<typeof createAcpConnection>[0],
+  ) => AcpConnectionOwner;
 }
 
 /** One official ACP process and protocol Session, retained across turns for one Maka Session. */
@@ -89,6 +95,9 @@ export class AcpAgentBackend implements AgentBackend {
     readonly tools: Map<string, ToolSnapshot>;
     readonly hostedInteraction: BackendSendInput['hostedInteraction'];
     readonly promptSettled: Promise<void>;
+    readonly initializationAbort: AbortController;
+    cancelRequested: boolean;
+    promptDispatched: boolean;
     cancelledWithPendingPermission: boolean;
     settlePrompt(): void;
   };
@@ -96,6 +105,7 @@ export class AcpAgentBackend implements AgentBackend {
   private stopping = false;
   private lost = false;
   private disposed = false;
+  private unavailableReported = false;
 
   constructor(input: AcpAgentBackendInput) {
     this.input = input;
@@ -107,7 +117,6 @@ export class AcpAgentBackend implements AgentBackend {
     if (this.disposed || this.lost) throw new Error('ACP Session is no longer available');
     if (this.current) throw new Error('ACP Session is busy');
     if (input.attachments?.length) throw new Error('ACP supports project files and text only');
-    await this.ensureInitialized();
     const queue = new EventQueue();
     let settlePrompt!: () => void;
     const promptSettled = new Promise<void>((resolvePrompt) => {
@@ -121,6 +130,9 @@ export class AcpAgentBackend implements AgentBackend {
       tools: new Map<string, ToolSnapshot>(),
       hostedInteraction: input.hostedInteraction,
       promptSettled,
+      initializationAbort: new AbortController(),
+      cancelRequested: false,
+      promptDispatched: false,
       cancelledWithPendingPermission: false,
       settlePrompt,
     };
@@ -136,23 +148,35 @@ export class AcpAgentBackend implements AgentBackend {
 
   async stop(_reason: 'user_stop' | 'redirect'): Promise<void> {
     const active = this.current;
-    if (!active || !this.connection || !this.acpSessionId) return;
+    if (!active) return;
     this.stopping = true;
+    active.cancelRequested = true;
     active.cancelledWithPendingPermission = this.pendingPermissions.size > 0;
-    for (const permission of this.pendingPermissions.values()) {
+    const permissionClosures = [...this.pendingPermissions.values()].map((permission) => {
       permission.settle({ outcome: 'cancelled' });
-      await permission.hostedSettlement.applyClosure('turn_stopped').catch(() => undefined);
-    }
+      return permission.hostedSettlement.applyClosure('turn_stopped').catch(() => undefined);
+    });
     this.pendingPermissions.clear();
-    await this.connection.agent.notify(methods.agent.session.cancel, {
-      sessionId: this.acpSessionId,
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const cancellation = Promise.all(permissionClosures).then(async () => {
+      if (this.connection && this.acpSessionId) {
+        await this.connection.agent.notify(methods.agent.session.cancel, {
+          sessionId: this.acpSessionId,
+        });
+      } else {
+        active.initializationAbort.abort();
+      }
+      await active.promptSettled;
+      return true as const;
     });
     const completed = await Promise.race([
-      active.promptSettled.then(() => true),
-      new Promise<false>((resolveTimeout) => setTimeout(() => resolveTimeout(false), CANCEL_TIMEOUT_MS)),
-    ]);
+      cancellation,
+      new Promise<false>((resolveTimeout) => {
+        timeout = setTimeout(() => resolveTimeout(false), CANCEL_TIMEOUT_MS);
+      }),
+    ]).finally(() => clearTimeout(timeout));
     if (!completed) {
-      this.lost = true;
+      this.markUnavailable();
       await this.releaseOwner();
       active.queue.push(event(active.turnId, 'abort', { reason: 'timeout' }));
       active.queue.finish();
@@ -166,6 +190,7 @@ export class AcpAgentBackend implements AgentBackend {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.reportUnavailable();
     for (const permission of this.pendingPermissions.values()) {
       permission.settle({ outcome: 'cancelled' });
       await permission.hostedSettlement.applyClosure('producer_cancelled').catch(() => undefined);
@@ -175,14 +200,14 @@ export class AcpAgentBackend implements AgentBackend {
     this.input.releaseResidency();
   }
 
-  private async ensureInitialized(): Promise<void> {
+  private async ensureInitialized(cancellationSignal: AbortSignal): Promise<void> {
     if (this.initialization) return this.initialization;
-    this.initialization = this.initialize();
+    this.initialization = this.initialize(cancellationSignal);
     return this.initialization;
   }
 
-  private async initialize(): Promise<void> {
-    const owner = createAcpConnection({
+  private async initialize(cancellationSignal: AbortSignal): Promise<void> {
+    const owner = (this.input.createConnection ?? createAcpConnection)({
       executable: this.input.executable,
       cwd: dirname(this.input.executable),
       env: {
@@ -197,22 +222,27 @@ export class AcpAgentBackend implements AgentBackend {
     this.owner = owner;
     this.connection = owner.connection;
     try {
-      const initialized = await owner.connection.agent.request(methods.agent.initialize, {
-        protocolVersion: 1,
-        clientCapabilities: {
-          fs: { readTextFile: true, writeTextFile: true },
-          terminal: false,
+      const initialized = await owner.connection.agent.request(
+        methods.agent.initialize,
+        {
+          protocolVersion: 1,
+          clientCapabilities: {
+            fs: { readTextFile: true, writeTextFile: true },
+            terminal: false,
+          },
         },
-      });
+        { cancellationSignal },
+      );
       if (initialized.protocolVersion !== 1) throw new Error('Unsupported ACP protocol version');
-      const session = await owner.connection.agent.request(methods.agent.session.new, {
-        cwd: this.cwd,
-        mcpServers: [],
-      });
+      const session = await owner.connection.agent.request(
+        methods.agent.session.new,
+        { cwd: this.cwd, mcpServers: [] },
+        { cancellationSignal },
+      );
       this.acpSessionId = session.sessionId;
       void owner.failed.catch((error) => this.failConnection(error));
     } catch (error) {
-      this.lost = true;
+      this.markUnavailable();
       await this.releaseOwner();
       throw error;
     }
@@ -258,6 +288,18 @@ export class AcpAgentBackend implements AgentBackend {
     active: NonNullable<AcpAgentBackend['current']>,
   ): Promise<void> {
     try {
+      await this.ensureInitialized(active.initializationAbort.signal);
+      if (active.cancelRequested) {
+        active.queue.push(
+          event(active.turnId, 'complete', {
+            stopReason: 'user_stop',
+            providerStopReason: 'cancelled_before_prompt',
+          }),
+        );
+        active.queue.finish();
+        return;
+      }
+      active.promptDispatched = true;
       const response = await this.connection!.agent.request(methods.agent.session.prompt, {
         sessionId: this.acpSessionId!,
         prompt: [{ type: 'text', text: promptText(input) }],
@@ -269,19 +311,38 @@ export class AcpAgentBackend implements AgentBackend {
         ? 'error'
         : response.stopReason === 'cancelled'
           ? 'user_stop'
-          : mapStopReason(response.stopReason);
-      active.queue.push(event(active.turnId, 'complete', { stopReason }));
+          : mapAcpStopReason(response.stopReason);
+      active.queue.push(
+        event(active.turnId, 'complete', {
+          stopReason,
+          providerStopReason: response.stopReason,
+        }),
+      );
       active.queue.finish();
       // Antigravity 1.1.1 can return a cancelled prompt while leaving its input
       // step unregistered after a permission form was pending. Do not present
       // that process as resumable: a follow-up would otherwise end silently.
       if (response.stopReason === 'cancelled' && active.cancelledWithPendingPermission) {
-        this.lost = true;
+        this.markUnavailable();
         await this.releaseOwner();
       }
     } catch (error) {
+      if (active.cancelRequested) {
+        this.markUnavailable();
+        await this.releaseOwner().catch(() => undefined);
+        active.queue.push(
+          event(active.turnId, 'complete', {
+            stopReason: 'user_stop',
+            providerStopReason: active.promptDispatched
+              ? 'cancelled_during_prompt'
+              : 'cancelled_during_startup',
+          }),
+        );
+        active.queue.finish();
+        return;
+      }
       // A transport failure after cancel is not an acknowledged cancellation.
-      this.lost = true;
+      this.markUnavailable();
       active.queue.fail(error);
     } finally {
       active.settlePrompt();
@@ -293,8 +354,13 @@ export class AcpAgentBackend implements AgentBackend {
     if (!active) return;
     if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
       const messageId = update.messageId ?? `acp-message-${active.turnId}`;
-      active.textByMessage.set(messageId, (active.textByMessage.get(messageId) ?? '') + update.content.text);
-      active.queue.push(event(active.turnId, 'text_delta', { messageId, text: update.content.text }));
+      active.textByMessage.set(
+        messageId,
+        (active.textByMessage.get(messageId) ?? '') + update.content.text,
+      );
+      active.queue.push(
+        event(active.turnId, 'text_delta', { messageId, text: update.content.text }),
+      );
       return;
     }
     if (update.sessionUpdate === 'agent_thought_chunk' && update.content.type === 'text') {
@@ -303,7 +369,9 @@ export class AcpAgentBackend implements AgentBackend {
         messageId,
         (active.thinkingByMessage.get(messageId) ?? '') + update.content.text,
       );
-      active.queue.push(event(active.turnId, 'thinking_delta', { messageId, text: update.content.text }));
+      active.queue.push(
+        event(active.turnId, 'thinking_delta', { messageId, text: update.content.text }),
+      );
       return;
     }
     if (update.sessionUpdate === 'tool_call') this.acceptTool(update, false);
@@ -361,7 +429,7 @@ export class AcpAgentBackend implements AgentBackend {
           providerExecuted: true,
           providerOutput: snapshot.rawOutput,
           isError: snapshot.status === 'failed',
-          content: terminalToolContent(snapshot),
+          content: projectAcpToolContent(snapshot.content, snapshot.rawOutput),
           origin: 'provider',
           modelVisibility: 'hidden',
         }),
@@ -408,7 +476,10 @@ export class AcpAgentBackend implements AgentBackend {
       applyAnswer: async (answer) => {
         if (answer.action !== 'accept') return settle({ outcome: 'cancelled' });
         const selected = answer.values.optionId;
-        if (typeof selected !== 'string' || !params.options.some((option) => option.optionId === selected))
+        if (
+          typeof selected !== 'string' ||
+          !params.options.some((option) => option.optionId === selected)
+        )
           return settle({ outcome: 'cancelled' });
         settle({ outcome: 'selected', optionId: selected });
       },
@@ -435,7 +506,8 @@ export class AcpAgentBackend implements AgentBackend {
   }
 
   private assertAcpSession(sessionId: string): void {
-    if (!this.acpSessionId || sessionId !== this.acpSessionId) throw new Error('Unknown ACP Session');
+    if (!this.acpSessionId || sessionId !== this.acpSessionId)
+      throw new Error('Unknown ACP Session');
   }
 
   private async checkedPath(path: string, forWrite: boolean): Promise<string> {
@@ -454,16 +526,20 @@ export class AcpAgentBackend implements AgentBackend {
       }
     }
     const rel = relative(await realpath(this.cwd), resolvedPath);
-    if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) throw new Error('ACP file path leaves the workspace');
+    if (rel === '..' || rel.startsWith('../') || isAbsolute(rel))
+      throw new Error('ACP file path leaves the workspace');
     if (!forWrite) await access(resolvedPath, constants.R_OK);
     return resolvedPath;
   }
 
   private failConnection(error: unknown): void {
     if (this.disposed) return;
-    this.lost = true;
+    this.markUnavailable();
     const active = this.current;
-    if (active) active.queue.fail(error instanceof Error ? error : new AcpConnectionError('connection_failed'));
+    if (active)
+      active.queue.fail(
+        error instanceof Error ? error : new AcpConnectionError('connection_failed'),
+      );
   }
 
   private async releaseOwner(): Promise<void> {
@@ -478,6 +554,17 @@ export class AcpAgentBackend implements AgentBackend {
       throw error;
     }
   }
+
+  private markUnavailable(): void {
+    this.lost = true;
+    this.reportUnavailable();
+  }
+
+  private reportUnavailable(): void {
+    if (this.unavailableReported) return;
+    this.unavailableReported = true;
+    this.input.onUnavailable();
+  }
 }
 
 function promptText(input: BackendSendInput): string {
@@ -488,19 +575,43 @@ function promptText(input: BackendSendInput): string {
   return sections.filter(Boolean).join('\n\n');
 }
 
-function terminalToolContent(snapshot: ToolSnapshot): ToolResultContent {
-  const diffs = snapshot.content.filter((item): item is Extract<ToolCallContent, { type: 'diff' }> => item.type === 'diff');
-  if (diffs.length) {
-    return {
-      kind: 'file_diff',
-      paths: diffs.map((diff) => diff.path),
-      diff: diffs
-        .map((diff) => `--- a/${diff.path}\n+++ b/${diff.path}\n${diff.oldText}\n${diff.newText}`)
-        .join('\n\n'),
-    };
+export function projectAcpToolContent(
+  content: readonly ToolCallContent[],
+  rawOutput?: unknown,
+): ToolResultContent {
+  const parts: Array<Extract<ToolResultContent, { kind: 'external_tool' }>['parts'][number]> = [];
+  for (const item of content) {
+    if (item.type === 'diff') {
+      parts.push({
+        kind: 'file_diff',
+        paths: [item.path],
+        diff: createWholeFileDiff(item.path, item.oldText ?? '', item.newText ?? ''),
+      });
+      continue;
+    }
+    if (item.type === 'terminal') {
+      if (item.terminalId) parts.push({ kind: 'terminal', terminalId: item.terminalId });
+      continue;
+    }
+    if (item.content.type === 'text') parts.push({ kind: 'text', text: item.content.text });
   }
-  const text = summarizeToolContent(snapshot.content);
-  return text ? { kind: 'text', text } : { kind: 'json', value: snapshot.rawOutput ?? null };
+  if (parts.length === 1 && parts[0]?.kind === 'text') return parts[0];
+  if (parts.length === 1 && parts[0]?.kind === 'file_diff') return parts[0];
+  return parts.length
+    ? { kind: 'external_tool', parts }
+    : { kind: 'json', value: rawOutput ?? null };
+}
+
+function createWholeFileDiff(path: string, oldText: string, newText: string): string {
+  const oldLines = oldText.split('\n');
+  const newLines = newText.split('\n');
+  return [
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
+    ...oldLines.map((line) => `-${line}`),
+    ...newLines.map((line) => `+${line}`),
+  ].join('\n');
 }
 
 function summarizeToolContent(content: readonly ToolCallContent[]): string {
@@ -514,9 +625,12 @@ function summarizeToolContent(content: readonly ToolCallContent[]): string {
     .join('\n');
 }
 
-function mapStopReason(reason: string): 'end_turn' | 'max_tokens' | 'error' {
+export function mapAcpStopReason(
+  reason: string,
+): 'end_turn' | 'max_tokens' | 'step_limit' | 'error' {
   if (reason === 'end_turn') return 'end_turn';
   if (reason === 'max_tokens') return 'max_tokens';
+  if (reason === 'max_turn_requests') return 'step_limit';
   return 'error';
 }
 

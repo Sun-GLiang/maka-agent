@@ -44,6 +44,16 @@ export function extractErrorText(result: ToolActivityItem['result'], locale: UiL
     }
     case 'file_diff':
       return result.diff;
+    case 'external_tool':
+      return result.parts
+        .map((part) =>
+          part.kind === 'text'
+            ? part.text
+            : part.kind === 'file_diff'
+              ? part.diff
+              : `Terminal ${part.terminalId}`,
+        )
+        .join('\n');
     case 'rive_workflow':
       return result.error
         ? [result.summary, result.error.reason, result.error.message].filter(Boolean).join('\n')
@@ -78,6 +88,7 @@ export function resultOwnsOwnPanel(item: ToolActivityItem): boolean {
     case 'web_search':
     case 'web_search_error':
     case 'file_diff':
+    case 'external_tool':
     case 'rive_workflow':
       return true;
     default:
