@@ -87,6 +87,8 @@ export async function installAntigravity(
     try {
       await lstat(destination);
       await verifyInstallation(destination, signal, files);
+      await setExecutablePermissions(destination, files);
+      signal.throwIfAborted();
       return join(destination, files[0][0]);
     } catch (error) {
       signal.throwIfAborted();
@@ -139,7 +141,7 @@ export async function installAntigravity(
     // Only the hash-verified archive is extracted. Bound cancellation until the child closes.
     await extract(archive, expanded, signal);
     await verifyInstallation(expanded, signal, files);
-    for (const [name] of files) await chmod(join(expanded, name), 0o700);
+    await setExecutablePermissions(expanded, files);
     signal.throwIfAborted();
     await publishInstallation(expanded, destination, previous, signal, files);
     return join(destination, files[0][0]);
@@ -216,6 +218,12 @@ async function verifyInstallation(
     await pipeline(createReadStream(path), hash, { signal });
     if (hash.digest('hex') !== expected) throw new AcpSetupError('integrity_failed');
   }
+}
+async function setExecutablePermissions(
+  directory: string,
+  files: readonly (readonly [string, string])[],
+): Promise<void> {
+  for (const [name] of files) await chmod(join(directory, name), 0o700);
 }
 async function extract(archive: string, destination: string, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted();

@@ -17,19 +17,9 @@
   under the License.
 -->
 
-# Antigravity ACP setup (PR1)
+# Antigravity ACP 1.1.1 observed behavior
 
-Settings → External Agents configures Antigravity on a local macOS arm64 Runtime Host. Install downloads Google's pinned ACP 1.1.1 distribution, verifies the archive and both executables, extracts into the Host state root under `external-agents/antigravity/1.1.1`, checks the connection, and saves the executable path through the existing Settings mutation. Download source links directly to Google's archive. The existing RuntimePolicy proxy configuration is used for downloads.
-
-The Program section always shows Choose existing program beside Install/Reinstall, with a visible explanation that existing ACP installations can be reused. Selecting a file saves the native picker result through the existing Settings mutation; there is no separate path editor or Advanced settings foldout. A saved path is read on reopening but is not an authentication claim. There is no disk-wide or PATH discovery. The installer reuses a matching verified managed version without another download, replaces a damaged copy only after verifying a fresh download, and removes staging left by interrupted attempts. Existing custom paths are only replaced by an explicit install or file selection. An install's Settings mutation commits only while the saved executable still matches the attempt's admission basis, so an optimistic retry cannot overwrite a newer choice. The Antigravity desktop application alone does not provide this ACP connection.
-
-Only the executable path is persisted in RuntimePolicy document schema 4. Schemas 2 and 3 migrate with an empty path. Setup requests compare the saved path before admission; changing it invalidates displayed results. Connection success does not establish authentication. Official credentials remain under the official process's control, outside Maka's credential store.
-
-The Host directly uses ACP SDK 1.4.0. Setup initializes the process without file or terminal capabilities and never creates a session or sends a prompt. Login selects the observed `oauth-personal` method. Its stderr authorization link is forwarded through the existing Desktop `oauth_presentation` capability. The subprocess environment sets `BROWSER=/usr/bin/true` to suppress the official process's own browser launch and `ANTIGRAVITY_HARNESS_PATH` to its sibling helper. No raw authentication output is retained by Maka.
-
-One setup attempt, including installation, runs at a time. Installation has a 15-minute timeout, bounded download size, SHA-256 verification and per-attempt staging cleanup. Cancelling does not remove a completed managed installation. A config-save failure leaves the verified installation available for retry. Duplicate IDs return the existing attempt; retries use new IDs. Page/Host changes, client disconnect, timeout, drain and shutdown cancel the attempt. Terminal results follow bounded process-tree cleanup, including SIGKILL escalation. Failed cleanup drains the Host. Terminal attempt history is in memory and bounded to 32 records. Handshake timeout is 30 seconds; authentication timeout is five minutes.
-
-## Official behavior observed on 2026-09-10
+Observed on macOS arm64 on 2026-09-10.
 
 Source: [Google's official macOS arm64 ACP 1.1.1 archive](https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-agy_acp_server_1.1.1-darwin-arm64.zip).
 

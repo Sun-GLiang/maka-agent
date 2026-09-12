@@ -37,11 +37,7 @@ export class RuntimeHostOAuthPresentation implements OAuthPresentationBackend {
 
   constructor(private readonly openSystemBrowser: (url: string) => Promise<void>) {}
 
-  expect(
-    attemptId: string,
-    expectedStateHint?: string,
-    timeoutMs = PRESENTATION_TIMEOUT_MS,
-  ): OAuthPresentationExpectation {
+  expect(attemptId: string, expectedStateHint?: string): OAuthPresentationExpectation {
     if (this.#pending) throw new Error('Another OAuth login is already in progress');
     let resolvePresented!: (presentation: OAuthExternalPresentation) => void;
     let rejectPresented!: (reason?: unknown) => void;
@@ -58,7 +54,7 @@ export class RuntimeHostOAuthPresentation implements OAuthPresentationBackend {
       this.#pending = undefined;
       rejectPresented(new Error('Runtime Host did not present OAuth authorization'));
     };
-    let timer = setTimeout(expire, timeoutMs);
+    let timer = setTimeout(expire, PRESENTATION_TIMEOUT_MS);
     const pending: PendingPresentation = {
       attemptId,
       expectedStateHint,
@@ -80,7 +76,7 @@ export class RuntimeHostOAuthPresentation implements OAuthPresentationBackend {
       renew: () => {
         if (this.#pending !== pending) return;
         clearTimeout(timer);
-        timer = setTimeout(expire, timeoutMs);
+        timer = setTimeout(expire, PRESENTATION_TIMEOUT_MS);
       },
       cancel: (reason = new Error('OAuth presentation cancelled')) => {
         if (this.#pending === pending) pending.reject(reason);

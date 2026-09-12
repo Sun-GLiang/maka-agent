@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import {
+  chmod,
   mkdir,
   mkdtemp,
   writeFile,
@@ -71,7 +72,7 @@ async function fixture(
 }
 const supported = { skip: process.platform !== 'darwin' };
 test(
-  'installs a verified archive atomically and reuses both verified executables',
+  'installs atomically, reuses verified executables, and restores their permissions',
   supported,
   async () =>
     fixture(async ({ root, zip, evidence }) => {
@@ -93,6 +94,13 @@ test(
       assert.equal((await stat(executable)).mode & 0o777, 0o700);
       assert.equal(await installAntigravity(input, evidence), executable);
       assert.equal(requests, 1);
+      for (const name of ['agy_acp_server.par', 'localharness_external']) {
+        const path = join(input.directory, '1.1.1', name);
+        await chmod(path, 0o600);
+        assert.equal(await installAntigravity(input, evidence), executable);
+        assert.equal((await stat(path)).mode & 0o777, 0o700);
+      }
+      assert.equal(requests, 1, 'restores permissions without downloading again');
       assert.ok(phases.includes('installing'));
       assert.deepEqual(await readdir(input.directory), ['1.1.1']);
       for (const name of ['agy_acp_server.par', 'localharness_external']) {
