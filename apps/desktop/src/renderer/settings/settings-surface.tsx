@@ -88,8 +88,9 @@ import {
 } from './settings-nav';
 import { getSettingsNavigationCopy } from '../locales/settings-navigation-copy.js';
 import { SettingRow } from './settings-rows';
-import { SettingsPage } from './settings-section';
+import { SettingsPage, SettingsSection as SettingsSectionBlock } from './settings-section';
 import { settingsActionErrorMessage } from './settings-error-copy';
+import { SessionBundleTasks } from '../features/session-bundle';
 import { ImportTasksSettingsPage } from './import-tasks-settings-page';
 import { TasksSettingsPage, type ArchivedTasksBridge } from './tasks-settings-page';
 import { UsageScopeMount, UsageSettingsPage, type UsageScopeHandle } from './usage-settings-page';
@@ -1010,6 +1011,10 @@ function SettingsSurfaceContent(
                         >
                           <SettingsPageBody
                             section={section}
+                            // A bundle names a path on THIS machine, so the
+                            // feature is offered only while the Local Host is
+                            // the target -- never beside a Remote one.
+                            isLocalRuntimeHost={selectedRuntimeHostEntry?.profile.kind === 'local'}
                             settings={settings}
                             connections={connections}
                             connectionsBridge={connectionsBridge}
@@ -1065,6 +1070,7 @@ function SettingsSurfaceContent(
 
 function SettingsPageBody(props: {
   section: SettingsSection;
+  isLocalRuntimeHost: boolean;
   settings: AppSettings;
   connections: ProjectedLlmConnection[];
   connectionsBridge: RuntimeHostSettingsConnectionsBridge | undefined;
@@ -1200,10 +1206,21 @@ function SettingsPageBody(props: {
       return <TasksSettingsPage {...props.archivedTasks} />;
     case 'import-tasks':
       return (
-        <ImportTasksSettingsPage
-          onImported={props.onTaskImported}
-          onOpenImported={props.onOpenSession}
-        />
+        <SettingsPage as="section">
+          <SessionBundleTasks
+            isLocalTarget={props.isLocalRuntimeHost}
+            sessions={props.archivedTasks.sessions}
+            renderSection={({ children, ...section }) => (
+              <SettingsSectionBlock {...section}>{children}</SettingsSectionBlock>
+            )}
+          >
+            <ImportTasksSettingsPage
+              onImported={props.onTaskImported}
+              onOpenImported={props.onOpenSession}
+              offersBundleSource={props.isLocalRuntimeHost}
+            />
+          </SessionBundleTasks>
+        </SettingsPage>
       );
     case 'data':
       return (
