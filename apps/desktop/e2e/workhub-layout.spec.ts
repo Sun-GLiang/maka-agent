@@ -62,7 +62,13 @@ test('WorkHub uses its coordination model and shared attachment composer', async
       return conversation.left >= 0 && conversation.right <= innerWidth + 1;
     })).toBe(true);
   }
-  await mainWindow.evaluate((window, bounds) => window.setBounds(bounds), originalBounds);
+  const restoredContentWidth = await mainWindow.evaluate((window, bounds) => {
+    window.setBounds(bounds);
+    return window.getContentSize()[0];
+  }, originalBounds);
+  await expect.poll(() => page.evaluate(() => innerWidth)).toBe(restoredContentWidth);
+  const restoredDockWidth = await page.locator('.workHubDock').evaluate((element) => Math.round(element.getBoundingClientRect().width));
+  await expect.poll(() => workhub.evaluate(() => innerWidth)).toBe(restoredDockWidth);
   const anchors = workhub.locator('.workhub-anchors');
   const draftBeforeOverlays = 'Draft survives main-window overlays and dragging.';
   await workhub.locator(COMPOSER_INPUT).fill(draftBeforeOverlays);
