@@ -71,7 +71,6 @@ import { useCommandPalette } from './command-palette';
 import { ChatMessageSurface } from './chat-message-surface';
 import { useTaskSubmissionReadiness } from './use-task-submission-readiness';
 import * as Conversation from './features/conversation';
-import type { TranscriptHistoryPending } from './features/conversation';
 import { deriveWorkspaceReadinessRecovery } from './workspace-readiness-recovery';
 import { LiveTurnReconciler } from './live-turn-reconciler';
 import { useAppShellSessionUiReads } from './use-app-shell-session-ui-reads';
@@ -119,7 +118,6 @@ import type {
   DesktopSessionSummary,
   OnboardingSnapshot,
 } from '../preload/bridge-contract.js';
-import { DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES } from '../preload/transcript-contract.js';
 import { ProviderLogo } from './settings/provider-display';
 import { ProviderBrandMark } from './settings/provider-brand-marks';
 import { RuntimeHostSshTerminalDialog } from './settings/runtime-host-ssh-terminal-dialog.js';
@@ -341,10 +339,11 @@ function AppShellContent({
   const activeHostSession = activeCatalogSession?.localState !== 'pending' ? activeCatalogSession : undefined;
   const sharedSessionActive = activeCatalogSession?.shared === true;
   const ownerActiveId = sharedSessionActive ? undefined : activeHostSession?.id;
-  const interactionHydrationEpochRef = useRef(new Map<string, number>());
+  // Only the outstanding read needs a fence; past Sessions leave no hydration metadata.
+  const interactionHydrationRef = useRef<{ sessionId: string } | null>(null);
   const markInteractionChanged = useCallback((sessionId: string) => {
-    const epochs = interactionHydrationEpochRef.current;
-    epochs.set(sessionId, (epochs.get(sessionId) ?? 0) + 1);
+    const pending = interactionHydrationRef.current;
+    if (pending?.sessionId === sessionId) interactionHydrationRef.current = null;
   }, []);
 
   const {
@@ -417,7 +416,6 @@ function AppShellContent({
   const [newChatOrchestrationMode, setNewChatOrchestrationMode] = useState<OrchestrationMode>('default');
   const [newTaskPermissionChoice, setNewTaskPermissionChoice, clearNewTaskPermissionChoice] =
     useNewTaskChoice<ChatDefaultPermissionMode>(currentNewTaskDraftKey);
-  const [historyLoadPending, setHistoryLoadPending] = useState<TranscriptHistoryPending>();
   const transcriptReadingCommands = useRef<Conversation.TranscriptReadingPositionCommands>(null);
   const [transcriptTurnIndex, setTranscriptTurnIndex] = useState<{
     sessionId: string;
@@ -1029,23 +1027,20 @@ function AppShellContent({
   // active session changes (#2072).
   useEffect(() => {
     if (!ownerActiveId) return;
-    let cancelled = false;
-    const hydrationEpoch = interactionHydrationEpochRef.current.get(ownerActiveId) ?? 0;
+    const pending = { sessionId: ownerActiveId };
+    interactionHydrationRef.current = pending;
+    const release = () => {
+      if (interactionHydrationRef.current === pending) interactionHydrationRef.current = null;
+    };
     void window.maka.sessions
       .listActiveInteractions(ownerActiveId)
       .then((requests) => {
-        if (
-          cancelled ||
-          (interactionHydrationEpochRef.current.get(ownerActiveId) ?? 0) !== hydrationEpoch
-        ) {
-          return;
-        }
+        if (interactionHydrationRef.current !== pending) return;
         sessionUiController.setInteractionBySession((current) => reconcileInteractions(current, ownerActiveId, requests));
       })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
+      .catch(() => {})
+      .finally(release);
+    return release;
   }, [ownerActiveId, sessionUiController.setInteractionBySession]);
   useEffect(
     () =>
@@ -2334,8 +2329,6 @@ function AppShellContent({
         turnIndex={transcriptTurnIndex}
         setTurnIndex={setTranscriptTurnIndex}
         listTurnLandmarks={(sessionId) => window.maka.sessions.listTurnLandmarks(sessionId)}
-        setHistoryPending={setHistoryLoadPending}
-        historyPageBytes={DESKTOP_TRANSCRIPT_RANGE_MAX_BYTES}
         onRestoreError={(error, sessionId) => sessionUiController.setMessageLoadErrorBySession((current) => ({
           ...current,
           [sessionId]: localizedShellErrorMessage(error, desktopConversationCopy.actions.operationFailedFallback, uiLocale),
@@ -2495,7 +2488,7 @@ function AppShellContent({
                   desktopConversationCopy.actions.scrollMainToBottom
                 }
                 onReturnToTail={activeTranscriptRange?.hasNewer
-                  ? () => transcriptReadingCommands.current?.loadHistory('latest')
+                  ? () => transcriptReadingCommands.current?.returnToLatest()
                   : undefined}
                 hidden={workHubActive || !sessionsSelected}
                 composer={
@@ -2695,8 +2688,9 @@ function AppShellContent({
                 activeSessionId={activeId}
                 hasOlderHistory={activeTranscriptRange?.hasOlder}
                 hasNewerHistory={activeTranscriptRange?.hasNewer}
-                historyLoadPending={historyLoadPending}
-                onLoadHistory={(target, anchorTurnId) => transcriptReadingCommands.current?.loadHistory(target, anchorTurnId)}
+                onPrefetchHistory={(edge) =>
+                  transcriptReadingCommands.current?.prefetchHistory(edge) ?? Promise.resolve(false)}
+                onRetainWindow={(band) => transcriptReadingCommands.current?.retainWindow(band)}
                 liveContentSeedRevision={liveContent.liveContentSeedRevision(activeEventSeed, activeId)}
                 messages={messages}
                 transientMessages={transientMessages}
