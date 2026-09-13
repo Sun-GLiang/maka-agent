@@ -61,7 +61,6 @@ export {
   removePendingItems,
   clearPending,
 } from '@maka/ui/pending-items';
-export { desktopSlashCommandPresentation } from './model/slash-command-presentation.js';
 export {
   projectBoundaryUnreadableNotice,
   projectDesktopSlashCommands,
