@@ -1239,8 +1239,11 @@ export const NewChatComposer: Story = {
       session={null}
       chat={{ messages: [] }}
       composer={{
-        newChatModel: { llmConnectionId: 'connection-anthropic-main', llmConnectionSlug: 'anthropic-main', model: 'claude-sonnet-4-5' },
-        onPickNewChatModel: noop,
+        newTaskExecutionChoice: {
+          executor: 'maka',
+          makaModel: { llmConnectionId: 'connection-anthropic-main', llmConnectionSlug: 'anthropic-main', model: 'claude-sonnet-4-5' },
+        },
+        onNewTaskExecutionChoiceChange: noop,
         onOpenModelSettings: noop,
       }}
     />
@@ -1255,8 +1258,11 @@ export const NewChatComposerEmptyLocalHost: Story = {
       session={null}
       chat={{ messages: [] }}
       composer={{
-        newChatModel: { llmConnectionId: 'connection-anthropic-main', llmConnectionSlug: 'anthropic-main', model: 'claude-sonnet-4-5' },
-        onPickNewChatModel: noop,
+        newTaskExecutionChoice: {
+          executor: 'maka',
+          makaModel: { llmConnectionId: 'connection-anthropic-main', llmConnectionSlug: 'anthropic-main', model: 'claude-sonnet-4-5' },
+        },
+        onNewTaskExecutionChoiceChange: noop,
         onOpenModelSettings: noop,
         workspacePicker: {
           ...baseComposerProps.workspacePicker!,
@@ -1280,8 +1286,11 @@ export const NewChatComposerProjectPending: Story = {
       session={null}
       chat={{ messages: [] }}
       composer={{
-        newChatModel: { llmConnectionId: 'connection-anthropic-main', llmConnectionSlug: 'anthropic-main', model: 'claude-sonnet-4-5' },
-        onPickNewChatModel: noop,
+        newTaskExecutionChoice: {
+          executor: 'maka',
+          makaModel: { llmConnectionId: 'connection-anthropic-main', llmConnectionSlug: 'anthropic-main', model: 'claude-sonnet-4-5' },
+        },
+        onNewTaskExecutionChoiceChange: noop,
         onOpenModelSettings: noop,
         workspacePicker: {
           ...baseComposerProps.workspacePicker!,

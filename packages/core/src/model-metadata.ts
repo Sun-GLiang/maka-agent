@@ -251,7 +251,10 @@ const GOOGLE_MODEL_OVERRIDES: Record<string, ModelMetadata> = {
 // catalog says. Base facts come from the active table, falling back to the
 // shipped snapshot so a model upstream stops listing keeps a display name.
 function openAiOAuthBase(active: ModelsDevMetadata, modelId: string): ModelMetadata {
-  return active.openai?.[modelId] ?? GENERATED_MODELS_DEV_METADATA.openai[modelId] ?? {};
+  const metadata = active.openai?.[modelId] ?? GENERATED_MODELS_DEV_METADATA.openai[modelId] ?? {};
+  // The subscription endpoint declares its own access-path window. The public
+  // API input limit is not authoritative for that narrower catalog.
+  return { ...metadata, inputLimit: undefined };
 }
 
 function openAiOAuthModelMetadata(active: ModelsDevMetadata): Record<string, ModelMetadata> {

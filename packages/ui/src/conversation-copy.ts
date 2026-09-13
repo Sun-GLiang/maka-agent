@@ -517,7 +517,7 @@ const CONVERSATION_COPY = {
       // Canonical per-chat ladder: 默认 (model default, overriding Settings) / 关 / 低 / 中 / 高 / 超高
       // (minimal/max when offered).
       level: { off: '关', minimal: '最少', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' },
-      switching: '切换中', model: '模型', switchAriaLabel: '切换当前任务模型', executor: '执行者', chooseExecutor: '选择执行者与模型', makaExecutor: 'Maka', antigravityExecutor: 'Antigravity', agentDefault: '使用 Agent 默认', configureExternalAgent: '配置外部 Agent',
+      switching: '切换中', model: '模型', switchAriaLabel: '切换当前任务模型', executor: '执行者', chooseExecutor: '选择执行者', makaExecutor: 'Maka', antigravityExecutor: 'Antigravity', agentDefault: '使用 Agent 默认', configureExternalAgent: '配置外部 Agent',
       switchWarning: '切换模型可能需要重建服务商提示缓存，使下一次请求更慢或成本更高。',
       newChatAriaLabel: (label) => `选择新任务模型，当前 ${label}`, newChatTitle: (label) => `新任务使用的模型：${label}`,
       configureAriaLabel: (label) => `配置模型连接，当前 ${label}`, configureTitle: '配置模型连接',
@@ -675,7 +675,7 @@ const CONVERSATION_COPY = {
       // Canonical per-chat ladder: 預設 (model default, overriding Settings) / 關 / 低 / 中 / 高 / 超高
       // (minimal/max when offered).
       level: { off: '關', minimal: '最少', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' },
-      switching: '切換中', model: '模型', switchAriaLabel: '切換目前任務模型', executor: '執行者', chooseExecutor: '選擇執行者與模型', makaExecutor: 'Maka', antigravityExecutor: 'Antigravity', agentDefault: '使用 Agent 預設', configureExternalAgent: '設定外部 Agent',
+      switching: '切換中', model: '模型', switchAriaLabel: '切換目前任務模型', executor: '執行者', chooseExecutor: '選擇執行者', makaExecutor: 'Maka', antigravityExecutor: 'Antigravity', agentDefault: '使用 Agent 預設', configureExternalAgent: '設定外部 Agent',
       switchWarning: '切換模型可能需要重建服務商提示快取，使下一次請求更慢或成本更高。',
       newChatAriaLabel: (label) => `選擇新任務模型，目前 ${label}`, newChatTitle: (label) => `新任務使用的模型：${label}`,
       configureAriaLabel: (label) => `設定模型連線，目前 ${label}`, configureTitle: '設定模型連線',
@@ -859,7 +859,7 @@ const CONVERSATION_COPY = {
     model: {
       thinkingLevel: 'Thinking level', thinkingUnsupported: 'This model does not support thinking-level changes', changeThinkingLevel: 'Change the current model thinking level', defaultLevel: 'Model default',
       level: { off: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Maximum' },
-      switching: 'Switching', model: 'Model', switchAriaLabel: 'Switch model for this task', executor: 'Executor', chooseExecutor: 'Choose executor and model', makaExecutor: 'Maka', antigravityExecutor: 'Antigravity', agentDefault: 'Use Agent default', configureExternalAgent: 'Configure external Agent',
+      switching: 'Switching', model: 'Model', switchAriaLabel: 'Switch model for this task', executor: 'Executor', chooseExecutor: 'Choose executor', makaExecutor: 'Maka', antigravityExecutor: 'Antigravity', agentDefault: 'Use Agent default', configureExternalAgent: 'Configure external Agent',
       switchWarning: 'Switching may rebuild the provider prompt cache, making the next request slower or more expensive.',
       newChatAriaLabel: (label) => `Choose a model for the new task, currently ${label}`, newChatTitle: (label) => `Model for the new task: ${label}`,
       configureAriaLabel: (label) => `Configure model connections, currently ${label}`, configureTitle: 'Configure model connections',

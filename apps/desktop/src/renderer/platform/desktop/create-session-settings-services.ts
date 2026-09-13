@@ -26,13 +26,6 @@ export function createDesktopSessionSettingsServices(
   bridge: DesktopSessionSettingsBridge = window.maka,
 ): SessionSettingsServices {
   return {
-    getExternalAgentModel: (sessionId) => bridge.sessions.getExternalAgentModel(sessionId),
-    setExternalAgentModel: (sessionId, value) =>
-      bridge.sessions.setExternalAgentModel(sessionId, value),
-    setModelConfiguration: (sessionId, input) =>
-      bridge.sessions.setModelConfiguration(sessionId, input),
-    setPermissionMode: (sessionId, mode) => bridge.sessions.setPermissionMode(sessionId, mode),
-    setOrchestrationMode: (sessionId, mode) =>
-      bridge.sessions.setOrchestrationMode(sessionId, mode),
+    sessions: bridge.sessions,
   };
 }

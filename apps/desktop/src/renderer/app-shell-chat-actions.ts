@@ -34,6 +34,7 @@ import {
   dequeueInteractionByRequestId,
   type InteractionQueues,
   type NavSelection,
+  type NewTaskExecutionChoice,
   type TransientUserMessageProjection,
 } from '@maka/ui';
 import { messageRefreshErrorMessage } from './app-shell-copy.js';
@@ -71,12 +72,6 @@ type ComposerImportOwner = {
 type RefBox<T> = { current: T };
 type MessageLoadErrorUpdater = (updater: (current: Record<string, string>) => Record<string, string>) => void;
 type InteractionQueueUpdater = (updater: (current: InteractionQueues) => InteractionQueues) => void;
-
-type PendingNewChatModel = {
-  llmConnectionId: string;
-  llmConnectionSlug: string;
-  model: string;
-} | null;
 
 type PendingNewChatThinkingLevel = ThinkingLevel | null;
 type DesktopNewTaskTarget = DesktopBridge.DesktopNewTaskTarget;
@@ -181,8 +176,7 @@ export function createAppShellChatActions(deps: {
     diagnosticTarget?: { sessionId: string } | { profileId: string },
   ) => void;
   toastApi: ToastApi;
-  newChatModel: PendingNewChatModel;
-  newChatExecutor?: string;
+  newTaskExecutionChoice: NewTaskExecutionChoice;
   clearNewChatExecutionChoice?(): void;
   pendingNewChatThinkingLevel: PendingNewChatThinkingLevel;
   /**
@@ -222,7 +216,6 @@ export function createAppShellChatActions(deps: {
     respondToUserForm: submitUserForm,
     showModelSetupToast,
     toastApi,
-    newChatModel,
     pendingNewChatThinkingLevel,
     newChatPermissionChoice,
     clearNewChatPermissionChoice,
@@ -399,7 +392,7 @@ export function createAppShellChatActions(deps: {
         if (pending?.length) preflightAttachmentItems(pending);
         const session = await window.maka.newTasks.create(initialNewTaskTarget, {
           name: DEFAULT_SESSION_NAME,
-          ...Conversation.newTaskExecutorTarget(deps.newChatExecutor, newChatModel),
+          ...Conversation.newTaskExecutorTarget(deps.newTaskExecutionChoice),
           ...(pendingNewChatThinkingLevel ? { thinkingLevel: pendingNewChatThinkingLevel } : {}),
           ...(newChatPermissionChoice ? { permissionMode: newChatPermissionChoice } : {}),
           collaborationMode: newChatCollaborationMode,

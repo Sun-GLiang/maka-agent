@@ -54,7 +54,8 @@ import {
   ExternalAgentModelSwitcher,
   type ExternalAgentModelConfiguration,
   ModelChipStatic,
-  NewTaskTargetPicker,
+  NewChatModelPicker,
+  NewTaskExecutorPicker,
   ThinkingLevelSelector,
 } from './chat-model-switcher.js';
 import { useUiLocale } from './locale-context.js';
@@ -132,6 +133,16 @@ import {
   type WorkspaceFileReferencePosition,
 } from './inline-reference.js';
 import { ComposerMessageQueue, projectComposerMessageQueue } from './composer-message-queue.js';
+
+export type NewTaskExecutionChoice = {
+  executor: 'maka' | 'antigravity';
+  /** The exact Maka target retained while another executor is selected. */
+  makaModel: {
+    llmConnectionId: string;
+    llmConnectionSlug: string;
+    model: string;
+  } | null;
+};
 
 /** A Skill as the composer offers it: what the `/` menu lists and what a
  * chosen entry writes into the draft. */
@@ -386,17 +397,11 @@ export const Composer = forwardRef<
      * the otherwise-static model chip becomes a real dropdown so the user can
      * choose the new-chat model inline instead of only via Settings · 模型.
      */
-    newChatModel?: { llmConnectionId: string; llmConnectionSlug: string; model: string };
-    /** Execution owner for the next task. Existing Sessions keep their durable owner. */
-    newChatExecutor?: 'maka' | 'antigravity';
-    onNewChatExecutorChange?(executor: 'maka' | 'antigravity'): void;
+    /** Exact execution owner + retained Maka target for the next task. */
+    newTaskExecutionChoice?: NewTaskExecutionChoice;
+    onNewTaskExecutionChoiceChange?(choice: NewTaskExecutionChoice): void;
     onOpenExternalAgentSettings?(): void;
     newChatProviderType?: ProviderType;
-    onPickNewChatModel?(input: {
-      llmConnectionId: string;
-      llmConnectionSlug: string;
-      model: string;
-    }): void | Promise<void>;
     /**
      * Empty-state only: no models are configured yet, so the model chip is a
      * non-interactive label. When provided, the chip becomes a button into
@@ -1506,7 +1511,7 @@ export const Composer = forwardRef<
   const modelChipLabel = props.modelLabel?.trim() || copy.selectModel;
   const externalAgentSelected =
     props.activeSession?.backend === 'acp' ||
-    (!props.activeSession && props.newChatExecutor === 'antigravity');
+    (!props.activeSession && props.newTaskExecutionChoice?.executor === 'antigravity');
   // Mid-turn the model and thinking menus stay mounted but locked, each
   // carrying the reason in its own words (model vs thinking level) — the
   // lock is one state with two wordings, not two locks.
@@ -2136,24 +2141,46 @@ export const Composer = forwardRef<
                   its explanation, so the footer never reflows when a turn
                   starts or ends. */}
               <div className="maka-model-selection-controls">
-                {!props.activeSession && props.onNewChatExecutorChange ? (
-                  <NewTaskTargetPicker
-                    executor={props.newChatExecutor ?? 'maka'}
-                    modelLabel={modelChipLabel}
-                    choices={props.modelChoices ?? []}
-                    currentValue={props.newChatModel
-                      ? exactModelChoiceValue(
-                          props.newChatModel.llmConnectionId,
-                          props.newChatModel.llmConnectionSlug,
-                          props.newChatModel.model,
-                        )
-                      : undefined}
-                    currentProviderType={props.newChatProviderType}
-                    renderProviderMark={props.renderProviderMark}
-                    onCommitExecutor={props.onNewChatExecutorChange}
-                    onPickModel={props.onPickNewChatModel ?? (() => undefined)}
-                    onOpenExternalAgentSettings={props.onOpenExternalAgentSettings}
-                  />
+                {!props.activeSession && props.newTaskExecutionChoice && props.onNewTaskExecutionChoiceChange ? (
+                  <>
+                    <NewTaskExecutorPicker
+                      executor={props.newTaskExecutionChoice.executor}
+                      onChange={(executor) => props.onNewTaskExecutionChoiceChange?.({
+                        ...props.newTaskExecutionChoice!,
+                        executor,
+                      })}
+                      onOpenExternalAgentSettings={props.onOpenExternalAgentSettings}
+                    />
+                    {props.newTaskExecutionChoice.executor !== 'antigravity' &&
+                    (props.modelChoices?.length ?? 0) > 0 ? (
+                      <NewChatModelPicker
+                        label={modelChipLabel}
+                        choices={props.modelChoices ?? []}
+                        currentValue={props.newTaskExecutionChoice.makaModel
+                          ? exactModelChoiceValue(
+                              props.newTaskExecutionChoice.makaModel.llmConnectionId,
+                              props.newTaskExecutionChoice.makaModel.llmConnectionSlug,
+                              props.newTaskExecutionChoice.makaModel.model,
+                            )
+                          : undefined}
+                        currentProviderType={props.newChatProviderType}
+                        renderProviderMark={props.renderProviderMark}
+                        onPick={(makaModel) =>
+                          props.onNewTaskExecutionChoiceChange?.({ executor: 'maka', makaModel })}
+                      />
+                    ) : props.newTaskExecutionChoice.executor === 'antigravity' ? (
+                      <ModelChipStatic
+                        label={getConversationCopy(locale).model.agentDefault}
+                        showUnavailableStatus={false}
+                      />
+                    ) : (
+                      <ModelChipStatic
+                        label={modelChipLabel}
+                        onOpenSettings={props.onOpenModelSettings}
+                        showUnavailableStatus={props.showStaticModelUnavailableStatus}
+                      />
+                    )}
+                  </>
                 ) : props.activeSession?.backend === 'acp' && props.externalAgentModelConfiguration ? (
                   <ExternalAgentModelSwitcher
                     configuration={props.externalAgentModelConfiguration}

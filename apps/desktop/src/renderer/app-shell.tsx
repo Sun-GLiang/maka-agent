@@ -749,9 +749,8 @@ function AppShellContent({
     newChatThinkingLevels,
     newChatThinkingLevel,
     composerSupportsVision,
-    setPendingNewChatModel,
-    newChatExecutor,
-    setNewChatExecutor,
+    newTaskExecutionChoice,
+    selectNewTaskExecutionChoice,
     clearNewChatExecutionChoice,
     pendingNewChatThinkingLevel,
     setPendingNewChatThinkingLevel,
@@ -847,8 +846,8 @@ function AppShellContent({
       if (!confirmed) return false;
       // Abandoning the proposal is what leaves Plan: Runtime writes the
       // Session back to `agent` itself as part of it.
-      await window.maka.sessions.abandonPlanProposal(sessionId, latestProposal.proposalId);
-    } else await window.maka.sessions.setCollaborationMode(sessionId, active ? 'plan' : 'agent');
+      await sessionSettingIntent.abandonPlanProposal(sessionId, latestProposal.proposalId);
+    } else await sessionSettingIntent.setCollaborationMode(sessionId, active ? 'plan' : 'agent');
     return true;
   }
 
@@ -1196,7 +1195,8 @@ function AppShellContent({
   );
   const taskReadinessNotice = Conversation.deriveTaskReadinessNotice(taskReadiness.snapshot, uiLocale);
   const antigravityTask =
-    activeSession?.backend === 'acp' || !activeId && newChatExecutor === 'antigravity';
+    activeSession?.backend === 'acp' ||
+    !activeId && newTaskExecutionChoice.executor === 'antigravity';
   const taskSubmissionHardBlocked = Conversation.isTaskSubmissionBlocked(
     activeId,
     taskEntry.selectors.target,
@@ -1479,8 +1479,7 @@ function AppShellContent({
     respondToUserForm: commands.respondToUserForm,
     showModelSetupToast,
     toastApi,
-    newChatModel: newChatModel ?? null,
-    newChatExecutor,
+    newTaskExecutionChoice,
     clearNewChatExecutionChoice,
     pendingNewChatThinkingLevel: newChatThinkingLevel ?? null,
     newChatPermissionChoice: newTaskPermissionChoice,
@@ -1529,7 +1528,11 @@ function AppShellContent({
   });
 
   async function taskSubmissionReadyAtSend(): Promise<boolean> {
-    return !sharedSessionActive && (!!activeIdRef.current || !!taskEntry.selectors.target);
+    if (sharedSessionActive) return false;
+    const target = taskEntry.selectors.target;
+    return !!activeIdRef.current || !!target &&
+      (newTaskExecutionChoice.executor !== 'antigravity' ||
+        await taskEntry.commands.ensureAntigravityReady(target));
   }
 
   /**
@@ -2566,12 +2569,13 @@ function AppShellContent({
                   onThinkingLevelChange={(level) => {
                     if (activeId) void setSessionThinkingLevel(activeId, level ?? null);
                   }}
-                  {...{ newChatModel, newChatProviderType, newChatThinkingLevels, newChatThinkingLevel }}
-                  newChatExecutor={newChatExecutor}
-                  onNewChatExecutorChange={setNewChatExecutor}
-                  onPickNewChatModel={(input) => {
-                    setPendingNewChatModel(input);
-                    if (modelSettingsOwnsComposerHost) saveComposerDefaults({ model: input });
+                  {...{ newChatProviderType, newChatThinkingLevels, newChatThinkingLevel }}
+                  newTaskExecutionChoice={newTaskExecutionChoice}
+                  onNewTaskExecutionChoiceChange={(choice) => {
+                    selectNewTaskExecutionChoice(choice);
+                    if (choice.executor === 'maka' && choice.makaModel && modelSettingsOwnsComposerHost) {
+                      saveComposerDefaults({ model: choice.makaModel });
+                    }
                   }}
                   onNewChatThinkingLevelChange={(level) => setPendingNewChatThinkingLevel(level ?? null)}
                   onOpenModelSettings={modelSettingsOwnsComposerHost

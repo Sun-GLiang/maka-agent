@@ -38,6 +38,8 @@ import {
   getShellCopy,
   localizedShellErrorMessage,
 } from '../../../locales/shell-copy.js';
+import { getExternalAgentsCopy } from '../../../locales/settings-external-agents-copy.js';
+import { ensureAntigravityExecutionReady } from '../model/external-agent-readiness.js';
 import {
   isReadyTaskEntryHost,
   resolveProjectSelection,
@@ -80,6 +82,7 @@ export interface TaskEntryControllerSelectors {
 
 export interface TaskEntryControllerCommands {
   refresh(): Promise<void>;
+  ensureAntigravityReady(host: TaskEntryHostRef): Promise<boolean>;
   selectLocalProject(projectId: string): boolean;
   addProject(): void;
   chooseProjectForProfile(profileId: string): Promise<void>;
@@ -132,9 +135,10 @@ export function useTaskEntryController(
   const locale = useUiLocale();
   const copy = getShellCopy(locale).projectActions;
   const conversationCopy = getConversationCopy(locale).workspace;
+  const externalAgentCopy = getExternalAgentsCopy(locale);
   const reportError = input.reportError;
   const manageProjects = input.manageProjects;
-  const { catalog: service } = useTaskEntryServices();
+  const { catalog: service, externalAgent } = useTaskEntryServices();
   const [catalog, setCatalog] = useState<TaskEntryCatalog>(EMPTY_CATALOG);
   const [selectedProfileId, setSelectedProfileId] = useState<string>();
   const [projectSelections, setProjectSelections] = useState(
@@ -345,6 +349,37 @@ export function useTaskEntryController(
     }
   }, [copy.catalogUnavailable, locale, refresh, reportError]);
 
+  const ensureAntigravityReady = useCallback(async (host: TaskEntryHostRef): Promise<boolean> => {
+    try {
+      if (!externalAgent) throw new Error('External Agent service is unavailable');
+      const result = await ensureAntigravityExecutionReady(externalAgent, host);
+      if (result.status === 'ready') return true;
+      reportError({
+        title: externalAgentCopy.executionSetupTitle,
+        description: result.reason === 'not_configured'
+          ? externalAgentCopy.executionNotConfigured
+          : result.reason === 'login_failed' && result.failure
+            ? externalAgentCopy.failures[result.failure]
+            : result.reason === 'login_cancelled'
+              ? externalAgentCopy.cancelled
+              : externalAgentCopy.accountUnchecked,
+        profileId: host.profileId,
+      });
+      return false;
+    } catch (cause) {
+      reportError({
+        title: externalAgentCopy.executionSetupTitle,
+        description: localizedShellErrorMessage(
+          cause,
+          externalAgentCopy.authenticationReadFailed,
+          locale,
+        ),
+        profileId: host.profileId,
+      });
+      return false;
+    }
+  }, [externalAgent, externalAgentCopy, locale, reportError]);
+
   const acceptRegisteredProject = useCallback(async (
     project: ProjectRecord,
     registeredHost: TaskEntryHostRef,
@@ -525,6 +560,7 @@ export function useTaskEntryController(
     },
     commands: {
       refresh: refreshCatalog,
+      ensureAntigravityReady,
       selectLocalProject,
       addProject: addSelectedProject,
       chooseProjectForProfile,
@@ -553,6 +589,7 @@ export function useTaskEntryController(
     chooseProjectForProfile,
     closeDirectoryPicker,
     directoryHost,
+    ensureAntigravityReady,
     projectPath,
     refreshCatalog,
     selectLocalProject,

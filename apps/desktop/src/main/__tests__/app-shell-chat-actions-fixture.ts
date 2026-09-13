@@ -102,7 +102,7 @@ export function createActionsDeps() {
     respondToUserForm: async () => undefined,
     showModelSetupToast: () => undefined,
     toastApi: { error: () => undefined, info: () => undefined },
-    newChatModel: null,
+    newTaskExecutionChoice: { executor: 'maka' as const, makaModel: null },
     pendingNewChatThinkingLevel: null,
     newChatPermissionChoice: undefined,
     clearNewChatPermissionChoice: () => {},

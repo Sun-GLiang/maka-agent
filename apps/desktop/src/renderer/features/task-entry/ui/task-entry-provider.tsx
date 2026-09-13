@@ -34,7 +34,7 @@ import {
   type TaskEntryControllerSelectors,
 } from '../controller/use-task-entry-controller.js';
 import { taskEntryDraftKey } from '../model/task-entry-selection.js';
-import type { TaskEntryError } from '../ports.js';
+import type { TaskEntryError, TaskEntryHostRef } from '../ports.js';
 import type { TaskEntryHostModel } from './task-entry-host.js';
 
 type Listener = () => void;
@@ -66,6 +66,7 @@ const EMPTY_CONTROLLER: TaskEntryController = {
   },
   commands: {
     async refresh() {},
+    async ensureAntigravityReady() { return false; },
     selectLocalProject: () => false,
     addProject() {},
     async chooseProjectForProfile() {},
@@ -96,6 +97,8 @@ function createTaskEntryOwner(): TaskEntryOwner & {
     },
     commands: {
       refresh: () => current.commands.refresh(),
+      ensureAntigravityReady: (host: TaskEntryHostRef) =>
+        current.commands.ensureAntigravityReady(host),
       selectLocalProject: (projectId: string) =>
         current.commands.selectLocalProject(projectId),
       addProject: () => current.commands.addProject(),

@@ -20,6 +20,12 @@
 import type { ProjectRecord } from '@maka/core/project';
 import type { ChatDefaultsSettings } from '@maka/core/settings';
 import type { RuntimeHostProfileKind } from '@maka/runtime-host/profile-kind';
+import type {
+  ExternalAgentAuthenticationProjection,
+  ExternalAgentSetupFailure,
+  ExternalAgentSetupProjection,
+  ExternalAgentSetupStart,
+} from '@maka/runtime-host/protocol';
 
 export type TaskEntryUnsubscribe = () => void;
 
@@ -100,6 +106,26 @@ export interface TaskEntryCatalogService {
   ): Promise<TaskEntryProjectMutationResult>;
 }
 
+export interface TaskEntryExternalAgentService {
+  authentication(host: TaskEntryHostRef): Promise<ExternalAgentAuthenticationProjection>;
+  createAttemptId(): string;
+  start(
+    input: ExternalAgentSetupStart,
+    host: TaskEntryHostRef,
+  ): Promise<ExternalAgentSetupProjection>;
+  query(attemptId: string, host: TaskEntryHostRef): Promise<ExternalAgentSetupProjection>;
+}
+
+export type TaskEntryExternalAgentReadiness =
+  | { readonly status: 'ready' }
+  | { readonly status: 'setup_required'; readonly reason: 'not_configured' }
+  | {
+      readonly status: 'setup_required';
+      readonly reason: 'login_failed' | 'login_cancelled' | 'verification_failed';
+      readonly failure?: ExternalAgentSetupFailure;
+    };
+
 export interface TaskEntryServices {
   readonly catalog: TaskEntryCatalogService;
+  readonly externalAgent?: TaskEntryExternalAgentService;
 }

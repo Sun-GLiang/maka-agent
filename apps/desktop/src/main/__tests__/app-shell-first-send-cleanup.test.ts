@@ -107,10 +107,13 @@ describe('composer first-send cleanup', () => {
     try {
       const deps = {
         ...createActionsDeps(),
-        newChatModel: {
-          llmConnectionId: 'connection-1',
-          llmConnectionSlug: 'opencode-free',
-          model: 'mimo-v2.5-free',
+        newTaskExecutionChoice: {
+          executor: 'maka' as const,
+          makaModel: {
+            llmConnectionId: 'connection-1',
+            llmConnectionSlug: 'opencode-free',
+            model: 'mimo-v2.5-free',
+          },
         },
       };
       assert.equal(await createAppShellChatActions(deps).send('hello'), true);

@@ -19,7 +19,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { act, createRef } from 'react';
+import { type ComponentProps, type ReactNode, act, createRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { parseHTML } from 'linkedom';
 import type { ChatModelChoice } from '@maka/core/chat-model-choice';
@@ -27,6 +27,82 @@ import type { SessionSummary } from '@maka/core/session';
 import { Composer, type ComposerHandle } from '../composer.js';
 import { deriveComposerModelSwitchAvailability } from '../composer-helpers.js';
 import { LocaleProvider } from '../locale-context.js';
+
+const choice: ChatModelChoice = {
+  connectionId: 'connection-openrouter',
+  connectionSlug: 'openrouter',
+  connectionName: 'OpenRouter',
+  providerType: 'openrouter',
+  providerLabel: 'OpenRouter',
+  model: 'openai/gpt-5',
+  label: 'GPT-5',
+  isDefault: true,
+  thinkingLevels: [],
+};
+const secondChoice: ChatModelChoice = {
+  ...choice,
+  connectionId: 'connection-second',
+  connectionSlug: 'second',
+  connectionName: 'Second account',
+};
+
+async function withComposer(
+  run: (context: {
+    document: Document;
+    window: Window & { Event: typeof Event };
+    composer: ReturnType<typeof createRef<ComposerHandle>>;
+    render(node: ReactNode): Promise<void>;
+  }) => Promise<void>,
+) {
+  const original = {
+    document: globalThis.document,
+    window: globalThis.window,
+    matchMedia: globalThis.matchMedia,
+    requestAnimationFrame: globalThis.requestAnimationFrame,
+    cancelAnimationFrame: globalThis.cancelAnimationFrame,
+    IS_REACT_ACT_ENVIRONMENT: (globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT?: boolean;
+    }).IS_REACT_ACT_ENVIRONMENT,
+  };
+  const parsed = parseHTML('<div id="root"></div>');
+  const document = parsed.document as unknown as Document;
+  const window = parsed.window as unknown as Window & { Event: typeof Event };
+  window.getComputedStyle = () => ({
+    direction: 'ltr',
+    writingMode: 'horizontal-tb',
+    getPropertyValue: () => '',
+  }) as unknown as CSSStyleDeclaration;
+  Object.assign(globalThis, {
+    document,
+    window,
+    matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame() {},
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  const container = document.querySelector('#root');
+  assert.ok(container);
+  const root = createRoot(container);
+  const composer = createRef<ComposerHandle>();
+
+  try {
+    await run({
+      document,
+      window,
+      composer,
+      render: async (node) => {
+        await act(() => root.render(<LocaleProvider locale="en">{node}</LocaleProvider>));
+      },
+    });
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(globalThis, original);
+  }
+}
+
+function click(window: Window & { Event: typeof Event }, element: Element | null | undefined) {
+  element?.dispatchEvent(new window.Event('click', { bubbles: true }));
+}
 
 test('model switch availability has one priority-ordered contract', () => {
   assert.deepEqual(
@@ -52,190 +128,179 @@ test('model switch availability has one priority-ordered contract', () => {
 });
 
 test('the recovery handle opens the existing exact account-and-model picker', async () => {
-  const original = {
-    document: globalThis.document,
-    window: globalThis.window,
-    matchMedia: globalThis.matchMedia,
-    requestAnimationFrame: globalThis.requestAnimationFrame,
-    cancelAnimationFrame: globalThis.cancelAnimationFrame,
-    IS_REACT_ACT_ENVIRONMENT: (globalThis as typeof globalThis & {
-      IS_REACT_ACT_ENVIRONMENT?: boolean;
-    }).IS_REACT_ACT_ENVIRONMENT,
-  };
-  const { document, window } = parseHTML('<div id="root"></div>');
-  window.getComputedStyle = () => ({
-    direction: 'ltr',
-    writingMode: 'horizontal-tb',
-    getPropertyValue: () => '',
-  }) as unknown as CSSStyleDeclaration;
-  Object.assign(globalThis, {
-    document,
-    window,
-    matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
-    requestAnimationFrame: () => 1,
-    cancelAnimationFrame() {},
-    IS_REACT_ACT_ENVIRONMENT: true,
-  });
-  const container = document.querySelector('#root');
-  assert.ok(container);
-  const root = createRoot(container);
-  const composer = createRef<ComposerHandle>();
-  let selected: {
-    llmConnectionId: string;
-    llmConnectionSlug: string;
-    model: string;
-  } | undefined;
-  const choice: ChatModelChoice = {
-    connectionId: 'connection-openrouter',
-    connectionSlug: 'openrouter',
-    connectionName: 'OpenRouter',
-    providerType: 'openrouter',
-    providerLabel: 'OpenRouter',
-    model: 'openai/gpt-5',
-    label: 'GPT-5',
-    isDefault: true,
-    thinkingLevels: [],
-  };
-
-  try {
-    await act(() => root.render(
-      <LocaleProvider locale="en">
-        <Composer
-          ref={composer}
-          activeSession={{
-            id: 'legacy-session',
-            llmConnectionSlug: 'openrouter',
-            model: 'openai/gpt-5',
-          } as SessionSummary}
-          modelChoices={[choice]}
-          hideUnavailableCurrentModel
-          onModelChange={(input) => {
-            selected = input;
-          }}
-          onSend={() => undefined}
-          onStop={() => undefined}
-        />
-      </LocaleProvider>,
-    ));
-    assert.match(document.documentElement.innerHTML, /aria-expanded="false"/);
+  await withComposer(async ({ document, window, composer, render }) => {
+    let selected:
+      | Parameters<NonNullable<ComponentProps<typeof Composer>['onModelChange']>>[0]
+      | undefined;
+    await render(
+      <Composer
+        ref={composer}
+        activeSession={{
+          id: 'legacy-session',
+          llmConnectionSlug: 'openrouter',
+          model: 'openai/gpt-5',
+        } as SessionSummary}
+        modelChoices={[choice]}
+        hideUnavailableCurrentModel
+        onModelChange={(input) => { selected = input; }}
+        onSend={() => undefined}
+        onStop={() => undefined}
+      />,
+    );
 
     await act(() => composer.current?.openModelPicker());
-
-    assert.ok(document.querySelector('.maka-model-wheel-viewport'));
-    assert.match(document.documentElement.innerHTML, /GPT-5/);
-    const items = [...document.querySelectorAll<HTMLElement>('.maka-model-wheel-viewport [role="option"]')];
-    assert.equal(items.length, 1, 'the stale legacy target is not a selectable current row');
-
-    await act(() => items[0]?.dispatchEvent(new window.Event('click', { bubbles: true })));
-
+    const items = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
+    assert.equal(items.length, 1, 'the stale legacy target is hidden during identity recovery');
+    await act(() => click(window, items[0]));
     assert.deepEqual(selected, {
-      llmConnectionId: 'connection-openrouter',
-      llmConnectionSlug: 'openrouter',
-      model: 'openai/gpt-5',
+      llmConnectionId: choice.connectionId,
+      llmConnectionSlug: choice.connectionSlug,
+      model: choice.model,
     });
-    await act(() => document.querySelector('.maka-model-wheel-viewport')?.dispatchEvent(Object.assign(new window.Event('keydown', { bubbles: true }), { key: 'Escape' })));
-    assert.equal(Boolean(document.querySelector('.maka-model-wheel-viewport')), false, 'Escape closes the wheel');
+  });
+});
 
-    await act(() => root.render(
-      <LocaleProvider locale="en">
-        <Composer
-          ref={composer}
-          activeSession={{
-            id: 'legacy-session',
-            llmConnectionSlug: 'legacy-openrouter',
-            model: 'legacy-model',
-          } as SessionSummary}
-          activeModelConnectionId={choice.connectionId}
-          activeModelConnectionSlug={choice.connectionSlug}
-          activeModel={choice.model}
-          activeModelLabel={choice.label}
-          modelChoices={[choice]}
-          onModelChange={() => undefined}
-          onSend={() => undefined}
-          onStop={() => undefined}
-        />
-      </LocaleProvider>,
-    ));
+test('an unavailable current model is display-only in the active-session menu', async () => {
+  await withComposer(async ({ document, composer, render }) => {
+    await render(
+      <Composer
+        ref={composer}
+        activeSession={{
+          id: 'legacy-session',
+          llmConnectionId: 'removed-connection',
+          llmConnectionSlug: 'removed',
+          model: 'removed-model',
+        } as SessionSummary}
+        activeModelLabel="Removed model"
+        modelChoices={[choice]}
+        onModelChange={() => undefined}
+        onSend={() => undefined}
+        onStop={() => undefined}
+      />,
+    );
+
     await act(() => composer.current?.openModelPicker());
+    const unavailable = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
+      .find((item) => item.textContent?.includes('Removed model'));
+    assert.ok(unavailable);
+    assert.equal(unavailable.getAttribute('aria-disabled'), 'true');
+  });
+});
 
-    const selectedRadio = document.querySelector<HTMLElement>(
-      '.maka-model-wheel-viewport [role="option"][aria-selected="true"]',
-    );
-    assert.equal(selectedRadio?.textContent?.includes('GPT-5'), true);
-    assert.match(
-      document.querySelector<HTMLElement>('.maka-model-wheel-viewport')?.getAttribute('aria-label') ?? '',
-      /GPT-5/,
-    );
-
-    selected = undefined;
+test('an active Maka session selects another exact model without sending', async () => {
+  await withComposer(async ({ document, window, composer, render }) => {
+    let selected:
+      | Parameters<NonNullable<ComponentProps<typeof Composer>['onModelChange']>>[0]
+      | undefined;
     let sends = 0;
-    const second = { ...choice, connectionId: 'connection-second', connectionSlug: 'second', connectionName: 'Second account' };
-    await act(() => root.render(
-      <LocaleProvider locale="en"><Composer ref={composer}
-        activeSession={{ id: 'wheel-session', llmConnectionId: choice.connectionId, llmConnectionSlug: choice.connectionSlug, model: choice.model } as SessionSummary}
-        modelChoices={[choice, second]}
-        onModelChange={(input) => { selected = input; }} onSend={() => { sends++; }} onStop={() => undefined} />
-      </LocaleProvider>,
-    ));
-    await act(() => composer.current?.openModelPicker());
-    const browseNext = async () => {
-      const wheel = document.querySelector<HTMLElement>('.maka-model-wheel-viewport');
-      assert.ok(wheel);
-      await act(() => wheel.dispatchEvent(Object.assign(new window.Event('keydown', { bubbles: true, cancelable: true }), { key: 'ArrowDown' })));
-      await act(() => wheel.dispatchEvent(new window.Event('scroll')));
-      return wheel;
-    };
-    const wheel = await browseNext();
-    assert.deepEqual(selected, { llmConnectionId: second.connectionId, llmConnectionSlug: second.connectionSlug, model: second.model }, 'keyboard navigation applies the model without confirmation');
-    assert.ok(document.querySelector('.maka-model-wheel-viewport'), 'selection keeps the wheel open');
-    await act(() => wheel.dispatchEvent(Object.assign(new window.Event('keydown', { bubbles: true, cancelable: true }), { key: 'Enter' })));
-    assert.equal(sends, 0, 'closing the picker must not send the composer draft');
-    assert.equal(Boolean(document.querySelector('.maka-model-wheel-viewport')), false);
-
-    let externalAgentModel: string | undefined;
-    await act(() => root.render(
-      <LocaleProvider locale="en">
-        <Composer
-          ref={composer}
-          activeSession={{
-            id: 'acp-session',
-            backend: 'acp',
-            externalAgentId: 'antigravity',
-            lastMessageAt: 1,
-          } as SessionSummary}
-          modelChoices={[choice]}
-          externalAgentModelConfiguration={{
-            currentValue: 'gemini-3.7-flash-high',
-            options: [
-              { value: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
-              { value: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },
-            ],
-          }}
-          onExternalAgentModelChange={(value) => { externalAgentModel = value; }}
-          onSend={() => undefined}
-          onStop={() => undefined}
-        />
-      </LocaleProvider>,
-    ));
-    await act(() => composer.current?.openModelPicker());
-    const acpWheel = document.querySelector<HTMLElement>('.maka-model-wheel-viewport');
-    assert.ok(acpWheel, 'external Agent sessions reuse the main model wheel UI');
-    assert.equal(
-      document.querySelectorAll('[role="menuitemradio"]').length,
-      0,
-      'external Agent sessions do not replace the main UI with a dropdown menu',
+    await render(
+      <Composer
+        ref={composer}
+        activeSession={{
+          id: 'menu-session',
+          llmConnectionId: choice.connectionId,
+          llmConnectionSlug: choice.connectionSlug,
+          model: choice.model,
+        } as SessionSummary}
+        modelChoices={[choice, secondChoice]}
+        onModelChange={(input) => { selected = input; }}
+        onSend={() => { sends += 1; }}
+        onStop={() => undefined}
+      />,
     );
-    const acpItems = [...acpWheel.querySelectorAll<HTMLElement>('[role="option"]')];
-    assert.equal(acpItems.length, 2);
-    assert.equal(acpItems.some((item) => item.textContent?.includes('GPT-5')), false);
-    assert.equal(acpItems[0]?.textContent?.includes('Gemini 3.7 Flash (High)'), true);
+
+    await act(() => composer.current?.openModelPicker());
+    const items = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
+    await act(() => click(window, items[1]));
+    assert.deepEqual(selected, {
+      llmConnectionId: secondChoice.connectionId,
+      llmConnectionSlug: secondChoice.connectionSlug,
+      model: secondChoice.model,
+    });
+    assert.equal(sends, 0);
+  });
+});
+
+test('a new Maka task uses the boxed model menu and commits one complete target', async () => {
+  await withComposer(async ({ document, window, composer, render }) => {
+    const changes: unknown[] = [];
+    await render(
+      <Composer
+        ref={composer}
+        modelLabel={choice.label}
+        modelChoices={[choice, secondChoice]}
+        newTaskExecutionChoice={{
+          executor: 'maka',
+          makaModel: {
+            llmConnectionId: choice.connectionId,
+            llmConnectionSlug: choice.connectionSlug,
+            model: choice.model,
+          },
+        }}
+        onNewTaskExecutionChoiceChange={(next) => { changes.push(next); }}
+        onSend={() => undefined}
+        onStop={() => undefined}
+      />,
+    );
+
+    assert.ok(document.querySelector('button[aria-label="Choose executor"]'));
+    const trigger = document.querySelector<HTMLButtonElement>(
+      'button.maka-new-chat-model-selector[aria-haspopup="menu"]',
+    );
+    assert.ok(trigger);
+    await act(() => click(window, trigger));
+    assert.equal(document.querySelectorAll('.maka-model-wheel-viewport').length, 0);
+    const options = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
     await act(async () => {
-      acpItems[1]?.dispatchEvent(new window.Event('click', { bubbles: true }));
+      click(window, options[1]);
       await Promise.resolve();
     });
-    assert.equal(externalAgentModel, 'gemini-3.1-pro-preview');
-  } finally {
-    await act(() => root.unmount());
-    Object.assign(globalThis, original);
-  }
+    assert.deepEqual(changes, [{
+      executor: 'maka',
+      makaModel: {
+        llmConnectionId: secondChoice.connectionId,
+        llmConnectionSlug: secondChoice.connectionSlug,
+        model: secondChoice.model,
+      },
+    }]);
+  });
+});
+
+test('an external Agent session reuses the boxed model menu', async () => {
+  await withComposer(async ({ document, window, composer, render }) => {
+    let selected: string | undefined;
+    await render(
+      <Composer
+        ref={composer}
+        activeSession={{
+          id: 'acp-session',
+          backend: 'acp',
+          externalAgentId: 'antigravity',
+          lastMessageAt: 1,
+        } as SessionSummary}
+        modelChoices={[choice]}
+        externalAgentModelConfiguration={{
+          currentValue: 'gemini-3.7-flash-high',
+          options: [
+            { value: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
+            { value: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },
+          ],
+        }}
+        onExternalAgentModelChange={(value) => { selected = value; }}
+        onSend={() => undefined}
+        onStop={() => undefined}
+      />,
+    );
+
+    await act(() => composer.current?.openModelPicker());
+    const options = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
+    assert.equal(document.querySelectorAll('.maka-model-wheel-viewport').length, 0);
+    assert.equal(options.length, 2);
+    assert.equal(options.some((item) => item.textContent?.includes('GPT-5')), false);
+    await act(async () => {
+      click(window, options[1]);
+      await Promise.resolve();
+    });
+    assert.equal(selected, 'gemini-3.1-pro-preview');
+  });
 });

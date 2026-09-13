@@ -34,16 +34,18 @@ test('maps session setting services to the existing compound Desktop bridge', as
     sessions,
   } as unknown as MakaBridge);
 
-  await services.getExternalAgentModel('session-1');
-  await services.setExternalAgentModel('session-1', 'gemini-3.1-pro-preview');
-  await services.setModelConfiguration('session-1', {
+  await services.sessions.getExternalAgentModel('session-1');
+  await services.sessions.setExternalAgentModel('session-1', 'gemini-3.1-pro-preview');
+  await services.sessions.setModelConfiguration('session-1', {
     llmConnectionId: 'connection-1',
     llmConnectionSlug: 'openai',
     model: 'gpt-5',
     thinkingLevel: 'high',
   });
-  await services.setPermissionMode('session-1', 'bypass');
-  await services.setOrchestrationMode('session-1', 'swarm');
+  await services.sessions.setPermissionMode('session-1', 'bypass');
+  await services.sessions.setOrchestrationMode('session-1', 'swarm');
+  await services.sessions.setCollaborationMode('session-1', 'plan');
+  await services.sessions.abandonPlanProposal('session-1', 'proposal-1');
 
   assert.deepEqual(calls, [
     { name: 'getExternalAgentModel', args: ['session-1'] },
@@ -62,5 +64,7 @@ test('maps session setting services to the existing compound Desktop bridge', as
     },
     { name: 'setPermissionMode', args: ['session-1', 'bypass'] },
     { name: 'setOrchestrationMode', args: ['session-1', 'swarm'] },
+    { name: 'setCollaborationMode', args: ['session-1', 'plan'] },
+    { name: 'abandonPlanProposal', args: ['session-1', 'proposal-1'] },
   ]);
 });

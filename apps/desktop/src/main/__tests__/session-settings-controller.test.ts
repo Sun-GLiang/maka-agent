@@ -537,18 +537,22 @@ function desktopSession(input: {
 }
 
 function createServices(
-  overrides: Partial<SessionSettingsServices> = {},
+  overrides: Partial<SessionSettingsServices['sessions']> = {},
 ): SessionSettingsServices {
   return {
-    getExternalAgentModel: async () => {
-      throw new Error('external Agent model unavailable');
+    sessions: {
+      getExternalAgentModel: async () => {
+        throw new Error('external Agent model unavailable');
+      },
+      setExternalAgentModel: async () => {
+        throw new Error('external Agent model unavailable');
+      },
+      setModelConfiguration: async () => ({} as DesktopSessionSummary),
+      setPermissionMode: async () => ({} as DesktopSessionSummary),
+      setOrchestrationMode: async () => ({} as DesktopSessionSummary),
+      setCollaborationMode: async () => ({} as DesktopSessionSummary),
+      abandonPlanProposal: async () => {},
+      ...overrides,
     },
-    setExternalAgentModel: async () => {
-      throw new Error('external Agent model unavailable');
-    },
-    setModelConfiguration: async () => ({} as DesktopSessionSummary),
-    setPermissionMode: async () => ({} as DesktopSessionSummary),
-    setOrchestrationMode: async () => ({} as DesktopSessionSummary),
-    ...overrides,
   };
 }

@@ -120,3 +120,14 @@ test('a reported model context window is metadata, not a Maka declaration', () =
   assert.equal(resolveSelectedModelContextWindow(connection, undefined), 100_000);
   assert.equal(resolveDeclaredContextWindow(connection, undefined), undefined);
 });
+
+test('Codex OAuth does not mix a public API input limit with its access-path window', () => {
+  const connection = {
+    slug: 'codex-subscription',
+    providerType: 'openai-codex' as const,
+    defaultModel: 'gpt-5.6-sol',
+    models: [{ id: 'gpt-5.6-sol', contextWindow: 272_000 }],
+  };
+
+  assert.equal(resolveSelectedModelContextWindow(connection, undefined), 272_000);
+});

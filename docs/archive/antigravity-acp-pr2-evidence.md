@@ -119,9 +119,25 @@ Runtime 全量测试另有两项既有 Zod 递归引用契约在当前依赖环�
 
 人工操作与截图结果：
 
-- 新任务执行者/模型双栏选择器正常切换到 Antigravity。根据用户反馈修正了复合菜单仍继承普通单栏菜单 `320px` 上限的问题；修正后外层菜单 `clientWidth === scrollWidth === 620`，两栏内容区 `612 === 612`，横向 overflow 被关闭，中文“配置外部 Agent”完整显示。
+- 旧版新任务执行者/模型双栏选择器能切换到 Antigravity，但后续回归发现复合选择器会用旧执行者状态覆盖刚选中的 Maka 模型。当前实现将“执行者 + 保留的 Maka 模型”作为一个目标原子提交；UI 将执行者和模型分成两个控件，Maka 与外部 Agent 的模型筛选均按 `upstream/main` 的主线框式交互使用 Astryx 弹出菜单，不使用滚动滚轮。
+
+变更前（已替换的复合双栏菜单）：
+
+![变更前：执行者和模型共用复合双栏菜单](../images/pr/antigravity-acp-pr2/before-composite-target-picker.png)
+
+变更后（当前 Storybook production component/frame，Maka 使用主线弹出菜单）：
+
+![变更后：Maka 新任务使用主线弹出菜单](../images/pr/antigravity-acp-pr2/after-maka-model-menu.png)
+
+变更后的浏览器可访问树确认模型筛选器是 `menu` / `menuitemradio`，且不存在 `.maka-model-wheel-viewport`；真实 hook + 首次发送回归则确认精确连接和模型会原样进入 `newTasks.create`。
 - 真实任务进入 ACP 权限表单，显示 provider 工具 `pwd`、请求者 `Antigravity · ACP` 以及 Allow / Deny 选项。一次性 Allow 后，`pwd` 与 `client_view_file` 工具活动按到达顺序显示，最终文本包含实际 worktree 路径与 `README.md` 第一行。
 - 另一轮一次性 Allow 后运行 `sleep 30`，在工具执行期间点击 Composer“停止”。工具结果显示 `context canceled` / `The request was cancelled by the client.`，轮次显示“已中断”，没有等待命令自然完成。
 - 重启同一 Desktop 实例后重新打开上述成功任务，用户消息、工具活动及最终文本保持可读；Composer 显示“Antigravity 会话已结束”，并提供“新建任务”入口，不能继续向旧进程会话发送消息。
 
-本次截图保存在隔离临时目录 `/tmp/maka-pr2-screenshot-acceptance.QJvM72/`，其中 `06-target-picker-fixed.png`、`16-antigravity-tool-result.png`、`20-antigravity-cancelled.png`、`21-antigravity-history-only-after-restart.png` 分别对应菜单修正、成功工具结果、运行中取消和重启只读历史。附件发送阻断仍由已通过的 Desktop/UI 自动化用例覆盖；原生文件选择器同时受到另一开发 worktree 的 Electron 对话框占用，本轮没有把其他 worktree 的文件带入该隔离任务。
+原始官方账号截图保存在隔离临时目录 `/tmp/maka-pr2-screenshot-acceptance.QJvM72/`；其中旧菜单截图已作为变更前证据归档到仓库。`16-antigravity-tool-result.png`、`20-antigravity-cancelled.png`、`21-antigravity-history-only-after-restart.png` 分别对应成功工具结果、运行中取消和重启只读历史。附件发送阻断仍由已通过的 Desktop/UI 自动化用例覆盖；原生文件选择器同时受到另一开发 worktree 的 Electron 对话框占用，本轮没有把其他 worktree 的文件带入该隔离任务。
+
+## 模型选择后无法发送的复查（2026-09-13）
+
+- Maka 的 Codex 订阅模型把 `models.dev` 公开 OpenAI API 的 `inputLimit=922000` 与订阅入口实际发布的 `contextWindow=272000` 合并，形成输入上限大于总窗口的无效事实，因此请求在 provider 调用前以 `Model input limit exceeds the context window` 失败。OAuth 入口现在只继承通用模型元数据，不再继承另一访问路径的 input limit；真实本地 `gpt-5.6-sol` 配置解析为 `272000`。
+- Antigravity 选择已正确写入 `backend=acp` 与 `externalAgentId=antigravity`。失败原因是 Runtime Host 重启会按安全策略清除进程内认证证据，旧首发路径仍先创建 Session，随后 `prepareExecution` 以 `authentication_failed` 阻断。新路径在 Session 创建前查询证据；未验证时自动运行官方登录，验证成功后才继续原首发，失败或未配置时不留下空的 blocked Session。
+- 本机官方 `agy_acp_server.par` 与 `localharness_external` 连接检查通过。完整回归：Desktop 2605/2605、UI 445/445、Core 830/830、Runtime 3486 通过且 13 项按既有条件跳过；Renderer architecture 112/112 并通过 `upstream/main` 债务比较。Biome、locale hygiene、模型元数据同步检查和 Git diff 校验通过。

@@ -20,7 +20,7 @@
 import type { MakaBridge } from '../../../preload/bridge-contract.js';
 import type { TaskEntryServices } from '../../features/task-entry';
 
-export type DesktopTaskEntryBridge = Pick<MakaBridge, 'newTasks'>;
+export type DesktopTaskEntryBridge = Pick<MakaBridge, 'newTasks' | 'externalAgents'>;
 
 /** The only Desktop-to-Task Entry adapter. */
 export function createDesktopTaskEntryServices(
@@ -28,5 +28,11 @@ export function createDesktopTaskEntryServices(
 ): TaskEntryServices {
   return {
     catalog: bridge.newTasks,
+    externalAgent: {
+      authentication: (host) => bridge.externalAgents.authentication(host),
+      createAttemptId: () => crypto.randomUUID(),
+      start: (input, host) => bridge.externalAgents.start(input, host),
+      query: (attemptId, host) => bridge.externalAgents.query(attemptId, host),
+    },
   };
 }

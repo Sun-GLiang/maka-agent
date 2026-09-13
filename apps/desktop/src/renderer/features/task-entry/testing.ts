@@ -35,8 +35,10 @@ export {
   selectAvailableProfile,
   taskEntryDraftKey,
 } from './model/task-entry-selection.js';
+export { ensureAntigravityExecutionReady } from './model/external-agent-readiness.js';
 export type {
   TaskEntryCatalog,
+  TaskEntryExternalAgentService,
   TaskEntryHost,
   TaskEntryServices,
 } from './ports.js';

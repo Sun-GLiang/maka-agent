@@ -34,6 +34,8 @@ const en = {
   installing: "Installing and checking the connection…",
   installed: "Installed and connected.",
   reverify: "Verify sign-in again",
+  executionSetupTitle: 'Antigravity needs attention',
+  executionNotConfigured: 'Configure the Antigravity program before starting this task.',
 
   title: 'Antigravity',
   accountUnchecked: 'Sign-in has not been verified for this program on this Host.',
@@ -103,6 +105,8 @@ const zh = {
   installing: "正在安装并检查连接…",
   installed: "安装完成，连接成功。",
   reverify: "重新验证登录",
+  executionSetupTitle: 'Antigravity 需要处理',
+  executionNotConfigured: '请先配置 Antigravity 程序，再开始此任务。',
 
   title: 'Antigravity',
   accountUnchecked: '当前 Host 尚未验证此程序的登录状态。',
@@ -167,6 +171,8 @@ const zhTW: typeof en = {
   installing: "正在安裝並檢查連線…",
   installed: "安裝完成，連線成功。",
   reverify: "重新驗證登入",
+  executionSetupTitle: 'Antigravity 需要處理',
+  executionNotConfigured: '請先設定 Antigravity 程式，再開始此任務。',
 
   title: 'Antigravity',
   accountUnchecked: '目前 Host 尚未驗證此程式的登入狀態。',

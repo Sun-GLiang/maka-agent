@@ -88,7 +88,7 @@ export function useSessionSettingIntent<Owner extends { sessionId?: string }>(in
       return;
     }
     let cancelled = false;
-    void services.getExternalAgentModel(sessionId).then(
+    void services.sessions.getExternalAgentModel(sessionId).then(
       (configuration) => {
         if (!cancelled) setExternalAgentModel({ sessionId, configuration });
       },
@@ -119,7 +119,7 @@ export function useSessionSettingIntent<Owner extends { sessionId?: string }>(in
       modelConfiguration: {
         isEqual: equalSessionModelConfigurationIntent,
         write: async (sessionId, configuration) => {
-          const summary = await services.setModelConfiguration(sessionId, {
+          const summary = await services.sessions.setModelConfiguration(sessionId, {
             ...configuration.modelTarget,
             thinkingLevel: configuration.thinkingLevel,
           });
@@ -139,7 +139,7 @@ export function useSessionSettingIntent<Owner extends { sessionId?: string }>(in
       },
       permissionMode: {
         write: async (sessionId, mode) => {
-          const summary = await services.setPermissionMode(sessionId, mode);
+          const summary = await services.sessions.setPermissionMode(sessionId, mode);
           return {
             committed: summary.permissionMode === mode,
             sessionRevision: summary.revision,
@@ -156,7 +156,7 @@ export function useSessionSettingIntent<Owner extends { sessionId?: string }>(in
       },
       orchestrationMode: {
         write: async (sessionId, mode) => {
-          const summary = await services.setOrchestrationMode(sessionId, mode);
+          const summary = await services.sessions.setOrchestrationMode(sessionId, mode);
           return {
             committed: summary.orchestrationMode === mode,
             sessionRevision: summary.revision,
@@ -171,6 +171,8 @@ export function useSessionSettingIntent<Owner extends { sessionId?: string }>(in
 
   return {
     clear: intent.clear,
+    abandonPlanProposal: services.sessions.abandonPlanProposal,
+    setCollaborationMode: services.sessions.setCollaborationMode,
     overlays: intent.overlayByChannel,
     setSessionModel: (sessionId: string, modelTarget: SessionModelTarget) =>
       intent.request('modelConfiguration', sessionId, modelConfigurationIntentForModel(modelTarget)),
@@ -199,7 +201,7 @@ export function useSessionSettingIntent<Owner extends { sessionId?: string }>(in
         const sessionId = activeSession?.id;
         if (!sessionId || activeSession.backend !== 'acp') return;
         try {
-          const configuration = await services.setExternalAgentModel(sessionId, value);
+          const configuration = await services.sessions.setExternalAgentModel(sessionId, value);
           setExternalAgentModel({ sessionId, configuration });
         } catch (error) {
           reportWriteError(sessionId, error, 'model');

@@ -17,13 +17,16 @@
  * under the License.
  */
 
-export function newTaskExecutorTarget(
-  executor: string | undefined,
-  model: { llmConnectionId?: string; llmConnectionSlug: string; model: string } | null,
-) {
-  return executor === 'antigravity'
+import type { NewTaskExecutionChoice } from '@maka/ui';
+
+export function newTaskExecutorTarget(choice: NewTaskExecutionChoice) {
+  return choice.executor === 'antigravity'
     ? { executionBackend: 'acp' as const, externalAgentId: 'antigravity' as const }
-    : model ? { llmConnectionId: model.llmConnectionId, llmConnectionSlug: model.llmConnectionSlug, model: model.model } : {};
+    : choice.makaModel ? {
+        llmConnectionId: choice.makaModel.llmConnectionId,
+        llmConnectionSlug: choice.makaModel.llmConnectionSlug,
+        model: choice.makaModel.model,
+      } : {};
 }
 
 export function isTaskSubmissionBlocked(

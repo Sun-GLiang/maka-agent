@@ -23,7 +23,7 @@ import type { MakaBridge } from '../../preload/bridge-contract.js';
 import { createDesktopTaskEntryServices } from '../../renderer/platform/desktop/create-task-entry-services.js';
 
 describe('createDesktopTaskEntryServices', () => {
-  it('maps only the Task Entry catalog and Project selection operations', async () => {
+  it('maps Task Entry catalog, Project selection, and external Agent readiness operations', async () => {
     const calls: Array<{ name: string; args: unknown[] }> = [];
     let changeHandler: (() => void) | undefined;
     let changes = 0;
@@ -52,7 +52,33 @@ describe('createDesktopTaskEntryServices', () => {
           return cancelled;
         },
       },
-    } as unknown as Pick<MakaBridge, 'newTasks'>;
+      externalAgents: {
+        authentication: async (...args: unknown[]) => {
+          calls.push({ name: 'authentication', args });
+          return {
+            acpAgentId: 'antigravity' as const,
+            executable: '/agent/agy_acp_server.par',
+            status: 'verified' as const,
+          };
+        },
+        start: async (...args: unknown[]) => {
+          calls.push({ name: 'start', args });
+          return {
+            ...(args[0] as object),
+            phase: 'succeeded' as const,
+          };
+        },
+        query: async (...args: unknown[]) => {
+          calls.push({ name: 'query', args });
+          return {
+            attemptId: args[0] as string,
+            action: 'login' as const,
+            expectedExecutable: '/agent/agy_acp_server.par',
+            phase: 'succeeded' as const,
+          };
+        },
+      },
+    } as unknown as Pick<MakaBridge, 'newTasks' | 'externalAgents'>;
     const services = createDesktopTaskEntryServices(bridge);
     const host = { profileId: 'remote', hostId: 'host-1' };
 
@@ -63,6 +89,16 @@ describe('createDesktopTaskEntryServices', () => {
     changeHandler?.();
     await services.catalog.addProject(host);
     await services.catalog.relinkProject(host, 'project-1');
+    await services.externalAgent?.authentication(host);
+    const attemptId = services.externalAgent?.createAttemptId();
+    assert.equal(typeof attemptId, 'string');
+    const setup = {
+      attemptId: attemptId!,
+      action: 'login' as const,
+      expectedExecutable: '/agent/agy_acp_server.par',
+    };
+    await services.externalAgent?.start(setup, host);
+    await services.externalAgent?.query(attemptId!, host);
     unsubscribe();
 
     assert.deepEqual(calls, [
@@ -70,6 +106,9 @@ describe('createDesktopTaskEntryServices', () => {
       { name: 'subscribeChanges', args: [] },
       { name: 'addProject', args: [host] },
       { name: 'relinkProject', args: [host, 'project-1'] },
+      { name: 'authentication', args: [host] },
+      { name: 'start', args: [setup, host] },
+      { name: 'query', args: [attemptId, host] },
     ]);
     assert.equal(changes, 1);
     assert.equal(disposed, 1);

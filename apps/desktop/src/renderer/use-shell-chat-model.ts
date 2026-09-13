@@ -28,6 +28,7 @@ import type { SessionSummary } from '@maka/core/session';
 import type { SettingsSection } from '@maka/core/settings';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { UiLocale } from '@maka/core/ui-locale';
+import type { NewTaskExecutionChoice } from '@maka/ui';
 import {
   chatModelChoiceLabel,
   composerModelSupportsVision,
@@ -45,7 +46,7 @@ import { useNewTaskChoice } from './use-new-task-choice.js';
 
 export type { NewChatModel } from './shell-chat-model-selection.js';
 
-type NewTaskExecutionChoice = {
+type PendingNewTaskExecutionChoice = {
   executor: 'maka' | 'antigravity';
   model: NewChatModelCandidate | null;
 };
@@ -104,9 +105,8 @@ export function useShellChatModel(options: {
   newChatThinkingLevel: ThinkingLevel | undefined;
   composerSupportsVision: boolean | undefined;
   pendingNewChatModel: NewChatModelCandidate | null;
-  setPendingNewChatModel: (next: NewChatModelCandidate | null) => void;
-  newChatExecutor: 'maka' | 'antigravity';
-  setNewChatExecutor: (executor: 'maka' | 'antigravity') => void;
+  newTaskExecutionChoice: NewTaskExecutionChoice;
+  selectNewTaskExecutionChoice: (choice: NewTaskExecutionChoice) => void;
   clearNewChatExecutionChoice: () => void;
   pendingNewChatThinkingLevel: ThinkingLevel | null;
   setPendingNewChatThinkingLevel: (next: ThinkingLevel | null) => void;
@@ -125,17 +125,13 @@ export function useShellChatModel(options: {
   } = options;
   const conversationCopy = getDesktopConversationCopy(uiLocale);
   const [executionChoice, setExecutionChoice, clearNewChatExecutionChoice] =
-    useNewTaskChoice<NewTaskExecutionChoice>(options.newTaskKey);
+    useNewTaskChoice<PendingNewTaskExecutionChoice>(options.newTaskKey);
   const newChatExecutor = executionChoice?.executor ?? 'maka';
   const pendingNewChatModel = executionChoice !== undefined
     ? executionChoice.model
     : options.usePersistedComposerDefaults
       ? persistedComposerDefaults?.model ?? null
       : null;
-  const setPendingNewChatModel = (model: NewChatModelCandidate | null): void =>
-    setExecutionChoice({ executor: newChatExecutor, model });
-  const setNewChatExecutor = (executor: 'maka' | 'antigravity'): void =>
-    setExecutionChoice({ executor, model: pendingNewChatModel });
   const activeConnection = activeSession
     ? connections.find(
         (connection) =>
@@ -191,6 +187,12 @@ export function useShellChatModel(options: {
     catalogDefault: catalogDefaultNewChatModel,
     choices: chatModelChoices,
   });
+  const newTaskExecutionChoice: NewTaskExecutionChoice = {
+    executor: newChatExecutor,
+    makaModel: newChatModel ?? null,
+  };
+  const selectNewTaskExecutionChoice = (choice: NewTaskExecutionChoice): void =>
+    setExecutionChoice({ executor: choice.executor, model: choice.makaModel });
   // A task whose backend was retired has no model to name (#3211). That verdict
   // comes from the readiness projection, not from reading `activeSession.backend`
   // here: the projection is the single authority on whether a task is usable,
@@ -332,9 +334,8 @@ export function useShellChatModel(options: {
     newChatThinkingLevel,
     composerSupportsVision,
     pendingNewChatModel,
-    setPendingNewChatModel,
-    newChatExecutor,
-    setNewChatExecutor,
+    newTaskExecutionChoice,
+    selectNewTaskExecutionChoice,
     clearNewChatExecutionChoice,
     // Resolved, not raw: callers want the level the next chat would actually
     // request, and must not have to re-apply the settings fallback themselves.

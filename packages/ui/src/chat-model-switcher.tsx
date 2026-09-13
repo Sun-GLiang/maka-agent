@@ -17,7 +17,7 @@
  * under the License.
  */
 
-/** Session and new-chat adapters for the shared magnetic model picker. */
+/** Session and new-chat adapters for the shared model menu. */
 
 import { type ReactNode, useMemo, useState } from 'react';
 import { Button as UiButton } from '@astryxdesign/core';
@@ -27,7 +27,7 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
 } from '@astryxdesign/core/DropdownMenu';
-import { ICON_SIZE, Check, Settings } from './icons.js';
+import { ICON_SIZE, AlertTriangle, Check, Settings } from './icons.js';
 import {
   type ChatModelChoice,
   type ModelMenuGroup,
@@ -40,7 +40,6 @@ import { type SessionSummary } from '@maka/core/session';
 import { type ThinkingLevel } from '@maka/core/model-thinking';
 import { useUiLocale } from './locale-context.js';
 import { getConversationCopy } from './conversation-copy.js';
-import { ModelWheelPicker, type ModelWheelOption } from './model-wheel-picker.js';
 import type { ComposerModelSwitchAvailability } from './composer-helpers.js';
 
 const DEFAULT_THINKING_LEVEL = '__default__';
@@ -87,37 +86,50 @@ export function ExternalAgentModelSwitcher(props: {
     !props.onChange ||
     props.configuration.options.length === 0;
   const label = current?.name ?? props.configuration.currentValue;
-  const options: ModelWheelOption[] = props.configuration.options.map((option) => ({
-    value: option.value,
-    label: option.name,
-    heading: copy.antigravityExecutor,
-    description: option.description,
-  }));
   return (
-    <ModelWheelPicker
-      options={options}
-      value={props.configuration.currentValue}
-      label={label}
-      ariaLabel={`${copy.switchAriaLabel}: ${label}`}
-      tooltip={props.disabledReason ?? copy.switchAriaLabel}
-      triggerClassName="maka-model-switcher-trigger"
-      disabled={disabled}
-      open={props.isMenuOpen}
+    <DropdownMenu
+      {...(props.isMenuOpen === undefined ? {} : { isMenuOpen: props.isMenuOpen })}
+      placement="above"
+      hasChevron={false}
+      className="maka-composer-quiet-menu"
       onOpenChange={props.onMenuOpenChange}
-      onValueChange={(value) => {
-        if (value !== props.configuration.currentValue) return props.onChange?.(value);
+      button={{
+        label,
+        variant: 'ghost',
+        size: 'sm',
+        isDisabled: disabled,
+        tooltip: props.disabledReason ?? copy.switchAriaLabel,
+        className: 'maka-model-switcher-trigger',
+        'aria-label': `${copy.switchAriaLabel}: ${label}`,
       }}
-    />
+    >
+      <DropdownMenuRadioGroup
+        value={props.configuration.currentValue}
+        label={`${copy.switchAriaLabel}: ${label}`}
+        onChange={(value) => {
+          if (value !== props.configuration.currentValue) void props.onChange?.(value);
+        }}
+      >
+        <div role="group" aria-label={copy.antigravityExecutor}>
+          <div className="maka-model-menu-group-heading" aria-hidden="true">
+            {copy.antigravityExecutor}
+          </div>
+          {props.configuration.options.map((option) => (
+            <DropdownMenuRadioItem
+              key={option.value}
+              value={option.value}
+              label={option.name}
+              description={option.description}
+              endContent={
+                option.value === props.configuration.currentValue ? currentCheck : undefined
+              }
+              isDisabled={disabled}
+            />
+          ))}
+        </div>
+      </DropdownMenuRadioGroup>
+    </DropdownMenu>
   );
-}
-
-function wheelOptions(groups: readonly ModelMenuGroup[], locale: Parameters<typeof modelChoiceDescription>[1]): ModelWheelOption[] {
-  return groups.flatMap((group) => group.choices.map((choice) => ({
-    value: exactModelChoiceValue(choice.connectionId, choice.connectionSlug, choice.model),
-    label: choice.label,
-    heading: group.heading,
-    description: modelChoiceDescription(choice, locale),
-  })));
 }
 
 /**
@@ -255,24 +267,55 @@ export function ChatModelSwitcher(props: {
     try { await props.onChange?.(next); } catch { /* The action owner reports the failure. */ }
   };
 
-  const options = wheelOptions(grouped, locale);
-  if (!currentKnownChoice && currentValue && !props.hideUnavailableCurrentOption) {
-    options.unshift({ value: currentValue, label: displayLabel, disabled: true });
-  }
-  return <>
-    <ModelWheelPicker options={options} value={currentValue} label={displayLabel}
-      ariaLabel={`${copy.switchAriaLabel}: ${displayLabel}`}
-      icon={providerMarkIcon(props.currentProviderType, props.renderProviderMark)}
-      tooltip={title} triggerClassName="maka-model-switcher-trigger"
-      disabled={disabled} open={menuOpen} onOpenChange={setMenuOpen}
-      onValueChange={(value) => {
-        const choice = props.choices.find((entry) => exactModelChoiceValue(entry.connectionId, entry.connectionSlug, entry.model) === value);
-        if (choice) return pick({ llmConnectionId: choice.connectionId, llmConnectionSlug: choice.connectionSlug, model: choice.model });
-      }} />
-    <span className="maka-visually-hidden maka-model-switch-announcement" role="status" aria-live="polite" aria-atomic="true">
-      {announceWarning ? copy.switchWarning : ''}
-    </span>
-  </>;
+  return (
+    <>
+      <DropdownMenu
+        {...(props.isMenuOpen === undefined ? {} : { isMenuOpen: props.isMenuOpen })}
+        placement="above"
+        hasChevron={false}
+        className="maka-composer-quiet-menu"
+        onOpenChange={setMenuOpen}
+        button={{
+          label: displayLabel,
+          icon: providerMarkIcon(props.currentProviderType, props.renderProviderMark),
+          variant: 'ghost',
+          size: 'sm',
+          isDisabled: disabled,
+          tooltip: title,
+          className: 'maka-model-switcher-trigger',
+          'aria-label': `${copy.switchAriaLabel}: ${displayLabel}`,
+        }}
+      >
+        {announceWarning ? (
+          <div className="maka-model-switch-notice" aria-hidden="true">
+            <AlertTriangle size={ICON_SIZE.meta} />
+            <span>{copy.switchWarning}</span>
+          </div>
+        ) : null}
+        <ModelMenuItems
+          groups={grouped}
+          currentValue={currentValue}
+          label={`${copy.switchAriaLabel}: ${displayLabel}`}
+          leadingOption={
+            !currentKnownChoice && !props.hideUnavailableCurrentOption
+              ? { label: displayLabel, providerType: props.currentProviderType }
+              : undefined
+          }
+          renderProviderMark={props.renderProviderMark}
+          disabled={disabled}
+          onPick={pick}
+        />
+      </DropdownMenu>
+      <span
+        className="maka-visually-hidden maka-model-switch-announcement"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {announceWarning ? copy.switchWarning : ''}
+      </span>
+    </>
+  );
 }
 
 /**
@@ -305,25 +348,44 @@ export function NewChatModelPicker(props: {
       exactModelChoiceValue(choice.connectionId, choice.connectionSlug, choice.model) ===
       currentValue,
   );
-  const options = wheelOptions(grouped, locale);
-  if (!currentKnownChoice && currentValue) {
-    options.unshift({ value: currentValue, label: props.label, disabled: true });
-  }
-  return <ModelWheelPicker options={options} value={currentValue} label={props.label}
-    ariaLabel={copy.newChatAriaLabel(props.label)}
-    icon={providerMarkIcon(props.currentProviderType, props.renderProviderMark)}
-    tooltip={copy.newChatTitle(props.label)} triggerClassName="maka-new-chat-model-selector"
-    onValueChange={(value) => {
-      const choice = props.choices.find((entry) => exactModelChoiceValue(entry.connectionId, entry.connectionSlug, entry.model) === value);
-      if (choice) return props.onPick({ llmConnectionId: choice.connectionId, llmConnectionSlug: choice.connectionSlug, model: choice.model });
-    }} />;
+  return (
+    <DropdownMenu
+      placement="above"
+      hasChevron={false}
+      className="maka-composer-quiet-menu"
+      button={{
+        label: props.label,
+        icon: providerMarkIcon(props.currentProviderType, props.renderProviderMark),
+        variant: 'ghost',
+        size: 'sm',
+        tooltip: copy.newChatTitle(props.label),
+        className: 'maka-new-chat-model-selector',
+        'aria-label': copy.newChatAriaLabel(props.label),
+      }}
+    >
+      <ModelMenuItems
+        groups={grouped}
+        currentValue={currentValue}
+        label={copy.newChatAriaLabel(props.label)}
+        leadingOption={
+          !currentKnownChoice && currentValue
+            ? { label: props.label, providerType: props.currentProviderType }
+            : undefined
+        }
+        renderProviderMark={props.renderProviderMark}
+        onPick={props.onPick}
+      />
+    </DropdownMenu>
+  );
 }
 
 function ModelMenuItems(props: {
   groups: readonly ModelMenuGroup[];
   currentValue?: string;
   label: string;
+  leadingOption?: { label: string; providerType?: ProviderType };
   renderProviderMark?(type: ProviderType): ReactNode;
+  disabled?: boolean;
   onPick(input: {
     llmConnectionId: string;
     llmConnectionSlug: string;
@@ -352,6 +414,15 @@ function ModelMenuItems(props: {
         }
       }}
     >
+      {props.leadingOption ? (
+        <DropdownMenuRadioItem
+          value={props.currentValue ?? ''}
+          icon={providerMarkIcon(props.leadingOption.providerType, props.renderProviderMark)}
+          label={props.leadingOption.label}
+          endContent={currentCheck}
+          isDisabled
+        />
+      ) : null}
       {props.groups.map((group) => (
         <div role="group" aria-label={group.heading} key={group.connectionSlug}>
           <div className="maka-model-menu-group-heading" aria-hidden="true">
@@ -371,6 +442,7 @@ function ModelMenuItems(props: {
                 label={choice.label}
                 description={modelChoiceDescription(choice, locale)}
                 endContent={value === props.currentValue ? currentCheck : undefined}
+                isDisabled={props.disabled}
               />
             );
           })}
@@ -380,93 +452,45 @@ function ModelMenuItems(props: {
   );
 }
 
-/** One atomic new-task target picker: browsing an executor does not commit until a target is chosen. */
-export function NewTaskTargetPicker(props: {
+/** Selects only the execution owner; each owner's settings keep their native UI. */
+export function NewTaskExecutorPicker(props: {
   executor: 'maka' | 'antigravity';
-  modelLabel: string;
-  choices: ChatModelChoice[];
-  currentValue?: string;
-  currentProviderType?: ProviderType;
-  renderProviderMark?(type: ProviderType): ReactNode;
-  onCommitExecutor(executor: 'maka' | 'antigravity'): void;
-  onPickModel(input: {
-    llmConnectionId: string;
-    llmConnectionSlug: string;
-    model: string;
-  }): void | Promise<void>;
+  onChange(executor: 'maka' | 'antigravity'): void;
   onOpenExternalAgentSettings?(): void;
 }) {
-  const locale = useUiLocale();
-  const copy = getConversationCopy(locale).model;
-  const [open, setOpen] = useState(false);
-  const [browsed, setBrowsed] = useState(props.executor);
-  const grouped = modelMenuGroups(props.choices, locale);
-  const label = props.executor === 'antigravity' ? copy.agentDefault : props.modelLabel;
+  const copy = getConversationCopy(useUiLocale()).model;
+  const label = props.executor === 'antigravity' ? copy.antigravityExecutor : copy.makaExecutor;
   return (
     <DropdownMenu
       placement="above"
       hasChevron={false}
-      isMenuOpen={open}
-      onOpenChange={(next) => {
-        if (next) setBrowsed(props.executor);
-        setOpen(next);
-      }}
-      menuWidth="min(620px, 92vw)"
-      className="maka-composer-quiet-menu maka-new-task-target-popup"
+      className="maka-composer-quiet-menu"
       button={{
         label,
-        icon: providerMarkIcon(props.currentProviderType, props.renderProviderMark),
         variant: 'ghost',
         size: 'sm',
         tooltip: copy.chooseExecutor,
-        className: 'maka-new-chat-model-selector',
+        className: 'maka-new-task-executor-selector',
         'aria-label': copy.chooseExecutor,
       }}
     >
-      <div className="maka-new-task-target-menu">
-        <div className="maka-new-task-executor-rail" aria-label={copy.executor}>
-          <DropdownMenuItem
-            label={copy.makaExecutor}
-            endContent={browsed === 'maka' ? currentCheck : undefined}
-            hasCloseOnSelect={false}
-            onClick={() => setBrowsed('maka')}
-          />
-          <DropdownMenuItem
-            label={copy.antigravityExecutor}
-            endContent={browsed === 'antigravity' ? currentCheck : undefined}
-            hasCloseOnSelect={false}
-            onClick={() => setBrowsed('antigravity')}
-          />
-          {props.onOpenExternalAgentSettings ? (
-            <DropdownMenuItem
-              label={copy.configureExternalAgent}
-              icon={<Settings size={ICON_SIZE.meta} aria-hidden="true" />}
-              onClick={props.onOpenExternalAgentSettings}
-            />
-          ) : null}
-        </div>
-        <div className="maka-new-task-target-options">
-          {browsed === 'maka' ? (
-            <ModelMenuItems
-              groups={grouped}
-              currentValue={props.currentValue}
-              label={copy.newChatAriaLabel(props.modelLabel)}
-              renderProviderMark={props.renderProviderMark}
-              onPick={async (input) => {
-                await props.onPickModel(input);
-                props.onCommitExecutor('maka');
-                setOpen(false);
-              }}
-            />
-          ) : (
-            <DropdownMenuItem
-              label={copy.agentDefault}
-              endContent={props.executor === 'antigravity' ? currentCheck : undefined}
-              onClick={() => props.onCommitExecutor('antigravity')}
-            />
-          )}
-        </div>
-      </div>
+      <DropdownMenuItem
+        label={copy.makaExecutor}
+        endContent={props.executor === 'maka' ? currentCheck : undefined}
+        onClick={() => props.onChange('maka')}
+      />
+      <DropdownMenuItem
+        label={copy.antigravityExecutor}
+        endContent={props.executor === 'antigravity' ? currentCheck : undefined}
+        onClick={() => props.onChange('antigravity')}
+      />
+      {props.onOpenExternalAgentSettings ? (
+        <DropdownMenuItem
+          label={copy.configureExternalAgent}
+          icon={<Settings size={ICON_SIZE.meta} aria-hidden="true" />}
+          onClick={props.onOpenExternalAgentSettings}
+        />
+      ) : null}
     </DropdownMenu>
   );
 }

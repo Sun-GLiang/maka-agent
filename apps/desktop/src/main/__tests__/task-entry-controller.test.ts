@@ -135,6 +135,32 @@ afterEach(() => {
 });
 
 describe('useTaskEntryController', () => {
+  it('restores Antigravity authentication through the first-send command', async () => {
+    const { root } = installReactRenderer();
+    let authenticationReads = 0;
+    const services = createFakeTaskEntryServices({
+      externalAgent: {
+        authentication: async () => ({
+          acpAgentId: 'antigravity',
+          executable: '/agent/agy_acp_server.par',
+          status: authenticationReads++ === 0 ? 'unverified' : 'verified',
+        }),
+        createAttemptId: () => 'attempt-1',
+        start: async (input) => ({ ...input, phase: 'succeeded' }),
+        query: async () => assert.fail('a terminal start result must not be polled'),
+      },
+    });
+
+    await act(async () => renderController(root, services));
+    const ready = await controller().commands.ensureAntigravityReady({
+      profileId: 'local',
+      hostId: 'host-local',
+    });
+
+    assert.equal(ready, true);
+    assert.equal(authenticationReads, 2);
+  });
+
   it('projects the target and keeps draft identity in sync with Workspace Picker selections', async () => {
     const { root } = installReactRenderer();
     const services = createFakeTaskEntryServices({
