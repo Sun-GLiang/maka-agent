@@ -79,6 +79,7 @@ import {
   fileTransferContainsFiles,
   isChatInputComposing,
   mentionQueryMatches,
+  selectedSkillIds,
   slashCommandQuery,
   skillMentionQuery,
   type ChatInputActionOwner,
@@ -974,6 +975,7 @@ export const Composer = forwardRef<
       }
       const commandQuery = slashCommandQuery(textBeforeCaret, textAfterCaret, rawQuery);
       const query = skillMentionQuery(rawQuery);
+      const selectedSkills = selectedSkillIds(textPort.getValue(), rawQuery);
       const commandItems = commandQuery === null
         ? []
         : (source.slashCommands ?? [])
@@ -993,6 +995,7 @@ export const Composer = forwardRef<
               } satisfies ComposerSlashSuggestion,
             }));
       const skillItems = skills
+        .filter((skill) => !selectedSkills.has(skill.id.toLowerCase()))
         .filter((skill) =>
           mentionQueryMatches(query, `${skill.id} ${skill.name} ${skill.description ?? ''}`),
         )

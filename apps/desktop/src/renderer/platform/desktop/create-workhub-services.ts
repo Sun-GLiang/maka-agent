@@ -221,6 +221,10 @@ export function createDesktopWorkHubServices(
     attachments: bridge.attachments,
     readAttachmentBytes: bridge.attachments.readBytes,
     prepareAttachments: (sessionId, items) => bridge.workHub.prepareAttachments(sessionId, items),
+    listActiveInteractions: (sessionId) => bridge.sessions.listActiveInteractions(sessionId),
+    subscribeActiveInteractions: (handler) => bridge.sessions.subscribeActiveInteractions(handler),
+    respondToUserForm: (sessionId, response) => bridge.sessions.respondToUserForm(sessionId, response),
+    respondToUserQuestion: (sessionId, response) => bridge.sessions.respondToUserQuestion(sessionId, response),
     answer: (sessionId, input) => bridge.workHub.answer(sessionId, input),
     enqueueMessage: async (sessionId, messageId, text, attachments, placement) => {
       const result = await bridge.sessions.submitMessage(sessionId, placement, {

@@ -1015,6 +1015,10 @@ export class DesktopRuntimeHostClient {
     return this.request("workhub.coordination.candidates", {});
   }
 
+  selectAndDelegateWorkHubTarget(input: OperationInput<'workhub.coordination.selectAndDelegate'>) {
+    return this.request('workhub.coordination.selectAndDelegate', input);
+  }
+
   actWorkHubCoordinationFromTurn(input: OperationInput<'workhub.coordination.actFromTurn'>) {
     return this.request('workhub.coordination.actFromTurn', input);
   }
