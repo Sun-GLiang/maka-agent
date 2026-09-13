@@ -1467,6 +1467,9 @@ export interface MakaBridge {
   };
   externalAgents: {
     authentication(host: DesktopRuntimeHostRef): Promise<OperationOutput<'external_agents.authentication.query'>>;
+    prepareDraftModel(input: OperationInput<'external_agents.draft.model.prepare'>, host: DesktopRuntimeHostRef): Promise<OperationOutput<'external_agents.draft.model.prepare'>>;
+    updateDraftModel(draftId: string, value: string, host: DesktopRuntimeHostRef): Promise<OperationOutput<'external_agents.draft.model.update'>>;
+    releaseDraft(draftId: string, host: DesktopRuntimeHostRef): Promise<OperationOutput<'external_agents.draft.release'>>;
     selectExecutable(host: DesktopRuntimeHostRef): Promise<string | undefined>;
     start(input: OperationInput<'external_agents.setup.start'>, host: DesktopRuntimeHostRef): Promise<OperationOutput<'external_agents.setup.start'>>;
     query(attemptId: string, host: DesktopRuntimeHostRef): Promise<OperationOutput<'external_agents.setup.query'>>;

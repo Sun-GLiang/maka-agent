@@ -103,31 +103,23 @@ export function ExternalAgentModelSwitcher(props: {
         'aria-label': `${copy.switchAriaLabel}: ${label}`,
       }}
     >
-      <DropdownMenuRadioGroup
-        value={props.configuration.currentValue}
+      <ModelCandidateMenuItems
+        groups={[{
+          key: 'antigravity',
+          heading: copy.antigravityExecutor,
+          options: props.configuration.options.map((option) => ({
+            value: option.value,
+            label: option.name,
+            description: option.description,
+          })),
+        }]}
+        currentValue={props.configuration.currentValue}
         label={`${copy.switchAriaLabel}: ${label}`}
-        onChange={(value) => {
+        disabled={disabled}
+        onPick={(value) => {
           if (value !== props.configuration.currentValue) void props.onChange?.(value);
         }}
-      >
-        <div role="group" aria-label={copy.antigravityExecutor}>
-          <div className="maka-model-menu-group-heading" aria-hidden="true">
-            {copy.antigravityExecutor}
-          </div>
-          {props.configuration.options.map((option) => (
-            <DropdownMenuRadioItem
-              key={option.value}
-              value={option.value}
-              label={option.name}
-              description={option.description}
-              endContent={
-                option.value === props.configuration.currentValue ? currentCheck : undefined
-              }
-              isDisabled={disabled}
-            />
-          ))}
-        </div>
-      </DropdownMenuRadioGroup>
+      />
     </DropdownMenu>
   );
 }
@@ -393,11 +385,34 @@ function ModelMenuItems(props: {
   }): void | Promise<void>;
 }) {
   const locale = useUiLocale();
+  const groups = props.groups.map((group) => ({
+    key: group.connectionSlug,
+    heading: group.heading,
+    options: group.choices.map((choice) => ({
+      value: exactModelChoiceValue(choice.connectionId, choice.connectionSlug, choice.model),
+      icon: providerMarkIcon(choice.providerType, props.renderProviderMark),
+      label: choice.label,
+      description: modelChoiceDescription(choice, locale),
+    })),
+  }));
   return (
-    <DropdownMenuRadioGroup
-      value={props.currentValue}
+    <ModelCandidateMenuItems
+      groups={groups}
+      currentValue={props.currentValue}
       label={props.label}
-      onChange={(value) => {
+      leadingOption={props.leadingOption
+        ? {
+            value: props.currentValue ?? '',
+            icon: providerMarkIcon(
+              props.leadingOption.providerType,
+              props.renderProviderMark,
+            ),
+            label: props.leadingOption.label,
+            disabled: true,
+          }
+        : undefined}
+      disabled={props.disabled}
+      onPick={(value) => {
         const choice = props.groups
           .flatMap((group) => group.choices)
           .find(
@@ -413,39 +428,62 @@ function ModelMenuItems(props: {
           });
         }
       }}
+    />
+  );
+}
+
+interface ModelCandidate {
+  readonly value: string;
+  readonly label: string;
+  readonly description?: string;
+  readonly icon?: ReactNode;
+  readonly disabled?: boolean;
+}
+
+/** One boxed candidate list shared by Maka and every external Agent provider. */
+function ModelCandidateMenuItems(props: {
+  readonly groups: readonly {
+    readonly key: string;
+    readonly heading: string;
+    readonly options: readonly ModelCandidate[];
+  }[];
+  readonly currentValue?: string;
+  readonly label: string;
+  readonly leadingOption?: ModelCandidate;
+  readonly disabled?: boolean;
+  onPick(value: string): void;
+}) {
+  return (
+    <DropdownMenuRadioGroup
+      value={props.currentValue}
+      label={props.label}
+      onChange={props.onPick}
     >
       {props.leadingOption ? (
         <DropdownMenuRadioItem
-          value={props.currentValue ?? ''}
-          icon={providerMarkIcon(props.leadingOption.providerType, props.renderProviderMark)}
+          value={props.leadingOption.value}
+          icon={props.leadingOption.icon}
           label={props.leadingOption.label}
           endContent={currentCheck}
           isDisabled
         />
       ) : null}
       {props.groups.map((group) => (
-        <div role="group" aria-label={group.heading} key={group.connectionSlug}>
+        <div role="group" aria-label={group.heading} key={group.key}>
           <div className="maka-model-menu-group-heading" aria-hidden="true">
             {group.heading}
           </div>
-          {group.choices.map((choice) => {
-            const value = exactModelChoiceValue(
-              choice.connectionId,
-              choice.connectionSlug,
-              choice.model,
-            );
-            return (
-              <DropdownMenuRadioItem
-                key={value}
-                value={value}
-                icon={providerMarkIcon(choice.providerType, props.renderProviderMark)}
-                label={choice.label}
-                description={modelChoiceDescription(choice, locale)}
-                endContent={value === props.currentValue ? currentCheck : undefined}
-                isDisabled={props.disabled}
-              />
-            );
-          })}
+          {group.options.map((option) => (
+            <DropdownMenuRadioItem
+              key={option.value}
+              value={option.value}
+              icon={option.icon}
+              label={option.label}
+              description={option.description}
+              endContent={option.value === props.currentValue ? currentCheck : undefined}
+              isDisabled={props.disabled || option.disabled}
+            />
+          ))}
         </div>
       ))}
     </DropdownMenuRadioGroup>

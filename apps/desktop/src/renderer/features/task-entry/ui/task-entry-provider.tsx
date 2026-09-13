@@ -27,6 +27,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useToast, type WorkspacePickerModel } from '@maka/ui';
+import type { ExternalAgentDraftAgentId } from '@maka/runtime-host/protocol';
 import {
   useTaskEntryController,
   type TaskEntryController,
@@ -67,6 +68,10 @@ const EMPTY_CONTROLLER: TaskEntryController = {
   commands: {
     async refresh() {},
     async ensureAntigravityReady() { return false; },
+    setExternalAgentDraft() {},
+    async selectExternalAgentDraftModel() {},
+    markExternalAgentDraftConsumed() {},
+    async releaseExternalAgentDraft() {},
     selectLocalProject: () => false,
     addProject() {},
     async chooseProjectForProfile() {},
@@ -77,6 +82,12 @@ const EMPTY_CONTROLLER: TaskEntryController = {
     usesDefaultHost: true,
     workspacePicker: EMPTY_WORKSPACE_PICKER,
     canAddProject: false,
+    externalAgentDraft: {
+      pending: false,
+      async selectModel() {},
+      markConsumed() {},
+      async releaseConsumed() {},
+    },
   },
 };
 
@@ -99,6 +110,14 @@ function createTaskEntryOwner(): TaskEntryOwner & {
       refresh: () => current.commands.refresh(),
       ensureAntigravityReady: (host: TaskEntryHostRef) =>
         current.commands.ensureAntigravityReady(host),
+      setExternalAgentDraft: (externalAgentId: ExternalAgentDraftAgentId | undefined) =>
+        current.commands.setExternalAgentDraft(externalAgentId),
+      selectExternalAgentDraftModel: (value: string) =>
+        current.commands.selectExternalAgentDraftModel(value),
+      markExternalAgentDraftConsumed: (draftId: string) =>
+        current.commands.markExternalAgentDraftConsumed(draftId),
+      releaseExternalAgentDraft: (draftId: string) =>
+        current.commands.releaseExternalAgentDraft(draftId),
       selectLocalProject: (projectId: string) =>
         current.commands.selectLocalProject(projectId),
       addProject: () => current.commands.addProject(),
@@ -185,6 +204,7 @@ function sameShellSelectors(
     previous.defaultProfileId === next.defaultProfileId &&
     previous.usesDefaultHost === next.usesDefaultHost &&
     previous.canAddProject === next.canAddProject
+    && previous.externalAgentDraft === next.externalAgentDraft
   );
 }
 

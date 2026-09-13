@@ -33,6 +33,10 @@ export function createDesktopTaskEntryServices(
       createAttemptId: () => crypto.randomUUID(),
       start: (input, host) => bridge.externalAgents.start(input, host),
       query: (attemptId, host) => bridge.externalAgents.query(attemptId, host),
+      prepareDraftModel: (input, host) => bridge.externalAgents.prepareDraftModel(input, host),
+      updateDraftModel: (draftId, value, host) =>
+        bridge.externalAgents.updateDraftModel(draftId, value, host),
+      releaseDraft: (draftId, host) => bridge.externalAgents.releaseDraft(draftId, host),
     },
   };
 }

@@ -43,6 +43,9 @@ function services(
       phase: 'succeeded',
     }),
     query: async () => assert.fail('unexpected setup query'),
+    prepareDraftModel: async () => assert.fail('unexpected draft preparation'),
+    updateDraftModel: async () => assert.fail('unexpected draft update'),
+    releaseDraft: async () => assert.fail('unexpected draft release'),
     ...overrides,
   };
 }

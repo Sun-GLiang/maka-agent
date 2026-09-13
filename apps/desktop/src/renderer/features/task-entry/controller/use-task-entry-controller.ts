@@ -29,6 +29,7 @@ import {
   runtimeHostProfileUsesHostWorkspace,
   type RuntimeHostProfileKind,
 } from '@maka/runtime-host/profile-kind';
+import type { ExternalAgentDraftAgentId } from '@maka/runtime-host/protocol';
 import {
   getConversationCopy,
   type WorkspacePickerModel,
@@ -40,6 +41,10 @@ import {
 } from '../../../locales/shell-copy.js';
 import { getExternalAgentsCopy } from '../../../locales/settings-external-agents-copy.js';
 import { ensureAntigravityExecutionReady } from '../model/external-agent-readiness.js';
+import {
+  useExternalAgentDraftModel,
+  type ExternalAgentDraftModel,
+} from './use-external-agent-draft-model.js';
 import {
   isReadyTaskEntryHost,
   resolveProjectSelection,
@@ -78,11 +83,16 @@ export interface TaskEntryControllerSelectors {
   readonly usesDefaultHost: boolean;
   readonly workspacePicker: WorkspacePickerModel;
   readonly canAddProject: boolean;
+  readonly externalAgentDraft: ExternalAgentDraftModel;
 }
 
 export interface TaskEntryControllerCommands {
   refresh(): Promise<void>;
   ensureAntigravityReady(host: TaskEntryHostRef): Promise<boolean>;
+  setExternalAgentDraft(externalAgentId: ExternalAgentDraftAgentId | undefined): void;
+  selectExternalAgentDraftModel(value: string): Promise<void>;
+  markExternalAgentDraftConsumed(draftId: string): void;
+  releaseExternalAgentDraft(draftId: string): Promise<void>;
   selectLocalProject(projectId: string): boolean;
   addProject(): void;
   chooseProjectForProfile(profileId: string): Promise<void>;
@@ -148,6 +158,8 @@ export function useTaskEntryController(
   const [refreshing, setRefreshing] = useState(true);
   const [error, setError] = useState<string>();
   const [directoryHost, setDirectoryHost] = useState<DirectoryHandoff>();
+  const [draftExternalAgentId, setDraftExternalAgentId] =
+    useState<ExternalAgentDraftAgentId>();
   const directoryOpenerRef = useRef<HTMLElement | null>(null);
   const committedCatalogRef = useRef<TaskEntryCatalog>(EMPTY_CATALOG);
   const refreshRequestSequenceRef = useRef(0);
@@ -380,6 +392,35 @@ export function useTaskEntryController(
     }
   }, [externalAgent, externalAgentCopy, locale, reportError]);
 
+  const ensureExternalAgentReady = useCallback(
+    (externalAgentId: ExternalAgentDraftAgentId, host: TaskEntryHostRef) => {
+      switch (externalAgentId) {
+        case 'antigravity':
+          return ensureAntigravityReady(host);
+      }
+      return Promise.resolve(false);
+    },
+    [ensureAntigravityReady],
+  );
+  const reportExternalAgentDraftError = useCallback((cause: unknown): void => {
+    reportError({
+      title: externalAgentCopy.modelDiscoveryTitle,
+      description: localizedShellErrorMessage(
+        cause,
+        externalAgentCopy.modelDiscoveryFailed,
+        locale,
+      ),
+      profileId: target?.profileId ?? catalog.defaultProfileId,
+    });
+  }, [catalog.defaultProfileId, externalAgentCopy, locale, reportError, target?.profileId]);
+  const externalAgentDraft = useExternalAgentDraftModel({
+    externalAgentId: draftExternalAgentId,
+    target,
+    cwd: projectPath,
+    ensureReady: ensureExternalAgentReady,
+    onError: reportExternalAgentDraftError,
+  });
+
   const acceptRegisteredProject = useCallback(async (
     project: ProjectRecord,
     registeredHost: TaskEntryHostRef,
@@ -561,6 +602,10 @@ export function useTaskEntryController(
     commands: {
       refresh: refreshCatalog,
       ensureAntigravityReady,
+      setExternalAgentDraft: setDraftExternalAgentId,
+      selectExternalAgentDraftModel: externalAgentDraft.selectModel,
+      markExternalAgentDraftConsumed: externalAgentDraft.markConsumed,
+      releaseExternalAgentDraft: externalAgentDraft.releaseConsumed,
       selectLocalProject,
       addProject: addSelectedProject,
       chooseProjectForProfile,
@@ -580,6 +625,7 @@ export function useTaskEntryController(
           (selectedHost.capabilities.chooseClientDirectory ||
             selectedHost.capabilities.chooseHostDirectory),
       ),
+      externalAgentDraft,
     },
   }), [
     acceptRegisteredProject,
@@ -590,6 +636,7 @@ export function useTaskEntryController(
     closeDirectoryPicker,
     directoryHost,
     ensureAntigravityReady,
+    externalAgentDraft,
     projectPath,
     refreshCatalog,
     selectLocalProject,

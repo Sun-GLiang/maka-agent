@@ -3338,6 +3338,9 @@ const makaBridge = {
   },
   externalAgents: {
     authentication(host) { return invokeSelectedRuntimeHost(host, 'external-agents:authentication:query'); },
+    prepareDraftModel(input, host) { return invokeSelectedRuntimeHost(host, 'external-agents:draft:model:prepare', input); },
+    updateDraftModel(draftId, value, host) { return invokeSelectedRuntimeHost(host, 'external-agents:draft:model:update', { draftId, value }); },
+    releaseDraft(draftId, host) { return invokeSelectedRuntimeHost(host, 'external-agents:draft:release', { draftId }); },
     selectExecutable(host) { return invokeSelectedRuntimeHost(host, 'external-agents:select-executable'); },
     start(input, host) { return invokeSelectedRuntimeHost(host, 'external-agents:setup:start', input); },
     query(attemptId, host) { return invokeSelectedRuntimeHost(host, 'external-agents:setup:query', { attemptId }); },

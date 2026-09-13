@@ -746,6 +746,7 @@ function AppShellContent({
     activeThinkingLevel,
     newChatModel,
     newChatModelLabel,
+    newChatProviderType,
     newChatThinkingLevels,
     newChatThinkingLevel,
     composerSupportsVision,
@@ -778,9 +779,6 @@ function AppShellContent({
     openModelPicker: openComposerModelPicker,
     refreshModelChoices: sessionHostConnections.refreshConnections,
   });
-  const newChatProviderType = connections.find(
-    (connection) => connection.slug === newChatModel?.llmConnectionSlug,
-  )?.providerType;
   // PR109d-b: turn footer actions per turn. Derived from the
   // materialized turn list (status + lineage descendants) + pending
   // mask. Per @kenji PR109d review: pending state prevents double-click
@@ -1197,6 +1195,7 @@ function AppShellContent({
   const antigravityTask =
     activeSession?.backend === 'acp' ||
     !activeId && newTaskExecutionChoice.executor === 'antigravity';
+  const externalAgentDraft = TaskEntry.bindExternalAgentDraft(taskEntry, newTaskExecutionChoice);
   const taskSubmissionHardBlocked = Conversation.isTaskSubmissionBlocked(
     activeId,
     taskEntry.selectors.target,
@@ -1459,7 +1458,9 @@ function AppShellContent({
     },
     activeIdRef,
     captureComposerImportOwner,
-    checkTaskSubmissionReadiness: taskSubmissionReadyAtSend,
+    checkTaskSubmissionReadiness: async () =>
+      !sharedSessionActive &&
+      (!!activeIdRef.current || Boolean(taskEntry.selectors.target) && externalAgentDraft.ready),
     isNewChatSendSurfaceActive,
     isShellSurfaceOwnerActive,
     messageRetryPending: sessionUiController.messageRetryPending,
@@ -1479,8 +1480,9 @@ function AppShellContent({
     respondToUserForm: commands.respondToUserForm,
     showModelSetupToast,
     toastApi,
-    newTaskExecutionChoice,
-    clearNewChatExecutionChoice,
+    newTaskExecutionChoice: externalAgentDraft.choice,
+    ...externalAgentDraft.chatActions,
+    clearNewChatExecutionChoice: () => externalAgentDraft.clear(clearNewChatExecutionChoice),
     pendingNewChatThinkingLevel: newChatThinkingLevel ?? null,
     newChatPermissionChoice: newTaskPermissionChoice,
     clearNewChatPermissionChoice: clearNewTaskPermissionChoice,
@@ -1526,14 +1528,6 @@ function AppShellContent({
     revisionDraftRef,
     toastApi,
   });
-
-  async function taskSubmissionReadyAtSend(): Promise<boolean> {
-    if (sharedSessionActive) return false;
-    const target = taskEntry.selectors.target;
-    return !!activeIdRef.current || !!target &&
-      (newTaskExecutionChoice.executor !== 'antigravity' ||
-        await taskEntry.commands.ensureAntigravityReady(target));
-  }
 
   /**
    * The send the composer calls, wrapped so the new-task target cannot move
@@ -2564,15 +2558,19 @@ function AppShellContent({
                     modelSwitchAvailability,
                     activeThinkingLevels,
                     activeThinkingLevel,
-                    ...sessionSettingIntent.externalAgentModel,
                   }}
+                  {...externalAgentDraft.composer(
+                    activeId,
+                    sessionSettingIntent.externalAgentModel,
+                    taskSubmissionHardBlocked,
+                  )}
                   onThinkingLevelChange={(level) => {
                     if (activeId) void setSessionThinkingLevel(activeId, level ?? null);
                   }}
                   {...{ newChatProviderType, newChatThinkingLevels, newChatThinkingLevel }}
                   newTaskExecutionChoice={newTaskExecutionChoice}
                   onNewTaskExecutionChoiceChange={(choice) => {
-                    selectNewTaskExecutionChoice(choice);
+                    externalAgentDraft.select(choice, selectNewTaskExecutionChoice);
                     if (choice.executor === 'maka' && choice.makaModel && modelSettingsOwnsComposerHost) {
                       saveComposerDefaults({ model: choice.makaModel });
                     }
@@ -2588,7 +2586,6 @@ function AppShellContent({
                   noModelHint={!modelSettingsOwnsComposerHost && composerProfileName
                     ? shellCopy.configureModelsOnHost(composerProfileName)
                     : undefined}
-                  sendBlocked={taskSubmissionHardBlocked}
                   permissionMode={activePermissionMode}
                   // Every "cannot change this mid-turn" gate reads `turnActive`,
                   // the same witness Stop reads. Reading the persisted status

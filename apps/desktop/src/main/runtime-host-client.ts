@@ -570,6 +570,18 @@ export class DesktopRuntimeHostClient {
     return this.request("external_agents.setup.cancel", { attemptId });
   }
 
+  prepareExternalAgentDraftModel(input: OperationInput<'external_agents.draft.model.prepare'>) {
+    return this.request('external_agents.draft.model.prepare', input);
+  }
+
+  updateExternalAgentDraftModel(draftId: string, value: string) {
+    return this.request('external_agents.draft.model.update', { draftId, value });
+  }
+
+  releaseExternalAgentDraft(draftId: string) {
+    return this.request('external_agents.draft.release', { draftId });
+  }
+
   startOAuthLogin(
     attemptId: string,
     target: OperationInput<"oauth.login.start">["target"],

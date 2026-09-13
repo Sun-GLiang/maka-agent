@@ -70,6 +70,8 @@ export {
   isTaskSubmissionBlocked,
   newTaskExecutorTarget,
 } from './model/new-task-executor-target.js';
+export { createNewTaskSessionLease } from './model/new-task-session-lease.js';
+export { copiedArray } from './model/message-content.js';
 
 export { activeHostTurn, chatTurnActivity } from '../../application/contracts/session-execution.js';
 export { selectLiveTurns, sessionUiSelectors } from './model/session-ui-selectors.js';

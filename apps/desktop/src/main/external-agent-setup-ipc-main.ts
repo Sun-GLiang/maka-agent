@@ -18,6 +18,9 @@
  */
 
 import {
+  decodeExternalAgentDraftModelPrepareInput,
+  decodeExternalAgentDraftModelUpdateInput,
+  decodeExternalAgentDraftReleaseInput,
   decodeExternalAgentSetupStart,
   decodeExternalAgentSetupAttempt,
 } from '@maka/runtime-host/protocol';
@@ -32,7 +35,13 @@ export function registerExternalAgentSetupIpc(deps: {
   ipcMain: ReconnectableReadIpcMain;
   client: Pick<
     DesktopRuntimeHostClient,
-    'startExternalAgentSetup' | 'queryExternalAgentSetup' | 'cancelExternalAgentSetup' | 'queryExternalAgentAuthentication'
+    | 'startExternalAgentSetup'
+    | 'queryExternalAgentSetup'
+    | 'cancelExternalAgentSetup'
+    | 'queryExternalAgentAuthentication'
+    | 'prepareExternalAgentDraftModel'
+    | 'updateExternalAgentDraftModel'
+    | 'releaseExternalAgentDraft'
   >;
   presentation: RuntimeHostOAuthPresentation;
   selectExecutable?: () => Promise<string | undefined>;
@@ -43,6 +52,17 @@ export function registerExternalAgentSetupIpc(deps: {
     'external-agents:authentication:query',
     () => deps.client.queryExternalAgentAuthentication(),
   );
+  deps.ipcMain.handle('external-agents:draft:model:prepare', (_event, raw: unknown) =>
+    deps.client.prepareExternalAgentDraftModel(decodeExternalAgentDraftModelPrepareInput(raw)),
+  );
+  deps.ipcMain.handle('external-agents:draft:model:update', (_event, raw: unknown) => {
+    const input = decodeExternalAgentDraftModelUpdateInput(raw);
+    return deps.client.updateExternalAgentDraftModel(input.draftId, input.value);
+  });
+  deps.ipcMain.handle('external-agents:draft:release', (_event, raw: unknown) => {
+    const input = decodeExternalAgentDraftReleaseInput(raw);
+    return deps.client.releaseExternalAgentDraft(input.draftId);
+  });
   let pending: { id: string; expectation: OAuthPresentationExpectation } | undefined;
   const clear = (id: string) => {
     if (pending?.id !== id) return;

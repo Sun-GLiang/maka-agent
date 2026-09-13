@@ -82,6 +82,7 @@ export * from './project-catalog.js';
 export * from './project-catalog-change.js';
 export * from './execution-inspect.js';
 export * from './external-session.js';
+export * from './external-agent-draft.js';
 export * from './message.js';
 export * from './operations.js';
 export * from './runtime-resource.js';
@@ -101,7 +102,9 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 153 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 154 as const;
+// 154: External Agent draft Sessions expose model configuration before the
+// first prompt and may be promoted into the created task without restarting.
 // 153: Reconcile the epoch-152 live ACP Session model surface with the
 // independently added WorkHub Host Form interaction from upstream epoch 151.
 // 152: Reconcile the epoch 150 protocol surface with the independently added

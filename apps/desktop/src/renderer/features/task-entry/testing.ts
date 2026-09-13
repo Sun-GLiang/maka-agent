@@ -36,6 +36,7 @@ export {
   taskEntryDraftKey,
 } from './model/task-entry-selection.js';
 export { ensureAntigravityExecutionReady } from './model/external-agent-readiness.js';
+export { useExternalAgentDraftModel } from './controller/use-external-agent-draft-model.js';
 export type {
   TaskEntryCatalog,
   TaskEntryExternalAgentService,

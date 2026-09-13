@@ -304,3 +304,42 @@ test('an external Agent session reuses the boxed model menu', async () => {
     assert.equal(selected, 'gemini-3.1-pro-preview');
   });
 });
+
+test('a new Antigravity task can choose an Agent model before the first send', async () => {
+  await withComposer(async ({ document, window, composer, render }) => {
+    let selected: string | undefined;
+    await render(
+      <Composer
+        ref={composer}
+        newTaskExecutionChoice={{
+          executor: 'antigravity',
+          makaModel: {
+            llmConnectionId: choice.connectionId,
+            llmConnectionSlug: choice.connectionSlug,
+            model: choice.model,
+          },
+        }}
+        onNewTaskExecutionChoiceChange={() => undefined}
+        externalAgentModelConfiguration={{
+          currentValue: 'gemini-3.7-flash-high',
+          options: [
+            { value: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
+            { value: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },
+          ],
+        }}
+        onExternalAgentModelChange={(value) => { selected = value; }}
+        onSend={() => undefined}
+        onStop={() => undefined}
+      />,
+    );
+
+    await act(() => composer.current?.openModelPicker());
+    const options = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
+    assert.equal(options.length, 2);
+    await act(async () => {
+      click(window, options[1]);
+      await Promise.resolve();
+    });
+    assert.equal(selected, 'gemini-3.1-pro-preview');
+  });
+});

@@ -105,6 +105,8 @@ export interface CreateSessionInput {
  */
 export type CreateSessionRequestInput = Partial<CreateSessionInput> & {
   mode?: SessionStartMode;
+  /** Process-local ACP draft identity; consumed as the created Session id. */
+  externalAgentDraftId?: string;
 };
 
 export interface UserMessageInput extends MessageContent {

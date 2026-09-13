@@ -21,6 +21,7 @@ import { useMemo } from 'react';
 import type { ChatModelChoice } from '@maka/core/chat-model-choice';
 import type {
   IdentifiedLlmConnection,
+  ProviderType,
   ProjectedLlmConnection,
 } from '@maka/core/llm-connections';
 import type { SessionSendProjection } from '@maka/core/session-send-projection';
@@ -101,6 +102,7 @@ export function useShellChatModel(options: {
   activeThinkingLevel: ThinkingLevel | undefined;
   newChatModel: NewChatModel | undefined;
   newChatModelLabel: string | undefined;
+  newChatProviderType: ProviderType | undefined;
   newChatThinkingLevels: readonly ThinkingLevel[];
   newChatThinkingLevel: ThinkingLevel | undefined;
   composerSupportsVision: boolean | undefined;
@@ -191,6 +193,9 @@ export function useShellChatModel(options: {
     executor: newChatExecutor,
     makaModel: newChatModel ?? null,
   };
+  const newChatProviderType = connections.find(
+    (connection) => connection.slug === newChatModel?.llmConnectionSlug,
+  )?.providerType;
   const selectNewTaskExecutionChoice = (choice: NewTaskExecutionChoice): void =>
     setExecutionChoice({ executor: choice.executor, model: choice.makaModel });
   // A task whose backend was retired has no model to name (#3211). That verdict
@@ -330,6 +335,7 @@ export function useShellChatModel(options: {
     activeThinkingLevel,
     newChatModel,
     newChatModelLabel,
+    newChatProviderType,
     newChatThinkingLevels,
     newChatThinkingLevel,
     composerSupportsVision,

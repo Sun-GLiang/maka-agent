@@ -103,12 +103,7 @@ type SendOptions = MessageContextOptions & {
   onSessionResolved?: (sessionId: string) => void;
 };
 
-function copiedArray<K extends string, T>(
-  key: K,
-  values?: readonly T[],
-): Partial<Record<K, T[]>> {
-  return values?.length ? { [key]: [...values] } as Record<K, T[]> : {};
-}
+const copiedArray = Conversation.copiedArray;
 
 export interface AppShellChatActions {
   send(
@@ -177,6 +172,8 @@ export function createAppShellChatActions(deps: {
   ) => void;
   toastApi: ToastApi;
   newTaskExecutionChoice: NewTaskExecutionChoice;
+  markNewTaskExternalAgentDraftConsumed?(draftId: string): void;
+  releaseNewTaskExternalAgentDraft?(draftId: string): Promise<void>;
   clearNewChatExecutionChoice?(): void;
   pendingNewChatThinkingLevel: PendingNewChatThinkingLevel;
   /**
@@ -339,19 +336,13 @@ export function createAppShellChatActions(deps: {
     // project-context resolution), so tracking it in one place is what keeps
     // the two exits from drifting apart; the deleted `quick-chat.ts` cleaned
     // up on throw and nothing replaced that half.
-    let unsentSessionId: string | undefined;
-    const discardUnsentSession = async () => {
-      if (!unsentSessionId) return;
-      const sessionId = unsentSessionId;
-      unsentSessionId = undefined;
-      try {
-        await window.maka.sessions.remove(sessionId);
-        retireSession(sessionId);
-        await refreshSessions();
-      } catch {
-        // Best-effort: a failed cleanup must not replace the real error.
-      }
-    };
+    const unsent = Conversation.createNewTaskSessionLease({
+      removeSession: (sessionId) => window.maka.sessions.remove(sessionId),
+      retireSession,
+      refreshSessions,
+      markExternalAgentDraftConsumed: deps.markNewTaskExternalAgentDraftConsumed,
+      releaseExternalAgentDraft: deps.releaseNewTaskExternalAgentDraft,
+    });
     try {
       const messageId = crypto.randomUUID();
       async function submitIntoSession(sessionId: string, messageId: string) {
@@ -398,7 +389,7 @@ export function createAppShellChatActions(deps: {
           collaborationMode: newChatCollaborationMode,
           orchestrationMode: newChatOrchestrationMode,
         });
-        unsentSessionId = session.id;
+        unsent.claim(session.id, deps.newTaskExecutionChoice.externalAgentDraftId);
         optimisticSessionId = session.id;
         optimisticMessageId = messageId;
         // Stage the first row before activation. `setActiveId` projects this
@@ -419,15 +410,15 @@ export function createAppShellChatActions(deps: {
         await activateSessionForFirstSend(session.id);
         if (activeIdRef.current !== session.id) {
           removeOptimisticUserMessage(session.id, messageId);
-          await discardUnsentSession();
+          await unsent.discard();
           return false;
         }
         const submitted = await submitIntoSession(session.id, messageId);
         if (submitted.kind === 'refused') {
-          await discardUnsentSession();
+          await unsent.discard();
           return false;
         }
-        unsentSessionId = undefined;
+        unsent.commit();
         deps.clearNewChatExecutionChoice?.();
         // The callback fires only when this send's first message projected;
         // an unreconciled first message stays unreported.
@@ -465,7 +456,7 @@ export function createAppShellChatActions(deps: {
             sessionId: feedbackSessionId,
           })) ||
         (newChatOwner !== null && isNewChatSendSurfaceActive(newChatOwner));
-      await discardUnsentSession();
+      await unsent.discard();
       if (optimisticSessionId && optimisticMessageId) {
         removeOptimisticUserMessage(optimisticSessionId, optimisticMessageId);
       }

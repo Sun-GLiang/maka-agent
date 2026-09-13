@@ -522,7 +522,11 @@ export function registerDesktopSessionLocalIpc(deps: {
         typeof input.projectId === 'string'
           ? { kind: 'project' as const, projectId: input.projectId }
           : await deps.resolveWorkspace(target, input);
-      const creation = resolveDesktopSessionCreateInput(input, randomUUID(), workspace);
+      const creation = resolveDesktopSessionCreateInput(
+        input,
+        resolveExternalAgentDraftSessionId(input) ?? randomUUID(),
+        workspace,
+      );
       const summary: DesktopSessionSummaryInput = {
         id: creation.sessionId,
         revision: 0,
@@ -648,4 +652,15 @@ function requiredId(value: unknown): string {
   if (typeof value !== 'string' || !value || value.length > 256)
     throw new Error('Invalid local Session or Message identity');
   return value;
+}
+
+export function resolveExternalAgentDraftSessionId(
+  input: CreateSessionRequestInput,
+): string | undefined {
+  const draftId = input.externalAgentDraftId;
+  if (draftId === undefined) return undefined;
+  if (input.executionBackend !== 'acp' || input.externalAgentId !== 'antigravity') {
+    throw new Error('External Agent draft requires Antigravity ACP execution');
+  }
+  return requiredId(draftId);
 }

@@ -138,6 +138,10 @@ describe('Runtime Host bootstrap protocol', () => {
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 150);
   });
 
+  test('publishes a new compatibility epoch for pre-send external Agent model discovery', () => {
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 153);
+  });
+
   test('publishes a new compatibility epoch for mandatory submit Skill outcomes', () => {
     // Submit Skill outcomes and explicit OAuth Connection targets independently
     // claimed epoch 78, so their merge requires a distinct compatibility boundary.

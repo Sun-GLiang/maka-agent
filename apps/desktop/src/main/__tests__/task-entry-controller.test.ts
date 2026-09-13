@@ -148,6 +148,9 @@ describe('useTaskEntryController', () => {
         createAttemptId: () => 'attempt-1',
         start: async (input) => ({ ...input, phase: 'succeeded' }),
         query: async () => assert.fail('a terminal start result must not be polled'),
+        prepareDraftModel: async () => assert.fail('draft preparation is outside this test'),
+        updateDraftModel: async () => assert.fail('draft update is outside this test'),
+        releaseDraft: async () => assert.fail('draft release is outside this test'),
       },
     });
 
@@ -159,6 +162,87 @@ describe('useTaskEntryController', () => {
 
     assert.equal(ready, true);
     assert.equal(authenticationReads, 2);
+  });
+
+  it('discovers and selects external Agent models before the first send', async () => {
+    const { root } = installReactRenderer();
+    const prepared = deferred<{
+      draftId: string;
+      externalAgentId: 'antigravity';
+      configId: string;
+      currentValue: string;
+      options: readonly { value: string; name: string }[];
+    }>();
+    const prepareInputs: unknown[] = [];
+    const updates: string[] = [];
+    const releases: string[] = [];
+    const options = [
+      { value: 'gemini-flash', name: 'Gemini Flash' },
+      { value: 'claude-sonnet', name: 'Claude Sonnet' },
+    ];
+    const services = createFakeTaskEntryServices({
+      catalog: {
+        ...createFakeTaskEntryServices().catalog,
+        getCatalog: async () => catalog(),
+      },
+      externalAgent: {
+        authentication: async () => ({
+          acpAgentId: 'antigravity',
+          executable: '/agent/agy_acp_server.par',
+          status: 'verified',
+        }),
+        createAttemptId: () => 'draft-1',
+        start: async () => assert.fail('verified authentication must not start setup'),
+        query: async () => assert.fail('verified authentication must not poll setup'),
+        prepareDraftModel: async (input) => {
+          prepareInputs.push(input);
+          return prepared.promise;
+        },
+        updateDraftModel: async (draftId, value) => {
+          assert.equal(draftId, 'draft-1');
+          updates.push(value);
+          return {
+            draftId,
+            externalAgentId: 'antigravity',
+            configId: 'model',
+            currentValue: value,
+            options,
+          };
+        },
+        releaseDraft: async (draftId) => {
+          releases.push(draftId);
+          return { draftId, released: true };
+        },
+      },
+    });
+
+    await act(async () => renderController(root, services));
+    await act(async () => controller().commands.setExternalAgentDraft('antigravity'));
+    assert.deepEqual(prepareInputs, [{
+      draftId: 'draft-1',
+      externalAgentId: 'antigravity',
+      workspace: { kind: 'project', projectId: 'project-a' },
+    }]);
+    await act(async () => prepared.resolve({
+      draftId: 'draft-1',
+      externalAgentId: 'antigravity',
+      configId: 'model',
+      currentValue: options[0]!.value,
+      options,
+    }));
+    assert.equal(controller().selectors.externalAgentDraft.draftId, 'draft-1');
+    assert.equal(controller().selectors.externalAgentDraft.configuration?.options.length, 2);
+
+    await act(async () =>
+      controller().commands.selectExternalAgentDraftModel(options[1]!.value));
+    assert.deepEqual(updates, [options[1]!.value]);
+    assert.equal(
+      controller().selectors.externalAgentDraft.configuration?.currentValue,
+      options[1]!.value,
+    );
+
+    await act(async () => controller().commands.setExternalAgentDraft(undefined));
+    assert.deepEqual(releases, ['draft-1']);
   });
 
   it('projects the target and keeps draft identity in sync with Workspace Picker selections', async () => {

@@ -21,7 +21,13 @@ import type { NewTaskExecutionChoice } from '@maka/ui';
 
 export function newTaskExecutorTarget(choice: NewTaskExecutionChoice) {
   return choice.executor === 'antigravity'
-    ? { executionBackend: 'acp' as const, externalAgentId: 'antigravity' as const }
+    ? {
+        executionBackend: 'acp' as const,
+        externalAgentId: 'antigravity' as const,
+        ...(choice.externalAgentDraftId
+          ? { externalAgentDraftId: choice.externalAgentDraftId }
+          : {}),
+      }
     : choice.makaModel ? {
         llmConnectionId: choice.makaModel.llmConnectionId,
         llmConnectionSlug: choice.makaModel.llmConnectionSlug,

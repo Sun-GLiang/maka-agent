@@ -147,3 +147,47 @@ test('selecting a Maka model commits one target and first send uses that exact m
     Object.assign(globalThis, original);
   }
 });
+
+test('first Antigravity send promotes the prepared draft into the created task', async () => {
+  const draftId = 'f9c15942-68ea-48ec-aa84-7fd4c9f44ed1';
+  let createInput: unknown;
+  const consumed: string[] = [];
+  const restoreWindow = installWindow({
+    newTasks: {
+      create: async (_target: unknown, input: unknown) => {
+        createInput = input;
+        return { id: draftId };
+      },
+    },
+    sessions: {
+      submitMessage: async () => ({
+        ok: true,
+        attachments: [],
+        skillInvocation: { loaded: [], failed: [], receipts: [] },
+      }),
+    },
+  });
+  try {
+    const sent = await createAppShellChatActions({
+      ...createActionsDeps(),
+      newTaskExecutionChoice: {
+        executor: 'antigravity',
+        makaModel: null,
+        externalAgentDraftId: draftId,
+      },
+      markNewTaskExternalAgentDraftConsumed: (id) => consumed.push(id),
+    }).send('hello');
+    assert.equal(sent, true);
+  } finally {
+    restoreWindow();
+  }
+  assert.deepEqual(consumed, [draftId]);
+  assert.deepEqual(createInput, {
+    name: 'New Chat',
+    executionBackend: 'acp',
+    externalAgentId: 'antigravity',
+    externalAgentDraftId: draftId,
+    collaborationMode: 'agent',
+    orchestrationMode: 'default',
+  });
+});

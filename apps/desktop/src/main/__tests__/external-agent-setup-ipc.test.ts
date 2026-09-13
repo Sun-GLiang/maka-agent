@@ -24,6 +24,18 @@ import { registerExternalAgentSetupIpc } from '../external-agent-setup-ipc-main.
 import { RuntimeHostOAuthPresentation } from '../runtime-host-oauth-presentation.js';
 import type { ExternalAgentSetupProjection } from '@maka/runtime-host/protocol';
 
+const unexpectedDraftClientMethods = {
+  prepareExternalAgentDraftModel: async (): Promise<never> => {
+    throw new Error('Unexpected draft preparation');
+  },
+  updateExternalAgentDraftModel: async (): Promise<never> => {
+    throw new Error('Unexpected draft update');
+  },
+  releaseExternalAgentDraft: async (): Promise<never> => {
+    throw new Error('Unexpected draft release');
+  },
+};
+
 test('authentication IPC is a reconnectable query without setup or browser side effects', async () => {
   type Handler = Parameters<Parameters<typeof registerExternalAgentSetupIpc>[0]['ipcMain']['handle']>[1];
   const reads = new Map<string, Handler>();
@@ -37,6 +49,7 @@ test('authentication IPC is a reconnectable query without setup or browser side 
     presentation: new RuntimeHostOAuthPresentation(unexpected),
     selectExecutable: unexpected,
     client: {
+      ...unexpectedDraftClientMethods,
       queryExternalAgentAuthentication: async () => authentication,
       startExternalAgentSetup: unexpected,
       queryExternalAgentSetup: unexpected,
@@ -46,6 +59,72 @@ test('authentication IPC is a reconnectable query without setup or browser side 
   const read = reads.get('external-agents:authentication:query');
   assert.ok(read);
   assert.deepEqual(await read({} as IpcMainInvokeEvent), authentication);
+});
+
+test('draft model IPC forwards one generic external Agent candidate provider lifecycle', async () => {
+  type Handler = Parameters<
+    Parameters<typeof registerExternalAgentSetupIpc>[0]['ipcMain']['handle']
+  >[1];
+  const handlers = new Map<string, Handler>();
+  const calls: unknown[] = [];
+  const projection = {
+    draftId: 'draft-1',
+    externalAgentId: 'antigravity' as const,
+    configId: 'model',
+    currentValue: 'gemini-flash',
+    options: [{ value: 'gemini-flash', name: 'Gemini Flash' }],
+  };
+  registerExternalAgentSetupIpc({
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    presentation: new RuntimeHostOAuthPresentation(async () => undefined),
+    client: {
+      queryExternalAgentAuthentication: async () => ({
+        acpAgentId: 'antigravity',
+        executable: '/agent',
+        status: 'verified',
+      }),
+      startExternalAgentSetup: async () => assert.fail('unexpected setup start'),
+      queryExternalAgentSetup: async () => assert.fail('unexpected setup query'),
+      cancelExternalAgentSetup: async () => assert.fail('unexpected setup cancel'),
+      prepareExternalAgentDraftModel: async (input) => {
+        calls.push(input);
+        return projection;
+      },
+      updateExternalAgentDraftModel: async (draftId, value) => {
+        calls.push({ draftId, value });
+        return { ...projection, currentValue: value };
+      },
+      releaseExternalAgentDraft: async (draftId) => {
+        calls.push({ draftId, release: true });
+        return { draftId, released: true };
+      },
+    },
+  });
+  const invoke = (channel: string, input: unknown) =>
+    handlers.get(channel)!({} as IpcMainInvokeEvent, input);
+
+  assert.deepEqual(
+    await invoke('external-agents:draft:model:prepare', {
+      draftId: 'draft-1',
+      externalAgentId: 'antigravity',
+      workspace: { kind: 'project', projectId: 'project-1' },
+    }),
+    projection,
+  );
+  await invoke('external-agents:draft:model:update', {
+    draftId: 'draft-1',
+    value: 'claude-sonnet',
+  });
+  await invoke('external-agents:draft:release', { draftId: 'draft-1' });
+  assert.deepEqual(calls, [
+    {
+      draftId: 'draft-1',
+      externalAgentId: 'antigravity',
+      workspace: { kind: 'project', projectId: 'project-1' },
+    },
+    { draftId: 'draft-1', value: 'claude-sonnet' },
+    { draftId: 'draft-1', release: true },
+  ]);
 });
 
 test('external setup shares browser presentation without accepting a stale attempt URL', async () => {
@@ -91,6 +170,7 @@ test('setup IPC registers an expectation before start and releases it on termina
     },
     presentation,
     client: {
+      ...unexpectedDraftClientMethods,
       queryExternalAgentAuthentication: async () => ({ acpAgentId: 'antigravity', executable: '/agent', status: 'unverified' }),
       startExternalAgentSetup: async (value) => {
         attempts++;
@@ -137,6 +217,7 @@ test('setup accepts a delayed authorization link and clears terminal, cancelled 
     ipcMain: { handle: (channel, listener) => { handlers.set(channel, listener); } },
     presentation,
     client: {
+      ...unexpectedDraftClientMethods,
       queryExternalAgentAuthentication: async () => ({ acpAgentId: 'antigravity', executable: '/agent', status: 'unverified' }),
       startExternalAgentSetup: async (value) => ({ ...value, phase }),
       queryExternalAgentSetup: async () => ({ ...input, phase }),

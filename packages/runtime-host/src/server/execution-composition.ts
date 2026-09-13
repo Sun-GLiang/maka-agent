@@ -194,6 +194,7 @@ import { join } from 'node:path';
 import { toRuntimePolicyProxy } from './runtime-policy-proxy.js';
 import { AcpSetupError } from './acp/connection.js';
 import { AcpAgentBackend } from './acp/acp-agent-backend.js';
+import { HostExternalAgentDraftModelCoordinator } from './acp/draft-model-coordinator.js';
 import { HostExternalAgentSessionModelCoordinator } from './acp/session-model-coordinator.js';
 import { installAntigravity } from './acp/antigravity-install.js';
 import { createAntigravityEnvironment } from './acp/antigravity-environment.js';
@@ -810,6 +811,7 @@ export async function createExecutionRuntimeHostComposition(
     let clientCapabilities: HostClientCapabilityCoordinator | undefined;
     let oauth: HostOAuthCoordinator | undefined;
     let externalAgentSetup: HostExternalAgentSetupCoordinator | undefined;
+    let externalAgentDraftModels: HostExternalAgentDraftModelCoordinator | undefined;
     let scheduledTasks: HostScheduledTaskCoordinator | undefined;
     let scheduledTaskTool: MakaTool | undefined;
     let goal: HostGoalCoordinator | undefined;
@@ -1466,6 +1468,46 @@ export async function createExecutionRuntimeHostComposition(
       },
       capabilities: clientCapabilities,
     });
+    type AcpLaunch = Awaited<ReturnType<HostExternalAgentSetupCoordinator['prepareExecution']>>;
+    const createAcpBackend = (
+      sessionId: string,
+      cwd: string,
+      launch: AcpLaunch,
+    ): AcpAgentBackend => {
+      const residency = context.acquireResidency('acp-agent');
+      let backend: AcpAgentBackend;
+      backend = new AcpAgentBackend({
+        sessionId,
+        cwd,
+        executable: launch.executable,
+        env: launch.env,
+        releaseResidency: () => residency.release(),
+        onCleanupFailure: () => {
+          context.retainUntilProcessExit();
+          context.requestDrain();
+        },
+        onUnavailable: () => {
+          if (activeAcpBackends.get(sessionId) !== backend) return;
+          unavailableAcpSessionsAfterRestart.add(sessionId);
+          hostChanges.publishSessionCatalog(sessionId);
+        },
+        onDisposed: () => {
+          if (activeAcpBackends.get(sessionId) === backend) {
+            activeAcpBackends.delete(sessionId);
+          }
+        },
+      });
+      return backend;
+    };
+    externalAgentDraftModels = new HostExternalAgentDraftModelCoordinator({
+      resolveWorkspace: (target) => workspaceResolver.resolve(target),
+      prepareBackend: async (externalAgentId, draftId, cwd) => {
+        if (externalAgentId !== 'antigravity') {
+          throw new Error(`Unsupported external Agent: ${externalAgentId}`);
+        }
+        return createAcpBackend(draftId, cwd, await externalAgentSetup!.prepareExecution());
+      },
+    });
     backends.register('acp', {
       prepare: async (backendContext) => {
         if (backendContext.header.externalAgentId !== 'antigravity') {
@@ -1476,31 +1518,26 @@ export async function createExecutionRuntimeHostComposition(
             'ACP Session history is readable, but its external process is no longer available; start a new task',
           );
         }
-        const launch = await externalAgentSetup!.prepareExecution();
+        const hasDraft = externalAgentDraftModels!.has(
+          'antigravity',
+          backendContext.header.id,
+          backendContext.header.cwd,
+        );
+        const launch = hasDraft ? undefined : await externalAgentSetup!.prepareExecution();
         return {
           build: (buildContext) => {
-            const residency = context.acquireResidency('acp-agent');
-            let backend: AcpAgentBackend;
-            backend = new AcpAgentBackend({
-              sessionId: buildContext.sessionId,
-              cwd: buildContext.header.cwd,
-              executable: launch.executable,
-              env: launch.env,
-              releaseResidency: () => residency.release(),
-              onCleanupFailure: () => {
-                context.retainUntilProcessExit();
-                context.requestDrain();
-              },
-              onUnavailable: () => {
-                unavailableAcpSessionsAfterRestart.add(buildContext.sessionId);
-                hostChanges.publishSessionCatalog(buildContext.sessionId);
-              },
-              onDisposed: () => {
-                if (activeAcpBackends.get(buildContext.sessionId) === backend) {
-                  activeAcpBackends.delete(buildContext.sessionId);
-                }
-              },
-            });
+            const draft = hasDraft
+              ? externalAgentDraftModels!.take(
+                  'antigravity',
+                  buildContext.sessionId,
+                  buildContext.header.cwd,
+                )
+              : undefined;
+            if (hasDraft && !draft) {
+              throw new Error('Prepared external Agent draft is no longer available');
+            }
+            const backend =
+              draft ?? createAcpBackend(buildContext.sessionId, buildContext.header.cwd, launch!);
             activeAcpBackends.set(buildContext.sessionId, backend);
             return backend;
           },
@@ -2583,6 +2620,7 @@ export async function createExecutionRuntimeHostComposition(
           usagePricing.handlers,
           oauth.handlers,
           externalAgentSetup.handlers,
+          externalAgentDraftModels.handlers,
           webSearch.handlers,
           networkProxy.handlers,
           configuration.handlers,
@@ -2594,6 +2632,7 @@ export async function createExecutionRuntimeHostComposition(
           () => connectionEffects.beginDrain(),
           () => skills.beginDrain(),
           () => oauth?.beginDrain(),
+          () => externalAgentDraftModels?.beginDrain(),
           () => externalAgentSetup?.beginDrain(),
         ],
         close: [
@@ -2606,6 +2645,7 @@ export async function createExecutionRuntimeHostComposition(
               : requireSessionManager(manager).refreshIdleBackends(),
           () => skills.close(),
           () => oauth?.close(),
+          () => externalAgentDraftModels?.close(),
           () => externalAgentSetup?.close(),
           () => {
             unsubscribeTranscriptChanges?.();
@@ -2614,6 +2654,7 @@ export async function createExecutionRuntimeHostComposition(
         ],
         releaseConnection: [
           (connectionId) => artifacts.releaseConnection(connectionId),
+          (connectionId) => externalAgentDraftModels?.releaseConnection(connectionId),
           (connectionId) => externalAgentSetup?.releaseConnection(connectionId),
         ],
       }),

@@ -17,12 +17,9 @@
  * under the License.
  */
 
-export { TaskEntryHost } from './ui/task-entry-host.js';
-export {
-  TaskEntryRoot,
-  TaskEntryWorkspacePickerConsumer,
-} from './ui/task-entry-provider.js';
-export type { TaskEntryShellProjection } from './ui/task-entry-provider.js';
-export { TaskEntryServicesProvider } from './services-context.js';
-export { bindExternalAgentDraft } from './model/external-agent-draft-binding.js';
-export type { TaskEntryServices } from './ports.js';
+export function copiedArray<K extends string, T>(
+  key: K,
+  values?: readonly T[],
+): Partial<Record<K, T[]>> {
+  return values?.length ? { [key]: [...values] } as Record<K, T[]> : {};
+}

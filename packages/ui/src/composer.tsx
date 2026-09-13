@@ -136,6 +136,8 @@ import { ComposerMessageQueue, projectComposerMessageQueue } from './composer-me
 
 export type NewTaskExecutionChoice = {
   executor: 'maka' | 'antigravity';
+  /** Prepared ACP Session identity promoted into the first Antigravity task. */
+  externalAgentDraftId?: string;
   /** The exact Maka target retained while another executor is selected. */
   makaModel: {
     llmConnectionId: string;
@@ -2167,6 +2169,16 @@ export const Composer = forwardRef<
                         renderProviderMark={props.renderProviderMark}
                         onPick={(makaModel) =>
                           props.onNewTaskExecutionChoiceChange?.({ executor: 'maka', makaModel })}
+                      />
+                    ) : props.newTaskExecutionChoice.executor === 'antigravity' &&
+                    props.externalAgentModelConfiguration ? (
+                      <ExternalAgentModelSwitcher
+                        configuration={props.externalAgentModelConfiguration}
+                        availability={modelSwitchAvailability}
+                        disabledReason={modelSwitcherDisabledReason}
+                        isMenuOpen={modelPickerOpen}
+                        onMenuOpenChange={setModelPickerOpen}
+                        onChange={props.onExternalAgentModelChange}
                       />
                     ) : props.newTaskExecutionChoice.executor === 'antigravity' ? (
                       <ModelChipStatic

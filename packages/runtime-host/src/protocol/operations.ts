@@ -39,6 +39,7 @@ import { MESSAGE_OPERATION_SPECS } from './message.js';
 import { MEMORY_OPERATION_SPECS } from './memory.js';
 import { NETWORK_PROXY_OPERATION_SPECS } from './network-proxy.js';
 import { EXTERNAL_AGENT_SETUP_OPERATION_SPECS } from './external-agent-setup.js';
+import { EXTERNAL_AGENT_DRAFT_OPERATION_SPECS } from './external-agent-draft.js';
 import { EXTERNAL_AGENT_SESSION_OPERATION_SPECS } from './external-agent-session.js';
 import { OAUTH_OPERATION_SPECS } from './oauth.js';
 import { PLAN_OPERATION_SPECS } from './plan.js';
@@ -169,6 +170,7 @@ export * from './host-resources.js';
 export * from './memory.js';
 export * from './network-proxy.js';
 export * from './oauth.js';
+export * from './external-agent-draft.js';
 export * from './external-agent-setup.js';
 export * from './external-agent-session.js';
 export * from './plan.js';
@@ -228,6 +230,7 @@ export const HOST_OPERATION_SPECS = composeOperationSpecMaps(
   MEMORY_OPERATION_SPECS,
   OAUTH_OPERATION_SPECS,
   EXTERNAL_AGENT_SETUP_OPERATION_SPECS,
+  EXTERNAL_AGENT_DRAFT_OPERATION_SPECS,
   EXTERNAL_AGENT_SESSION_OPERATION_SPECS,
   CLIENT_CAPABILITY_OPERATION_SPECS,
   WEB_SEARCH_OPERATION_SPECS,

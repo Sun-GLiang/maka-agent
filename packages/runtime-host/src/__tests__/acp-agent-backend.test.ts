@@ -163,6 +163,7 @@ test('reports an Agent execution error message as an explicit prompt diagnostic'
 
 test('retains and updates only the ACP Agent model configuration for the live Session', async () => {
   const requestedModels: string[] = [];
+  let promptRequests = 0;
   const modelOptions = [
     { value: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
     { value: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },
@@ -197,7 +198,10 @@ test('retains and updates only the ACP Agent model configuration for the live Se
             configOptions: configOptions(modelOptions[0]!.value),
           };
         }
-        if (method === methods.agent.session.prompt) return { stopReason: 'end_turn' };
+        if (method === methods.agent.session.prompt) {
+          promptRequests += 1;
+          return { stopReason: 'end_turn' };
+        }
         if (method === methods.agent.session.setConfigOption) {
           const request = params as { sessionId: string; configId: string; value: string };
           assert.deepEqual(request, {
@@ -229,12 +233,12 @@ test('retains and updates only the ACP Agent model configuration for the live Se
     }),
   });
 
-  await collectEvents(backend.send({ turnId: 'turn-1', text: 'hello' }));
-  assert.deepEqual(backend.modelConfiguration(), {
+  assert.deepEqual(await backend.prepare(new AbortController().signal), {
     configId: 'model',
     currentValue: modelOptions[0]!.value,
     options: modelOptions,
   });
+  assert.equal(promptRequests, 0, 'model discovery must not dispatch a prompt');
 
   assert.deepEqual(await backend.setModel(modelOptions[1]!.value), {
     configId: 'model',
@@ -242,6 +246,14 @@ test('retains and updates only the ACP Agent model configuration for the live Se
     options: modelOptions,
   });
   assert.deepEqual(requestedModels, [modelOptions[1]!.value]);
+
+  await collectEvents(backend.send({ turnId: 'turn-1', text: 'hello' }));
+  assert.deepEqual(backend.modelConfiguration(), {
+    configId: 'model',
+    currentValue: modelOptions[1]!.value,
+    options: modelOptions,
+  });
+  assert.equal(promptRequests, 1);
 });
 
 test('stop cancels startup before a prompt can be dispatched', async () => {

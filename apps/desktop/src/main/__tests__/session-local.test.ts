@@ -36,6 +36,7 @@ import {
   DesktopSessionLocalService,
   desktopSessionLocalPartition,
   registerDesktopSessionLocalIpc,
+  resolveExternalAgentDraftSessionId,
   type DesktopSessionLocalTarget,
 } from '../session-local-service.js';
 import type { DesktopSessionSummaryInput } from '../../shared/desktop-session-projection.js';
@@ -56,6 +57,22 @@ const intent = (messageId = 'message-1', sessionId = 'session-1'): LocalMessageI
       base64: Buffer.from('original bytes').toString('base64'),
     },
   ],
+});
+
+test('an Antigravity draft becomes the created local and Host Session identity', () => {
+  const draftId = randomUUID();
+  assert.equal(
+    resolveExternalAgentDraftSessionId({
+      executionBackend: 'acp',
+      externalAgentId: 'antigravity',
+      externalAgentDraftId: draftId,
+    }),
+    draftId,
+  );
+  assert.throws(
+    () => resolveExternalAgentDraftSessionId({ externalAgentDraftId: draftId }),
+    /requires Antigravity ACP execution/,
+  );
 });
 
 async function database(t: TestContext, now?: () => number) {

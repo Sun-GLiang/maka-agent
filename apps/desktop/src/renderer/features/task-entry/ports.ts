@@ -22,6 +22,9 @@ import type { ChatDefaultsSettings } from '@maka/core/settings';
 import type { RuntimeHostProfileKind } from '@maka/runtime-host/profile-kind';
 import type {
   ExternalAgentAuthenticationProjection,
+  ExternalAgentDraftModelPrepareInput,
+  ExternalAgentDraftModelProjection,
+  ExternalAgentDraftReleaseProjection,
   ExternalAgentSetupFailure,
   ExternalAgentSetupProjection,
   ExternalAgentSetupStart,
@@ -114,6 +117,19 @@ export interface TaskEntryExternalAgentService {
     host: TaskEntryHostRef,
   ): Promise<ExternalAgentSetupProjection>;
   query(attemptId: string, host: TaskEntryHostRef): Promise<ExternalAgentSetupProjection>;
+  prepareDraftModel(
+    input: ExternalAgentDraftModelPrepareInput,
+    host: TaskEntryHostRef,
+  ): Promise<ExternalAgentDraftModelProjection>;
+  updateDraftModel(
+    draftId: string,
+    value: string,
+    host: TaskEntryHostRef,
+  ): Promise<ExternalAgentDraftModelProjection>;
+  releaseDraft(
+    draftId: string,
+    host: TaskEntryHostRef,
+  ): Promise<ExternalAgentDraftReleaseProjection>;
 }
 
 export type TaskEntryExternalAgentReadiness =

@@ -246,6 +246,16 @@ export class AcpAgentBackend implements AgentBackend {
     };
   }
 
+  /** Start the official Agent Session without dispatching a prompt. */
+  async prepare(cancellationSignal: AbortSignal): Promise<AcpModelConfiguration> {
+    if (this.disposed || this.lost) throw new AcpModelConfigurationError('unavailable');
+    if (this.current) throw new AcpModelConfigurationError('busy');
+    await this.ensureInitialized(cancellationSignal);
+    const configuration = this.modelConfiguration();
+    if (!configuration) throw new AcpModelConfigurationError('unavailable');
+    return configuration;
+  }
+
   async setModel(value: string): Promise<AcpModelConfiguration> {
     if (this.disposed || this.lost || !this.connection || !this.acpSessionId) {
       throw new AcpModelConfigurationError('unavailable');
