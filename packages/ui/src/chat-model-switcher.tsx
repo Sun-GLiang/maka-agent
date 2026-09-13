@@ -17,56 +17,33 @@
  * under the License.
  */
 
-/**
- * Chat model pickers, extracted from `components.tsx`.
- *
- * `ChatModelSwitcher` (in-session) and `NewChatModelPicker` (home / empty
- * state) were ~200 lines of Select JSX living next to the Composer in the
- * 8k-line `components.tsx`. They are consumed only by the Composer and share
- * the grouped model-choice helpers, so they form a clean seam. `index.ts` does
- * not re-export them (they are internal to the `@maka/ui` Composer surface).
- *
- * Composer footer pickers are ghost-button DropdownMenus — the same toolbar
- * primitive as the ＋ and permission controls beside them, so resting, hover,
- * focus, and disabled chrome all derive from one Button instead of a product
- * overlay restyling a form field. The Astryx Selector (a field primitive,
- * with search) remains the right shape for Settings forms via `ModelPicker`.
- *
- * Thinking level is a separate menu (not nested in the model menu). The
- * Composer places it immediately after the model control in the left footer.
- */
+/** Session and new-chat adapters for the shared magnetic model picker. */
 
-import {
-  type ReactNode,
-  useId,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { Button as UiButton } from "@astryxdesign/core";
+import { type ReactNode, useMemo, useState } from 'react';
+import { Button as UiButton } from '@astryxdesign/core';
 import {
   DropdownMenu,
   DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
-} from "@astryxdesign/core/DropdownMenu";
-import { ICON_SIZE, AlertTriangle, Check, Settings } from "./icons.js";
+} from '@astryxdesign/core/DropdownMenu';
+import { ICON_SIZE, Check, Settings } from './icons.js';
 import {
   type ChatModelChoice,
   type ModelMenuGroup,
   exactModelChoiceValue,
   modelChoiceDescription,
   modelMenuGroups,
-} from "./chat-model-helpers.js";
-import { type ProviderType } from "@maka/core/llm-connections";
-import { type SessionSummary } from "@maka/core/session";
-import { type ThinkingLevel } from "@maka/core/model-thinking";
-import { useUiLocale } from "./locale-context.js";
-import { getConversationCopy } from "./conversation-copy.js";
-import type { ComposerModelSwitchAvailability } from "./composer-helpers.js";
+} from './chat-model-helpers.js';
+import { type ProviderType } from '@maka/core/llm-connections';
+import { type SessionSummary } from '@maka/core/session';
+import { type ThinkingLevel } from '@maka/core/model-thinking';
+import { useUiLocale } from './locale-context.js';
+import { getConversationCopy } from './conversation-copy.js';
+import { ModelWheelPicker, type ModelWheelOption } from './model-wheel-picker.js';
+import type { ComposerModelSwitchAvailability } from './composer-helpers.js';
 
-const DEFAULT_THINKING_LEVEL = "__default__";
+const DEFAULT_THINKING_LEVEL = '__default__';
 
 function providerMarkIcon(
   providerType: ProviderType | undefined,
@@ -74,11 +51,7 @@ function providerMarkIcon(
 ): ReactNode {
   if (!providerType || !renderProviderMark) return undefined;
   return (
-    <span
-      className="modelPickerProviderMark"
-      data-provider={providerType}
-      aria-hidden="true"
-    >
+    <span className="modelPickerProviderMark" data-provider={providerType} aria-hidden="true">
       {renderProviderMark(providerType)}
     </span>
   );
@@ -124,12 +97,12 @@ export function ExternalAgentModelSwitcher(props: {
       onOpenChange={props.onMenuOpenChange}
       button={{
         label,
-        variant: "ghost",
-        size: "sm",
+        variant: 'ghost',
+        size: 'sm',
         isDisabled: disabled,
         tooltip: props.disabledReason ?? copy.switchAriaLabel,
-        className: "maka-model-switcher-trigger maka-external-agent-model-switcher",
-        "aria-label": `${copy.switchAriaLabel}: ${label}`,
+        className: 'maka-model-switcher-trigger maka-external-agent-model-switcher',
+        'aria-label': `${copy.switchAriaLabel}: ${label}`,
       }}
     >
       <DropdownMenuRadioGroup
@@ -154,277 +127,13 @@ export function ExternalAgentModelSwitcher(props: {
   );
 }
 
-/** Scroll previews a model; click or Enter commits it. No popup escapes the window. */
-function ModelWheel(props: {
-  groups: readonly ModelMenuGroup[];
-  currentValue?: string;
-  label: string;
-  disabled: boolean;
-  onPick(choice: ChatModelChoice): void;
-  onClose(restoreFocus: boolean): void;
-}) {
-  const id = useId();
-  const viewport = useRef<HTMLDivElement>(null);
-  const drag = useRef<
-    | { pointerId: number; startY: number; scrollTop: number; moved: boolean }
-    | undefined
-  >(undefined);
-  const choices = props.groups.flatMap((group) =>
-    group.choices.map((choice) => ({
-      choice,
-      heading: group.heading,
-      value: exactModelChoiceValue(
-        choice.connectionId,
-        choice.connectionSlug,
-        choice.model,
-      ),
-    })),
-  );
-  const [preview, setPreview] = useState(() =>
-    Math.max(
-      0,
-      choices.findIndex((entry) => entry.value === props.currentValue),
-    ),
-  );
-  const rowHeight = 44;
-  const finishDrag = (element: HTMLDivElement) => {
-    if (!element.dataset.dragging) return;
-    delete element.dataset.dragging;
-    element.scrollTo({
-      top: Math.round(element.scrollTop / rowHeight) * rowHeight,
-      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-        ? "instant"
-        : "smooth",
-    });
-  };
-  useLayoutEffect(() => {
-    if (!viewport.current) return;
-    viewport.current.scrollTop = preview * rowHeight;
-    viewport.current.focus({ preventScroll: true });
-  }, []);
-  return (
-    <div className="maka-model-wheel">
-      <div
-        ref={viewport}
-        className="maka-model-wheel-viewport"
-        role="listbox"
-        tabIndex={0}
-        aria-label={props.label}
-        aria-disabled={props.disabled}
-        aria-activedescendant={`${id}-${preview}`}
-        style={{ height: rowHeight * 3, paddingBlock: rowHeight }}
-        onBlur={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget))
-            props.onClose(false);
-        }}
-        onScroll={(event) =>
-          setPreview(
-            Math.max(
-              0,
-              Math.min(
-                choices.length - 1,
-                Math.round(event.currentTarget.scrollTop / rowHeight),
-              ),
-            ),
-          )
-        }
-        onPointerDown={(event) => {
-          drag.current = undefined;
-          if (
-            props.disabled ||
-            event.button !== 0 ||
-            event.pointerType !== "mouse"
-          )
-            return;
-          drag.current = {
-            pointerId: event.pointerId,
-            startY: event.clientY,
-            scrollTop: event.currentTarget.scrollTop,
-            moved: false,
-          };
-        }}
-        onPointerMove={(event) => {
-          const gesture = drag.current;
-          if (
-            !gesture ||
-            gesture.pointerId !== event.pointerId ||
-            !(event.buttons & 1)
-          )
-            return;
-          const distance = event.clientY - gesture.startY;
-          if (!gesture.moved && Math.abs(distance) < 5) return;
-          if (!gesture.moved) {
-            gesture.moved = true;
-            event.currentTarget.setPointerCapture(event.pointerId);
-            event.currentTarget.dataset.dragging = "true";
-          }
-          event.preventDefault();
-          event.currentTarget.scrollTop = gesture.scrollTop - distance;
-        }}
-        onPointerUp={(event) => finishDrag(event.currentTarget)}
-        onPointerCancel={(event) => {
-          finishDrag(event.currentTarget);
-          drag.current = undefined;
-        }}
-        onLostPointerCapture={(event) => finishDrag(event.currentTarget)}
-        onClickCapture={(event) => {
-          if (drag.current?.moved) {
-            event.preventDefault();
-            event.stopPropagation();
-          }
-          drag.current = undefined;
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            event.stopPropagation();
-            props.onClose(true);
-            return;
-          }
-          if (props.disabled) return;
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            event.stopPropagation();
-            const entry = choices[preview];
-            if (entry) props.onPick(entry.choice);
-            return;
-          }
-          const next =
-            event.key === "ArrowDown"
-              ? preview + 1
-              : event.key === "ArrowUp"
-                ? preview - 1
-                : event.key === "Home"
-                  ? 0
-                  : event.key === "End"
-                    ? choices.length - 1
-                    : undefined;
-          if (next === undefined) return;
-          event.preventDefault();
-          event.stopPropagation();
-          event.currentTarget.scrollTop =
-            Math.max(0, Math.min(choices.length - 1, next)) * rowHeight;
-        }}
-      >
-        {choices.map(({ choice, heading, value }, index) => (
-          <div
-            key={value}
-            id={`${id}-${index}`}
-            className="maka-model-wheel-option"
-            role="option"
-            aria-selected={value === props.currentValue}
-            data-active={index === preview}
-            aria-disabled={props.disabled}
-            style={{ height: rowHeight }}
-            title={`${choice.label} · ${heading}`}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => {
-              if (!props.disabled) props.onPick(choice);
-            }}
-          >
-            <span className="maka-model-wheel-label">{choice.label}</span>
-            <span className="maka-model-wheel-provider">{heading}</span>
-            {value === props.currentValue && (
-              <span className="maka-model-wheel-check">{currentCheck}</span>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/**
- * The one shared body of both model menus: an optional leading row for a
- * current model the catalog no longer lists, then one `role="group"` section
- * per connection (heading + its models). Radio semantics expose the selected
- * value to assistive technology while the aria-hidden check preserves the
- * quiet footer's visual density. `disabled` locks every row, not just the trigger: an aria-disabled
- * trigger still opens its menu on ArrowDown (Astryx DropdownMenu's keydown
- * path does not consult `isDisabled`), so the lock must live on the items too.
- */
-function ModelMenuItems(props: {
-  groups: readonly ModelMenuGroup[];
-  currentValue?: string;
-  label: string;
-  leadingOption?: { label: string; providerType?: ProviderType };
-  renderProviderMark?(type: ProviderType): ReactNode;
-  disabled?: boolean;
-  onPick(input: {
-    llmConnectionId: string;
-    llmConnectionSlug: string;
-    model: string;
-  }): void | Promise<void>;
-}) {
-  const locale = useUiLocale();
-  return (
-    <DropdownMenuRadioGroup
-      value={props.currentValue}
-      label={props.label}
-      onChange={(value) => {
-        const choice = props.groups
-          .flatMap((group) => group.choices)
-          .find(
-            (entry) =>
-              exactModelChoiceValue(
-                entry.connectionId,
-                entry.connectionSlug,
-                entry.model,
-              ) === value,
-          );
-        if (choice) {
-          void props.onPick({
-            llmConnectionId: choice.connectionId,
-            llmConnectionSlug: choice.connectionSlug,
-            model: choice.model,
-          });
-        }
-      }}
-    >
-      {props.leadingOption ? (
-        <DropdownMenuRadioItem
-          value={props.currentValue ?? ""}
-          icon={providerMarkIcon(
-            props.leadingOption.providerType,
-            props.renderProviderMark,
-          )}
-          label={props.leadingOption.label}
-          endContent={currentCheck}
-          isDisabled={props.disabled}
-        />
-      ) : null}
-      {props.groups.map((group) => (
-        <div role="group" aria-label={group.heading} key={group.connectionSlug}>
-          <div className="maka-model-menu-group-heading" aria-hidden="true">
-            {group.heading}
-          </div>
-          {group.choices.map((choice) => {
-            const value = exactModelChoiceValue(
-              choice.connectionId,
-              choice.connectionSlug,
-              choice.model,
-            );
-            return (
-              <DropdownMenuRadioItem
-                key={value}
-                value={value}
-                icon={providerMarkIcon(
-                  choice.providerType,
-                  props.renderProviderMark,
-                )}
-                label={choice.label}
-                description={modelChoiceDescription(choice, locale)}
-                endContent={
-                  value === props.currentValue ? currentCheck : undefined
-                }
-                isDisabled={props.disabled}
-              />
-            );
-          })}
-        </div>
-      ))}
-    </DropdownMenuRadioGroup>
-  );
+function wheelOptions(groups: readonly ModelMenuGroup[], locale: Parameters<typeof modelChoiceDescription>[1]): ModelWheelOption[] {
+  return groups.flatMap((group) => group.choices.map((choice) => ({
+    value: exactModelChoiceValue(choice.connectionId, choice.connectionSlug, choice.model),
+    label: choice.label,
+    heading: group.heading,
+    description: modelChoiceDescription(choice, locale),
+  })));
 }
 
 /**
@@ -445,10 +154,7 @@ export function ThinkingLevelSelector(props: {
   const options = useMemo(
     () => [
       { value: DEFAULT_THINKING_LEVEL, label: copy.defaultLevel },
-      ...props.levels.map((level) => ({
-        value: level,
-        label: copy.level[level],
-      })),
+      ...props.levels.map((level) => ({ value: level, label: copy.level[level] })),
     ],
     [copy.defaultLevel, copy.level, props.levels],
   );
@@ -456,9 +162,7 @@ export function ThinkingLevelSelector(props: {
   if (!hasVariants) return null;
 
   const currentValue = props.current ?? DEFAULT_THINKING_LEVEL;
-  const currentLabel =
-    options.find((option) => option.value === currentValue)?.label ??
-    copy.defaultLevel;
+  const currentLabel = options.find((option) => option.value === currentValue)?.label ?? copy.defaultLevel;
 
   return (
     <DropdownMenu
@@ -467,12 +171,12 @@ export function ThinkingLevelSelector(props: {
       className="maka-composer-quiet-menu"
       button={{
         label: currentLabel,
-        variant: "ghost",
-        size: "sm",
+        variant: 'ghost',
+        size: 'sm',
         isDisabled: props.disabled,
         tooltip: props.disabledReason ?? copy.changeThinkingLevel,
-        className: "maka-thinking-level-selector",
-        "aria-label": `${copy.thinkingLevel}: ${currentLabel}`,
+        className: 'maka-thinking-level-selector',
+        'aria-label': `${copy.thinkingLevel}: ${currentLabel}`,
       }}
     >
       <DropdownMenuRadioGroup
@@ -480,9 +184,7 @@ export function ThinkingLevelSelector(props: {
         label={`${copy.thinkingLevel}: ${currentLabel}`}
         onChange={(value) => {
           void props.onChange?.(
-            value === DEFAULT_THINKING_LEVEL
-              ? undefined
-              : (value as ThinkingLevel),
+            value === DEFAULT_THINKING_LEVEL ? undefined : (value as ThinkingLevel),
           );
         }}
       >
@@ -491,9 +193,7 @@ export function ThinkingLevelSelector(props: {
             key={option.value}
             value={option.value}
             label={option.label}
-            endContent={
-              option.value === currentValue ? currentCheck : undefined
-            }
+            endContent={option.value === currentValue ? currentCheck : undefined}
             isDisabled={props.disabled}
           />
         ))}
@@ -503,7 +203,6 @@ export function ThinkingLevelSelector(props: {
 }
 
 export function ChatModelSwitcher(props: {
-  presentation?: "menu" | "wheel";
   activeSession: SessionSummary;
   activeModelConnectionId?: string;
   activeModelConnectionSlug?: string;
@@ -533,20 +232,23 @@ export function ChatModelSwitcher(props: {
   const currentConnectionSlug =
     props.activeModelConnectionSlug ?? props.activeSession.llmConnectionSlug;
   const currentModel = props.activeModel ?? props.activeSession.model;
-  const currentValue =
-    currentConnectionId && currentConnectionSlug && currentModel
-      ? exactModelChoiceValue(
-          currentConnectionId,
-          currentConnectionSlug,
-          currentModel,
-        )
-      : undefined;
-  const availability = props.availability ?? {
-    available: true,
-    pending: false,
-  };
+  if (!currentConnectionSlug || !currentModel) {
+    return (
+      <ModelChipStatic
+        label={props.activeModelLabel ?? copy.agentDefault}
+        showUnavailableStatus
+      />
+    );
+  }
+  const currentValue = currentConnectionId
+    ? exactModelChoiceValue(
+        currentConnectionId,
+        currentConnectionSlug,
+        currentModel,
+      )
+    : undefined;
+  const availability = props.availability ?? { available: true, pending: false };
   const [internalMenuOpen, setInternalMenuOpen] = useState(false);
-  const trigger = useRef<HTMLButtonElement>(null);
   const menuOpen = props.isMenuOpen ?? internalMenuOpen;
   const setMenuOpen = (open: boolean) => {
     if (props.isMenuOpen === undefined) setInternalMenuOpen(open);
@@ -554,137 +256,39 @@ export function ChatModelSwitcher(props: {
   };
   const disabled =
     Boolean(props.disabledReason) ||
-    !availability.available ||
-    !props.onChange ||
-    props.choices.length === 0;
+    !availability.available || !props.onChange || props.choices.length === 0;
   const grouped = modelMenuGroups(props.choices, locale);
   const currentKnownChoice = props.choices.some(
     (choice) =>
-      exactModelChoiceValue(
-        choice.connectionId,
-        choice.connectionSlug,
-        choice.model,
-      ) === currentValue,
+      exactModelChoiceValue(choice.connectionId, choice.connectionSlug, choice.model) ===
+      currentValue,
   );
-  const displayLabel = props.activeModelLabel ?? currentModel ?? "Model";
+  const displayLabel = props.activeModelLabel ?? currentModel;
   const title = props.disabledReason ?? copy.switchAriaLabel;
   const announceWarning = menuOpen && props.hasConversationHistory === true;
-  const pick = async (next: {
-    llmConnectionSlug: string;
-    llmConnectionId: string;
-    model: string;
-  }) => {
-    if (
-      next.llmConnectionSlug === currentConnectionSlug &&
-      next.llmConnectionId === currentConnectionId &&
-      next.model === currentModel
-    )
-      return;
-    try {
-      await props.onChange?.(next);
-    } catch {
-      /* The action owner reports the failure. */
-    }
+  const pick = async (next: { llmConnectionSlug: string; llmConnectionId: string; model: string }) => {
+    if (next.llmConnectionSlug === currentConnectionSlug && next.llmConnectionId === currentConnectionId && next.model === currentModel) return;
+    try { await props.onChange?.(next); } catch { /* The action owner reports the failure. */ }
   };
 
-  if (props.presentation === "wheel") {
-    const close = (restoreFocus: boolean) => {
-      setMenuOpen(false);
-      if (restoreFocus)
-        requestAnimationFrame(() =>
-          trigger.current?.focus({ preventScroll: true }),
-        );
-    };
-    return menuOpen ? (
-      <ModelWheel
-        groups={grouped}
-        currentValue={currentValue}
-        label={copy.switchAriaLabel}
-        disabled={disabled}
-        onClose={close}
-        onPick={(choice) => {
-          close(true);
-          void pick({
-            llmConnectionId: choice.connectionId,
-            llmConnectionSlug: choice.connectionSlug,
-            model: choice.model,
-          });
-        }}
-      />
-    ) : (
-      <UiButton
-        ref={trigger}
-        type="button"
-        variant="ghost"
-        size="sm"
-        label={displayLabel}
-        icon={providerMarkIcon(
-          props.currentProviderType,
-          props.renderProviderMark,
-        )}
-        isDisabled={disabled}
-        className="maka-model-switcher-trigger"
-        aria-label={`${copy.switchAriaLabel}: ${displayLabel}`}
-        aria-expanded={false}
-        onClick={() => setMenuOpen(true)}
-      />
-    );
+  const options = wheelOptions(grouped, locale);
+  if (!currentKnownChoice && currentValue && !props.hideUnavailableCurrentOption) {
+    options.unshift({ value: currentValue, label: displayLabel, disabled: true });
   }
-
-  return (
-    <>
-      <DropdownMenu
-        {...(props.isMenuOpen === undefined
-          ? {}
-          : { isMenuOpen: props.isMenuOpen })}
-        placement="above"
-        hasChevron={false}
-        className="maka-composer-quiet-menu"
-        onOpenChange={setMenuOpen}
-        button={{
-          label: displayLabel,
-          icon: providerMarkIcon(
-            props.currentProviderType,
-            props.renderProviderMark,
-          ),
-          variant: "ghost",
-          size: "sm",
-          isDisabled: disabled,
-          tooltip: title,
-          className: "maka-model-switcher-trigger",
-          "aria-label": `${copy.switchAriaLabel}: ${displayLabel}`,
-        }}
-      >
-        {announceWarning ? (
-          <div className="maka-model-switch-notice" aria-hidden="true">
-            <AlertTriangle size={ICON_SIZE.meta} />
-            <span>{copy.switchWarning}</span>
-          </div>
-        ) : null}
-        <ModelMenuItems
-          groups={grouped}
-          currentValue={currentValue}
-          label={`${copy.switchAriaLabel}: ${displayLabel}`}
-          leadingOption={
-            !currentKnownChoice && !props.hideUnavailableCurrentOption
-              ? { label: displayLabel, providerType: props.currentProviderType }
-              : undefined
-          }
-          renderProviderMark={props.renderProviderMark}
-          disabled={disabled}
-          onPick={pick}
-        />
-      </DropdownMenu>
-      <span
-        className="maka-visually-hidden maka-model-switch-announcement"
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-      >
-        {announceWarning ? copy.switchWarning : ""}
-      </span>
-    </>
-  );
+  return <>
+    <ModelWheelPicker options={options} value={currentValue} label={displayLabel}
+      ariaLabel={`${copy.switchAriaLabel}: ${displayLabel}`}
+      icon={providerMarkIcon(props.currentProviderType, props.renderProviderMark)}
+      tooltip={title} triggerClassName="maka-model-switcher-trigger"
+      disabled={disabled} open={menuOpen} onOpenChange={setMenuOpen}
+      onValueChange={(value) => {
+        const choice = props.choices.find((entry) => exactModelChoiceValue(entry.connectionId, entry.connectionSlug, entry.model) === value);
+        if (choice) return pick({ llmConnectionId: choice.connectionId, llmConnectionSlug: choice.connectionSlug, model: choice.model });
+      }} />
+    <span className="maka-visually-hidden maka-model-switch-announcement" role="status" aria-live="polite" aria-atomic="true">
+      {announceWarning ? copy.switchWarning : ''}
+    </span>
+  </>;
 }
 
 /**
@@ -711,58 +315,96 @@ export function NewChatModelPicker(props: {
   const locale = useUiLocale();
   const copy = getConversationCopy(locale).model;
   const grouped = modelMenuGroups(props.choices, locale);
-  const currentValue = props.currentValue ?? "";
+  const currentValue = props.currentValue ?? '';
   const currentKnownChoice = props.choices.some(
     (choice) =>
-      exactModelChoiceValue(
-        choice.connectionId,
-        choice.connectionSlug,
-        choice.model,
-      ) === currentValue,
+      exactModelChoiceValue(choice.connectionId, choice.connectionSlug, choice.model) ===
+      currentValue,
   );
+  const options = wheelOptions(grouped, locale);
+  if (!currentKnownChoice && currentValue) {
+    options.unshift({ value: currentValue, label: props.label, disabled: true });
+  }
+  return <ModelWheelPicker options={options} value={currentValue} label={props.label}
+    ariaLabel={copy.newChatAriaLabel(props.label)}
+    icon={providerMarkIcon(props.currentProviderType, props.renderProviderMark)}
+    tooltip={copy.newChatTitle(props.label)} triggerClassName="maka-new-chat-model-selector"
+    onValueChange={(value) => {
+      const choice = props.choices.find((entry) => exactModelChoiceValue(entry.connectionId, entry.connectionSlug, entry.model) === value);
+      if (choice) return props.onPick({ llmConnectionId: choice.connectionId, llmConnectionSlug: choice.connectionSlug, model: choice.model });
+    }} />;
+}
+
+function ModelMenuItems(props: {
+  groups: readonly ModelMenuGroup[];
+  currentValue?: string;
+  label: string;
+  renderProviderMark?(type: ProviderType): ReactNode;
+  onPick(input: {
+    llmConnectionId: string;
+    llmConnectionSlug: string;
+    model: string;
+  }): void | Promise<void>;
+}) {
+  const locale = useUiLocale();
   return (
-    <DropdownMenu
-      placement="above"
-      hasChevron={false}
-      className="maka-composer-quiet-menu"
-      button={{
-        label: props.label,
-        icon: providerMarkIcon(
-          props.currentProviderType,
-          props.renderProviderMark,
-        ),
-        variant: "ghost",
-        size: "sm",
-        tooltip: copy.newChatTitle(props.label),
-        className: "maka-new-chat-model-selector",
-        "aria-label": copy.newChatAriaLabel(props.label),
+    <DropdownMenuRadioGroup
+      value={props.currentValue}
+      label={props.label}
+      onChange={(value) => {
+        const choice = props.groups
+          .flatMap((group) => group.choices)
+          .find(
+            (entry) =>
+              exactModelChoiceValue(entry.connectionId, entry.connectionSlug, entry.model) ===
+              value,
+          );
+        if (choice) {
+          void props.onPick({
+            llmConnectionId: choice.connectionId,
+            llmConnectionSlug: choice.connectionSlug,
+            model: choice.model,
+          });
+        }
       }}
     >
-      <ModelMenuItems
-        groups={grouped}
-        currentValue={currentValue}
-        label={copy.newChatAriaLabel(props.label)}
-        leadingOption={
-          !currentKnownChoice && currentValue
-            ? { label: props.label, providerType: props.currentProviderType }
-            : undefined
-        }
-        renderProviderMark={props.renderProviderMark}
-        onPick={props.onPick}
-      />
-    </DropdownMenu>
+      {props.groups.map((group) => (
+        <div role="group" aria-label={group.heading} key={group.connectionSlug}>
+          <div className="maka-model-menu-group-heading" aria-hidden="true">
+            {group.heading}
+          </div>
+          {group.choices.map((choice) => {
+            const value = exactModelChoiceValue(
+              choice.connectionId,
+              choice.connectionSlug,
+              choice.model,
+            );
+            return (
+              <DropdownMenuRadioItem
+                key={value}
+                value={value}
+                icon={providerMarkIcon(choice.providerType, props.renderProviderMark)}
+                label={choice.label}
+                description={modelChoiceDescription(choice, locale)}
+                endContent={value === props.currentValue ? currentCheck : undefined}
+              />
+            );
+          })}
+        </div>
+      ))}
+    </DropdownMenuRadioGroup>
   );
 }
 
 /** One atomic new-task target picker: browsing an executor does not commit until a target is chosen. */
 export function NewTaskTargetPicker(props: {
-  executor: "maka" | "antigravity";
+  executor: 'maka' | 'antigravity';
   modelLabel: string;
   choices: ChatModelChoice[];
   currentValue?: string;
   currentProviderType?: ProviderType;
   renderProviderMark?(type: ProviderType): ReactNode;
-  onCommitExecutor(executor: "maka" | "antigravity"): void;
+  onCommitExecutor(executor: 'maka' | 'antigravity'): void;
   onPickModel(input: {
     llmConnectionId: string;
     llmConnectionSlug: string;
@@ -770,12 +412,12 @@ export function NewTaskTargetPicker(props: {
   }): void | Promise<void>;
   onOpenExternalAgentSettings?(): void;
 }) {
-  const copy = getConversationCopy(useUiLocale()).model;
+  const locale = useUiLocale();
+  const copy = getConversationCopy(locale).model;
   const [open, setOpen] = useState(false);
   const [browsed, setBrowsed] = useState(props.executor);
-  const grouped = modelMenuGroups(props.choices, useUiLocale());
-  const label =
-    props.executor === "antigravity" ? copy.agentDefault : props.modelLabel;
+  const grouped = modelMenuGroups(props.choices, locale);
+  const label = props.executor === 'antigravity' ? copy.agentDefault : props.modelLabel;
   return (
     <DropdownMenu
       placement="above"
@@ -789,30 +431,27 @@ export function NewTaskTargetPicker(props: {
       className="maka-composer-quiet-menu maka-new-task-target-popup"
       button={{
         label,
-        icon: providerMarkIcon(
-          props.currentProviderType,
-          props.renderProviderMark,
-        ),
-        variant: "ghost",
-        size: "sm",
+        icon: providerMarkIcon(props.currentProviderType, props.renderProviderMark),
+        variant: 'ghost',
+        size: 'sm',
         tooltip: copy.chooseExecutor,
-        className: "maka-new-chat-model-selector",
-        "aria-label": copy.chooseExecutor,
+        className: 'maka-new-chat-model-selector',
+        'aria-label': copy.chooseExecutor,
       }}
     >
       <div className="maka-new-task-target-menu">
         <div className="maka-new-task-executor-rail" aria-label={copy.executor}>
           <DropdownMenuItem
             label={copy.makaExecutor}
-            endContent={browsed === "maka" ? currentCheck : undefined}
+            endContent={browsed === 'maka' ? currentCheck : undefined}
             hasCloseOnSelect={false}
-            onClick={() => setBrowsed("maka")}
+            onClick={() => setBrowsed('maka')}
           />
           <DropdownMenuItem
             label={copy.antigravityExecutor}
-            endContent={browsed === "antigravity" ? currentCheck : undefined}
+            endContent={browsed === 'antigravity' ? currentCheck : undefined}
             hasCloseOnSelect={false}
-            onClick={() => setBrowsed("antigravity")}
+            onClick={() => setBrowsed('antigravity')}
           />
           {props.onOpenExternalAgentSettings ? (
             <DropdownMenuItem
@@ -823,7 +462,7 @@ export function NewTaskTargetPicker(props: {
           ) : null}
         </div>
         <div className="maka-new-task-target-options">
-          {browsed === "maka" ? (
+          {browsed === 'maka' ? (
             <ModelMenuItems
               groups={grouped}
               currentValue={props.currentValue}
@@ -831,17 +470,15 @@ export function NewTaskTargetPicker(props: {
               renderProviderMark={props.renderProviderMark}
               onPick={async (input) => {
                 await props.onPickModel(input);
-                props.onCommitExecutor("maka");
+                props.onCommitExecutor('maka');
                 setOpen(false);
               }}
             />
           ) : (
             <DropdownMenuItem
               label={copy.agentDefault}
-              endContent={
-                props.executor === "antigravity" ? currentCheck : undefined
-              }
-              onClick={() => props.onCommitExecutor("antigravity")}
+              endContent={props.executor === 'antigravity' ? currentCheck : undefined}
+              onClick={() => props.onCommitExecutor('antigravity')}
             />
           )}
         </div>

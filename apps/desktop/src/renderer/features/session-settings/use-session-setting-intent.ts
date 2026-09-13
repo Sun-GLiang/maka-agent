@@ -197,14 +197,12 @@ export function useSessionSettingIntent<Owner extends { sessionId?: string }>(in
           : undefined,
       onExternalAgentModelChange: async (value: string) => {
         const sessionId = activeSession?.id;
-        if (!sessionId || activeSession.backend !== 'acp') return false;
+        if (!sessionId || activeSession.backend !== 'acp') return;
         try {
           const configuration = await services.setExternalAgentModel(sessionId, value);
           setExternalAgentModel({ sessionId, configuration });
-          return true;
         } catch (error) {
           reportWriteError(sessionId, error, 'model');
-          return false;
         }
       },
     },

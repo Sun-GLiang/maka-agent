@@ -83,6 +83,7 @@ import { registerRuntimeHostWorkHubIpc } from "./runtime-host-workhub-ipc-main.j
 import { registerRuntimeHostExternalSessionsIpc } from "./runtime-host-external-sessions-ipc-main.js";
 import { registerRuntimeHostSessionBundleIpc } from "./runtime-host-session-bundle-ipc-main.js";
 import { registerRuntimeHostCollaborationIpc } from './runtime-host-collaboration-ipc-main.js';
+import { TerminalCloseIntents } from './terminal-close-intents.js';
 import type { DesktopCollaborationConnectionTarget } from './runtime-host-collaboration-invitation.js';
 import { registerRuntimeHostAttachmentPreviewIpc } from './runtime-host-artifacts-ipc-main.js';
 import {
@@ -119,6 +120,7 @@ import {
 type CandidateIpcMain = ReconnectableReadIpcMain & Pick<IpcMain, "removeHandler">;
 
 export interface DesktopRuntimeHostCandidateDeps {
+  readonly terminalCloses?: import('./terminal-close-intents.js').TerminalCloseIntents;
   readonly cacheTranscript?: (scope: DesktopTargetScope, snapshot: DesktopTranscriptReplicaSnapshot) => void;
   readonly ipcMain: RuntimeHostTargetIpcMain;
   readonly workspaceRoot: string;
@@ -565,6 +567,11 @@ export async function createDesktopRuntimeHostCandidate(
   const reportError = (error: unknown): void => {
     if (isTargetActive()) deps.onError?.(error);
   };
+  // Managed candidates receive their target's owner. Direct standalone starts
+  // have no replacement lifetime, and own this instance until they close.
+  const terminalCloses = deps.terminalCloses ?? new TerminalCloseIntents(
+    (change) => sendToRenderer?.('shell-runs:close-changed', change),
+  );
   const sessionObservations =
     observationRegistry ??
     new RuntimeHostSessionObservationRegistry((error) => deps.onError?.(error));
@@ -594,6 +601,7 @@ export async function createDesktopRuntimeHostCandidate(
     if (failed) throw failed.reason;
   };
   const releaseNativeSession = async (sessionId: string): Promise<void> => {
+    terminalCloses.retireSession(sessionId);
     const abortResults = await Promise.allSettled(
       [...providers].map((provider) => provider.abortSession(sessionId)),
     );
@@ -666,8 +674,6 @@ export async function createDesktopRuntimeHostCandidate(
         target.access === 'session_guest'
           ? sharedShellRuns?.sessionSubscriptionRecovered(sessionId)
           : domains?.sessionSubscriptionRecovered(sessionId),
-      emitObservationSeed: (sessionId, phase) =>
-        sendToRenderer?.('sessions:observation-seed', { sessionId, phase }),
       ...(target.access === 'owner'
         ? {
             onWatchedTurnFinished: (sessionId: string, outcome: 'completed' | 'abandoned') =>
@@ -688,6 +694,7 @@ export async function createDesktopRuntimeHostCandidate(
       domains = registerRuntimeHostSessionDomainsIpc(
         {
           client,
+          terminalCloses,
           sessionObserver,
           emitModeChanged,
           ...(deps.renderer ? { sendToRenderer } : {}),
@@ -731,7 +738,7 @@ export async function createDesktopRuntimeHostCandidate(
     }
     const observedSessionIds = sessionObservations.observedSessionIds();
     for (const sessionId of observedSessionIds) {
-      sendToRenderer('sessions:observation-seed', { sessionId, phase: 'pending' });
+      sendToRenderer(`sessions:event:${sessionId}`, { type: 'host_observation_pending' });
     }
     observationsAttached = true;
     const restoredSessionIds = await sessionObservations.attach(
@@ -761,7 +768,6 @@ export async function createDesktopRuntimeHostCandidate(
       );
     }
     for (const sessionId of restoredSessionIds) {
-      sendToRenderer('sessions:observation-seed', { sessionId, phase: 'ready' });
       emitSessionsChanged("message-appended", sessionId);
       emitSessionsChanged("goal-change", sessionId);
       domains?.sessionSubscriptionRecovered(sessionId);

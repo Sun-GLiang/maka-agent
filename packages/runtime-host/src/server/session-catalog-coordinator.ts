@@ -17,6 +17,8 @@
  * under the License.
  */
 
+import { JsonArrayPageBudget } from './json-array-page-budget.js';
+
 import { RuntimeHostProtocolError } from '../protocol/errors.js';
 import { createHash } from 'node:crypto';
 import { authorizeConnectionModel, connectionEnabledModelIds } from '@maka/core/llm-connections';
@@ -28,6 +30,7 @@ import {
   type ExecutionBoundarySummary,
 } from '@maka/core/sandbox-boundary';
 import type { CreateSessionInput } from '@maka/core/runtime-inputs';
+import type { ToolMode } from '@maka/core/tool-mode';
 import type { ConnectionCatalogEntry, ConnectionCatalogSnapshot } from '@maka/core/runtime-policy';
 import { DEFAULT_SESSION_NAME, normalizeUserSessionName } from '@maka/core/session-name';
 import {
@@ -347,13 +350,14 @@ export class HostSessionCatalogCoordinator {
       llmConnectionSlug: model.connectionSlug,
       model: model.model,
       permissionMode: policy.policy.chatDefaults.permissionMode,
+      toolMode: policy.policy.chatDefaults.codeModeEnabled ? 'code_mode' : 'direct',
       collaborationMode: 'agent',
       orchestrationMode: 'default',
     };
   }
 
-  async createForHost(input: SessionCreateInput): Promise<void> {
-    const outcome = await this.#create(input);
+  async createForHost(input: SessionCreateInput, toolMode: ToolMode): Promise<void> {
+    const outcome = await this.#create(input, toolMode);
     if (!outcome.ok) throw new Error(outcome.error.message);
   }
 
@@ -390,6 +394,7 @@ export class HostSessionCatalogCoordinator {
           ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }),
           ...(input.toolProfile === undefined ? {} : { toolProfile: input.toolProfile }),
           permissionMode: prepared.permissionMode ?? policy.policy.chatDefaults.permissionMode,
+          toolMode: policy.policy.chatDefaults.codeModeEnabled ? 'code_mode' : 'direct',
           collaborationMode: input.collaborationMode ?? 'agent',
           orchestrationMode: input.orchestrationMode ?? 'default',
         },
@@ -572,7 +577,10 @@ export class HostSessionCatalogCoordinator {
     }
   }
 
-  async #create(input: SessionCreateInput): Promise<OperationOutcome<'session.create'>> {
+  async #create(
+    input: SessionCreateInput,
+    toolMode?: ToolMode,
+  ): Promise<OperationOutcome<'session.create'>> {
     if (isWorkHubCoordinationSessionId(input.sessionId)) {
       return createFailure(
         'operation_conflict',
@@ -632,6 +640,8 @@ export class HostSessionCatalogCoordinator {
               ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }),
               ...(input.toolProfile === undefined ? {} : { toolProfile: input.toolProfile }),
               permissionMode: prepared.permissionMode ?? policy.policy.chatDefaults.permissionMode,
+              toolMode:
+                toolMode ?? (policy.policy.chatDefaults.codeModeEnabled ? 'code_mode' : 'direct'),
               collaborationMode: input.collaborationMode ?? 'agent',
               orchestrationMode: input.orchestrationMode ?? 'default',
             };
@@ -782,6 +792,7 @@ export class HostSessionCatalogCoordinator {
         await this.#manager.transitionSessionConfiguration(input.sessionId, {
           expectedRevision: input.expectedRevision,
           clearConnectionBlock: input.patch.modelTarget !== undefined,
+          permissionModeOnly: isPermissionModeOnlyPatch(input.patch),
           configuration,
         });
         return configurationSuccess(
@@ -1154,7 +1165,7 @@ export class HostSessionCatalogCoordinator {
       );
     }
     // Fail-closed for undeclared levels only: the catalog entry carries the
-    // typed `relayModelProfiles` table, so a relay's user-declared levels DO
+    // typed `modelOverrides` table, so a relay's user-declared levels DO
     // reach this gate. A level outside the resolved variants is still
     // rejected — execution-model-authority rebuilds the runtime connection
     // from the same table, so whatever passes here is exactly what the wire
@@ -1164,7 +1175,7 @@ export class HostSessionCatalogCoordinator {
       !thinkingVariantsForConnection(
         {
           providerType: connection.providerType,
-          relayModelProfiles: connection.relayModelProfiles,
+          modelOverrides: connection.modelOverrides,
         },
         selected.modelId,
       ).includes(thinkingLevel)
@@ -1306,6 +1317,16 @@ function sessionConfigurationMatches(
     header.permissionMode === configuration.permissionMode &&
     (header.collaborationMode ?? 'agent') === configuration.collaborationMode &&
     (header.orchestrationMode ?? 'default') === configuration.orchestrationMode
+  );
+}
+
+function isPermissionModeOnlyPatch(patch: SessionConfigurationUpdateInput['patch']): boolean {
+  return (
+    patch.permissionMode !== undefined &&
+    patch.modelTarget === undefined &&
+    patch.thinkingLevel === undefined &&
+    patch.collaborationMode === undefined &&
+    patch.orchestrationMode === undefined
   );
 }
 
@@ -1533,18 +1554,18 @@ function page(
   project: (record: SessionCatalogRecord) => SessionCatalogItem = projectSessionCatalogRecord,
 ): SessionCatalogQueryResult {
   const items: SessionCatalogItem[] = [];
+  const budget = new JsonArrayPageBudget(SESSION_CATALOG_RESULT_MAX_BYTES, {
+    kind: 'page',
+    revision,
+    sessions: [],
+    nextCursor: null,
+  });
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
     if (!record) throw new Error('Session catalog record index is invalid');
     const item = project(record);
     const moreItems = index + 1 < records.length || hasMore;
-    const candidate = {
-      kind: 'page' as const,
-      revision,
-      sessions: [...items, item],
-      nextCursor: moreItems ? encodeCursor(record) : null,
-    };
-    if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') > SESSION_CATALOG_RESULT_MAX_BYTES) {
+    if (!budget.tryAppend(item, moreItems ? encodeCursor(record) : null)) {
       break;
     }
     items.push(item);

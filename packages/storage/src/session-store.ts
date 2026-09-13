@@ -70,6 +70,7 @@ import type {
 } from '@maka/core/sandbox-boundary';
 
 import type { CreateSessionInput, SessionListFilter } from '@maka/core/runtime-inputs';
+import { DEFAULT_TOOL_MODE, isToolMode } from '@maka/core/tool-mode';
 
 import {
   isSessionToolProfile,
@@ -1363,6 +1364,7 @@ function buildSessionHeader(
     connectionLocked: input.subagentParent !== undefined,
     ...(backend === 'acp' ? {} : { model: input.model ?? 'default' }),
     ...(input.toolProfile !== undefined ? { toolProfile: input.toolProfile } : {}),
+    toolMode: input.toolMode ?? DEFAULT_TOOL_MODE,
     permissionMode: input.permissionMode,
     collaborationMode: input.collaborationMode ?? 'agent',
     orchestrationMode: input.orchestrationMode ?? 'default',
@@ -1433,6 +1435,7 @@ export function normalizeSessionHeader(
     typeof header.connectionLocked === 'boolean' &&
     (header.model === undefined || typeof header.model === 'string') &&
     (header.toolProfile === undefined || isSessionToolProfile(header.toolProfile)) &&
+    (header.toolMode === undefined || isToolMode(header.toolMode)) &&
     isPermissionMode(header.permissionMode) &&
     isCollaborationMode(header.collaborationMode) &&
     isOrchestrationMode(header.orchestrationMode) &&
