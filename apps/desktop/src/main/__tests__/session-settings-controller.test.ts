@@ -540,6 +540,12 @@ function createServices(
   overrides: Partial<SessionSettingsServices> = {},
 ): SessionSettingsServices {
   return {
+    getExternalAgentModel: async () => {
+      throw new Error('external Agent model unavailable');
+    },
+    setExternalAgentModel: async () => {
+      throw new Error('external Agent model unavailable');
+    },
     setModelConfiguration: async () => ({} as DesktopSessionSummary),
     setPermissionMode: async () => ({} as DesktopSessionSummary),
     setOrchestrationMode: async () => ({} as DesktopSessionSummary),

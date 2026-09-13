@@ -2456,6 +2456,12 @@ const makaBridge = {
     setThinkingLevel(sessionId: string, level: ThinkingLevel | undefined | null): Promise<DesktopSessionSummary> {
       return invokeSessionSummary('sessions:setThinkingLevel', sessionId, level ?? undefined);
     },
+    getExternalAgentModel(sessionId) {
+      return invokeSessionRuntimeHost('sessions:getExternalAgentModel', sessionId);
+    },
+    setExternalAgentModel(sessionId, value) {
+      return invokeSessionRuntimeHost('sessions:setExternalAgentModel', sessionId, value);
+    },
     async remove(
       sessionId: string,
       options?: { revisionFamily?: boolean; requireArchived?: boolean },

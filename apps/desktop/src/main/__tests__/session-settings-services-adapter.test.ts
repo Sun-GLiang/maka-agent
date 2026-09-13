@@ -34,6 +34,8 @@ test('maps session setting services to the existing compound Desktop bridge', as
     sessions,
   } as unknown as MakaBridge);
 
+  await services.getExternalAgentModel('session-1');
+  await services.setExternalAgentModel('session-1', 'gemini-3.1-pro-preview');
   await services.setModelConfiguration('session-1', {
     llmConnectionId: 'connection-1',
     llmConnectionSlug: 'openai',
@@ -44,6 +46,11 @@ test('maps session setting services to the existing compound Desktop bridge', as
   await services.setOrchestrationMode('session-1', 'swarm');
 
   assert.deepEqual(calls, [
+    { name: 'getExternalAgentModel', args: ['session-1'] },
+    {
+      name: 'setExternalAgentModel',
+      args: ['session-1', 'gemini-3.1-pro-preview'],
+    },
     {
       name: 'setModelConfiguration',
       args: ['session-1', {

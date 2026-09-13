@@ -101,7 +101,9 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 148 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 151 as const;
+// 151: Live ACP Sessions expose their Agent-owned model selector and accept
+// model updates through dedicated Host operations.
 // 148: Project process-local ACP continuation availability in the Session catalog.
 // 147: Persist and create ACP Sessions without a native model connection.
 // 146: Query Host-local external-agent authentication evidence independently of setup attempts.

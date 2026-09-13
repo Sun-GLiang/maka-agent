@@ -151,6 +151,8 @@ interface ChatComposerRegionProps
     'pendingDirectories' | 'onRemoveDirectory' | 'onPickDirectory'
   >;
   directoryPickerEnabled: boolean;
+  externalAgentModelConfiguration?: ComponentProps<typeof Composer>['externalAgentModelConfiguration'];
+  onExternalAgentModelChange?: ComponentProps<typeof Composer>['onExternalAgentModelChange'];
 }
 
 /**
@@ -224,6 +226,8 @@ export function ChatComposerRegion({
   LiveContextUsageProbe,
   directoryComposerProps,
   directoryPickerEnabled,
+  externalAgentModelConfiguration,
+  onExternalAgentModelChange,
   ...composerRest
 }: ChatComposerRegionProps) {
   const mentions = useComposerMentionsContext();
@@ -316,6 +320,8 @@ export function ChatComposerRegion({
         <Composer
           ref={composerRef}
           {...composerRest}
+          externalAgentModelConfiguration={externalAgentModelConfiguration}
+          onExternalAgentModelChange={onExternalAgentModelChange}
           contextUsage={contextUsage && liveContextUsage
             ? {
                 ...contextUsage,

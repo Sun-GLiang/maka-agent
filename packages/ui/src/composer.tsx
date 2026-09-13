@@ -51,6 +51,8 @@ import {
 } from './icons.js';
 import {
   ChatModelSwitcher,
+  ExternalAgentModelSwitcher,
+  type ExternalAgentModelConfiguration,
   ModelChipStatic,
   NewTaskTargetPicker,
   ThinkingLevelSelector,
@@ -351,6 +353,9 @@ export const Composer = forwardRef<
     activeModelLabel?: string;
     activeProviderType?: ProviderType;
     modelChoices?: ChatModelChoice[];
+    /** Model choices owned and returned by the active external Agent Session. */
+    externalAgentModelConfiguration?: ExternalAgentModelConfiguration;
+    onExternalAgentModelChange?(value: string): void | Promise<void>;
     /** Inline browsing for compact windows that cannot fit a popup menu. */
     modelPickerPresentation?: 'menu' | 'wheel';
     /** Maximum input height in the upstream editor's row units. */
@@ -2133,6 +2138,15 @@ export const Composer = forwardRef<
                     onCommitExecutor={props.onNewChatExecutorChange}
                     onPickModel={props.onPickNewChatModel ?? (() => undefined)}
                     onOpenExternalAgentSettings={props.onOpenExternalAgentSettings}
+                  />
+                ) : props.activeSession?.backend === 'acp' && props.externalAgentModelConfiguration ? (
+                  <ExternalAgentModelSwitcher
+                    configuration={props.externalAgentModelConfiguration}
+                    availability={modelSwitchAvailability}
+                    disabledReason={modelSwitcherDisabledReason}
+                    isMenuOpen={modelPickerOpen}
+                    onMenuOpenChange={setModelPickerOpen}
+                    onChange={props.onExternalAgentModelChange}
                   />
                 ) : props.activeSession?.backend === 'acp' ? (
                   <ModelChipStatic

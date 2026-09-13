@@ -50,12 +50,14 @@ import {
 type RuntimeHostSessionCatalogClient = Pick<
   DesktopRuntimeHostClient,
   | 'createSession'
+  | 'getExternalAgentSessionModel'
   | 'listSessions'
   | 'previewSessionRemoval'
   | 'removeSession'
   | 'setSessionLifecycle'
   | 'updateSessionConfiguration'
   | 'updateSessionMetadata'
+  | 'updateExternalAgentSessionModel'
 >;
 
 export interface DesktopHostSessionSummary extends SessionCatalogSummary {
@@ -201,6 +203,20 @@ export function registerRuntimeHostSessionCatalogIpc(
     }
     return updateConfiguration(deps, sessionId, { thinkingLevel: level ?? null }, 'updated');
   });
+  ipcMain.handle('sessions:getExternalAgentModel', async (_event, sessionId: string) =>
+    deps.client.getExternalAgentSessionModel(sessionId),
+  );
+  ipcMain.handle(
+    'sessions:setExternalAgentModel',
+    async (_event, sessionId: string, value: unknown) => {
+      if (typeof value !== 'string' || value.length === 0) {
+        throw new Error('Invalid external Agent model');
+      }
+      const projection = await deps.client.updateExternalAgentSessionModel(sessionId, value);
+      deps.emitSessionsChanged('updated', sessionId, { modelId: projection.currentValue });
+      return projection;
+    },
+  );
   ipcMain.handle('sessions:remove', async (_event, sessionId: string, options?: unknown) => {
     requestsRevisionFamily(options);
     const ids = await actionIds(sessionId, { revisionFamily: true });

@@ -693,7 +693,6 @@ function AppShellContent({
     : undefined;
   const activeMessageQueue = activeId ? messageQueueBySession[activeId] : undefined;
   const activeMessageSubmitting = transientMessages.length > 0;
-  const activeDesktopSession = activeSession;
   // The shell's reading of the active live turn: streaming/settled flags, the
   // in-flight tool signal, and the #646 turn-wait cues, all derived from the
   // semantic snapshot rather than the projection (#1985).
@@ -729,10 +728,10 @@ function AppShellContent({
     ? onboarding.snapshot?.sessionSendOutcomes[activeSession.id]
     : undefined;
   const composerProfileId = activeId
-    ? activeDesktopSession?.profileId
+    ? activeSession?.profileId
     : taskEntry.selectors.selectedProfileId;
   const composerProfileName = activeId
-    ? activeDesktopSession?.profileName
+    ? activeSession?.profileName
     : taskEntry.selectors.selectedHost?.name;
   const modelSettingsOwnsComposerHost =
     composerProfileId !== undefined &&
@@ -1190,7 +1189,7 @@ function AppShellContent({
     sessionId: ownerActiveId,
     sessionCwd: sharedSessionActive ? undefined : activeSession?.cwd,
     sessionProjectId: sharedSessionActive ? undefined : activeSession?.projectId,
-    sessionProfileKind: sharedSessionActive ? undefined : activeDesktopSession?.profileKind,
+    sessionProfileKind: sharedSessionActive ? undefined : activeSession?.profileKind,
     onProjectSelected: (ownerSessionId) => {
       void moduleHubCommands.refreshProjectSkills();
       if (ownerSessionId && activeIdRef.current === ownerSessionId) openNewTaskSurface();
@@ -2395,12 +2394,12 @@ function AppShellContent({
                 readOnly={sharedSessionActive}
                 action={
                   sharedSessionActive ||
-                  !activeDesktopSession ||
-                  activeDesktopSession.profileKind === 'environment'
+                  !activeSession ||
+                  activeSession.profileKind === 'environment'
                     ? undefined
                     : {
                         label: sharedSessionDialog.shareActionLabel,
-                        onClick: () => sharedSessionDialog.openSession(activeDesktopSession),
+                        onClick: () => sharedSessionDialog.openSession(activeSession),
                       }
                 }
                 onRenameSession={(name) => {
@@ -2525,7 +2524,7 @@ function AppShellContent({
                     ) : null}
                     {!sharedSessionActive && sessionsSelected ? <PlanExecutionPanel planMode={planMode} /> : null}
                     <WorkHubReturnButton
-                      visible={workHubEnabled && Boolean(activeId) && !onboardingComposerHidden}
+                      visible={workHubEnabled && !!activeId && !onboardingComposerHidden}
                       onReturn={openWorkHub}
                     />
                     {sharedSessionActive && activeId ? (
@@ -2626,7 +2625,12 @@ function AppShellContent({
                   hideUnavailableCurrentModel={sessionHealthNotice?.onClickTarget === 'model_picker'}
                   renderProviderMark={(type) => <ProviderBrandMark type={type} />}
                   onModelChange={(input) => activeId ? void setSessionModel(activeId, input) : undefined}
-                  {...{ modelSwitchAvailability, activeThinkingLevels, activeThinkingLevel }}
+                  {...{
+                    modelSwitchAvailability,
+                    activeThinkingLevels,
+                    activeThinkingLevel,
+                    ...sessionSettingIntent.externalAgentModel,
+                  }}
                   onThinkingLevelChange={(level) => {
                     if (activeId) void setSessionThinkingLevel(activeId, level ?? null);
                   }}

@@ -20,10 +20,16 @@
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { OrchestrationMode } from '@maka/core/orchestration';
 import type { ChatDefaultPermissionMode } from '@maka/core/settings';
+import type { ExternalAgentSessionModelProjection } from '@maka/runtime-host/protocol';
 import type { DesktopSessionSummary } from '../../../shared/desktop-session-projection.js';
 import type { SessionModelTarget } from './session-model-configuration-intent.js';
 
 export interface SessionSettingsServices {
+  getExternalAgentModel(sessionId: string): Promise<ExternalAgentSessionModelProjection>;
+  setExternalAgentModel(
+    sessionId: string,
+    value: string,
+  ): Promise<ExternalAgentSessionModelProjection>;
   setModelConfiguration(
     sessionId: string,
     input: SessionModelTarget & { thinkingLevel: ThinkingLevel | null },

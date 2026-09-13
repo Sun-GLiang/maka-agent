@@ -86,6 +86,74 @@ function providerMarkIcon(
 
 const currentCheck = <Check size={ICON_SIZE.control} aria-hidden="true" />;
 
+export interface ExternalAgentModelConfiguration {
+  readonly currentValue: string;
+  readonly options: readonly {
+    readonly value: string;
+    readonly name: string;
+    readonly description?: string;
+  }[];
+}
+
+export function ExternalAgentModelSwitcher(props: {
+  configuration: ExternalAgentModelConfiguration;
+  availability?: ComposerModelSwitchAvailability;
+  disabledReason?: string;
+  isMenuOpen?: boolean;
+  onMenuOpenChange?(open: boolean): void;
+  onChange?(value: string): void | Promise<void>;
+}) {
+  const copy = getConversationCopy(useUiLocale()).model;
+  const current = props.configuration.options.find(
+    (option) => option.value === props.configuration.currentValue,
+  );
+  const availability = props.availability ?? { available: true, pending: false };
+  const disabled =
+    Boolean(props.disabledReason) ||
+    !availability.available ||
+    !props.onChange ||
+    props.configuration.options.length === 0;
+  const label = current?.name ?? props.configuration.currentValue;
+  return (
+    <DropdownMenu
+      {...(props.isMenuOpen === undefined ? {} : { isMenuOpen: props.isMenuOpen })}
+      placement="above"
+      hasChevron={false}
+      className="maka-composer-quiet-menu"
+      menuWidth="min(420px, 92vw)"
+      onOpenChange={props.onMenuOpenChange}
+      button={{
+        label,
+        variant: "ghost",
+        size: "sm",
+        isDisabled: disabled,
+        tooltip: props.disabledReason ?? copy.switchAriaLabel,
+        className: "maka-model-switcher-trigger maka-external-agent-model-switcher",
+        "aria-label": `${copy.switchAriaLabel}: ${label}`,
+      }}
+    >
+      <DropdownMenuRadioGroup
+        value={props.configuration.currentValue}
+        label={`${copy.switchAriaLabel}: ${label}`}
+        onChange={(value) => {
+          if (value !== props.configuration.currentValue) void props.onChange?.(value);
+        }}
+      >
+        {props.configuration.options.map((option) => (
+          <DropdownMenuRadioItem
+            key={option.value}
+            value={option.value}
+            label={option.name}
+            description={option.description}
+            endContent={option.value === props.configuration.currentValue ? currentCheck : undefined}
+            isDisabled={disabled}
+          />
+        ))}
+      </DropdownMenuRadioGroup>
+    </DropdownMenu>
+  );
+}
+
 /** Scroll previews a model; click or Enter commits it. No popup escapes the window. */
 function ModelWheel(props: {
   groups: readonly ModelMenuGroup[];

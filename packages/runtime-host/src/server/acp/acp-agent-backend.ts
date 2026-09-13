@@ -26,6 +26,7 @@ import {
   type ClientApp,
   type ClientConnection,
   type RequestPermissionRequest,
+  type SessionConfigOption,
   type SessionUpdate,
   type ToolCall,
   type ToolCallContent,
@@ -80,6 +81,24 @@ interface PendingPermission {
   readonly hostedSettlement: HostedFormSettlement;
 }
 
+export interface AcpModelConfiguration {
+  readonly configId: string;
+  readonly currentValue: string;
+  readonly options: readonly {
+    readonly value: string;
+    readonly name: string;
+    readonly description?: string;
+  }[];
+}
+
+export class AcpModelConfigurationError extends Error {
+  readonly name = 'AcpModelConfigurationError';
+
+  constructor(readonly code: 'busy' | 'unavailable' | 'invalid_value') {
+    super(`ACP Session model configuration: ${code}`);
+  }
+}
+
 export interface AcpAgentBackendInput {
   readonly sessionId: string;
   readonly cwd: string;
@@ -88,6 +107,7 @@ export interface AcpAgentBackendInput {
   readonly releaseResidency: () => void;
   readonly onCleanupFailure: () => void;
   readonly onUnavailable: () => void;
+  readonly onDisposed?: () => void;
   readonly createConnection?: (
     input: Parameters<typeof createAcpConnection>[0],
   ) => AcpConnectionOwner;
@@ -102,6 +122,7 @@ export class AcpAgentBackend implements AgentBackend {
   private owner?: AcpConnectionOwner;
   private connection?: ClientConnection;
   private acpSessionId?: string;
+  private configOptions: readonly SessionConfigOption[] = [];
   private initialization?: Promise<void>;
   private current?: {
     readonly turnId: string;
@@ -205,6 +226,46 @@ export class AcpAgentBackend implements AgentBackend {
     throw new Error('ACP permissions use hosted forms');
   }
 
+  modelConfiguration(): AcpModelConfiguration | undefined {
+    if (this.disposed || this.lost) return undefined;
+    const option = this.configOptions.find(
+      (candidate) => candidate.type === 'select' && candidate.category === 'model',
+    );
+    if (!option || option.type !== 'select') return undefined;
+    const options = option.options.flatMap((entry) =>
+      'options' in entry ? entry.options : [entry],
+    );
+    return {
+      configId: option.id,
+      currentValue: option.currentValue,
+      options: options.map((entry) => ({
+        value: entry.value,
+        name: entry.name,
+        ...(entry.description ? { description: entry.description } : {}),
+      })),
+    };
+  }
+
+  async setModel(value: string): Promise<AcpModelConfiguration> {
+    if (this.disposed || this.lost || !this.connection || !this.acpSessionId) {
+      throw new AcpModelConfigurationError('unavailable');
+    }
+    if (this.current) throw new AcpModelConfigurationError('busy');
+    const configuration = this.modelConfiguration();
+    if (!configuration?.options.some((option) => option.value === value)) {
+      throw new AcpModelConfigurationError('invalid_value');
+    }
+    const response = await this.connection.agent.request(methods.agent.session.setConfigOption, {
+      sessionId: this.acpSessionId,
+      configId: configuration.configId,
+      value,
+    });
+    this.configOptions = response.configOptions;
+    const updated = this.modelConfiguration();
+    if (!updated) throw new AcpModelConfigurationError('unavailable');
+    return updated;
+  }
+
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
@@ -216,6 +277,7 @@ export class AcpAgentBackend implements AgentBackend {
     this.pendingPermissions.clear();
     await this.releaseOwner();
     this.input.releaseResidency();
+    this.input.onDisposed?.();
   }
 
   private async ensureInitialized(cancellationSignal: AbortSignal): Promise<void> {
@@ -264,6 +326,7 @@ export class AcpAgentBackend implements AgentBackend {
         { cancellationSignal },
       );
       this.acpSessionId = session.sessionId;
+      this.configOptions = session.configOptions ?? [];
       void owner.failed.catch((error) => this.failConnection(error));
     } catch (error) {
       this.markUnavailable();

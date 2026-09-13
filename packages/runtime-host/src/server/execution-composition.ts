@@ -194,6 +194,7 @@ import { join } from 'node:path';
 import { toRuntimePolicyProxy } from './runtime-policy-proxy.js';
 import { AcpSetupError } from './acp/connection.js';
 import { AcpAgentBackend } from './acp/acp-agent-backend.js';
+import { HostExternalAgentSessionModelCoordinator } from './acp/session-model-coordinator.js';
 import { installAntigravity } from './acp/antigravity-install.js';
 import { createAntigravityEnvironment } from './acp/antigravity-environment.js';
 import { createProxiedFetchTransport } from '@maka/runtime/network/scoped-fetch-transport';
@@ -410,6 +411,10 @@ export async function createExecutionRuntimeHostComposition(
       storageRoot: context.owner.capability.canonicalPath,
     });
     const backends = new BackendRegistry();
+    const activeAcpBackends = new Map<string, AcpAgentBackend>();
+    const externalAgentSessionModels = new HostExternalAgentSessionModelCoordinator((sessionId) =>
+      activeAcpBackends.get(sessionId),
+    );
     // ACP Sessions are process-local in PR2. A persisted Session that existed
     // before this Host started remains readable, but must never create a fresh
     // external Session or resend its last prompt after a restart.
@@ -1475,7 +1480,8 @@ export async function createExecutionRuntimeHostComposition(
         return {
           build: (buildContext) => {
             const residency = context.acquireResidency('acp-agent');
-            return new AcpAgentBackend({
+            let backend: AcpAgentBackend;
+            backend = new AcpAgentBackend({
               sessionId: buildContext.sessionId,
               cwd: buildContext.header.cwd,
               executable: launch.executable,
@@ -1489,7 +1495,14 @@ export async function createExecutionRuntimeHostComposition(
                 unavailableAcpSessionsAfterRestart.add(buildContext.sessionId);
                 hostChanges.publishSessionCatalog(buildContext.sessionId);
               },
+              onDisposed: () => {
+                if (activeAcpBackends.get(buildContext.sessionId) === backend) {
+                  activeAcpBackends.delete(buildContext.sessionId);
+                }
+              },
             });
+            activeAcpBackends.set(buildContext.sessionId, backend);
+            return backend;
           },
         };
       },
@@ -2533,6 +2546,7 @@ export async function createExecutionRuntimeHostComposition(
           externalSessions.handlers,
           sessionBundles.handlers,
           sessionRevisions.handlers,
+          externalAgentSessionModels.handlers,
         ],
         recovery: {
           state: () => externalSessions.recover(),

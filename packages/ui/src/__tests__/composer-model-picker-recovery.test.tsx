@@ -199,6 +199,39 @@ test('the recovery handle opens the existing exact account-and-model picker', as
     assert.deepEqual(selected, { llmConnectionId: second.connectionId, llmConnectionSlug: second.connectionSlug, model: second.model });
     assert.equal(sends, 0, 'confirming a model must not send the composer draft');
     assert.equal(Boolean(document.querySelector('.maka-model-wheel-viewport')), false);
+
+    let externalAgentModel: string | undefined;
+    await act(() => root.render(
+      <LocaleProvider locale="en">
+        <Composer
+          ref={composer}
+          activeSession={{
+            id: 'acp-session',
+            backend: 'acp',
+            externalAgentId: 'antigravity',
+            lastMessageAt: 1,
+          } as SessionSummary}
+          modelChoices={[choice]}
+          externalAgentModelConfiguration={{
+            currentValue: 'gemini-3.7-flash-high',
+            options: [
+              { value: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
+              { value: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },
+            ],
+          }}
+          onExternalAgentModelChange={(value) => { externalAgentModel = value; }}
+          onSend={() => undefined}
+          onStop={() => undefined}
+        />
+      </LocaleProvider>,
+    ));
+    await act(() => composer.current?.openModelPicker());
+    const acpItems = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
+    assert.equal(acpItems.length, 2);
+    assert.equal(acpItems.some((item) => item.textContent?.includes('GPT-5')), false);
+    assert.equal(acpItems[0]?.textContent?.includes('Gemini 3.7 Flash (High)'), true);
+    await act(() => acpItems[1]?.dispatchEvent(new window.Event('click', { bubbles: true })));
+    assert.equal(externalAgentModel, 'gemini-3.1-pro-preview');
   } finally {
     await act(() => root.unmount());
     Object.assign(globalThis, original);

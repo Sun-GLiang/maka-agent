@@ -62,6 +62,55 @@ test('session creation forwards the caller name for a mode that carries none', a
   );
 });
 
+test('external Agent model IPC reads and updates only the live ACP Session selector', async () => {
+  const ipc = ipcHarness();
+  const updates: Array<{ sessionId: string; value: string }> = [];
+  const changes: Array<{ reason: string; sessionId?: string; modelId?: string }> = [];
+  const model = (currentValue: string) => ({
+    sessionId: 'session-1',
+    acpAgentId: 'antigravity' as const,
+    configId: 'model',
+    currentValue,
+    options: [
+      { value: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
+      { value: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },
+    ],
+  });
+  const deps = createDeps([]);
+  deps.client = {
+    getExternalAgentSessionModel: async () => model('gemini-3.7-flash-high'),
+    updateExternalAgentSessionModel: async (sessionId: string, value: string) => {
+      updates.push({ sessionId, value });
+      return model(value);
+    },
+  } as unknown as RuntimeHostSessionCatalogIpcDeps['client'];
+  deps.emitSessionsChanged = (reason, sessionId, extra) => {
+    changes.push({ reason, sessionId, modelId: extra?.modelId });
+  };
+  registerRuntimeHostSessionCatalogIpc(deps, ipc as unknown as IpcMain);
+
+  assert.equal(
+    ((await ipc.invoke('sessions:getExternalAgentModel', 'session-1')) as {
+      currentValue: string;
+    }).currentValue,
+    'gemini-3.7-flash-high',
+  );
+  assert.equal(
+    ((await ipc.invoke(
+      'sessions:setExternalAgentModel',
+      'session-1',
+      'gemini-3.1-pro-preview',
+    )) as { currentValue: string }).currentValue,
+    'gemini-3.1-pro-preview',
+  );
+  assert.deepEqual(updates, [
+    { sessionId: 'session-1', value: 'gemini-3.1-pro-preview' },
+  ]);
+  assert.deepEqual(changes, [
+    { reason: 'updated', sessionId: 'session-1', modelId: 'gemini-3.1-pro-preview' },
+  ]);
+});
+
 type IpcHandler = Parameters<Pick<IpcMain, 'handle'>['handle']>[1];
 
 function ipcHarness() {

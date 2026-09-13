@@ -161,6 +161,89 @@ test('reports an Agent execution error message as an explicit prompt diagnostic'
   );
 });
 
+test('retains and updates only the ACP Agent model configuration for the live Session', async () => {
+  const requestedModels: string[] = [];
+  const modelOptions = [
+    { value: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
+    { value: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },
+  ];
+  const configOptions = (currentValue: string) => [
+    {
+      id: 'model',
+      name: 'Model',
+      category: 'model',
+      type: 'select',
+      currentValue,
+      options: modelOptions,
+    },
+    {
+      id: 'mode',
+      name: 'Mode',
+      category: 'mode',
+      type: 'select',
+      currentValue: 'agent',
+      options: [{ value: 'agent', name: 'Agent' }],
+    },
+  ];
+  const connection = {
+    agent: {
+      async request(method: unknown, params: unknown) {
+        if (method === methods.agent.initialize) {
+          return { protocolVersion: 1, agentCapabilities: {}, authMethods: [] };
+        }
+        if (method === methods.agent.session.new) {
+          return {
+            sessionId: 'acp-session-1',
+            configOptions: configOptions(modelOptions[0]!.value),
+          };
+        }
+        if (method === methods.agent.session.prompt) return { stopReason: 'end_turn' };
+        if (method === methods.agent.session.setConfigOption) {
+          const request = params as { sessionId: string; configId: string; value: string };
+          assert.deepEqual(request, {
+            sessionId: 'acp-session-1',
+            configId: 'model',
+            value: modelOptions[1]!.value,
+          });
+          requestedModels.push(request.value);
+          return { configOptions: configOptions(request.value) };
+        }
+        throw new Error('unexpected request');
+      },
+      notify: async () => undefined,
+    },
+  } as unknown as ClientConnection;
+  const backend = new AcpAgentBackend({
+    sessionId: 'session-1',
+    cwd: process.cwd(),
+    executable: '/agent',
+    env: {},
+    releaseResidency: () => undefined,
+    onCleanupFailure: () => assert.fail('cleanup should succeed'),
+    onUnavailable: () => assert.fail('the reusable connection remains available'),
+    createConnection: () => ({
+      connection,
+      failed: new Promise<never>(() => {}),
+      closed: Promise.resolve(),
+      dispose: async () => undefined,
+    }),
+  });
+
+  await collectEvents(backend.send({ turnId: 'turn-1', text: 'hello' }));
+  assert.deepEqual(backend.modelConfiguration(), {
+    configId: 'model',
+    currentValue: modelOptions[0]!.value,
+    options: modelOptions,
+  });
+
+  assert.deepEqual(await backend.setModel(modelOptions[1]!.value), {
+    configId: 'model',
+    currentValue: modelOptions[1]!.value,
+    options: modelOptions,
+  });
+  assert.deepEqual(requestedModels, [modelOptions[1]!.value]);
+});
+
 test('stop cancels startup before a prompt can be dispatched', async () => {
   let signal: AbortSignal | undefined;
   let resolveStarted!: () => void;

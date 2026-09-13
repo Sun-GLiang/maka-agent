@@ -20,6 +20,8 @@
 import type { OrchestrationMode } from '@maka/core/orchestration';
 import type { PermissionMode } from '@maka/core/permission';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
+import type { ExternalAgentSessionModelProjection } from '@maka/runtime-host/protocol';
+import { useEffect, useState } from 'react';
 import {
   isChatDefaultPermissionMode,
   type ChatDefaultPermissionMode,
@@ -65,6 +67,11 @@ export function useSessionSettingIntent<Owner extends { sessionId?: string }>(in
   confirmBypass(): Promise<boolean>;
 }) {
   const services = useSessionSettingsServices();
+  const activeSession = input.sessions.find((session) => input.isActiveSession(session.id));
+  const [externalAgentModel, setExternalAgentModel] = useState<{
+    readonly sessionId: string;
+    readonly configuration: ExternalAgentSessionModelProjection;
+  }>();
   const reportWriteError = (
     sessionId: string,
     error: unknown,
@@ -74,6 +81,35 @@ export function useSessionSettingIntent<Owner extends { sessionId?: string }>(in
     const failure = input.writeFailureCopy(setting, error);
     input.showSessionError(sessionId, failure.title, failure.description);
   };
+  useEffect(() => {
+    const sessionId = activeSession?.id;
+    if (!sessionId || activeSession.backend !== 'acp') {
+      setExternalAgentModel(undefined);
+      return;
+    }
+    let cancelled = false;
+    void services.getExternalAgentModel(sessionId).then(
+      (configuration) => {
+        if (!cancelled) setExternalAgentModel({ sessionId, configuration });
+      },
+      () => {
+        if (!cancelled) {
+          setExternalAgentModel((current) =>
+            current?.sessionId === sessionId ? current : undefined,
+          );
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeSession?.backend,
+    activeSession?.id,
+    activeSession?.lastMessageAt,
+    activeSession?.status,
+    services,
+  ]);
   const catalogSessionRevision = (sessionId: string) =>
     input.sessions.find((session) => session.id === sessionId)?.revision;
   const intent = useSharedSessionSettingIntent<SessionSettingValues>({
@@ -153,6 +189,24 @@ export function useSessionSettingIntent<Owner extends { sessionId?: string }>(in
       return next
         ? intent.request('modelConfiguration', sessionId, next)
         : Promise.resolve(false);
+    },
+    externalAgentModel: {
+      externalAgentModelConfiguration:
+        externalAgentModel && externalAgentModel.sessionId === activeSession?.id
+          ? externalAgentModel.configuration
+          : undefined,
+      onExternalAgentModelChange: async (value: string) => {
+        const sessionId = activeSession?.id;
+        if (!sessionId || activeSession.backend !== 'acp') return false;
+        try {
+          const configuration = await services.setExternalAgentModel(sessionId, value);
+          setExternalAgentModel({ sessionId, configuration });
+          return true;
+        } catch (error) {
+          reportWriteError(sessionId, error, 'model');
+          return false;
+        }
+      },
     },
     setPermissionMode: async (mode: PermissionMode) => {
       if (!isChatDefaultPermissionMode(mode)) return false;

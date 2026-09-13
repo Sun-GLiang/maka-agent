@@ -1037,6 +1037,14 @@ export class DesktopRuntimeHostClient {
     return requireSessionProjection(result.session);
   }
 
+  getExternalAgentSessionModel(sessionId: string) {
+    return this.request('external_agents.session.model.query', { sessionId });
+  }
+
+  updateExternalAgentSessionModel(sessionId: string, value: string) {
+    return this.request('external_agents.session.model.update', { sessionId, value });
+  }
+
   exportSessionBundle(input: {
     readonly sessionId: string;
     readonly destination: string;

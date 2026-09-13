@@ -50,7 +50,7 @@
   width: 100%;
   min-width: 0;
   grid-template-columns: minmax(192px, max-content) minmax(0, 1fr);
-  max-height: min(420px, 70vh);
+  height: min(420px, 70vh);
   overflow-x: hidden;
 }
 

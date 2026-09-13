@@ -1267,6 +1267,13 @@ export interface MakaBridge {
       thinkingLevel: ThinkingLevel | null;
     }): Promise<DesktopSessionSummary>;
     setThinkingLevel(sessionId: string, level: ThinkingLevel | undefined | null): Promise<DesktopSessionSummary>;
+    getExternalAgentModel(
+      sessionId: string,
+    ): Promise<import('@maka/runtime-host/protocol').ExternalAgentSessionModelProjection>;
+    setExternalAgentModel(
+      sessionId: string,
+      value: string,
+    ): Promise<import('@maka/runtime-host/protocol').ExternalAgentSessionModelProjection>;
     /**
      * `requireArchived` holds the caller's premise through the deletion: a task
      * restored meanwhile answers `restored` and is kept. `archivedSubtaskCount`
