@@ -218,11 +218,21 @@ test('the recovery handle opens the existing exact account-and-model picker', as
       </LocaleProvider>,
     ));
     await act(() => composer.current?.openModelPicker());
-    const acpItems = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
+    const acpWheel = document.querySelector<HTMLElement>('.maka-model-wheel-viewport');
+    assert.ok(acpWheel, 'external Agent sessions reuse the main model wheel UI');
+    assert.equal(
+      document.querySelectorAll('[role="menuitemradio"]').length,
+      0,
+      'external Agent sessions do not replace the main UI with a dropdown menu',
+    );
+    const acpItems = [...acpWheel.querySelectorAll<HTMLElement>('[role="option"]')];
     assert.equal(acpItems.length, 2);
     assert.equal(acpItems.some((item) => item.textContent?.includes('GPT-5')), false);
     assert.equal(acpItems[0]?.textContent?.includes('Gemini 3.7 Flash (High)'), true);
-    await act(() => acpItems[1]?.dispatchEvent(new window.Event('click', { bubbles: true })));
+    await act(async () => {
+      acpItems[1]?.dispatchEvent(new window.Event('click', { bubbles: true }));
+      await Promise.resolve();
+    });
     assert.equal(externalAgentModel, 'gemini-3.1-pro-preview');
   } finally {
     await act(() => root.unmount());

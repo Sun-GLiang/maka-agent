@@ -29,8 +29,8 @@
 /* Model and thinking triggers share the footer's ghost-button chrome.
    The model control expands into the shared inline magnetic wheel. */
 
-/* External-Agent and new-task executor menus still use bounded dropdown
-   lists. Keep group labels readable and both executor states the same height. */
+/* The new-task executor menu uses a bounded dropdown list. Keep group labels
+   readable and both executor states the same height. */
 .maka-model-menu-group-heading {
   padding-block: var(--space-1);
   padding-inline: var(--space-2);

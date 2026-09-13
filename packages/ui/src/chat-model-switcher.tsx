@@ -87,43 +87,27 @@ export function ExternalAgentModelSwitcher(props: {
     !props.onChange ||
     props.configuration.options.length === 0;
   const label = current?.name ?? props.configuration.currentValue;
+  const options: ModelWheelOption[] = props.configuration.options.map((option) => ({
+    value: option.value,
+    label: option.name,
+    heading: copy.antigravityExecutor,
+    description: option.description,
+  }));
   return (
-    <DropdownMenu
-      {...(props.isMenuOpen === undefined ? {} : { isMenuOpen: props.isMenuOpen })}
-      placement="above"
-      hasChevron={false}
-      className="maka-composer-quiet-menu"
-      menuWidth="min(420px, 92vw)"
+    <ModelWheelPicker
+      options={options}
+      value={props.configuration.currentValue}
+      label={label}
+      ariaLabel={`${copy.switchAriaLabel}: ${label}`}
+      tooltip={props.disabledReason ?? copy.switchAriaLabel}
+      triggerClassName="maka-model-switcher-trigger"
+      disabled={disabled}
+      open={props.isMenuOpen}
       onOpenChange={props.onMenuOpenChange}
-      button={{
-        label,
-        variant: 'ghost',
-        size: 'sm',
-        isDisabled: disabled,
-        tooltip: props.disabledReason ?? copy.switchAriaLabel,
-        className: 'maka-model-switcher-trigger maka-external-agent-model-switcher',
-        'aria-label': `${copy.switchAriaLabel}: ${label}`,
+      onValueChange={(value) => {
+        if (value !== props.configuration.currentValue) return props.onChange?.(value);
       }}
-    >
-      <DropdownMenuRadioGroup
-        value={props.configuration.currentValue}
-        label={`${copy.switchAriaLabel}: ${label}`}
-        onChange={(value) => {
-          if (value !== props.configuration.currentValue) void props.onChange?.(value);
-        }}
-      >
-        {props.configuration.options.map((option) => (
-          <DropdownMenuRadioItem
-            key={option.value}
-            value={option.value}
-            label={option.name}
-            description={option.description}
-            endContent={option.value === props.configuration.currentValue ? currentCheck : undefined}
-            isDisabled={disabled}
-          />
-        ))}
-      </DropdownMenuRadioGroup>
-    </DropdownMenu>
+    />
   );
 }
 
