@@ -53,11 +53,11 @@ or reconnection without waiting for the Host to become available.
 | --- | --- |
 | Session create, list, configure, prompt, cancel, close | Supported through the shared Runtime Host connection. |
 | Tools | `tool_call` and cumulative `tool_call_update` snapshots. Host `toolUseId` is the stable `toolCallId`. |
-| Questions | Requires the client to advertise `elicitation.form`; each question is an optional string field with option hints and free answers. Missing or blank answers remain unanswered. |
+| Questions | Requires the client to advertise `elicitation.form`; each question is an optional string field with option hints and free answers. Missing, blank, or declined answers remain unanswered; cancellation cancels the Turn. |
 | Forms | Standard `elicitation/create`, preserving string, number, integer, boolean, enum and multi-enum types and constraints. Defaults are hints, never automatically submitted. Decline and cancel remain distinct answers. |
 | Sandbox boundary and client capability approval | Standard `session/request_permission`. The `allow_always` choice explicitly grants only the displayed scope for this Session; `reject_once` denies it. Permission cancellation cancels the Turn. |
 | MCP | Session-owned stdio servers supplied in `session/new.mcpServers`; discovered tools and MCP form continuation use the existing MCP manager and Host capability path. |
-| Historical `permission` | Already answered or closed outcomes remain readable. Unexpected live pending legacy requests fail with `unsupported_interaction`; no legacy approval route is restored. |
+| Tool `permission` | Standard `session/request_permission`. One-shot allow/deny choices are preserved; eligible tool permissions also expose an explicit allow-for-this-Turn choice. Permission cancellation cancels the Turn. |
 | Load/resume, replacing all MCP configuration, HTTP/SSE/OAuth | Deferred. |
 
 The adapter saves the capabilities supplied during `initialize`. Missing form

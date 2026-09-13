@@ -43,6 +43,7 @@ import {
   type InteractionResolvedSnapshot,
   type InteractionSnapshot,
 } from '@maka/runtime-host/protocol';
+import { whileActive } from './active-promise.js';
 
 export interface AcpInteractionClient {
   readonly capabilities: ClientCapabilities;
@@ -78,6 +79,11 @@ interface PendingInteraction {
   readonly snapshot: InteractionPendingSnapshot;
   readonly cancellation: AbortController;
   task: Promise<void>;
+}
+
+interface PermissionPresentation {
+  readonly request: RequestPermissionRequest;
+  readonly answers: ReadonlyMap<string, InteractionAnswer>;
 }
 
 /** Connection-local presentation of Host interactions; the Host owns every answer and grant. */
@@ -179,9 +185,6 @@ export class AcpSessionInteractions {
       return;
     }
     const request = pending.request;
-    if (request.kind === 'permission') {
-      throw interactionError(pending, 'unsupported_interaction', 'Legacy permission is not live');
-    }
     if (
       (request.kind === 'question' || request.kind === 'form') &&
       this.#options.client.capabilities.elicitation?.form == null
@@ -207,29 +210,32 @@ export class AcpSessionInteractions {
         signal,
       );
       if (!response.active) return;
+      if (request.kind === 'question' && response.value.action === 'cancel') {
+        this.#cancelPendingTurn(pending);
+        return;
+      }
       try {
         answer = elicitationAnswer(pending, response.value);
       } catch {
         throw interactionError(pending, 'invalid_interaction_answer');
       }
     } else {
-      const allow = randomUUID();
-      const deny = randomUUID();
+      const presentation = permissionPresentation(pending);
       const response = await whileActive(
-        this.#options.client.requestPermission(permissionRequest(pending, allow, deny), signal),
+        this.#options.client.requestPermission(presentation.request, signal),
         signal,
       );
       if (!response.active) return;
       if (response.value.outcome.outcome === 'cancelled') {
-        this.cancelTurn(pending.turnId);
-        this.#options.onCancelled(pending);
+        this.#cancelPendingTurn(pending);
         return;
       }
       const optionId = response.value.outcome.optionId;
-      if (optionId !== allow && optionId !== deny) {
+      const selected = presentation.answers.get(optionId);
+      if (!selected) {
         throw interactionError(pending, 'invalid_interaction_answer', 'Unknown permission option');
       }
-      answer = { kind: request.kind, decision: optionId === allow ? 'allow' : 'deny' };
+      answer = selected;
     }
     try {
       answer = decodeInteractionAnswer(answer);
@@ -301,6 +307,11 @@ export class AcpSessionInteractions {
     const entry = this.#pending.get(interactionId);
     this.#pending.delete(interactionId);
     entry?.cancellation.abort();
+  }
+
+  #cancelPendingTurn(pending: InteractionPendingSnapshot): void {
+    this.cancelTurn(pending.turnId);
+    this.#options.onCancelled(pending);
   }
 
   #fail(pending: InteractionPendingSnapshot, error: unknown): void {
@@ -433,8 +444,14 @@ function elicitationAnswer(
     );
   }
   if (request.kind !== 'question') throw new Error('Not a question');
-  if (action !== 'accept') {
+  if (response.action === 'cancel') {
+    throw interactionError(pending, 'invalid_interaction_answer', 'Question cancellation escaped');
+  }
+  if (response.action === 'decline') {
     return { kind: 'question', answers: request.questions.map(() => null) };
+  }
+  if (response.action !== 'accept') {
+    throw interactionError(pending, 'invalid_interaction_answer', 'Unknown elicitation action');
   }
   const content = response.content ?? {};
   if (
@@ -461,44 +478,92 @@ function elicitationAnswer(
   };
 }
 
-function permissionRequest(
-  pending: InteractionPendingSnapshot,
-  allow: string,
-  deny: string,
-): RequestPermissionRequest {
+function permissionPresentation(pending: InteractionPendingSnapshot): PermissionPresentation {
   const request = pending.request;
-  if (request.kind !== 'sandbox_boundary' && request.kind !== 'client_capability') {
+  if (
+    request.kind !== 'permission' &&
+    request.kind !== 'sandbox_boundary' &&
+    request.kind !== 'client_capability'
+  ) {
     throw new Error('Not a permission request');
+  }
+  const allow = randomUUID();
+  const deny = randomUUID();
+  if (request.kind === 'permission') {
+    const canRemember =
+      request.prompt.kind === 'tool_permission' && request.prompt.rememberForTurnAllowed;
+    const options: RequestPermissionRequest['options'] = [
+      { optionId: allow, name: 'Allow once', kind: 'allow_once' },
+    ];
+    const answers = new Map<string, InteractionAnswer>([
+      [allow, { kind: 'permission', decision: 'allow', rememberForTurn: false }],
+    ]);
+    if (canRemember) {
+      const remember = randomUUID();
+      options.push({ optionId: remember, name: 'Allow for this Turn', kind: 'allow_always' });
+      answers.set(remember, { kind: 'permission', decision: 'allow', rememberForTurn: true });
+    }
+    options.push({ optionId: deny, name: 'Reject', kind: 'reject_once' });
+    answers.set(deny, { kind: 'permission', decision: 'deny', rememberForTurn: false });
+    return {
+      request: {
+        sessionId: pending.sessionId,
+        toolCall: {
+          toolCallId: request.toolUseId,
+          title: `Authorize ${request.prompt.toolName}`,
+          status: 'pending',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: `Review this exact permission request:\n${JSON.stringify(request.prompt, null, 2)}`,
+              },
+            },
+          ],
+        },
+        options,
+      },
+      answers,
+    };
   }
   const boundary = request.kind === 'sandbox_boundary';
   return {
-    sessionId: pending.sessionId,
-    toolCall: {
-      toolCallId: boundary ? pending.interactionId : request.toolUseId,
-      title: boundary ? 'Expand this Session’s sandbox boundary' : 'Authorize a Session capability',
-      status: 'pending',
-      content: [
-        {
-          type: 'content',
-          content: {
-            type: 'text',
-            text: boundary
-              ? `${request.justification}\n\nApply only this requested expansion to this Session’s boundary:\n${JSON.stringify(request.expansion, null, 2)}`
-              : `Grant only the following exact capability target for this Session:\n${JSON.stringify(request.target, null, 2)}`,
+    request: {
+      sessionId: pending.sessionId,
+      toolCall: {
+        toolCallId: boundary ? pending.interactionId : request.toolUseId,
+        title: boundary
+          ? 'Expand this Session’s sandbox boundary'
+          : 'Authorize a Session capability',
+        status: 'pending',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: boundary
+                ? `${request.justification}\n\nApply only this requested expansion to this Session’s boundary:\n${JSON.stringify(request.expansion, null, 2)}`
+                : `Grant only the following exact capability target for this Session:\n${JSON.stringify(request.target, null, 2)}`,
+            },
           },
+        ],
+      },
+      options: [
+        {
+          optionId: allow,
+          name: boundary
+            ? 'Apply this expansion to this Session'
+            : 'Allow this scope for this Session',
+          kind: 'allow_always',
         },
+        { optionId: deny, name: 'Reject', kind: 'reject_once' },
       ],
     },
-    options: [
-      {
-        optionId: allow,
-        name: boundary
-          ? 'Apply this expansion to this Session'
-          : 'Allow this scope for this Session',
-        kind: 'allow_always',
-      },
-      { optionId: deny, name: 'Reject', kind: 'reject_once' },
-    ],
+    answers: new Map([
+      [allow, { kind: request.kind, decision: 'allow' }],
+      [deny, { kind: request.kind, decision: 'deny' }],
+    ]),
   };
 }
 
@@ -526,27 +591,4 @@ function interactionError(
     { source: 'adapter', code, kind: pending.request.kind, interactionId: pending.interactionId },
     detail ? `ACP interaction failed: ${detail}` : 'ACP interaction failed',
   );
-}
-
-/** SDK cancellation is cooperative; losing tasks still have a rejection handler. */
-function whileActive<T>(
-  task: Promise<T>,
-  signal: AbortSignal,
-): Promise<{ active: true; value: T } | { active: false }> {
-  return new Promise((resolve, reject) => {
-    const cancelled = () => resolve({ active: false });
-    if (signal.aborted) cancelled();
-    else signal.addEventListener('abort', cancelled, { once: true });
-    task.then(
-      (value) => {
-        signal.removeEventListener('abort', cancelled);
-        resolve(signal.aborted ? { active: false } : { active: true, value });
-      },
-      (error: unknown) => {
-        signal.removeEventListener('abort', cancelled);
-        if (signal.aborted) resolve({ active: false });
-        else reject(error);
-      },
-    );
-  });
 }

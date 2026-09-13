@@ -26,6 +26,7 @@ import {
 import type { SessionEvent } from '@maka/core/events';
 import type { StoredMessage } from '@maka/core/session';
 import type { InteractionPendingSnapshot, InteractionSnapshot } from '@maka/runtime-host/protocol';
+import { whileActive } from './active-promise.js';
 import { AcpToolEventMapper } from './tool-event-mapper.js';
 
 type StreamKind = 'text' | 'thinking';
@@ -33,12 +34,15 @@ type StreamKind = 'text' | 'thinking';
 export interface AcpSessionEventMapperOptions {
   readonly sessionId: string;
   readonly notify: (notification: SessionNotification) => Promise<void>;
+  /** Ends projection delivery without waiting for a stalled client transport. */
+  readonly signal?: AbortSignal;
 }
 
 /** Serializes one ACP prompt's live projection delivery. */
 export class AcpSessionEventMapper {
   readonly #sessionId: string;
   readonly #notify: (notification: SessionNotification) => Promise<void>;
+  readonly #signal: AbortSignal | undefined;
   readonly #streams = new Map<string, string>();
   readonly #tools: AcpToolEventMapper;
   #tail: Promise<unknown> = Promise.resolve();
@@ -48,8 +52,9 @@ export class AcpSessionEventMapper {
   constructor(options: AcpSessionEventMapperOptions) {
     this.#sessionId = options.sessionId;
     this.#notify = options.notify;
+    this.#signal = options.signal;
     this.#tools = new AcpToolEventMapper((update) =>
-      this.#notify({ sessionId: this.#sessionId, update }),
+      this.#deliver({ sessionId: this.#sessionId, update }),
     );
   }
 
@@ -150,7 +155,14 @@ export class AcpSessionEventMapper {
       content: { type: 'text', text: chunk },
       messageId: hostMessageId,
     };
-    await this.#notify({ sessionId: this.#sessionId, update });
+    await this.#deliver({ sessionId: this.#sessionId, update });
+  }
+
+  async #deliver(notification: SessionNotification): Promise<void> {
+    if (this.#signal?.aborted) return;
+    const delivery = this.#notify(notification);
+    if (!this.#signal) return delivery;
+    await whileActive(delivery, this.#signal);
   }
 
   #enqueue<T>(operation: () => Promise<T>): Promise<T> {

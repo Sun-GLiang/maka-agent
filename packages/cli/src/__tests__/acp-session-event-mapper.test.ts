@@ -169,6 +169,27 @@ describe('ACP Session event mapper', () => {
     await accepting;
   });
 
+  test('prompt cancellation releases stalled notification delivery and flush', async () => {
+    const abort = new AbortController();
+    let rejectDelivery!: (error: Error) => void;
+    const delivery = new Promise<void>((_resolve, reject) => {
+      rejectDelivery = reject;
+    });
+    const mapper = new AcpSessionEventMapper({
+      sessionId: 'session-1',
+      signal: abort.signal,
+      notify: () => delivery,
+    });
+
+    const accepting = mapper.accept(toolOutput('tool', 1, 'pending'));
+    await new Promise((resolve) => setImmediate(resolve));
+    abort.abort();
+    await accepting;
+    await mapper.flush();
+    rejectDelivery(new Error('Late transport failure'));
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
   test('replaces cumulative tool content, deduplicates output sequences and preserves stream/redaction', async () => {
     const notifications: SessionNotification[] = [];
     const mapper = eventMapper(notifications);

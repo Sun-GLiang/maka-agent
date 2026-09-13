@@ -459,6 +459,7 @@ describe('ACP Session registry', () => {
     'complete',
     'notification-failure',
     'cancel',
+    'cancel-stalled-notification',
     'host-failure',
     'host-abort',
   ] as const) {
@@ -473,7 +474,10 @@ describe('ACP Session registry', () => {
       let stopped = 0;
       let terminalDeliveryStarted = false;
       let settled = false;
-      const completesNormally = scenario === 'complete' || scenario === 'notification-failure';
+      const completesNormally =
+        scenario === 'complete' ||
+        scenario === 'notification-failure' ||
+        scenario === 'cancel-stalled-notification';
       const notifications: SessionNotification[] = [];
       const registry = new AcpSessionRegistry({
         connect: async () =>
@@ -573,6 +577,14 @@ describe('ACP Session registry', () => {
         deliveryGate.resolve();
         await new Promise((resolve) => setImmediate(resolve));
         assert.equal(terminalDeliveryStarted, false);
+      } else if (scenario === 'cancel-stalled-notification') {
+        pageGate.resolve();
+        await waitFor(() => terminalDeliveryStarted);
+        await registry.cancel({ sessionId });
+        assert.deepEqual(await prompt, { stopReason: 'cancelled' });
+        assert.equal(stopped, 0);
+        deliveryGate.reject(new Error('Late transport failure'));
+        await new Promise((resolve) => setImmediate(resolve));
       } else if (scenario === 'host-failure' || scenario === 'host-abort') {
         subscription.setRoot(
           scenario === 'host-failure'

@@ -176,7 +176,11 @@ describe('Maka ACP stdio server', () => {
               },
             },
           });
-          if (scenario === 'sandbox_boundary' || scenario === 'client_capability') {
+          if (
+            scenario === 'permission' ||
+            scenario === 'sandbox_boundary' ||
+            scenario === 'client_capability'
+          ) {
             const request = () =>
               (harness.stdoutMessages() as Array<{ id: string; method?: string }>).find(
                 (message) => message.method === 'session/request_permission',

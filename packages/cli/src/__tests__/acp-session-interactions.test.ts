@@ -257,14 +257,18 @@ describe('ACP Session interactions', () => {
     assert.deepEqual(fixture.answers[0]?.answer, { kind: 'form', action: 'accept', values: {} });
   });
 
-  test('question decline and cancel preserve the core unanswered meaning', async () => {
-    for (const action of ['decline', 'cancel'] as const) {
-      const fixture = interactionFixture(question());
-      fixture.elicitationResponse.resolve({ action });
-      await fixture.bridge.pending(fixture.initial);
-      assert.deepEqual(fixture.answers[0]?.answer, { kind: 'question', answers: [null] });
-      assert.deepEqual(fixture.cancelled, []);
-    }
+  test('question decline submits unanswered while cancel stops the Turn', async () => {
+    const declined = interactionFixture(question());
+    declined.elicitationResponse.resolve({ action: 'decline' });
+    await declined.bridge.pending(declined.initial);
+    assert.deepEqual(declined.answers[0]?.answer, { kind: 'question', answers: [null] });
+    assert.deepEqual(declined.cancelled, []);
+
+    const cancelled = interactionFixture(question());
+    cancelled.elicitationResponse.resolve({ action: 'cancel' });
+    await cancelled.bridge.pending(cancelled.initial);
+    assert.deepEqual(cancelled.answers, []);
+    assert.deepEqual(cancelled.cancelled, [cancelled.initial]);
   });
 
   test('rejects invalid typed forms, unknown fields and oversized Unicode answers before Host mutation', async () => {
@@ -387,7 +391,60 @@ describe('ACP Session interactions', () => {
     assert.deepEqual(fixture.failures, []);
   });
 
-  test('unadvertised elicitation and legacy live permission fail without synthetic answers', async () => {
+  test('legacy permission choices preserve one-shot and Turn-scoped decisions', async () => {
+    const expectations = [
+      {
+        kind: 'allow_once',
+        answer: { kind: 'permission', decision: 'allow', rememberForTurn: false },
+      },
+      {
+        kind: 'allow_always',
+        answer: { kind: 'permission', decision: 'allow', rememberForTurn: true },
+      },
+      {
+        kind: 'reject_once',
+        answer: { kind: 'permission', decision: 'deny', rememberForTurn: false },
+      },
+    ] as const;
+    for (const expected of expectations) {
+      const fixture = interactionFixture(legacyPermission());
+      const task = fixture.bridge.pending(fixture.initial);
+      const request = await fixture.permissionRequested.promise;
+      assert.equal(request.toolCall.toolCallId, 'tool-1');
+      assert.deepEqual(
+        request.options.map((option) => option.kind),
+        ['allow_once', 'allow_always', 'reject_once'],
+      );
+      assert.match(JSON.stringify(request.toolCall.content), /workspace\/file/);
+      const selected = request.options.find((option) => option.kind === expected.kind);
+      assert.ok(selected);
+      fixture.permissionResponse.resolve({
+        outcome: { outcome: 'selected', optionId: selected.optionId },
+      });
+      await task;
+      assert.deepEqual(fixture.answers[0]?.answer, expected.answer);
+      assert.deepEqual(fixture.failures, []);
+    }
+
+    const oneShot = interactionFixture(legacyPermission(false));
+    const task = oneShot.bridge.pending(oneShot.initial);
+    const request = await oneShot.permissionRequested.promise;
+    assert.deepEqual(
+      request.options.map((option) => option.kind),
+      ['allow_once', 'reject_once'],
+    );
+    oneShot.permissionResponse.resolve({
+      outcome: { outcome: 'selected', optionId: request.options[0].optionId },
+    });
+    await task;
+    assert.deepEqual(oneShot.answers[0]?.answer, {
+      kind: 'permission',
+      decision: 'allow',
+      rememberForTurn: false,
+    });
+  });
+
+  test('unadvertised elicitation fails without synthetic answers', async () => {
     for (const capabilities of [
       {},
       { elicitation: {} },
@@ -400,11 +457,6 @@ describe('ACP Session interactions', () => {
       assert.deepEqual(fixture.answers, []);
       assert.equal(errorCode(fixture.failures[0]), 'unsupported_interaction');
     }
-    const fixture = interactionFixture(legacyPermission());
-    await fixture.bridge.pending(fixture.initial);
-    assert.equal(fixture.permissionCalls, 0);
-    assert.deepEqual(fixture.answers, []);
-    assert.equal(errorCode(fixture.failures[0]), 'unsupported_interaction');
   });
 
   test('an old permission already closed by Host recovery is observed without a dialog', async () => {
@@ -726,7 +778,7 @@ function capability(): InteractionPendingSnapshot {
   });
 }
 
-function legacyPermission(): InteractionPendingSnapshot {
+function legacyPermission(rememberForTurnAllowed = true): InteractionPendingSnapshot {
   return snapshot({
     kind: 'permission',
     toolUseId: 'tool-1',
@@ -736,7 +788,7 @@ function legacyPermission(): InteractionPendingSnapshot {
       category: 'read',
       reason: 'custom',
       review: { kind: 'path', operation: 'read', path: '/workspace/file' },
-      rememberForTurnAllowed: true,
+      rememberForTurnAllowed,
     },
   });
 }
@@ -777,7 +829,25 @@ function answered(
         },
       };
     case 'permission':
-      throw new Error('Legacy permission has no live answer');
+      return {
+        ...base,
+        outcome:
+          answer.decision === 'deny'
+            ? {
+                kind: 'permission_answer',
+                reviewer: 'user',
+                decision: 'deny',
+                rememberForTurn: false,
+                committedAt,
+              }
+            : {
+                kind: 'permission_answer',
+                reviewer: 'user',
+                decision: 'allow',
+                rememberForTurn: answer.rememberForTurn,
+                committedAt,
+              },
+      };
   }
 }
 

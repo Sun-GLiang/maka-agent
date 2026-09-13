@@ -265,6 +265,7 @@ export class AcpSessionRegistry {
 
   async #prompt(params: PromptRequest, context: AcpPromptContext): Promise<PromptResponse> {
     const turnId = this.#newTurnId();
+    const projectionAbort = new AbortController();
     const active: ActiveAcpPrompt = {
       sessionId: params.sessionId,
       turnId,
@@ -275,9 +276,10 @@ export class AcpSessionRegistry {
             await context.notify(notification);
           }
         },
+        signal: projectionAbort.signal,
       }),
       waiters: new Set(),
-      projectionAbort: new AbortController(),
+      projectionAbort,
       dispatchStarted: false,
       startRequestSettled: false,
       admissionSettled: false,

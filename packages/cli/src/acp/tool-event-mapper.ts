@@ -80,6 +80,16 @@ interface ToolState {
   synthetic?: boolean;
 }
 
+interface ToolCallProjection {
+  readonly toolName: string;
+  readonly displayName?: string;
+  readonly activityKind?: ToolActivityKind;
+  readonly args?: unknown;
+  readonly argsPreview?: unknown;
+  readonly stepId?: string;
+  readonly operationId?: string;
+}
+
 /** Tool presentation only. Turn completion remains the Session channel's decision. */
 export class AcpToolEventMapper {
   readonly #tools = new Map<string, ToolState>();
@@ -90,20 +100,7 @@ export class AcpToolEventMapper {
     const tool = this.#ensure(event.turnId, event.toolUseId);
     switch (event.type) {
       case 'tool_start':
-        tool.name = event.toolName;
-        tool.title = bounded(event.displayName ?? event.toolName, AUXILIARY_CHARS).text;
-        tool.kind = toolKind(event.activityKind);
-        if (event.operationId) tool.meta.operationId = event.operationId;
-        if (event.stepId) tool.meta.stepId = event.stepId;
-        if (!tool.terminal) {
-          const preview =
-            event.args === undefined
-              ? event.argsPreview
-              : projectToolArgsPreview(event.toolName, event.args);
-          tool.inputPreview =
-            preview === undefined ? '' : bounded(JSON.stringify(preview), AUXILIARY_CHARS).text;
-        }
-        await this.#publishCall(tool, rawInput(event.toolName, event.args));
+        await this.#call(tool, event);
         return;
       case 'tool_output_delta':
         if (tool.terminal) return;
@@ -153,16 +150,7 @@ export class AcpToolEventMapper {
   async acceptMessage(message: StoredMessage): Promise<void> {
     if (message.type === 'tool_call') {
       const tool = this.#ensure(message.turnId, message.id);
-      tool.title = bounded(message.displayName ?? message.toolName, AUXILIARY_CHARS).text;
-      tool.name = message.toolName;
-      tool.kind = toolKind(message.activityKind);
-      if (message.stepId) tool.meta.stepId = message.stepId;
-      if (!tool.terminal) {
-        const preview = projectToolArgsPreview(message.toolName, message.args);
-        tool.inputPreview =
-          preview === undefined ? '' : bounded(JSON.stringify(preview), AUXILIARY_CHARS).text;
-      }
-      await this.#publishCall(tool, rawInput(message.toolName, message.args));
+      await this.#call(tool, message);
     } else if (message.type === 'tool_result') {
       await this.#result(
         this.#ensure(message.turnId, message.toolUseId),
@@ -319,6 +307,23 @@ export class AcpToolEventMapper {
     }
     tool.resultDigest = resultDigest;
     this.#release(tool);
+  }
+
+  async #call(tool: ToolState, call: ToolCallProjection): Promise<void> {
+    tool.name = call.toolName;
+    tool.title = bounded(call.displayName ?? call.toolName, AUXILIARY_CHARS).text;
+    tool.kind = toolKind(call.activityKind);
+    if (call.operationId) tool.meta.operationId = call.operationId;
+    if (call.stepId) tool.meta.stepId = call.stepId;
+    if (!tool.terminal) {
+      const preview =
+        call.args === undefined
+          ? call.argsPreview
+          : projectToolArgsPreview(call.toolName, call.args);
+      tool.inputPreview =
+        preview === undefined ? '' : bounded(JSON.stringify(preview), AUXILIARY_CHARS).text;
+    }
+    await this.#publishCall(tool, rawInput(call.toolName, call.args));
   }
 
   async #publishCall(tool: ToolState, input: { rawInput?: unknown }): Promise<void> {
