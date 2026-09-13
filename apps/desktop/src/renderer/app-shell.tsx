@@ -40,13 +40,11 @@ import type { UiLocale, UiLocalePreference } from '@maka/core/ui-locale';
 import { collapseSessionRevisions } from '@maka/core/session-revisions';
 import { isLinkedSubagentSession } from '@maka/core/session';
 import { resolveUiLocale } from '@maka/core/ui-locale';
-import { slashCommandsForSurface } from '@maka/core/slash-command-catalog';
 import { hasSettledInitialOnboarding } from '@maka/core/onboarding-milestone';
 import {
   ChatSurfaceLayout,
   type ComposerHandle,
   type ComposerSendMetadata,
-  type ComposerSlashCommandOption,
   type MakaUriDest,
   MakaUriContext,
   AstryxLocaleProvider,
@@ -97,10 +95,7 @@ import { useNewTaskChoice } from './use-new-task-choice';
 import { SessionCollaborationDialog } from './session-collaboration-dialog';
 import * as SessionCollaboration from './features/session-collaboration';
 import { NEW_TASK_PENDING_KEY } from './pending-items';
-import {
-  desktopSlashCommandAvailability,
-  parseDesktopSlashCommand,
-} from './desktop-slash-command';
+import { parseDesktopSlashCommand } from './desktop-slash-command';
 import {
   mergeWorkspaceReferences,
   rebaseWorkspaceFileReferences,
@@ -182,10 +177,7 @@ import {
 import * as liveContent from './live-content-seed';
 import { loadComposerDefaults, saveComposerDefaults } from './composer-defaults';
 import { useTurnActionRegistry } from './use-turn-action-registry';
-import {
-  desktopSlashCommandPresentation,
-  useComposerAttachments,
-} from './features/conversation/index.js';
+import { useComposerAttachments } from './features/conversation/index.js';
 import { useAppShellComposerQuotes } from './use-app-shell-composer-quotes';
 import {
   type ComposerMentionsSurfaceInput,
@@ -1130,17 +1122,12 @@ function AppShellContent({
   // hiding it silently and forever is not. Once the read has spent its retries
   // the slot says so and hands the user another attempt; while it is still
   // reading, or while onboarding owns the surface, there is nothing to say.
-  const desktopSlashCommands = useMemo<readonly ComposerSlashCommandOption[]>(
-    () => {
-      const availableCommands = slashCommandsForSurface('desktop').filter(
-        desktopSlashCommandAvailability({
-          hasSession: Boolean(activeId),
-          streaming: turnActive,
-        }),
-      );
-      const presentation = desktopSlashCommandPresentation(shellCopy.slashCommands);
-      return availableCommands.map(({ id }) => ({ id, ...presentation[id] }));
-    },
+  const desktopSlashCommands = useMemo(
+    () =>
+      Conversation.projectDesktopSlashCommands(shellCopy.slashCommands, {
+        hasSession: !!activeId,
+        streaming: turnActive,
+      }),
     [activeId, shellCopy.slashCommands, turnActive],
   );
   const moduleHubCommands = useMemo(ModuleHub.createModuleHubCommandPort, []);

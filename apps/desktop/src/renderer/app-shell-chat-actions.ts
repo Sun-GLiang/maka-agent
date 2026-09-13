@@ -466,7 +466,7 @@ export function createAppShellChatActions(deps: {
           ? { profileId: initialNewTaskTarget.profileId }
           : undefined;
       const sendStillOwnsCurrentSurface =
-        (feedbackSessionId !== undefined &&
+        (feedbackSessionId &&
           isShellSurfaceOwnerActive({
             ...sendOwner,
             sessionId: feedbackSessionId,
