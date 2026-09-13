@@ -351,8 +351,6 @@ export const Composer = forwardRef<
     activeModelLabel?: string;
     activeProviderType?: ProviderType;
     modelChoices?: ChatModelChoice[];
-    /** Inline browsing for compact windows that cannot fit a popup menu. */
-    modelPickerPresentation?: 'menu' | 'wheel';
     /** Maximum input height in the upstream editor's row units. */
     maxInputRows?: number;
     /** Whether this Session already has conversation history whose provider prompt cache may be rebuilt by a switch. */
@@ -544,7 +542,7 @@ export const Composer = forwardRef<
     });
   const modelSwitchAvailabilityRef = useRef(modelSwitchAvailability);
   modelSwitchAvailabilityRef.current = modelSwitchAvailability;
-  useLayoutEffect(() => setModelPickerOpen(false), [props.activeSession?.id, props.modelPickerPresentation]);
+  useLayoutEffect(() => setModelPickerOpen(false), [props.activeSession?.id]);
   const [pendingImportAction, setPendingImportAction] = useState<ComposerImportActionId | null>(null);
   const composerMountedRef = useMountedRef();
   const sendPendingRef = useRef(false);
@@ -1264,6 +1262,15 @@ export const Composer = forwardRef<
     [],
   );
 
+  // Sendable content is a non-empty draft *or* staged structured context:
+  // a pure quote send is a real message (#4804). Attachment-only sends stay
+  // on the Host opt-in (`allowAttachmentOnlySend`), so the upstream flag
+  // governs that half while staged quotes pass the same gates (send handler,
+  // disabled state, send/stop toggle) as text.
+  const hasStagedContext =
+    (props.pendingQuotes?.length ?? 0) > 0 ||
+    (props.allowAttachmentOnlySend === true && (props.pendingAttachments?.length ?? 0) > 0);
+
   async function sendCurrent(followUpMode?: FollowUpMode) {
     if (
       props.disabled
@@ -1275,7 +1282,7 @@ export const Composer = forwardRef<
     // `text`. The optional metadata below is a send-time rendering snapshot of
     // file chips that still exist in the editor, not a second draft state.
     const text = composerWireText(textPort.getValue());
-    if (!text && !(props.allowAttachmentOnlySend && props.pendingAttachments?.length)) return;
+    if (!text.trim() && !hasStagedContext) return;
     const editable = editableNode();
     const workspaceFileReferences = editable ? workspaceFileReferencePositions(editable) : [];
     const submittedDraftKey = activeDraftKey();
@@ -1463,7 +1470,7 @@ export const Composer = forwardRef<
     props.sendBlocked ||
     sendPending ||
     importActionBusy ||
-    (!text.trim() && !(props.allowAttachmentOnlySend && props.pendingAttachments?.length)) ||
+    (!text.trim() && !hasStagedContext) ||
     noModelConnection;
   // The disabled Send is explanatory only in the no-model dead-end; other
   // disabled reasons (empty draft, in-flight import) keep the neutral label.
@@ -1474,7 +1481,12 @@ export const Composer = forwardRef<
   // returns to Send (the host queues it as a follow-up). Stop is not lost in
   // that window: Esc interrupts from the input, which is where the hands already
   // are.
-  const stopShown = props.streaming === true && (!text.trim() || props.sendBlocked === true);
+  // Union of two contracts: a blocked send always shows Stop (#4979 — a dead
+  // Send helps nobody), and an unblocked structured-only draft (#4804) shows
+  // Send so the staged context can still be handed over as a follow-up.
+  const stopShown =
+    props.streaming === true
+    && (props.sendBlocked === true || (!text.trim() && !hasStagedContext));
   // A Host receipt is not model consumption. Keep steering above the composer
   // until the host surface retires its transient on steering_message.
   const queuedMessages = projectComposerMessageQueue(props.queuedMessages ?? [], props.pendingMessages ?? []);
@@ -2106,7 +2118,6 @@ export const Composer = forwardRef<
               <div className="maka-model-selection-controls">
                 {props.activeSession ? (
                   <ChatModelSwitcher
-                    presentation={props.modelPickerPresentation}
                     activeSession={props.activeSession}
                     activeModelConnectionId={props.activeModelConnectionId}
                     activeModelConnectionSlug={props.activeModelConnectionSlug}

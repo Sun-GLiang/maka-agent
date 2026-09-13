@@ -24,7 +24,7 @@ import { afterEach, test } from 'node:test';
 import { act, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { parseHTML } from 'linkedom';
-import { TurnView } from '../chat-turn.js';
+import { LocalizedChatMessage, TurnView } from '../chat-turn.js';
 import { LocaleProvider } from '../locale-context.js';
 import type { TurnTimelineItem, TurnViewModel } from '../materialize.js';
 
@@ -108,6 +108,15 @@ const RUNNING_TOOL: TurnTimelineItem = {
   kind: 'tools',
   items: [{ toolUseId: 'tool-1', toolName: 'read', status: 'running', args: {} }],
 };
+
+test('message accessibility labels preserve literal ICU syntax', async () => {
+  const { container, root } = domRoot();
+  const label = "Maka's response · <redacted> {value} <tag>it's literal</tag>";
+  await act(() => {
+    root.render(<LocaleProvider locale="en"><LocalizedChatMessage sender="assistant" accessibleLabel={label}>{null}</LocalizedChatMessage></LocaleProvider>);
+  });
+  assert.equal(container.querySelector('article')?.getAttribute('aria-label'), label);
+});
 
 test('renders an aborted turn outcome as an inline system status notice', async () => {
   const { container, root } = domRoot();
@@ -294,6 +303,10 @@ test('uses human conversation context instead of raw ids in action names', async
   const actionNames = [...container.querySelectorAll('[aria-label]')]
     .map((element) => element.getAttribute('aria-label'))
     .filter((label): label is string => label !== null);
+  assert.match(
+    container.querySelector('.maka-assistant-answer')?.getAttribute('aria-label') ?? '',
+    /^Maka's response · Summarize the accessibility findings/,
+  );
   assert.ok(actionNames.some((label) => label.startsWith(
     'Copy message: Summarize the accessibility findings',
   )));
@@ -354,6 +367,69 @@ test('does not edit and resend a message with folder references', async () => {
   );
   await act(() => editButton.dispatchEvent(new window.Event('click', { bubbles: true })));
   assert.equal(editCalls, 0, 'folder references must not be silently dropped by revision');
+});
+
+/**
+ * A structured-only user message (#4804) — empty inline text carrying a
+ * quote — must render the quote without an empty text bubble, while keeping
+ * the metadata row (timestamp, copy) and its edit entry, which used to be
+ * dropped together with the bubble.
+ */
+test('renders a quote-only user message without an empty bubble but with metadata', async () => {
+  const { container, root } = domRoot();
+  const turn = {
+    ...turnWith([]),
+    status: 'completed' as const,
+    user: {
+      id: 'quote-only',
+      role: 'user' as const,
+      text: '',
+      ts: 1,
+      quotes: [{ text: 'selected excerpt' }],
+    },
+  };
+
+  await act(() => {
+    root.render(
+      <LocaleProvider locale="en">
+        <TurnView turn={turn} onEditUserMessage={() => undefined} />
+      </LocaleProvider>,
+    );
+  });
+
+  assert.equal(
+    container.querySelector('.maka-chat-message-bubble-user'),
+    null,
+    'an empty text must not render an empty user bubble',
+  );
+  const quotes = container.querySelector('.maka-user-quotes');
+  assert.ok(quotes, 'the staged quote still renders');
+  assert.match(quotes?.textContent ?? '', /selected excerpt/);
+  assert.ok(
+    container.querySelector('.maka-message-meta'),
+    'a structured-only message keeps its metadata row',
+  );
+});
+
+test('a user message with text still renders its bubble', async () => {
+  const { container, root } = domRoot();
+  const turn = {
+    ...turnWith([]),
+    status: 'completed' as const,
+    user: {
+      id: 'with-text',
+      role: 'user' as const,
+      text: 'explain this',
+      ts: 1,
+      quotes: [{ text: 'selected excerpt' }],
+    },
+  };
+
+  await renderTurn(root, turn);
+
+  const bubble = container.querySelector('.maka-chat-message-bubble-user');
+  assert.ok(bubble, 'a text message keeps its bubble');
+  assert.match(bubble?.textContent ?? '', /explain this/);
 });
 
 test('keeps Astryx auto formatting live for user-message timestamps', async (context) => {

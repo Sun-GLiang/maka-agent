@@ -101,7 +101,17 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 145 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 150 as const;
+// 150: Message admission accepts an empty-text Message that carries a quote or
+// an attachment (#4804). Peers older than this epoch reject that frame at
+// admission, so the pair must refuse each other at the handshake.
+// 149: Connection model overrides retain disabled identities and separate capacity
+// from compaction. Catalog entries carry overrides; clients do not rebuild them.
+// 148: Model catalog entries include image support before a user override.
+// 147: OAuth create targets may carry a caller-selected Connection name and
+// slug, and slug collisions remain a closed typed error before or after
+// authorization. Older peers reject those strict input and output shapes.
+// 146: Code Mode settings and Session tool mode join the epoch-145 Host contract.
 // 145: Combine Antigravity setup with Session bundle Host operations and explicit
 // missing/archived Skill query refusals.
 // 144: Antigravity setup combined with explicit missing/archived Skill query refusals.

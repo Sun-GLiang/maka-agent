@@ -286,6 +286,11 @@ export type DesktopSessionStopResult =
   | { kind: 'interrupted'; retractedMessageIds: string[] }
   | undefined;
 
+/** Cancellation proof aggregated across every Runtime Host query batch. */
+export interface DesktopMessageCancellationQueryResult {
+  readonly cancelledMessageIds: readonly string[];
+}
+
 export type DesktopReviseBeforeTurnInput = ReviseBeforeTurnInput & {
   /** Stable target identity for retrying one Desktop copy action. */
   copyId: string;
@@ -1169,7 +1174,7 @@ export interface MakaBridge {
     queryCancelledMessages(
       sessionId: string,
       messageIds: readonly string[],
-    ): Promise<import('@maka/runtime-host/protocol').TurnMessageQueryResult>;
+    ): Promise<DesktopMessageCancellationQueryResult>;
     queryMessageExecutions(
       sessionId: string,
       messageIds: readonly string[],
@@ -1224,9 +1229,9 @@ export interface MakaBridge {
     subscribeEvents(
       sessionId: string,
       handler: (event: SessionEvent) => void,
-      onSeeded?: () => void,
       onObservationSeed?: (phase: 'pending' | 'ready') => void,
       onSeedError?: (error: unknown) => void,
+      onExecution?: (projection: import('../shared/session-execution-projection.js').SessionExecutionProjection | undefined) => void,
     ): () => void;
     subscribeChanges(handler: (event: SessionChangedEvent) => void): () => void;
     archive(sessionId: string, options?: { revisionFamily?: boolean }): Promise<void>;
@@ -1360,6 +1365,8 @@ export interface MakaBridge {
     restore(projectId: string, host?: DesktopRuntimeHostRef): Promise<ProjectRecord>;
   };
   shellRuns: {
+    recover(sessionId: string): Promise<import('../shared/runtime-host-identity.js').TerminalRecovery>;
+    subscribeCloseChanges(handler: (change: import('../shared/runtime-host-identity.js').TerminalCloseChange) => void): () => void;
     list(sessionId: string): Promise<ShellRunUpdate[]>;
     attach(input: {
       sessionId: string;
@@ -1372,11 +1379,11 @@ export interface MakaBridge {
       ref: string;
       input?: string;
       size?: { cols: number; rows: number };
-    }): Promise<ShellRunUpdate | null>;
+    }): Promise<void>;
     stop(input: {
       sessionId: string;
       ref: string;
-    }): Promise<ShellRunUpdate | null>;
+    }): Promise<void>;
     subscribeUpdates(handler: (update: ShellRunUpdate) => void): () => void;
     subscribePtyData(handler: (event: ShellRunPtyDataEvent) => void): () => void;
     subscribeResync(handler: (event: { sessionId: string }) => void): () => void;
@@ -1800,6 +1807,21 @@ export interface MakaBridge {
       | { ok: false; reason: 'invalid-path' | 'not-found' }
     >;
     openArtifactPath(
+      sessionId: string,
+      artifactId: string,
+    ): Promise<
+      | { ok: true; opened: string }
+      | {
+          ok: false;
+          reason:
+            | 'unknown-key'
+            | 'not-allowed'
+            | 'missing'
+            | 'not-a-directory'
+            | 'open-failed';
+        }
+    >;
+    showArtifactInFolder(
       sessionId: string,
       artifactId: string,
     ): Promise<
