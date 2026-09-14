@@ -53,7 +53,9 @@ PluginExecutorService
 ```
 
 `@maka/acp-executor-plugin` owns the shared ACP protocol implementation. Its `acp-runtime` profile
-Entry provides `ctx.acp`; external-Agent Entries are mounted below it and call `ctx.acp.register(...)`.
+Entry provides `ctx.acp`; external-Agent Entries are mounted below it and call
+`ctx.acp.register(ctx, ...)`, explicitly preserving the consuming Entry identity across independently
+bundled Plugin generations.
 The service wraps every adapter as the generic executor contribution introduced by #5283, so it is
 not a second backend or routing authority.
 
@@ -87,15 +89,27 @@ custom storage fields, CLI transcript branches, model-picker forks, or visual-wo
 Those components either duplicate #5283 or solve UI/configuration concerns that should be added as a
 generic Plugin executor capability rather than an Antigravity branch.
 
-The installation and authentication surface already merged in #5164 remains in Runtime Host for
-now. It is live mainline behavior and is not part of PR #5224's conflicting execution architecture.
-A later migration can expose setup/authentication as a Plugin capability once the Plugin Platform has
-a corresponding client-facing contribution contract.
+The installation and authentication surface already merged in #5164 remains the producer of setup
+facts. `HostBuiltinExternalAgentPluginCoordinator` projects the saved executable into system-managed
+Plugin packages and a configured adapter Entry. The projection is content-addressed and idempotent:
+it installs the ACP runtime before the adapter, replaces only a changed package layer, restores the
+same state after Host restart, and removes the adapter before its runtime when the setting is cleared.
+Adapter code never reads RuntimePolicy.
 
-## Current limitation
+Both production `plugin.mjs` bundles are release dependencies of Runtime Host, so the same path is
+available to Desktop-owned and managed/remote Hosts. The installed ACP service uses an isolated
+Context label and an explicit consumer Context instead of relying on cross-bundle `Service`
+`instanceof` identity.
 
-The Plugin can be installed and selected through existing Plugin and Session operations. Current
-`main` does not provide a Desktop/default executor selector (#5283 explicitly introduced only the
-Host extension point and routing bridge), so this rebuild does not reintroduce the ACP-specific
-Composer state from #5224. A Desktop selector should consume generic `plugin.platform.query` executor
-inspection and create the Session with its `executorId`.
+## Remaining PR 2 work
+
+PR 2 remains one pull request, organized as four reviewable producer-to-consumer sets:
+
+1. Setup facts to active executor: implemented by the system-managed package projection above;
+   readiness projection still needs the bounded provider probe used by Desktop.
+2. Provider catalog to Desktop choice to first prompt: add a generic executor catalog/configuration
+   contract and integrate it into the existing model menu without creating preview Sessions.
+3. ACP updates/interactions to canonical conversation settlement: add generic Agent questions and
+   complete race, unsupported-input, and rendering coverage.
+4. Process continuity facts to task readiness: project history-only/process-loss into generic Session
+   and Desktop readiness and finish controlled official-provider acceptance.

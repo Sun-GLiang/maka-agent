@@ -26,3 +26,8 @@ into the generic executor contribution introduced by #5283.
 Installing this package creates the `acp-runtime` profile Entry. Keep adapter Entries below it so the
 service follows normal Plugin Context inheritance. The Host remains unaware of ACP and sees only
 `ctx.executors` registrations.
+
+Adapter packages register with `ctx.acp.register(ctx, adapter, config)`. Passing the adapter Entry's
+Context explicitly is part of the package ABI: production packages are separate self-contained
+bundles, and the shared runtime must register the executor against the consumer's scope rather than
+against its parent Entry.

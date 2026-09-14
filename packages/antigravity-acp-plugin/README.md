@@ -43,6 +43,10 @@ Build the repository, install this directory with `plugin.package.install`, then
 
 The parent Entry is contributed when the `acp-executor` dependency is installed.
 
+In production, Runtime Host ships both bundles and derives this Entry from the executable saved by
+the existing external-Agent setup flow. The derived package layer is content-addressed, restored on
+restart, and removed when the setting is cleared; the adapter itself never reads RuntimePolicy.
+
 Create a Session with `executorId: "antigravity-acp"`. The executable and its
 `localharness_external` helper remain adapter-owned. An optional `model` configuration is validated
 against the live ACP Session before the first prompt.

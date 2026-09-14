@@ -84,7 +84,7 @@ export function antigravityEnvironment(base: NodeJS.ProcessEnv, helper: string):
 const host = Object.freeze({
   inject: ['acp'] as const,
   apply(ctx: Context, config: AntigravityAcpConfig) {
-    ctx.acp.register(antigravityAcpAdapter, config);
+    ctx.acp.register(ctx, antigravityAcpAdapter, config);
   },
 });
 

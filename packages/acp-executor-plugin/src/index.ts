@@ -45,7 +45,7 @@ import type {
   PluginExecutorResult,
   PluginExecutorToolResultContent,
 } from '@maka/runtime/plugin-executor-service';
-import { Service, type Context, type Disposable } from '@maka/runtime/plugin-kernel';
+import type { Context, Disposable } from '@maka/runtime/plugin-kernel';
 import { terminateChildProcessTree } from '@maka/runtime/process-tree-terminator';
 
 declare module '@maka/runtime/plugin-kernel' {
@@ -520,18 +520,31 @@ export class AcpExecutor implements PluginExecutorProvider {
   }
 }
 
-export class AcpRuntimeService extends Service {
+/**
+ * Shared ACP registration surface.
+ *
+ * Installed Plugin packages are self-contained bundles, so this class must not
+ * rely on `instanceof Service` across package generations. The adapter passes
+ * its own Context explicitly; that preserves the child Entry identity used by
+ * PluginExecutorService even when the ACP runtime was loaded from another
+ * immutable package generation.
+ */
+export class AcpRuntimeService {
   constructor(ctx: Context) {
-    super(ctx, 'acp');
+    ctx.provide('acp', this);
   }
 
-  register<TConfig>(adapter: AcpAgentAdapter<TConfig>, config: TConfig): Disposable<Promise<void>> {
-    const storage = this.ctx.get<PluginStorageService>('storage');
+  register<TConfig>(
+    consumer: Context,
+    adapter: AcpAgentAdapter<TConfig>,
+    config: TConfig,
+  ): Disposable<Promise<void>> {
+    const storage = consumer.get<PluginStorageService>('storage');
     const provider = new AcpExecutor(adapter as AcpAgentAdapter, config, {
       ...(storage ? { state: pluginStateStore(storage, adapter.id) } : {}),
     });
-    this.ctx.effect(() => () => provider.dispose(), `acp.dispose(${JSON.stringify(adapter.id)})`);
-    return this.ctx.executors.register(provider);
+    consumer.effect(() => () => provider.dispose(), `acp.dispose(${JSON.stringify(adapter.id)})`);
+    return consumer.executors.register(provider);
   }
 }
 

@@ -20,3 +20,5 @@
   entry:
     id: acp-runtime
     packageId: acp-executor
+    isolate:
+      acp: true

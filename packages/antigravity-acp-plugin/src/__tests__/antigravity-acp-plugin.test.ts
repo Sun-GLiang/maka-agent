@@ -39,6 +39,7 @@ test('adapter registers through a parent ACP Runtime Entry', async () => {
   await loader.create('profile', {
     id: 'acp-runtime-entry',
     packageId: 'acp-executor',
+    isolate: { acp: true },
     children: [
       {
         id: 'antigravity-entry',
