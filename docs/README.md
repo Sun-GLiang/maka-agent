@@ -96,7 +96,7 @@ This page is the authority map for Maka documentation. Code and contract tests r
 
 ## Proposed contracts
 
-- [Revision-consistent, bounded Usage screen reads](./architecture/usage-screen-bounded-reads-draft.md) — design draft; Storage semantics and product scope are pending review.
+- [Revision-consistent Usage screen reads](./architecture/usage-screen-revision-consistency-draft.md) — design draft; Storage semantics are pending review.
 
 ## Historical material
 
