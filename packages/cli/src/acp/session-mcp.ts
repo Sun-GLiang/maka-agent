@@ -105,6 +105,7 @@ export class AcpSessionMcp {
   #availability: RuntimeHostConnectionAvailability | undefined;
   #prepared = false;
   #closed = false;
+  #authoritativelyRetired = false;
   #closeTask: Promise<void> | undefined;
 
   constructor(sessionId: string, config: McpConfigFile, connection: AcpMcpConnection) {
@@ -172,6 +173,7 @@ export class AcpSessionMcp {
   }
 
   #retire(): Promise<void> {
+    this.#authoritativelyRetired = true;
     return this.#close(false);
   }
 
@@ -183,7 +185,14 @@ export class AcpSessionMcp {
     const managerClose = this.#manager.close();
     this.#closeTask = (async () => {
       try {
-        await (unregister ? this.#publication.close() : this.#publication.retire());
+        try {
+          await (unregister ? this.#publication.close() : this.#publication.retire());
+        } catch (error) {
+          // Session retirement is authoritative. If it wins the race with a local
+          // unregister, the obsolete unregister may reject even though withdrawal
+          // has already completed on the Host.
+          if (!this.#authoritativelyRetired) throw error;
+        }
       } finally {
         await managerClose;
       }

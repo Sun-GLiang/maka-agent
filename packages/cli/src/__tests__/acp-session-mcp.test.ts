@@ -213,6 +213,44 @@ test('authoritative retirement of the current Session registration closes its MC
   assert.equal(host.listenerCount(), 0);
 });
 
+test('authoritative retirement makes an in-flight local close succeed', {
+  timeout: 20_000,
+}, async (t) => {
+  const root = await temporaryRoot();
+  const host = fakeHost();
+  const unregister = deferred<void>();
+  host.unregister = () => unregister.promise;
+  const mcp = new AcpSessionMcp(
+    sessionId,
+    createAcpMcpConfig({ cwd: root, mcpServers: [stdioServer(root, 'fixture')] }),
+    host.connection,
+  );
+  t.after(async () => {
+    unregister.resolve();
+    await mcp.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await mcp.prepare();
+  const provider = host.replacements[0]!.provider;
+  assert.ok(provider.currentRegistrationRetired);
+
+  const closing = mcp.close();
+  await waitFor(() => host.unregisters.length === 1, { timeoutMs: 5_000, pollMs: 10 });
+  const retiring = provider.currentRegistrationRetired();
+  unregister.reject(
+    new RuntimeHostOperationError(
+      'client.capability.unregister',
+      'invalid_request',
+      'Client Capability registration is not current',
+    ),
+  );
+
+  await Promise.all([closing, retiring]);
+  assert.deepEqual(host.unregisters, [{ sessionId }]);
+  assert.equal(host.listenerCount(), 0);
+  await assertFixtureExited(root, 'fixture');
+});
+
 test('one failed MCP discovery closes every prepared server without publishing a partial group', {
   timeout: 20_000,
 }, async (t) => {
@@ -453,6 +491,7 @@ function fakeHost() {
     }[],
     unregisters: [] as (number | ClientCapabilityRegistrationOptions | undefined)[],
     replace: async (): Promise<void> => undefined,
+    unregister: async (): Promise<void> => undefined,
     listenerCount: () => listeners.size,
     emit: (availability: RuntimeHostConnectionAvailability) => {
       for (const listener of listeners) listener(availability);
@@ -467,6 +506,7 @@ function fakeHost() {
     },
     unregisterClientCapabilities: async (options) => {
       host.unregisters.push(options);
+      await host.unregister();
       return { registrationId: 'registration', revision: host.replacements.length + 1 };
     },
     subscribeConnectionAvailability: (listener) => {
