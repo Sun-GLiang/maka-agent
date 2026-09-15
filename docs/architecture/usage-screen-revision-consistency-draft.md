@@ -134,6 +134,24 @@ The resolved range has fixed `from` and `to` values. `All` also receives a fixed
 upper bound for this screen. The query identity binds that range and the activity
 filters, so a cursor cannot be reused with a different query.
 
+### Author proposals for Storage review
+
+The consistency contract above is fixed by this design. The mechanisms below are
+author proposals for likun to accept, replace, or request evidence for; they are
+not decisions made on Storage's behalf.
+
+| Decision | Author proposal | Alternative | Confirmation requested from likun |
+| --- | --- | --- | --- |
+| Query boundary | Add screen and activity-page reads to the existing Usage stores facade, delegating the synchronous multi-query transaction to one internal module on the current SQLite handle | Implement the transaction directly in the facade | Confirm the placement reuses the existing lease and creates no competing root owner |
+| Repair boundary | Host explicitly asks the existing Usage writer to repair, waits for that transaction to finish, then calls the screen read | Expose an explicitly writable Storage operation that performs repair followed by the read | Confirm repair authority and failure handling remain with the current owner and no transaction spans both requests |
+| Revision | Start with one root-scoped durable Usage counter advanced explicitly in every relevant mutation transaction, combined with the existing pricing revision and Host-generation fence | Use narrowly scoped SQLite triggers or another mutation-sensitive Storage revision | Confirm complete writer coverage, rollback/no-op behavior, and old-token rejection after restore or replacement |
+| Cursor | Use `(timestamp, source, stableStorageIdentity)` with physical indexes matching its exact newest-first comparator | Use another globally unique stable ordering key supplied by Storage | Confirm uniqueness across canonical, legacy, and tool sources and validate the exact seek predicate |
+| Restore fencing | Include a durable database-incarnation identity in the opaque revision and also require the existing Host-generation match | Rotate an equivalent Storage lifecycle identity on restore/rebuild | Confirm a repeated numeric counter can never validate a token issued for an earlier database incarnation |
+
+These defaults deliberately avoid a new durable query cache, retained snapshot,
+or aggregate authority. Selecting an alternative must preserve the same public
+screen/page consistency behavior.
+
 ### Repair ordering
 
 The existing Usage repair authority remains unchanged. An initial request may
