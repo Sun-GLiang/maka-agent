@@ -24,6 +24,7 @@
 - Delivery scope: [Issue #4058](https://github.com/apache/maka/issues/4058).
 - Design constraints: [Storage and protocol rules](https://github.com/apache/maka/discussions/4876).
 - Source baseline inspected: `1ae4d5b89` on 2026-09-15.
+- Review follow-up: [screen capacity and filter transitions](https://github.com/apache/maka/pull/5023#issuecomment-5682698338).
 
 This document defines the consistency contract for Settings Usage. It does not
 set new performance targets, historical-size guarantees, admission budgets, or
@@ -63,11 +64,13 @@ This design includes:
 - Host-generation fencing across reconnect or Host replacement;
 - preservation of current accounting, pricing, coverage, activity-filter, and
   historical-retention semantics;
-- atomic Desktop installation and an explicit stale-screen state.
+- atomic Desktop installation and an explicit stale-screen state;
+- whole-request failure when the complete screen exceeds its wire limits;
+- whole-screen reload on activity-filter changes.
 
 This design does not include:
 
-- bounded-admission thresholds or new `limit_exceeded` product behavior;
+- scan/admission thresholds or a scan-budget `limit_exceeded` product state;
 - a guarantee that exact queries complete for arbitrary history sizes;
 - incremental aggregate or completeness projections;
 - new latency, memory, scan, sort, or availability targets;
@@ -75,7 +78,9 @@ This design does not include:
 - retention changes, retroactive repricing, exports, or coverage UI redesign.
 
 Existing protocol item and encoded-byte limits remain in force. They are wire
-safety constraints, not a new performance contract in this design.
+safety constraints, not a new performance contract in this design. The screen
+capacity failure below is in scope; it does not introduce a history-size or
+query-work admission budget.
 
 ## User-visible behavior
 
@@ -89,6 +94,49 @@ If the selected Host changes before the result is installed, Desktop discards
 the result and reloads from the new Host. An initial revision race may retry the
 whole load a finite number of times. It may not degrade into independently
 accepted fragments.
+
+### Screen capacity failure
+
+The initial Host operation returns either one complete screen or a typed
+`screen_response_too_large` failure without screen fields or continuation tokens.
+The wire boundaries are defined below. No summary, breakdown, or pricing entries
+may be omitted to turn an oversized screen into a successful response. Activity
+remains an explicitly paginated list with `hasMore` and a continuation cursor.
+
+On first load, Desktop shows a load error instead of empty or zero-valued Usage.
+If a screen from the same Host is already visible, Desktop retains that complete
+result, labels it as the previous result, displays the failed-load error, and
+disables continuation until a new screen is successfully installed. Its range
+and filters remain attached to the retained result; pending controls must not
+mislabel old rows as matching a new selection. Host replacement still discards
+the old Host's result and tokens.
+
+Capacity failure is not `revision_changed` and does not enter the automatic
+revision-race or reconnect retry path. A user may explicitly retry, but the same
+oversized result deterministically fails again. A smaller range or activity
+filter is not guaranteed to help: pricing is not reduced by activity filtering,
+and the complete range-wide breakdowns remain required. This design accepts
+that some screens cannot be displayed within the wire limits. Supporting them
+through same-revision segmented reads would require a separate scope decision.
+
+### Activity-filter changes
+
+Changing activity filters starts `readUsageScreen(currentResolvedRange,
+newActivityFilters)`. Reuse the current fixed `from` and `to`, including the fixed
+upper bound for `All`; editing a search does not advance the time window.
+The new read obtains its transaction's revision and the query identity for the
+new filters; the revision can equal the previous screen's if nothing changed.
+On success, Desktop atomically replaces statistics, breakdowns, pricing/coverage,
+and activity page one, resetting navigation. Filters affect only activity;
+headline statistics and breakdowns still cover the entire selected range.
+
+Do not fetch only a new activity page and preserve old statistics. There is no
+operation for starting a different activity query against an old revision.
+While loading, a retained screen stays associated with its original range and
+filters and cannot continue paging. Failure leaves it visibly identified as the
+previous result. Refresh retries the requested range/filter selection as a whole.
+Every filter change supersedes earlier screen and continuation requests, even
+when the old and new responses happen to carry the same Storage revision.
 
 ### Activity continuation
 
@@ -134,6 +182,42 @@ The resolved range has fixed `from` and `to` values. `All` also receives a fixed
 upper bound for this screen. The query identity binds that range and the activity
 filters, so a cursor cannot be reused with a different query.
 
+### Host screen wire boundary
+
+Storage returns the transactional screen; Host owns projection, wire validation,
+and the typed capacity outcome. The proposed screen protocol explicitly adopts
+these limits; the old pricing-page limits alone do not define a screen response:
+
+| Boundary | Maximum | Completeness on success |
+| --- | --- | --- |
+| Each provider/model/tool breakdown | 100 entries and 48 KiB of encoded JSON for that array | All groups for the selected range |
+| Pricing | 128 entries and 48 KiB of encoded JSON for that array | All entries required by the existing screen pricing semantics |
+| Activity page | 100 rows and 48 KiB for the encoded page, including cursor metadata | One page, with explicit continuation when more rows exist |
+| Entire screen result | 640 KiB of encoded JSON, including revision, query identity, summary, provenance, all collections, and navigation metadata | One complete screen |
+| Entire Host message | Existing `RUNTIME_HOST_MAX_MESSAGE_BYTES` (768 KiB on the inspected baseline) | Includes the protocol envelope |
+
+The collection counts reuse the existing Usage/pricing page counts as explicit
+screen-section limits, not as assumptions about the maximum stored collection.
+The 640 KiB result limit leaves room for the envelope; it does not replace the
+final encoded-message check. UTF-8 bytes after JSON escaping are counted, not
+string length. Existing field bounds and accounting semantics still apply.
+These are wire capacities, not bounds on SQLite scan, sort, or aggregation work.
+
+If any complete section, the screen result, or its enclosing message cannot fit,
+Host returns `screen_response_too_large`. It must detect capacity failure before
+submitting an oversized success frame to transport, preserving the connection.
+The bounded error contains only a fixed failure code and a bounded section enum
+(`provider_breakdown`, `model_breakdown`, `tool_breakdown`, `pricing`,
+`activity_page`, `screen`, or `message`); it carries no partial data or diagnostic
+copy of the payload. If activity has remaining rows, page sizing must either
+return a nonempty fitting page with a cursor or fail, never silently end the list.
+
+The new operation's strict codec validates these boundaries. Reuse encoded bytes
+or trusted lengths for the same value/version/boundary where available, rather
+than repeatedly serializing collections. Independently valid sections must still
+pass the total result and message limits. No breakdown/pricing drain loop,
+per-reader Host cache, or segmented screen assembly is introduced.
+
 ### Author proposals for Storage review
 
 The consistency contract above is fixed by this design. The mechanisms below are
@@ -151,6 +235,12 @@ not decisions made on Storage's behalf.
 These defaults deliberately avoid a new durable query cache, retained snapshot,
 or aggregate authority. Selecting an alternative must preserve the same public
 screen/page consistency behavior.
+
+The review supports these directions but does not approve a concrete Storage
+implementation. Before implementation, record the chosen mechanisms and a writer
+coverage table mapping each invalidating mutation below to its actual writer,
+transactional revision update, and rollback/restore test. Fine-grained revisions
+and a new aggregate authority are not prerequisites for this design.
 
 ### Repair ordering
 
@@ -210,10 +300,10 @@ contract tests.
 
 Existing activity filters retain their current meaning. Model/provider/tool
 substring search and status filtering apply to the selected range before page
-selection, not merely to the visible rows. Changing filters starts activity
-navigation again and uses a query identity for the new filter values. Headline
-statistics and breakdowns continue to describe the selected range, as they do
-on the baseline.
+selection, not merely to the visible rows. Changing filters follows the
+whole-screen reload above and uses a query identity for the new filter values.
+Headline statistics and breakdowns continue to describe the selected range, as
+they do on the baseline.
 
 Moving activity filtering into Storage is required because Desktop no longer
 owns the complete activity array. This document does not add a new search index,
@@ -243,16 +333,20 @@ Storage owns the transaction, revision comparison, accounting composition, and
 cursor predicates. Host validates and projects the result but retains no dataset
 between requests.
 
-Runtime Host's Usage protocol gains an initial-screen result plus a
-revision-checked continuation result. Desktop's existing `usage:summary` IPC
-entry point returns the complete initial screen. The compatibility epoch rises
+Runtime Host's Usage protocol gains an initial-screen result, a typed
+`screen_response_too_large` failure, and a revision-checked continuation result.
+Desktop's existing `usage:summary` IPC entry point returns the complete initial
+screen or propagates the typed capacity failure. The compatibility epoch rises
 above main when this wire change is implemented.
 
 Desktop owns presentation and request supersession:
 
 - a newer range, filter, Refresh, or Host generation invalidates older replies;
+- request supersession and query identity are checked even at equal revisions;
+- filter changes read and replace the whole screen using the fixed range;
 - a complete initial result replaces the previous screen atomically;
-- continuation appends only a page carrying the current screen revision;
+- continuation appends only a page for the current request/query and revision;
+- capacity failure installs no fragments and follows the failed-load UI above;
 - `revision_changed` preserves the visible result, marks it stale, and stops
   continuation until Refresh;
 - no background loop drains activity pages or rebuilds breakdowns from them.
@@ -276,6 +370,23 @@ Protocol and Desktop tests cover malformed or mismatched tokens, Host
 replacement, delayed replies, rapid range/filter changes, finite initial retry,
 atomic screen replacement, stale-screen presentation, and rejection of a page
 from another revision. Compatibility tests cover the epoch change.
+
+In particular, implementation acceptance includes:
+
+- item-count and encoded-byte boundaries at the limit and one above it for each
+  complete collection, the result, and the message; include multibyte and escaped
+  text, envelope overhead, and individually valid sections whose total exceeds
+  the screen limit;
+- oversized screen failure carries no partial data or tokens, remains a valid
+  bounded error frame, and does not disconnect or automatically retry;
+- initial-load, Refresh, and filter-load capacity failures display the specified
+  error and retain only correctly labelled previous results when applicable;
+- display revision A, commit B, then change filters: install the complete B
+  screen or fail as a unit, never A statistics beside B activity;
+- rapid filter changes at the same revision reject older replies and old
+  continuation pages; changing filters preserves fixed time bounds, resets
+  pagination only on successful installation, and leaves headline/breakdown
+  accounting unfiltered.
 
 This design makes no performance claim. Performance benchmarks, admission
 limits, and arbitrary-history availability are not acceptance criteria for
