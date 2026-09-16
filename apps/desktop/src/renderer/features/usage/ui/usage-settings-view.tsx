@@ -154,9 +154,23 @@ export function UsageSettingsView(props: {
 
   return (
     <>
-      {state !== 'ready' ? <Banner status={state === 'loading' ? 'info' : 'warning'} role="status"
-        title={state === 'loading' ? copy.refreshingAria : state === 'stale' ? copy.staleTitle : copy.loadFailed}
-        description={state === 'stale' ? copy.staleBody : error?.includes('screen_response_too_large') ? copy.capacityBody : error ?? undefined} /> : null}
+      {state === 'stale' || state === 'error' ? (
+        <Banner
+          status={state === 'stale' ? 'info' : 'warning'}
+          role="status"
+          title={state === 'stale' ? copy.staleTitle : copy.loadFailed}
+          description={state === 'stale' ? copy.staleBody : error?.includes('screen_response_too_large') ? copy.capacityBody : error ?? undefined}
+          endContent={state === 'stale' ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              label={copy.refreshAria}
+              isLoading={refreshing}
+              onClick={() => void refresh()}
+            />
+          ) : undefined}
+        />
+      ) : null}
       {stats && state !== 'ready' ? <p role="status">{copy.previousResult}: {displayedRange}
         {stats.navigation ? ` · ${new Date(stats.navigation.query.range.from).toLocaleString(uiLocaleToIntlLocale(locale))} – ${new Date(stats.navigation.query.range.to).toLocaleString(uiLocaleToIntlLocale(locale))} · ${stats.navigation.query.search || '—'} · ${copy.statuses[['all', 'success', 'error', 'aborted'].indexOf(stats.navigation.query.status)]}` : ''}
       </p> : null}
@@ -183,7 +197,7 @@ export function UsageSettingsView(props: {
             variant="ghost"
             size="sm"
             isIconOnly
-            isLoading={refreshing}
+            isLoading={refreshing || state === 'loading'}
             label={copy.refreshAria}
             tooltip={copy.refreshAria}
             onClick={() => void refresh()}
