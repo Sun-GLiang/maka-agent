@@ -25,7 +25,7 @@ import {
   Tab,
   TabList,
   Tooltip,
-  useTablePagination,
+  Pagination,
 } from '@astryxdesign/core';
 import { uiLocaleToIntlLocale } from '@maka/core/ui-locale';
 import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
@@ -38,7 +38,7 @@ import {
   type UsageSettingsCopy,
 } from '../../../locales/settings-usage-copy.js';
 import { MetricCard } from './metric-card.js';
-import { UsageStatsTable, type UsageTableRow } from './usage-stats-table.js';
+import { UsageStatsTable } from './usage-stats-table.js';
 import { useActionGuard } from '../controller/action-guard.js';
 import { useOptimisticSettingsDraft } from '../controller/optimistic-settings-draft.js';
 import { useUsageServices, useUsageStats } from '../services-context.js';
@@ -111,7 +111,7 @@ export function UsageSettingsView(props: {
   }, [stats, usageDraft.status, normalizedModelFilter]);
 
   const tabCounts: Record<UsageActiveTab, number> = {
-    requests: stats?.logs.length ?? 0,
+    requests: stats?.navigation?.activityTotal ?? stats?.logs.length ?? 0,
     providers: stats?.byProvider.length ?? 0,
     models: stats?.byModel.length ?? 0,
     tools: stats?.byTool.length ?? 0,
@@ -234,13 +234,14 @@ export function UsageSettingsView(props: {
             <UsageRequestsPanel
               screenVersion={screenVersion}
               hasNextPage={Boolean(stats?.navigation?.nextCursor)}
+              totalRecords={stats?.navigation?.activityTotal ?? filteredLogs.length}
               canLoadNextPage={state === 'ready' && !paging}
               onLoadNextPage={loadMore}
               logs={showRequestDetails ? filteredLogs : EMPTY_USAGE_LOGS}
               showDetails={usageDraft.showDetails}
               modelFilter={usageDraft.modelFilter}
               status={usageDraft.status}
-              recordCount={filteredLogs.length}
+              recordCount={stats?.navigation?.activityTotal ?? filteredLogs.length}
               hasRequestFilters={hasRequestFilters}
               requestEmpty={hasRequestFilters ? copy.filteredEmpty : copy.requestEmpty}
               copy={copy}
@@ -289,8 +290,9 @@ export function UsageSettingsView(props: {
 function UsageRequestsPanel(props: {
   screenVersion: number;
   hasNextPage: boolean;
+  totalRecords: number;
   canLoadNextPage: boolean;
-  onLoadNextPage(): Promise<boolean>;
+  onLoadNextPage(minimumRecords: number): Promise<boolean>;
   logs: UsageStats['logs'];
   showDetails: boolean;
   modelFilter: string;
@@ -314,27 +316,22 @@ function UsageRequestsPanel(props: {
     navigationRequest.current += 1;
     setPage(1);
   }, [props.screenVersion]);
-  const pageCount = Math.max(1, Math.ceil(props.logs.length / USAGE_REQUESTS_PAGE_SIZE));
+  const pageCount = Math.max(1, Math.ceil(props.totalRecords / USAGE_REQUESTS_PAGE_SIZE));
+  const loadedPageCount = Math.ceil(props.logs.length / USAGE_REQUESTS_PAGE_SIZE);
   const currentPage = Math.min(page, pageCount);
-  const pagination = useTablePagination<UsageTableRow>({
-    page: currentPage,
-    onPageChange: async (nextPage) => {
-      const request = ++navigationRequest.current;
-      if (nextPage <= pageCount) {
+  async function changePage(nextPage: number) {
+    if (props.hasNextPage && !props.canLoadNextPage) return;
+    const request = ++navigationRequest.current;
+    if (nextPage <= loadedPageCount) {
+      setPage(nextPage);
+    } else if (props.hasNextPage) {
+      const loaded = await props.onLoadNextPage(nextPage * USAGE_REQUESTS_PAGE_SIZE);
+      if (loaded && mountedRef.current && request === navigationRequest.current) {
         setPage(nextPage);
-      } else if (props.hasNextPage && props.canLoadNextPage) {
-        const loaded = await props.onLoadNextPage();
-        if (loaded && mountedRef.current && request === navigationRequest.current) {
-          setPage(nextPage);
-        }
       }
-    },
-    ...(props.hasNextPage
-      ? { hasMore: currentPage < pageCount || props.canLoadNextPage }
-      : { totalItems: props.logs.length }),
-    pageSize: USAGE_REQUESTS_PAGE_SIZE,
-    size: 'sm',
-  });
+    }
+  }
+
 
 
   if (!props.showDetails) {
@@ -401,8 +398,19 @@ function UsageRequestsPanel(props: {
       <UsageStatsTable
         ariaLabel={props.copy.tables.requestsAria}
         rowIndexStart={(currentPage - 1) * USAGE_REQUESTS_PAGE_SIZE + 1}
-        rowCount={props.logs.length}
-        plugins={{ pagination }}
+        rowCount={props.totalRecords}
+        footer={pageCount > 1 ? (
+          <div style={{display: 'flex', justifyContent: 'center', marginTop: 'var(--spacing-2)'}}>
+            <Pagination
+              page={currentPage}
+              onChange={(nextPage) => void changePage(nextPage)}
+              totalItems={props.totalRecords}
+              pageSize={USAGE_REQUESTS_PAGE_SIZE}
+              size="sm"
+              isDisabled={props.hasNextPage && !props.canLoadNextPage}
+            />
+          </div>
+        ) : undefined}
         columns={[
           { header: props.copy.tables.requestHeaders[0], width: 168 },
           { header: props.copy.tables.requestHeaders[1], width: 72 },

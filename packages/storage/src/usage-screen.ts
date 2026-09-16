@@ -173,6 +173,7 @@ export function createUsageScreenReader(root: string) {
           revision,
           queryIdentity,
           query: input.query,
+          activityTotal: activityCount(db, input.query),
           summary: {
             totalRequests: n(aggregate.totalRequests),
             totalCostUsd: n(aggregate.totalCostUsd),
@@ -239,7 +240,7 @@ function validateQuery(query: UsageScreenQuery): void {
   }
 }
 
-function activity(db: DatabaseSync, query: UsageScreenQuery, cursor?: string) {
+function activityPredicate(query: UsageScreenQuery) {
   const range = [query.range.from, query.range.to];
   const args: (string | number)[] = [...range, ...range, ...range];
   const filters: string[] = [];
@@ -254,6 +255,21 @@ function activity(db: DatabaseSync, query: UsageScreenQuery, cursor?: string) {
     );
     args.push(query.search.toLowerCase(), query.search.toLowerCase(), query.search.toLowerCase());
   }
+  return { args, filters };
+}
+
+function activityCount(db: DatabaseSync, query: UsageScreenQuery): number {
+  const { args, filters } = activityPredicate(query);
+  return n(
+    db
+      .prepare(`WITH rows AS (${MODEL_ROWS} UNION ALL ${TOOL_ROWS})
+    SELECT COUNT(*) AS count FROM rows ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}`)
+      .get(...args)?.count,
+  );
+}
+
+function activity(db: DatabaseSync, query: UsageScreenQuery, cursor?: string) {
+  const { args, filters } = activityPredicate(query);
   if (cursor) {
     let value: unknown;
     try {

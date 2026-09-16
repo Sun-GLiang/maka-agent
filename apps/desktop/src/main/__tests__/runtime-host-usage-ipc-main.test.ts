@@ -29,6 +29,7 @@ import { registerRuntimeHostUsageIpc } from '../runtime-host-usage-ipc-main.js';
 const query: UsageScreenQuery = { range: { from: 0, to: 100 }, search: '', status: 'all' };
 function screen(): UsageScreen {
   return {
+    activityTotal: 151,
     revision: 'revision',
     queryIdentity: 'query',
     query,

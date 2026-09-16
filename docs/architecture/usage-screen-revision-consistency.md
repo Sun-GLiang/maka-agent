@@ -37,7 +37,9 @@ SQL combines canonical and frozen legacy accounting, groups providers by
 connection (falling back to provider), groups models by model identity, and
 aggregates tools separately. Activity search/status predicates apply before the
 page limit, including Unicode lowercase substring matching. They never filter
-headline statistics or breakdowns. The three source indexes support timestamp
+headline statistics or breakdowns. A filtered activity count is read in the same
+transaction as the initial screen, so numbered pagination knows its exact total
+from the first page. The three source indexes support timestamp
 and stable storage identity ordering; the cross-source comparator is
 `(timestamp DESC, source DESC, stableStorageIdentity DESC)`. Display IDs may repeat.
 Cursors bind that tuple and the fixed query identity. The tuple must identify a
@@ -101,9 +103,11 @@ Desktop's existing Settings `settings:usageStats` IPC now returns the complete
 screen; `usage:activity` requests a single continuation. The Session Inspector's
 separate `usage:summary` API keeps its existing contract. No activity drain loop
 or activity-derived breakdown remains in the Settings adapter. The existing table
-pagination requests continuation on Next and revisits loaded pages locally; there
-is no separate Load more control. Failed or superseded reads do not advance the
-visible page.
+pagination shows numbered pages from the initial response. Selecting an unloaded
+page follows the existing keyset continuations up to that page, then installs
+the matching-revision records together; already loaded pages are local. There
+is no separate Load more control or unknown-total pagination mode. Failed or
+superseded reads do not advance the visible page.
 
 Range/filter/Refresh requests supersede both screen and page replies, even when
 revisions are equal. Filter edits preserve the resolved time bounds (including

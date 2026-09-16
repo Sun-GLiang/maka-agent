@@ -167,8 +167,8 @@ async function loadUsageStats(
   }});
   if (result.kind === "screen_response_too_large") return result;
   if (result.kind !== "screen") throw invalidUsageProjection();
-  const {revision, queryIdentity, query: resolvedQuery, nextCursor, ...stats} = result.screen;
-  return {...stats, navigation: {revision, queryIdentity, query: resolvedQuery, nextCursor}};
+  const {revision, queryIdentity, query: resolvedQuery, nextCursor, activityTotal, ...stats} = result.screen;
+  return {...stats, navigation: {revision, queryIdentity, query: resolvedQuery, nextCursor, activityTotal}};
 }
 
 async function loadAllBuckets(

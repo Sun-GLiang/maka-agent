@@ -915,6 +915,7 @@ describe('revision-consistent Usage screen', () => {
       }
       const screen = await initialScreen(stores);
       assert.equal(screen.logs.length, 50);
+      assert.equal(screen.activityTotal, 64);
       const result = await stores.readUsageScreen(continuation(screen));
       assert.ok(result.kind === 'activity');
       assert.equal(result.page.logs.length, 14);
@@ -953,6 +954,7 @@ describe('revision-consistent Usage screen', () => {
       assert.ok(result.kind === 'screen');
       assert.equal(result.screen.summary.totalRequests, 62);
       assert.equal(result.screen.logs.length, 1);
+      assert.equal(result.screen.activityTotal, 1);
       assert.equal(result.screen.logs[0]?.id, 'old-match');
       assert.equal(result.screen.byModel.length, 2);
       assert.deepEqual(

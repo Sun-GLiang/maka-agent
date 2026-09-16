@@ -635,6 +635,7 @@ export interface UsageSummary {
 
 export interface UsageStats {
   navigation?: {
+    activityTotal: number;
     revision: string;
     queryIdentity: string;
     query: UsageScreenQuery;
@@ -697,6 +698,7 @@ export interface UsageActivityPage {
 }
 
 export interface UsageScreen extends UsageStats, UsageActivityPage {
+  activityTotal: number;
   query: UsageScreenQuery;
 }
 

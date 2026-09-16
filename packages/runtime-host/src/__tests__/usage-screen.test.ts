@@ -49,6 +49,7 @@ import type { ConnectionContext } from '../server/operation-dispatcher.js';
 const query: UsageScreenQuery = { range: { from: 0, to: 1000 }, search: '', status: 'all' };
 function screen(): UsageScreen {
   return {
+    activityTotal: 151,
     revision: 'r',
     queryIdentity: 'q',
     query,
@@ -96,6 +97,7 @@ test('strict screen codecs reject malformed requests, unknown fields, wrong-quer
     assert.throws(() => decodeUsageScreenRequest(input));
   for (const result of [
     { kind: 'screen', screen: { ...screen(), extra: true } },
+    { kind: 'screen', screen: { ...screen(), activityTotal: -1 } },
     { kind: 'screen', screen: { ...screen(), logs: [{ ...row(), status: 'failed' }] } },
     { kind: 'activity', page: { revision: 'r', queryIdentity: 'q', logs: [], nextCursor: 'next' } },
     { kind: 'revision_changed', logs: [row()] },

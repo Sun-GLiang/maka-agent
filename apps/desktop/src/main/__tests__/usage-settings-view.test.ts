@@ -553,7 +553,7 @@ describe('Usage feature scope', () => {
 });
 
 function navigable(total: number, query: UsageScreenQuery, identity: string): UsageStats {
-  return {...statsWithRequests(total), navigation: {query, revision: 'same-revision', queryIdentity: identity, nextCursor: 'next'}};
+  return {...statsWithRequests(total), navigation: {activityTotal: total, query, revision: 'same-revision', queryIdentity: identity, nextCursor: 'next'}};
 }
 function scopeTree(services: UsageServices, probe: () => ReactNode, targetKey = 'hostA:1'): ReactNode {
   return createElement(ToastProvider, {children: createElement(UsageFeatureScope, {
@@ -642,7 +642,7 @@ it('capacity failure never retries and retains the original query until a comple
   await act(async () => root.unmount());
 });
 
-it('the existing next-page control fetches activity and cached previous pages need no request', async () => {
+it('numbered pages are present initially and jumping to the last page keeps the same controls', async () => {
   const {container, root} = setupDom();
   const settings = mergeSettings(createDefaultSettings(), {
     usage: {range: 'all', activeTab: 'requests', showDetails: true},
@@ -654,9 +654,14 @@ it('the existing next-page control fetches activity and cached previous pages ne
   const services: UsageServices = {
     loadUsageStats: async (_range, query) => {
       assert.ok(query);
-      return {...navigable(51, query, 'query'), logs: Array.from({length: 50}, (_, i) => row(`first-${i}`))};
+      return {...navigable(101, query, 'query'), logs: Array.from({length: 50}, (_, i) => row(`first-${i}`))};
     },
-    loadUsageActivity: async () => {calls++; return continuation.promise;},
+    loadUsageActivity: async () => {
+      calls++;
+      return calls === 1 ? continuation.promise : {kind: 'activity', page: {
+        revision: 'same-revision', queryIdentity: 'query', nextCursor: null, logs: [row('last-page')],
+      }};
+    },
     updateUsageSettings: async () => settings.usage,
   };
   const button = (label: string) => {
@@ -666,22 +671,29 @@ it('the existing next-page control fetches activity and cached previous pages ne
   };
   await act(async () => {root.render(tree({active: true, settings, targetKey: 'host', services})); await flush();});
   assert.doesNotMatch(container.textContent ?? '', /Load more activity/);
-  await act(async () => {button('Go to next page').click(); await flush();});
+  assert.ok(button('Go to page 1'));
+  assert.ok(button('Go to page 2'));
+  assert.ok(button('Go to page 3'));
+  await act(async () => {button('Go to page 3').click(); await flush();});
   assert.equal(calls, 1);
   assert.equal(button('Go to next page').disabled, true);
   assert.match(container.textContent ?? '', /first-0/);
   await act(async () => {
     continuation.resolve({kind: 'activity', page: {revision: 'same-revision', queryIdentity: 'query',
-      nextCursor: null, logs: [row('second-page')]}});
+      nextCursor: 'last', logs: Array.from({length: 50}, (_, i) => row(`middle-${i}`))}});
     await flush();
   });
-  assert.match(container.textContent ?? '', /second-page/);
+  assert.match(container.textContent ?? '', /last-page/);
   assert.doesNotMatch(container.textContent ?? '', /first-0/);
   assert.equal(button('Go to next page').disabled, true);
+  assert.equal(calls, 2);
+  assert.ok(button('Go to page 1'));
+  assert.ok(button('Go to page 2'));
+  assert.ok(button('Go to page 3'));
   await act(async () => {button('Go to previous page').click(); await flush();});
-  assert.match(container.textContent ?? '', /first-0/);
+  assert.match(container.textContent ?? '', /middle-0/);
   await act(async () => {button('Go to next page').click(); await flush();});
-  assert.match(container.textContent ?? '', /second-page/);
-  assert.equal(calls, 1, 'returning to a cached page does not fetch again');
+  assert.match(container.textContent ?? '', /last-page/);
+  assert.equal(calls, 2, 'returning to a cached page does not fetch again');
   await act(async () => root.unmount());
 });

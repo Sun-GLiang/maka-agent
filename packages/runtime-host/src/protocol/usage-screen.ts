@@ -199,7 +199,16 @@ export function decodeUsageScreenResult(value: unknown): UsageScreenResult {
     'logs',
     'nextCursor',
     ...(isScreen
-      ? ['query', 'summary', 'byProvider', 'byModel', 'byTool', 'pricing', 'provenance']
+      ? [
+          'query',
+          'activityTotal',
+          'summary',
+          'byProvider',
+          'byModel',
+          'byTool',
+          'pricing',
+          'provenance',
+        ]
       : []),
   ]);
   token(p.revision);
@@ -250,6 +259,7 @@ export function decodeUsageScreenResult(value: unknown): UsageScreenResult {
   }
   if (isScreen) {
     query(p.query);
+    requireCount(p.activityTotal, 'Usage activity total');
     const summary = requireExactRecord(p.summary, 'Usage summary', [
       'totalRequests',
       'totalCostUsd',

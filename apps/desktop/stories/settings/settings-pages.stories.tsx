@@ -1700,7 +1700,7 @@ function withUsageConsistencyBridge(outcome: 'stale' | 'capacity' | 'page' = 'st
           logs: usageLogs.slice(50), nextCursor: null}}
         : {kind: 'revision_changed'};
       if (outcome === 'capacity' && query?.search) return {kind: 'screen_response_too_large', section: 'pricing'};
-      return {...usageStats, logs: usageLogs.slice(0, 50), navigation: {revision: 'revision-A', queryIdentity: 'query-A', nextCursor: 'next-page',
+      return {...usageStats, logs: usageLogs.slice(0, 50), navigation: {activityTotal: usageLogs.length, revision: 'revision-A', queryIdentity: 'query-A', nextCursor: 'next-page',
         query: query ?? {range: {from: 0, to: Date.now()}, search: '', status: 'all'}}};
     },
   }} satisfies Record<string, unknown>);
@@ -2609,7 +2609,9 @@ export const UsagePagedActivity: Story = {
     await waitForStoryCondition(() => canvas.queryByRole('table', {name: copy.tables.requestsAria}) !== null || canvas.queryByRole('button', {name: copy.showDetails}) !== null, 'Usage details were not available');
     const details = canvas.queryByRole('button', {name: copy.showDetails});
     if (details) await userEvent.click(details);
-    await userEvent.click(await canvas.findByRole('button', {name: /next page|下一页|下一頁/i}));
+    const pageTwo = canvas.getAllByRole('button').find(button => button.textContent?.trim() === '2');
+    await expect(pageTwo).toBeDefined();
+    await userEvent.click(pageTwo!);
     await expect(await canvas.findByText(USAGE_PAGINATION_SENTINEL)).toBeVisible();
     await expect(await canvas.findByRole('button', {name: /next page|下一页|下一頁/i})).toBeDisabled();
   },

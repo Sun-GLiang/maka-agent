@@ -50,7 +50,7 @@ interface UsageScopeValue {
   readonly error: string | null;
   readonly paging: boolean;
   reload(range: UsageRange, filters?: Filters, preserveRange?: boolean): Promise<void>;
-  loadMore(): Promise<boolean>;
+  loadMore(minimumRecords?: number): Promise<boolean>;
 }
 const UsageScopeContext = createContext<UsageScopeValue | null>(null);
 
@@ -136,70 +136,79 @@ export const UsageFeatureScope = forwardRef<
     [services, loadErrorTitle, describeError, toast, mountedRef],
   );
 
-  const loadMore = useCallback(async () => {
-    const current = snapshot?.value;
-    const navigation = current?.navigation;
-    if (
-      !snapshot ||
-      !current ||
-      blockedRef.current ||
-      pagingRef.current ||
-      !navigation?.nextCursor ||
-      !services.loadUsageActivity
-    )
-      return false;
-    const ticket = ticketRef.current;
-    pagingRef.current = true;
-    setPaging(true);
-    try {
-      const result = await services.loadUsageActivity({
-        kind: 'activity',
-        query: navigation.query,
-        revision: navigation.revision,
-        queryIdentity: navigation.queryIdentity,
-        cursor: navigation.nextCursor,
-      });
-      if (!mountedRef.current || ticket !== ticketRef.current) return false;
-      if (result.kind === 'revision_changed') {
-        blockedRef.current = true;
-        setState('stale');
+  const loadMore = useCallback(
+    async (minimumRecords = 0) => {
+      const current = snapshot?.value;
+      const navigation = current?.navigation;
+      if (
+        !snapshot ||
+        !current ||
+        blockedRef.current ||
+        pagingRef.current ||
+        !navigation?.nextCursor ||
+        !services.loadUsageActivity
+      )
         return false;
-      }
-      if (result.kind === 'screen_response_too_large') {
+      const ticket = ticketRef.current;
+      pagingRef.current = true;
+      setPaging(true);
+      try {
+        const logs = [...current.logs];
+        let nextCursor: string | null = navigation.nextCursor;
+        do {
+          const result = await services.loadUsageActivity({
+            kind: 'activity',
+            query: navigation.query,
+            revision: navigation.revision,
+            queryIdentity: navigation.queryIdentity,
+            cursor: nextCursor,
+          });
+          if (!mountedRef.current || ticket !== ticketRef.current) return false;
+          if (result.kind === 'revision_changed') {
+            blockedRef.current = true;
+            setState('stale');
+            return false;
+          }
+          if (result.kind === 'screen_response_too_large') {
+            blockedRef.current = true;
+            setState('error');
+            setError(result.kind);
+            return false;
+          }
+          if (
+            result.kind !== 'activity' ||
+            result.page.revision !== navigation.revision ||
+            result.page.queryIdentity !== navigation.queryIdentity ||
+            result.page.nextCursor === nextCursor
+          )
+            throw new Error('Invalid Usage continuation');
+          logs.push(...result.page.logs);
+          nextCursor = result.page.nextCursor;
+        } while (nextCursor && logs.length < minimumRecords);
+        setSnapshot({
+          ...snapshot,
+          value: {
+            ...current,
+            logs,
+            navigation: { ...navigation, nextCursor },
+          },
+        });
+        return true;
+      } catch (error) {
+        if (!mountedRef.current || ticket !== ticketRef.current) return false;
         blockedRef.current = true;
         setState('error');
-        setError(result.kind);
+        setError(describeError(error));
         return false;
+      } finally {
+        if (mountedRef.current && ticket === ticketRef.current) {
+          pagingRef.current = false;
+          setPaging(false);
+        }
       }
-      if (
-        result.kind !== 'activity' ||
-        result.page.revision !== navigation.revision ||
-        result.page.queryIdentity !== navigation.queryIdentity ||
-        result.page.nextCursor === navigation.nextCursor
-      )
-        throw new Error('Invalid Usage continuation');
-      setSnapshot({
-        ...snapshot,
-        value: {
-          ...current,
-          logs: [...current.logs, ...result.page.logs],
-          navigation: { ...navigation, nextCursor: result.page.nextCursor },
-        },
-      });
-      return true;
-    } catch (error) {
-      if (!mountedRef.current || ticket !== ticketRef.current) return false;
-      blockedRef.current = true;
-      setState('error');
-      setError(describeError(error));
-      return false;
-    } finally {
-      if (mountedRef.current && ticket === ticketRef.current) {
-        pagingRef.current = false;
-        setPaging(false);
-      }
-    }
-  }, [snapshot, services, mountedRef, describeError]);
+    },
+    [snapshot, services, mountedRef, describeError],
+  );
 
   useImperativeHandle(ref, () => ({ fenceTarget: clear }));
   const value = useMemo<UsageScopeValue>(
