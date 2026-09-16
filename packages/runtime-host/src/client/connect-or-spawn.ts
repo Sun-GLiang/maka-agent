@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto';
 import {
   prepareStorageRootControlDirectory,
   resolveStorageRoot,
+  StorageRootAuthorityError,
 } from '@maka/storage/root-authority';
 import { readStateRootCompositionBinding } from '@maka/storage/state-root-composition';
 import { performance } from 'node:perf_hooks';
@@ -76,6 +77,7 @@ const DEFAULT_BACKOFF_MIN_MS = 20;
 const DEFAULT_BACKOFF_MAX_MS = 250;
 const MIN_CANDIDATE_INTERVAL_MS = 250;
 export const ELECTION_DEADLINE_MS_ENV_VAR = 'MAKA_RUNTIME_HOST_ELECTION_DEADLINE_MS';
+export const IDLE_GRACE_MS_ENV_VAR = 'MAKA_RUNTIME_HOST_IDLE_GRACE_MS';
 
 export interface ConnectOrSpawnRuntimeHostInput {
   rootPath: string;
@@ -85,6 +87,7 @@ export interface ConnectOrSpawnRuntimeHostInput {
   takeoverHostEpoch?: string;
   clientInstanceId?: string;
   electionDeadlineMs?: number;
+  idleGraceMs?: number;
   connectTimeoutMs?: number;
   handshakeTimeoutMs?: number;
   candidateEntrypoint: string | URL;
@@ -116,24 +119,28 @@ const defaultDependencies: ConnectOrSpawnRuntimeHostDependencies = {
   random: Math.random,
 };
 
+// Invalid values fail closed: a silently ignored typo would look like a changed window.
+function durationMsFromEnvironment(
+  rawValue: string | undefined,
+  envVar: string,
+  minimum: number,
+): number | undefined {
+  if (rawValue === undefined || rawValue.trim() === '') return undefined;
+  const parsed = Number(rawValue);
+  requireOptionalTimeout(parsed, envVar, minimum);
+  return parsed;
+}
+
 /**
  * Resolves the operator override for the client election deadline. Large
  * workspaces can legitimately take longer than the default window on their
  * first start after an upgrade, so the deadline must be raisable without a
- * code change. Invalid values fail closed: a silently ignored typo would
- * leave the operator believing they widened the window when they did not.
+ * code change.
  */
 export function electionDeadlineMsFromEnvironment(
   rawValue: string | undefined,
 ): number | undefined {
-  if (rawValue === undefined || rawValue.trim() === '') return undefined;
-  const parsed = Number(rawValue);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > 120_000) {
-    throw new RangeError(
-      `${ELECTION_DEADLINE_MS_ENV_VAR} must be an integer between 1 and 120000 milliseconds`,
-    );
-  }
-  return parsed;
+  return durationMsFromEnvironment(rawValue, ELECTION_DEADLINE_MS_ENV_VAR, 1);
 }
 
 export type ConnectOrSpawnRuntimeHostResult =
@@ -218,7 +225,8 @@ export async function connectOrSpawnRuntimeHost(
 export type ConnectOwnedRuntimeHostResult =
   | { kind: 'connected'; connection: RuntimeHostConnection; host: OwnedCandidateAttempt }
   | Exclude<ConnectOrSpawnRuntimeHostResult, { kind: 'connected' }>
-  | { kind: 'failed'; reason: 'existing_host' };
+  | { kind: 'failed'; reason: 'existing_host' }
+  | { kind: 'failed'; reason: 'startup_failed'; detail: string };
 
 interface ConnectOwnedRuntimeHostDependencies {
   launchCandidate: typeof launchOwnedRuntimeHostCandidate;
@@ -229,13 +237,13 @@ const defaultOwnedDependencies: ConnectOwnedRuntimeHostDependencies = {
 };
 
 export async function connectOwnedRuntimeHost(
-  input: Omit<ConnectOrSpawnRuntimeHostInput, 'candidateEntrypoint'>,
+  input: OwnedRuntimeHostInput,
 ): Promise<ConnectOwnedRuntimeHostResult> {
   return connectOwnedRuntimeHostWithDependencies(input, defaultOwnedDependencies);
 }
 
 export async function connectOwnedRuntimeHostWithDependencies(
-  input: Omit<ConnectOrSpawnRuntimeHostInput, 'candidateEntrypoint'>,
+  input: OwnedRuntimeHostInput,
   dependencies: ConnectOwnedRuntimeHostDependencies,
 ): Promise<ConnectOwnedRuntimeHostResult> {
   let launch: ReturnType<typeof launchOwnedRuntimeHostCandidate> | undefined;
@@ -245,12 +253,18 @@ export async function connectOwnedRuntimeHostWithDependencies(
       {
         ...input,
         candidateEntrypoint: new URL('../execution-candidate-main.js', import.meta.url),
+        idleGraceMs: 0,
       },
       {
         launchCandidate(candidate) {
           launch ??= dependencies.launchCandidate({
             ...candidate,
-            idleGraceMs: 0,
+            // Proxy passwords belong in the child environment, never process arguments.
+            env: {
+              MAKA_HOSTED_INITIALIZATION: input.initialization
+                ? JSON.stringify(input.initialization)
+                : '',
+            },
           });
           return launch;
         },
@@ -282,12 +296,35 @@ export async function connectOwnedRuntimeHostWithDependencies(
       return { kind: 'failed', reason: 'existing_host' };
     }
     return { kind: 'connected', connection: ownedConnection, host };
-  } catch {
+  } catch (error) {
     await connection?.close().catch(() => undefined);
     releaseOwnedLaunch(launch);
-    return { kind: 'failed', reason: 'host_unresponsive' };
+    const code =
+      error instanceof StorageRootAuthorityError ? error.code : 'internal_startup_failure';
+    const cause = error instanceof Error ? error.cause : undefined;
+    const causeCode =
+      cause instanceof Error && 'code' in cause && typeof cause.code === 'string'
+        ? cause.code
+        : undefined;
+    return {
+      kind: 'failed',
+      reason: 'startup_failed',
+      detail: `${code}${causeCode && /^[A-Z0-9_]{1,64}$/.test(causeCode) ? ` (${causeCode})` : ''}`,
+    };
   }
 }
+
+export interface HostedRuntimeInitialization {
+  readonly incognito: true;
+  readonly proxyUrl?: string;
+}
+
+type OwnedRuntimeHostInput = Omit<
+  ConnectOrSpawnRuntimeHostInput,
+  'candidateEntrypoint' | 'idleGraceMs'
+> & {
+  readonly initialization?: HostedRuntimeInitialization;
+};
 
 function releaseOwnedLaunch(
   launch: ReturnType<typeof launchOwnedRuntimeHostCandidate> | undefined,
@@ -304,15 +341,16 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
   input: ConnectOrSpawnRuntimeHostInput,
   dependencies: ConnectOrSpawnRuntimeHostDependencies,
 ): Promise<ConnectOrSpawnRuntimeHostResult> {
+  const environment = dependencies.env ?? process.env;
   const deadlineMs =
     input.electionDeadlineMs ??
-    electionDeadlineMsFromEnvironment(
-      (dependencies.env ?? process.env)[ELECTION_DEADLINE_MS_ENV_VAR],
-    ) ??
+    electionDeadlineMsFromEnvironment(environment[ELECTION_DEADLINE_MS_ENV_VAR]) ??
     DEFAULT_ELECTION_DEADLINE_MS;
-  if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0 || deadlineMs > 120_000) {
-    throw new RangeError('electionDeadlineMs must be an integer between 1 and 120000');
-  }
+  const idleGraceMs =
+    input.idleGraceMs ??
+    durationMsFromEnvironment(environment[IDLE_GRACE_MS_ENV_VAR], IDLE_GRACE_MS_ENV_VAR, 0);
+  requireOptionalTimeout(input.electionDeadlineMs, 'electionDeadlineMs', 1);
+  requireOptionalTimeout(input.idleGraceMs, 'idleGraceMs', 0);
   validateProtocolRange(input.protocol);
   requireHostCompositionId(input.compositionId);
   requireOptionalTimeout(input.connectTimeoutMs, 'connectTimeoutMs', 1);
@@ -480,6 +518,7 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
               ? {}
               : { executable: input.candidateExecutable }),
             initialConnectionTimeoutMs: Math.ceil(remaining),
+            ...(idleGraceMs === undefined ? {} : { idleGraceMs }),
             ...(input.generation === undefined ? {} : { generation: input.generation }),
             ...(managedLaunchClaim === undefined ? {} : { managedLaunchClaim }),
             ...(input.onExit === undefined ? {} : { onExit: input.onExit }),

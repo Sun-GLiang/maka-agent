@@ -100,6 +100,7 @@ const executionStoresWritersOpeningByLease = new WeakMap<object, Promise<void>>(
 export {
   normalizeRootTurnAdmissionPayload,
   rootTurnAdmissionRecordFits,
+  rootTurnSourceMessagePayloadsEqual,
 } from './agent-run-store.js';
 export { isSessionNotFoundError } from './session-store-contract.js';
 export {
@@ -156,8 +157,8 @@ export type {
 
 export type ExecutionSessionWriter = SessionAuthorityStore;
 export type {
-  RuntimeTranscriptInvocationHeader,
   RuntimeTranscriptLandmark,
+  RuntimeTranscriptRun,
 } from './runtime-transcript-query.js';
 export type ExecutionAgentRunWriter = DurableAgentRunStore;
 export type ExecutionRuntimeEventWriter = DurableRuntimeEventStore &
@@ -177,6 +178,13 @@ export type ExecutionRuntimeEventWriter = DurableRuntimeEventStore &
       events: readonly RuntimeEvent[],
     ): Promise<void>;
     readSessionRuntimeEventEntries(sessionId: string): Promise<SessionRuntimeEventEntry[]>;
+    /** Called once per Session after each write that committed RuntimeEvents to it. */
+    subscribeRuntimeEventCommits(listener: (sessionId: string) => void): () => void;
+    listSessionsWithRuntimeEventText(
+      sessionIds: readonly string[],
+      terms: readonly string[],
+    ): Promise<string[]>;
+    countRuntimeEventMessages(sessionIds: readonly string[]): Promise<number>;
   };
 interface ExecutionStoresWriterBase<K extends StorageRootKind> {
   readonly kind: K;
@@ -265,6 +273,12 @@ export interface ExecutionRuntimeEventReader {
   readSessionRuntimeEventEntries(
     sessionId: string,
   ): Promise<ReadonlyArray<{ ordinal: number; event: RuntimeEvent }>>;
+  /** Recall's narrowing over the ledger; see `RuntimeEventStore`. */
+  listSessionsWithRuntimeEventText(
+    sessionIds: readonly string[],
+    terms: readonly string[],
+  ): Promise<string[]>;
+  countRuntimeEventMessages(sessionIds: readonly string[]): Promise<number>;
 }
 
 interface ExecutionStoresReaderBase<K extends StorageRootKind> {
@@ -511,8 +525,8 @@ async function createExecutionStoresForWrite(
     sessionStore: {
       ready: () => run(() => sessionStore.ready()),
       create: (input, initialBoundary) => run(() => sessionStore.create(input, initialBoundary)),
-      createImportedSession: (input, messages, externalOrigin) =>
-        run(() => sessionStore.createImportedSession(input, messages, externalOrigin)),
+      createImportedSession: (input, messages, externalOrigin, options) =>
+        run(() => sessionStore.createImportedSession(input, messages, externalOrigin, options)),
       lookupExternalSessionImports: (adapterId, sourceSessionIds, recentSessionIdLimit) =>
         run(() =>
           sessionStore.lookupExternalSessionImports(
@@ -730,14 +744,30 @@ async function createExecutionStoresForWrite(
         run(() => runtimeEventStore.readSessionRuntimeEvents(sessionId)),
       readSessionRuntimeEventEntries: (sessionId) =>
         run(() => runtimeEventStore.readSessionRuntimeEventEntries(sessionId)),
+      listSessionsWithRuntimeEventText: (sessionIds, terms) =>
+        run(() => runtimeEventStore.listSessionsWithRuntimeEventText(sessionIds, terms)),
+      countRuntimeEventMessages: (sessionIds) =>
+        run(() => runtimeEventStore.countRuntimeEventMessages(sessionIds)),
       resequenceSessionEventOrdinals: (sessionId) =>
         run(() => runtimeEventStore.resequenceSessionEventOrdinals(sessionId)),
       readTranscriptHighWater: (sessionId) =>
         run(() => runtimeEventStore.readTranscriptHighWater(sessionId)),
-      readTranscriptInvocations: (sessionId, request, project) =>
-        run(() => runtimeEventStore.readTranscriptInvocations(sessionId, request, project)),
+      readTranscriptRun: (sessionId, request, project) =>
+        run(() => runtimeEventStore.readTranscriptRun(sessionId, request, project)),
       readTranscriptLandmarks: (sessionId, throughOrdinal, limit) =>
         run(() => runtimeEventStore.readTranscriptLandmarks(sessionId, throughOrdinal, limit)),
+      subscribeRuntimeEventCommits: (listener) => {
+        if (closed) throw invalidExecutionStores(kind, 'write');
+        assertStorageRootLeaseActive(lease, kind, 'write');
+        const unsubscribe = runtimeEventStore.subscribeRuntimeEventCommits((sessionId) => {
+          if (!closed) listener(sessionId);
+        });
+        subscriptions.add(unsubscribe);
+        return () => {
+          subscriptions.delete(unsubscribe);
+          unsubscribe();
+        };
+      },
       claimContinuation: (input) => run(() => runtimeEventStore.claimContinuation(input)),
       readContinuationClaimByBoundary: (boundaryDigest) =>
         run(() => runtimeEventStore.readContinuationClaimByBoundary(boundaryDigest)),
@@ -857,6 +887,10 @@ async function openExecutionStoresForRead<K extends StorageRootKind, E extends o
         run(() => runtimeEventStore.readSessionRuntimeEvents(sessionId)),
       readSessionRuntimeEventEntries: (sessionId) =>
         run(() => runtimeEventStore.readSessionRuntimeEventEntries(sessionId)),
+      listSessionsWithRuntimeEventText: (sessionIds, terms) =>
+        run(() => runtimeEventStore.listSessionsWithRuntimeEventText(sessionIds, terms)),
+      countRuntimeEventMessages: (sessionIds) =>
+        run(() => runtimeEventStore.countRuntimeEventMessages(sessionIds)),
     },
   };
   freezeExecutionStoresFacade(stores);

@@ -88,6 +88,12 @@ type ProviderRuntimeAdapterDefinition =
   | { kind: 'openai-codex' }
   | { kind: 'google'; normalizeBaseUrl?: boolean }
   | { kind: 'cohere' }
+  /**
+   * The official Command Code CLI's private `/alpha/generate` wire. Not a
+   * published API: see `docs/commandcode-cli-transport.md` for provenance and
+   * why it ships behind a per-install flag.
+   */
+  | { kind: 'commandcode-cli' }
   | OpenAiCompatibleRuntimeAdapter;
 
 export type ProviderRuntimeAdapter = ProviderRuntimeAdapterDefinition & {
@@ -647,6 +653,13 @@ const moonshotModelIds = toolCallingModelIds('Moonshot', GENERATED_MODELS_DEV_ME
   'kimi-k2.6',
   'kimi-k2.7-code',
 ]).filter((id) => GENERATED_MODELS_DEV_METADATA.moonshot[id]?.lifecycle !== 'deprecated');
+const moonshotGlobal = GENERATED_MODELS_DEV_PROVIDER_FACTS['moonshot-global'];
+if (!moonshotGlobal.api) throw new Error('models.dev Moonshot Global provider is missing its API');
+const moonshotGlobalModelIds = toolCallingModelIds(
+  'Moonshot Global',
+  GENERATED_MODELS_DEV_METADATA['moonshot-global'],
+  ['kimi-k3'],
+).filter((id) => GENERATED_MODELS_DEV_METADATA['moonshot-global'][id]?.lifecycle !== 'deprecated');
 const cloudflareWorkersAi = GENERATED_MODELS_DEV_PROVIDER_FACTS['cloudflare-workers-ai'];
 if (cloudflareWorkersAi.id !== 'cloudflare-workers-ai') {
   throw new Error(
@@ -944,6 +957,19 @@ const providerRegistry = {
     catalogGroup: 'api',
     signupUrl: 'https://platform.kimi.com/console/api-keys',
     catalogOrder: 4,
+  },
+  'moonshot-global': {
+    label: 'Moonshot Global',
+    baseUrl: moonshotGlobal.api,
+    authKind: 'api_key',
+    fallbackModels: moonshotGlobalModelIds,
+    status: 'ready',
+    runtimeAdapter: { kind: 'openai', apiProtocol: 'openai-responses' },
+    modelDiscovery: { kind: 'protocol' },
+    category: 'overseas',
+    catalogGroup: 'api',
+    signupUrl: 'https://platform.kimi.ai/console/api-keys',
+    catalogOrder: 4.1,
   },
   'zai-coding-plan': {
     label: 'Z.AI Coding Plan',
@@ -1504,6 +1530,21 @@ const providerRegistry = {
     catalogGroup: 'plans',
     signupUrl: 'https://commandcode.ai/docs/plans/goat',
     catalogOrder: 41.5,
+  },
+  'commandcode-go': {
+    label: 'Command Code GO',
+    // The API root, not `/provider/v1`: generation posts to `/alpha/generate`
+    // and discovery reads `/provider/v1/models`, both under it.
+    baseUrl: 'https://api.commandcode.ai',
+    authKind: 'api_key',
+    fallbackModels: [],
+    status: 'ready',
+    runtimeAdapter: { kind: 'commandcode-cli' },
+    modelDiscovery: { kind: 'protocol', path: 'provider/v1/models' },
+    category: 'overseas',
+    catalogGroup: 'plans',
+    signupUrl: 'https://commandcode.ai/docs/plans/go',
+    catalogOrder: 41.6,
   },
   'cloudflare-workers-ai': {
     label: cloudflareWorkersAi.name,

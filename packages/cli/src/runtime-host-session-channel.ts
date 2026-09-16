@@ -55,7 +55,6 @@ import type { MakaPreparedSessionTurn } from './session-driver.js';
 
 const decodeStoredMessage = (value: unknown): StoredMessage =>
   decodePersistedStoredMessage(markPersisted<StoredMessage>(value));
-const MAX_PENDING_FRAMES = 512;
 const MAX_PENDING_EVENTS_PER_TURN = 1_024;
 const LAG_REARM_PENDING_EVENTS = MAX_PENDING_EVENTS_PER_TURN / 2;
 const MAX_RECOVERY_ATTEMPTS_WITHOUT_LIVE_FRAME = 8;
@@ -132,7 +131,6 @@ export class RuntimeHostSessionChannel {
   readonly #onFailed: ((error: Error) => void) | undefined;
   readonly #onRecovered: () => void;
   readonly #turns = new Map<string, SessionEventQueue>();
-  readonly #pendingFrames: SubscriptionFrame[] = [];
   readonly #pendingStartedTurns = new Map<string, MakaPreparedSessionTurn>();
   readonly #pendingOpenedInteractions: InteractionPendingSnapshot[] = [];
   readonly #pendingResolvedInteractions: InteractionPendingSnapshot[] = [];
@@ -257,7 +255,7 @@ export class RuntimeHostSessionChannel {
     this.#acceptCanonicalReplacement(messages ?? []);
     this.#ready = true;
     try {
-      for (const frame of this.#pendingFrames.splice(0)) this.#accept(frame);
+      await subscription.ready();
     } catch (error) {
       if (!this.#canRecover(error)) throw error;
       this.#failedSubscriptions.add(subscription);
@@ -543,18 +541,13 @@ export class RuntimeHostSessionChannel {
     try {
       for await (const frame of subscription) {
         if (this.#closing || this.#subscription !== subscription) return;
+        // The Host holds frames until `ready()`, which this channel calls only
+        // once the transcript it folds them onto is in place.
         if (!this.#ready) {
-          if (this.#pendingFrames.length >= MAX_PENDING_FRAMES) {
-            throw new RuntimeHostSubscriptionError(
-              'slow_consumer',
-              'Runtime Host transcript could not keep up with live Session events',
-            );
-          }
-          this.#pendingFrames.push(frame);
-        } else {
-          this.#accept(frame);
-          if (frame.kind !== 'subscription.closed') this.#observeRecoveryLiveFrame(subscription);
+          throw new Error('Runtime Host sent a Session frame before the subscriber was ready');
         }
+        this.#accept(frame);
+        if (frame.kind !== 'subscription.closed') this.#observeRecoveryLiveFrame(subscription);
       }
       // A stream that ends without a subscription.closed frame is a broken
       // live channel, not a terminal state: the Host may have torn the
@@ -646,7 +639,6 @@ export class RuntimeHostSessionChannel {
       this.#transcriptThrough = replacement.transcriptBootstrap?.throughSequence ?? null;
       this.#subscribeSessionDomainChanges(replacement);
       this.#ready = false;
-      this.#pendingFrames.length = 0;
       void this.#pump(replacement);
       try {
         const messages = await runChannelOperation(
@@ -663,7 +655,7 @@ export class RuntimeHostSessionChannel {
         const replacedLiveState = this.#acceptCanonicalReplacement(messages);
         this.#recoveryAwaitingLiveFrame = replacement;
         this.#ready = true;
-        for (const frame of this.#pendingFrames.splice(0)) this.#accept(frame);
+        await replacement.ready();
         if (replacedLiveState) this.#onRecovered();
         return;
       } catch (error) {
@@ -817,7 +809,6 @@ export class RuntimeHostSessionChannel {
       (error.reason === 'connection_closed' ||
         error.reason === 'sequence_gap' ||
         error.reason === 'projection_revision_invalid' ||
-        error.reason === 'transcript_release_failed' ||
         error.reason === 'slow_consumer')
     );
   }

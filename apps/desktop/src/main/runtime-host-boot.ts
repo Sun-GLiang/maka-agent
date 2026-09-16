@@ -81,6 +81,8 @@ import { createSettingsStore } from "@maka/storage/settings-store";
 import { resolveStorageRoot } from "@maka/storage/root-authority";
 
 import { createMcpOAuthController } from "./mcp-oauth-controller.js";
+import { CommandCodeBrowserLoginController } from "./commandcode-browser-login.js";
+import { registerCommandCodeLoginIpc } from "./commandcode-login-ipc-main.js";
 import { createWorkHubControl } from './workhub-control.js';
 import { createWorkHubPresentation } from './workhub-presentation.js';
 import { createWorkHubRuntime } from './workhub-runtime.js';
@@ -190,6 +192,8 @@ import { registerClientSettingsIpc } from "./client-settings-ipc-main.js";
 import { startClientSettingsWatcher } from "./client-settings-watcher.js";
 import { registerRuntimeHostGitHubCopilotIpc } from "./runtime-host-github-copilot-ipc-main.js";
 import { registerRuntimeHostArtifactsIpc } from "./runtime-host-artifacts-ipc-main.js";
+import { ManagedArtifactPreview } from './managed-artifact-preview.js';
+import { buildManagedArtifactPreviewTools } from './managed-artifact-preview-tools.js';
 import type { DesktopRuntimeHostClient } from "./runtime-host-client.js";
 import type {
   DesktopRuntimeHostCandidateControls,
@@ -623,6 +627,11 @@ function localSessionTarget(state: RuntimeHostDesktopTargetState): DesktopSessio
     ...(state.readiness === 'ready' ? { client: state.candidate.client, submit: (input) => state.candidate.submitLocalMessage(input) } : {}) };
 }
 const oauthPresentation = new RuntimeHostOAuthPresentation((url) => shell.openExternal(url));
+// Desktop-local by construction: the Studio page posts the key to a loopback
+// port beside the browser, so the listener cannot live in a (possibly remote) Host.
+const commandCodeLoginController = new CommandCodeBrowserLoginController({
+  openExternal: (url) => shell.openExternal(url),
+});
 const runtimeHostProfileService = createDesktopRuntimeHostProfileService({
   clientDataRoot: userDataDir,
   startup: runtimeHostStartup,
@@ -914,6 +923,10 @@ const workHubControl = createWorkHubControl({
   isCurrent: isCurrentWorkHubTarget,
   ...workHubRuntime,
 });
+const browserIpc = registerBrowserIpc({
+  mainWindowController,
+  isHostActive: (scope) => runtimeHostManager?.ownsScope(scope) === true,
+});
 let workHubEnabled = false;
 const workHubPresentation = createWorkHubPresentation({
   isEnabled: () => workHubEnabled,
@@ -928,7 +941,8 @@ const workHubPresentation = createWorkHubPresentation({
   mainModuleDirectory: import.meta.dirname,
   viteDevServerUrl: process.env.VITE_DEV_SERVER_URL,
   preloadPath: join(import.meta.dirname, '..', 'preload', 'preload.cjs'),
-  onViewCreated: (contents) => mainWindowController.registerAuxiliaryRenderer(contents),
+  onViewCreated: (contents, container) => mainWindowController.registerAuxiliaryRenderer(contents, container),
+  onVisibilityChanged: () => browserIpc.refreshVisibility(),
 });
 workHubPresentation.registerIpc();
 const windowsAppTray = createWindowsAppTray({
@@ -1024,6 +1038,7 @@ const clientSettingsTools = buildClientSettingsTools({
     return result.response === 0;
   },
 });
+const managedArtifactPreview = new ManagedArtifactPreview();
 const clientSettingsWatcher = startClientSettingsWatcher(
   workspaceRoot,
   () => {
@@ -1098,10 +1113,6 @@ registerPetPackIpc({
   settingsStore,
   resolveLocale: () => desktopLocale.resolve(),
 });
-const browserIpc = registerBrowserIpc({
-  mainWindowController,
-  isHostActive: (scope) => runtimeHostManager?.ownsScope(scope) === true,
-});
 registerNotificationsIpc({
   ipcMain,
   settingsStore,
@@ -1159,6 +1170,17 @@ const startLocalRuntimeHostManager = () => startRuntimeHostDesktopManager(
         }
         return [
           workHubControl.group(scope),
+          {
+            offerId: 'desktop_artifact_preview',
+            label: 'HTML Artifact preview',
+            description: 'Prepare an isolated, temporary HTTP preview of a generated HTML Artifact.',
+            tools: buildManagedArtifactPreviewTools(async (sessionId, artifactId, signal) => {
+              if (!scope || !runtimeHostManager?.ownsScope(scope)) throw new Error('Preview target is unavailable');
+              const target = runtimePolicyTargetsByEpoch.get(scope.targetEpoch);
+              if (!target?.isActive()) throw new Error('Preview target is no longer active');
+              return managedArtifactPreview.prepare(scope.targetEpoch, target.client, sessionId, artifactId, signal);
+            }),
+          },
           {
             offerId: "desktop_settings",
             label: "Client settings",
@@ -1666,6 +1688,7 @@ function registerHostClientIpc(
     mainWindowController,
     showItemInFolder: (path) => shell.showItemInFolder(path),
     openPath: (path) => shell.openPath(path),
+    preview: { service: managedArtifactPreview, scope: scope.targetEpoch, openExternal: (url) => shell.openExternal(url) },
   });
   registerExternalAgentSetupIpc({ ipcMain: scopedIpc, client, presentation: oauthPresentation,
     selectExecutable: async () => {
@@ -1876,6 +1899,7 @@ function registerHostClientIpc(
   registerTaskSubmissionReadinessIpc(taskSubmissionReadinessService, scopedIpc);
   return async () => {
     unsubscribeConfigurationChanges();
+    await managedArtifactPreview.closeScope(scope.targetEpoch);
     unsubscribeConnectionCatalogChanges();
     unsubscribeSessionCatalogChanges();
     unsubscribeProjectCatalogChanges();
@@ -1918,6 +1942,7 @@ function registerPersistentClientIpc(): void {
     mainWindowController,
     resolveLocale: () => desktopLocale.resolve(),
   });
+  registerCommandCodeLoginIpc({ ipcMain, controller: commandCodeLoginController });
   registerDesktopRuntimeHostProfileIpc(ipcMain, runtimeHostProfileService);
   registerDesktopGuestSessionMountIpc(
     ipcMain,
@@ -2156,6 +2181,8 @@ function closeRuntimeHostDesktop(): Promise<void> {
 }
 
 async function disposeRuntimeHostDesktop(): Promise<void> {
+  // Any in-flight browser sign-in ends here with the app; its loopback port goes with it.
+  commandCodeLoginController.dispose();
   sessionLocal.close();
   powerMonitor.off("resume", wakePeerRecoveryAfterResume);
   clientSettingsWatcher.stop();
@@ -2178,6 +2205,7 @@ async function disposeRuntimeHostDesktop(): Promise<void> {
       }
     });
   const results = await Promise.allSettled([
+    managedArtifactPreview.close(),
     Promise.resolve().then(() => windowsAppTray.dispose()),
     workHubControl.close(),
     Promise.resolve().then(() => workHubPresentation.dispose()),

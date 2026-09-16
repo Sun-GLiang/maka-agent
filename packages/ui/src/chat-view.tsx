@@ -51,7 +51,7 @@ import type { LiveTurnProjection } from './live-turn-projection.js';
 import {
   ModelProviderRetryIndicator,
   LocalizedChatMessage,
-  TurnRunningStatus,
+  ProcessingBlock,
   TurnFooter,
   TurnView,
   TransientUserMessage,
@@ -404,10 +404,6 @@ export function ChatView(props: {
   const tailTurnId = streamingActive ? props.activeTurn?.turnId : undefined;
   const runningStatus = streamingActive && !props.activeTurn?.awaitingInput;
   const hasRenderedLiveTurn = tailTurnId !== undefined && turns.some((turn) => turn.turnId === tailTurnId);
-  const pendingRunningStartedAt = transientMessages.findLast((message) =>
-    message.transientPlacement === 'current_turn'
-    && tailTurnId !== undefined && message.hostTurnId === tailTurnId,
-  )?.ts ?? activeContent?.startedAt;
   const boundaryOverlayTurnId = activeContent?.turnId
     ?? (streamingActive ? tailTurnId : undefined);
   // One rail tick per turn that carries a user prompt (Codex-style prompt
@@ -649,18 +645,10 @@ export function ChatView(props: {
                   ))}
                 </section>
               )}
-              {/* The optimistic message supplies the clock while the session is created. */}
+              {/* The pre-Turn cue is the same summary row the process uses. */}
               {runningStatus && (
                 <section className="maka-turn" data-live-streaming="true">
-                  <LocalizedChatMessage
-                    accessibleLabel={conversationCopy.messages.assistantAriaLabel}
-                    sender="assistant"
-                    className="maka-chat-message maka-assistant-answer"
-                  >
-                    <TurnFooter actions={[]} live context="" activity={
-                      <TurnRunningStatus startedAt={pendingRunningStartedAt} />
-                    } />
-                  </LocalizedChatMessage>
+                  <ProcessingBlock entries={[]} running activity={{}} />
                 </section>
               )}
             </>
@@ -849,19 +837,19 @@ export function ChatView(props: {
                   that same TurnView can take over. */}
               {streamingActive && !hasRenderedLiveTurn && (
                 <section className="maka-turn" data-live-streaming="true">
-                  <LocalizedChatMessage
-                    accessibleLabel={conversationCopy.messages.assistantAriaLabel}
-                    sender="assistant"
-                    className="maka-chat-message maka-assistant-answer"
-                  >
-                    <TurnFooter actions={[]} live context="" activity={
-                      activeContent?.turnId === tailTurnId && activeContent?.providerRetry ? (
+                  {activeContent && activeContent.turnId === tailTurnId && activeContent.providerRetry ? (
+                    <LocalizedChatMessage
+                      accessibleLabel={conversationCopy.messages.assistantAriaLabel}
+                      sender="assistant"
+                      className="maka-chat-message maka-assistant-answer"
+                    >
+                      <TurnFooter actions={[]} live context="" activity={
                         <ModelProviderRetryIndicator retry={activeContent.providerRetry} />
-                      ) : (
-                        (runningStatus && <TurnRunningStatus startedAt={pendingRunningStartedAt} />)
-                      )
-                    } />
-                  </LocalizedChatMessage>
+                      } />
+                    </LocalizedChatMessage>
+                  ) : runningStatus ? (
+                    <ProcessingBlock entries={[]} running activity={{}} />
+                  ) : null}
                 </section>
               )}
               {conversationItemPlacement.orphan && (
