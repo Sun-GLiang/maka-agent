@@ -67,12 +67,8 @@ export function UsageSettingsView(props: {
   const copy = getUsageSettingsCopy(locale);
   const toast = useToast();
   const persistedUsage = props.settings;
-  // The stats snapshot lives in the persistent `UsageFeatureScope` (keyed by the
-  // selected Host generation), so it survives this view unmounting on a section
-  // switch. `stats` is non-null only when the scope's snapshot was loaded for the
-  // persisted range — during a range switch (or after a late/failed load) the
-  // panels read `null` (loading/empty) rather than the previous range's numbers.
-  const { stats, reload, targetKey } = useUsageStats(persistedUsage.range);
+  // A retained complete result keeps its original query labels until replacement.
+  const { stats, reload, targetKey, state, error, paging, loadMore, displayedRange, screenVersion } = useUsageStats(persistedUsage.range);
   const [refreshing, setRefreshing] = useState(false);
   const usageRefreshGuard = useActionGuard<'refresh'>();
   const {
@@ -94,15 +90,16 @@ export function UsageSettingsView(props: {
   // isolation, target invalidation) lives in the scope, so a load in flight when
   // this view unmounts still lands and is visible on return.
   useEffect(() => {
-    void reload(persistedUsage.range);
+    void reload(persistedUsage.range, {search: usageDraft.modelFilter, status: usageDraft.status}, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [persistedUsage.range, targetKey]);
+  }, [persistedUsage.range, targetKey, usageDraft.modelFilter, usageDraft.status]);
 
   const normalizedModelFilter = usageDraft.modelFilter.trim().toLowerCase();
   const hasRequestFilters = usageDraft.status !== 'all' || normalizedModelFilter.length > 0;
   const showRequestDetails = usageDraft.activeTab === 'requests' && usageDraft.showDetails;
   const filteredLogs = useMemo(() => {
     const logs = stats?.logs ?? [];
+    if (stats?.navigation) return logs;
     return logs
       .filter((log) => usageDraft.status === 'all' || log.status === usageDraft.status)
       .filter((log) =>
@@ -134,7 +131,7 @@ export function UsageSettingsView(props: {
     if (!usageRefreshGuard.begin('refresh')) return;
     setRefreshing(true);
     try {
-      await reload(usageDraftRef.current.range);
+      await reload(usageDraftRef.current.range, {search: usageDraftRef.current.modelFilter, status: usageDraftRef.current.status});
     } finally {
       usageRefreshGuard.finish();
       if (usagePageMountedRef.current) setRefreshing(false);
@@ -157,6 +154,12 @@ export function UsageSettingsView(props: {
 
   return (
     <>
+      {state !== 'ready' ? <Banner status={state === 'loading' ? 'info' : 'warning'} role="status"
+        title={state === 'loading' ? copy.refreshingAria : state === 'stale' ? copy.staleTitle : copy.loadFailed}
+        description={state === 'stale' ? copy.staleBody : error?.includes('screen_response_too_large') ? copy.capacityBody : error ?? undefined} /> : null}
+      {stats && state !== 'ready' ? <p role="status">{copy.previousResult}: {displayedRange}
+        {stats.navigation ? ` · ${new Date(stats.navigation.query.range.from).toLocaleString(uiLocaleToIntlLocale(locale))} – ${new Date(stats.navigation.query.range.to).toLocaleString(uiLocaleToIntlLocale(locale))} · ${stats.navigation.query.search || '—'} · ${copy.statuses[['all', 'success', 'error', 'aborted'].indexOf(stats.navigation.query.status)]}` : ''}
+      </p> : null}
       {usageIncomplete ? (
         <Banner
           status="warning"
@@ -215,6 +218,7 @@ export function UsageSettingsView(props: {
         {usageDraft.activeTab === 'requests' ? (
           <div className="settingsUsageTabPanel">
             <UsageRequestsPanel
+              screenVersion={screenVersion}
               logs={showRequestDetails ? filteredLogs : EMPTY_USAGE_LOGS}
               showDetails={usageDraft.showDetails}
               modelFilter={usageDraft.modelFilter}
@@ -231,6 +235,8 @@ export function UsageSettingsView(props: {
               onToggleDetails={(showDetails) => void updateUsage({ showDetails })}
               onClearFilters={clearRequestFilters}
             />
+            {showRequestDetails && stats?.navigation?.nextCursor ? <Button variant="secondary" size="sm" label={copy.loadMore}
+              isDisabled={state !== 'ready' || paging} isLoading={paging} onClick={() => void loadMore()} /> : null}
           </div>
         ) : null}
 
@@ -265,6 +271,7 @@ export function UsageSettingsView(props: {
 // ── Per-tab panels ─────────────────────────────────────────────────────────
 
 function UsageRequestsPanel(props: {
+  screenVersion: number;
   logs: UsageStats['logs'];
   showDetails: boolean;
   modelFilter: string;
@@ -282,6 +289,7 @@ function UsageRequestsPanel(props: {
   onClearFilters(): void;
 }) {
   const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [props.screenVersion]);
   const pageCount = Math.max(1, Math.ceil(props.logs.length / USAGE_REQUESTS_PAGE_SIZE));
   const currentPage = Math.min(page, pageCount);
   const pagination = useTablePagination<UsageTableRow>({
@@ -292,9 +300,6 @@ function UsageRequestsPanel(props: {
     size: 'sm',
   });
 
-  useEffect(() => {
-    setPage(1);
-  }, [props.logs]);
 
   if (!props.showDetails) {
     return (

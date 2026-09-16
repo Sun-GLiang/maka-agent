@@ -17,6 +17,8 @@
  * under the License.
  */
 
+
+import { useUsageStats } from '../../renderer/features/usage/testing.js';
 import { strict as assert } from 'node:assert';
 import { afterEach, describe, it } from 'node:test';
 import { parseHTML } from 'linkedom';
@@ -30,6 +32,8 @@ import {
   type AppSettings,
   type UsageRange,
   type UsageStats,
+  type UsageScreenQuery,
+  type UsageScreenResult,
 } from '@maka/core/settings';
 import {
   UsageFeatureScope,
@@ -218,7 +222,7 @@ describe('Usage feature scope', () => {
     await act(async () => root.unmount());
   });
 
-  it('never shows the previous range while a new range loads, and drops a failed range', async () => {
+  it('retains the previous range with its original label while a new range loads or fails', async () => {
     const { container, root } = setupDom();
     const base: AppSettings = mergeSettings(createDefaultSettings(), {
       usage: { range: '24h', activeTab: 'providers' },
@@ -250,10 +254,10 @@ describe('Usage feature scope', () => {
       root.render(tree({ active: true, settings: sevenDay, targetKey: 'hostA:1', services }));
       await Promise.resolve();
     });
-    assert.doesNotMatch(
+    assert.match(
       container.textContent ?? '',
       /111/,
-      'the previous range total must not persist while 7d is loading',
+      'the previous range remains visible while 7d is loading',
     );
 
     // The 7d load fails — the stale 24h total must not reappear.
@@ -261,10 +265,10 @@ describe('Usage feature scope', () => {
       loads.get('7d')!.reject(new Error('boom'));
       await flush();
     });
-    assert.doesNotMatch(
+    assert.match(
       container.textContent ?? '',
-      /111/,
-      'a failed range load must not fall back to the previous range',
+      /Previous result: 24h/,
+      'a failed range retains the original result label',
     );
 
     await act(async () => root.unmount());
@@ -546,4 +550,94 @@ describe('Usage feature scope', () => {
 
     await act(async () => root.unmount());
   });
+});
+
+function navigable(total: number, query: UsageScreenQuery, identity: string): UsageStats {
+  return {...statsWithRequests(total), navigation: {query, revision: 'same-revision', queryIdentity: identity, nextCursor: 'next'}};
+}
+function scopeTree(services: UsageServices, probe: () => ReactNode, targetKey = 'hostA:1'): ReactNode {
+  return createElement(ToastProvider, {children: createElement(UsageFeatureScope, {
+    targetKey, services, loadErrorTitle: 'load failed', describeError: String, children: createElement(probe),
+  })});
+}
+
+it('same-revision filters supersede both old screens and continuations and retain fixed time bounds', async () => {
+  const {root} = setupDom();
+  let scope!: ReturnType<typeof useUsageStats>;
+  const Probe = () => {scope = useUsageStats('all'); return null;};
+  const loads: {query: UsageScreenQuery; response: Deferred<UsageStats | null>}[] = [];
+  const page = deferred<UsageScreenResult>();
+  let pageCalls = 0;
+  const services: UsageServices = {
+    loadUsageStats: async (_range, query) => {assert.ok(query); const response = deferred<UsageStats | null>(); loads.push({query, response}); return response.promise;},
+    loadUsageActivity: () => {pageCalls++; return page.promise;},
+    updateUsageSettings: async () => createDefaultSettings().usage,
+  };
+  await act(async () => {root.render(scopeTree(services, Probe)); await flush();});
+  await act(async () => {void scope.reload('all'); await flush();});
+  await act(async () => {loads[0]!.response.resolve(navigable(10, loads[0]!.query, 'initial')); await flush();});
+  await act(async () => {void scope.loadMore(); await flush();});
+  assert.equal(pageCalls, 1);
+  await act(async () => {void scope.reload('all', {search: 'alpha', status: 'all'}, true); await flush();});
+  await act(async () => {void scope.reload('all', {search: 'beta', status: 'error'}, true); await flush();});
+  assert.deepEqual(loads[1]!.query.range, loads[0]!.query.range);
+  assert.deepEqual(loads[2]!.query.range, loads[0]!.query.range);
+  await act(async () => {loads[2]!.response.resolve(navigable(30, loads[2]!.query, 'beta')); await flush();});
+  await act(async () => {
+    loads[1]!.response.resolve(navigable(20, loads[1]!.query, 'alpha'));
+    page.resolve({kind: 'activity', page: {revision: 'same-revision', queryIdentity: 'initial', logs: [{id: 'late', ts: 1, kind: 'model', provider: 'p', model: 'm', status: 'success', inputTokens: 0, outputTokens: 0}], nextCursor: null}});
+    await flush();
+  });
+  assert.equal(scope.stats?.summary.totalRequests, 30);
+  assert.equal(scope.stats?.navigation?.query.search, 'beta');
+  assert.deepEqual(scope.stats?.logs, []);
+  assert.equal(scope.state, 'ready');
+  await act(async () => root.unmount());
+});
+
+it('revision change retains the complete screen, blocks paging, and refresh installs a new screen', async () => {
+  const {root} = setupDom();
+  let scope!: ReturnType<typeof useUsageStats>;
+  const Probe = () => {scope = useUsageStats('all'); return null;};
+  let revision = 'A'; let calls = 0;
+  const services: UsageServices = {
+    loadUsageStats: async (_range, query) => {assert.ok(query); const value = navigable(revision === 'A' ? 10 : 20, query, revision); value.navigation!.revision = revision; return value;},
+    loadUsageActivity: async () => {calls++; return {kind: 'revision_changed'};},
+    updateUsageSettings: async () => createDefaultSettings().usage,
+  };
+  await act(async () => {root.render(scopeTree(services, Probe)); await flush();});
+  await act(async () => {await scope.reload('all');});
+  await act(async () => {await scope.loadMore();});
+  assert.equal(scope.state, 'stale'); assert.equal(scope.stats?.summary.totalRequests, 10);
+  await act(async () => {await scope.loadMore();}); assert.equal(calls, 1);
+  revision = 'B';
+  await act(async () => {await scope.reload('all');});
+  assert.equal(scope.state, 'ready'); assert.equal(scope.stats?.summary.totalRequests, 20);
+  await act(async () => root.unmount());
+});
+
+it('capacity failure never retries and retains only the original query labels until a complete replacement', async () => {
+  const {root} = setupDom();
+  let scope!: ReturnType<typeof useUsageStats>;
+  const Probe = () => {scope = useUsageStats('all'); return null;};
+  let fail = true; let calls = 0;
+  const services: UsageServices = {
+    loadUsageStats: async (_range, query) => {calls++; assert.ok(query); if (fail) return {kind: 'screen_response_too_large', section: 'pricing'}; return navigable(10, query, 'old');},
+    loadUsageActivity: async () => {throw new Error('must not continue');},
+    updateUsageSettings: async () => createDefaultSettings().usage,
+  };
+  await act(async () => {root.render(scopeTree(services, Probe)); await flush();});
+  await act(async () => {await scope.reload('all');});
+  assert.equal(calls, 1); assert.equal(scope.state, 'error'); assert.equal(Boolean(scope.stats), false);
+  fail = false;
+  await act(async () => {await scope.reload('all', {search: 'old-filter', status: 'all'});});
+  fail = true;
+  await act(async () => {await scope.reload('all', {search: 'new-filter', status: 'error'}, true);});
+  assert.equal(calls, 3); assert.equal(scope.state, 'error');
+  assert.equal(scope.stats?.navigation?.query.search, 'old-filter');
+  assert.equal(scope.stats?.summary.totalRequests, 10);
+  await act(async () => {await scope.loadMore();});
+  await act(async () => {root.render(scopeTree(services, Probe, 'hostB:1')); await flush();});
+  assert.equal(scope.stats, null, 'Host replacement drops the retained result and tokens');
+  await act(async () => root.unmount());
 });
