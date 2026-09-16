@@ -457,6 +457,7 @@ describe('ACP Session registry', () => {
 
   for (const scenario of [
     'complete',
+    'completed-without-result',
     'notification-failure',
     'cancel',
     'cancel-stalled-notification',
@@ -477,8 +478,10 @@ describe('ACP Session registry', () => {
       let settled = false;
       const completesNormally =
         scenario === 'complete' ||
+        scenario === 'completed-without-result' ||
         scenario === 'notification-failure' ||
         scenario === 'cancel-stalled-notification';
+      const hasResult = scenario !== 'completed-without-result';
       const notifications: SessionNotification[] = [];
       const registry = new AcpSessionRegistry({
         connect: async () =>
@@ -487,19 +490,23 @@ describe('ACP Session registry', () => {
               if (operation === 'session.create') return catalogSession(sessionId);
               if (operation === 'turn.start') {
                 subscription.setRoot(turn);
-                if (completesNormally)
+                if (completesNormally && hasResult)
                   subscription.appendToolResult(turn.turnId, turn.runId, 'tool');
                 else subscription.appendToolStart(turn.turnId, turn.runId, 'tool');
                 subscription.publishTranscript([
-                  {
-                    type: 'tool_result',
-                    id: 'stored-result',
-                    turnId: turn.turnId,
-                    ts: 2,
-                    toolUseId: 'tool',
-                    isError: false,
-                    content: { kind: 'text', text: 'authoritative result' },
-                  },
+                  ...(hasResult
+                    ? [
+                        {
+                          type: 'tool_result' as const,
+                          id: 'stored-result',
+                          turnId: turn.turnId,
+                          ts: 2,
+                          toolUseId: 'tool',
+                          isError: false,
+                          content: { kind: 'text' as const, text: 'authoritative result' },
+                        },
+                      ]
+                    : []),
                   ...(!completesNormally
                     ? []
                     : [
@@ -620,7 +627,7 @@ describe('ACP Session registry', () => {
         assert.equal(failedToolDelivered, true);
       } else {
         pageGate.resolve();
-        await waitFor(() => terminalDeliveryStarted);
+        if (hasResult) await waitFor(() => terminalDeliveryStarted);
         if (scenario === 'complete') {
           assert.equal(settled, false);
           deliveryGate.resolve();
@@ -633,12 +640,148 @@ describe('ACP Session registry', () => {
                 update.rawOutput !== undefined,
             ),
           );
+        } else if (scenario === 'completed-without-result') {
+          assert.deepEqual(await prompt, { stopReason: 'end_turn' });
+          assert.equal(terminalDeliveryStarted, false);
+          assert.equal(failedToolDelivered, true);
         } else await assert.rejects(prompt);
       }
       assert.equal(subscriptionOpens, 1);
       await registry.dispose();
     });
   }
+
+  test('recovers mid-prompt and settles a live tool from the replacement transcript', async () => {
+    const sessionId = 'session-tool-recovery';
+    const turn = runningTurn(sessionId, 'turn-tool-recovery');
+    const first = new FakeSubscription(continuitySnapshot(sessionId));
+    const replacement = new FakeSubscription(
+      { ...continuitySnapshot(sessionId), rootTurn: turn },
+      Promise.resolve([]),
+      'subscription-recovered',
+    );
+    let recoveries = 0;
+    const notifications: SessionNotification[] = [];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession(sessionId);
+            if (operation === 'turn.start') {
+              first.setRoot(turn);
+              first.appendToolStart(turn.turnId, turn.runId, 'tool');
+              first.publishTranscript([]);
+              return {
+                kind: 'started',
+                turn,
+                skillInvocation: { loaded: [], failed: [], receipts: [] },
+              };
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => first,
+          openSessionSubscription: async () => {
+            recoveries += 1;
+            return replacement;
+          },
+        }),
+      newSessionId: () => sessionId,
+      newTurnId: () => turn.turnId,
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    const prompt = registry.prompt(
+      { sessionId, prompt: [{ type: 'text', text: 'use the tool' }] },
+      promptContext(notifications),
+    );
+    await waitFor(() => notifications.some(({ update }) => update.sessionUpdate === 'tool_call'));
+    first.fail(new RuntimeHostSubscriptionError('connection_closed', 'Connection was lost'));
+    await waitFor(() => recoveries === 1 && replacement.nextCalls > 0);
+    replacement.publishTranscript([
+      {
+        type: 'tool_result',
+        id: 'stored-result',
+        turnId: turn.turnId,
+        ts: 2,
+        toolUseId: 'tool',
+        isError: false,
+        content: { kind: 'text', text: 'recovered result' },
+      },
+      {
+        type: 'turn_state',
+        id: 'stored-terminal',
+        turnId: turn.turnId,
+        ts: 3,
+        status: 'completed',
+      },
+    ]);
+    replacement.setRoot(completedTurn(sessionId, turn.turnId));
+    assert.deepEqual(await prompt, { stopReason: 'end_turn' });
+    assert.ok(
+      notifications.some(
+        ({ update }) =>
+          (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') &&
+          (update.rawOutput as { kind?: string; text?: string } | undefined)?.kind === 'text' &&
+          (update.rawOutput as { kind?: string; text?: string } | undefined)?.text ===
+            'recovered result',
+      ),
+    );
+    await registry.dispose();
+  });
+
+  test('explicit cancellation wins after a notification transport failure', async () => {
+    const sessionId = 'session-cancel-failed-delivery';
+    const turn = runningTurn(sessionId, 'turn-cancel-failed-delivery');
+    const subscription = new FakeSubscription(continuitySnapshot(sessionId));
+    let stopped = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession(sessionId);
+            if (operation === 'turn.start') {
+              subscription.setRoot(turn);
+              subscription.appendToolStart(turn.turnId, turn.runId, 'tool');
+              return {
+                kind: 'started',
+                turn,
+                skillInvocation: { loaded: [], failed: [], receipts: [] },
+              };
+            }
+            if (operation === 'turn.stop') {
+              stopped += 1;
+              subscription.setRoot({
+                ...turn,
+                status: 'cancelled',
+                terminalEventId: 'cancelled',
+                abortSource: 'user',
+              });
+              return {};
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+      newSessionId: () => sessionId,
+      newTurnId: () => turn.turnId,
+    });
+    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    let cancellation: Promise<void> | undefined;
+    const prompt = registry.prompt(
+      { sessionId, prompt: [{ type: 'text', text: 'use the tool' }] },
+      {
+        signal: new AbortController().signal,
+        notify: async ({ update }) => {
+          if (update.sessionUpdate !== 'tool_call') return;
+          cancellation = registry.cancel({ sessionId });
+          throw new Error('notification transport failed');
+        },
+      },
+    );
+    assert.deepEqual(await prompt, { stopReason: 'cancelled' });
+    await cancellation;
+    assert.equal(stopped, 1);
+    await registry.dispose();
+  });
 
   test('latches cancellation while the real Session subscription is opening', async () => {
     const sessionId = 'session-cancel-before-attach';

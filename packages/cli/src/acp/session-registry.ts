@@ -439,7 +439,9 @@ export class AcpSessionRegistry {
   }
 
   async #cancelledStopReason(active: ActiveAcpPrompt): Promise<'cancelled'> {
-    await active.mapper.flush();
+    // A failed notification must not change the outcome of an explicit Host
+    // cancellation. The projection failure still fails uncancelled prompts.
+    await active.mapper.flush().catch(() => undefined);
     return 'cancelled';
   }
 
@@ -488,7 +490,7 @@ export class AcpSessionRegistry {
     active.reconciliationAbort.abort();
     active.stopTask ??= this.#stopPromptWhenObservable(active);
     await Promise.all([
-      active.mapper.flush(),
+      active.mapper.flush().catch(() => undefined),
       active.stopTask.catch((error: unknown) => {
         // End only this prompt's observation. Failed delivery does not establish
         // a terminal Host Turn, and teardown still receives the original error.

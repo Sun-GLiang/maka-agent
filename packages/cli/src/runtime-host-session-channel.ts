@@ -72,6 +72,7 @@ export interface RuntimeHostSessionChannelOpenResult {
 
 /** Incremental prompt transcript consumption with replay across subscription recovery. */
 export interface RuntimeHostPromptTranscript {
+  /** Concurrent calls join the active scan; only its onMessages callback consumes that scan. */
   reconcile(
     onMessages: (messages: readonly StoredMessage[]) => Promise<void>,
     signal?: AbortSignal,

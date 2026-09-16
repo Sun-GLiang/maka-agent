@@ -332,8 +332,30 @@ describe('ACP Session event mapper', () => {
     assert.match(toolText(notifications.at(-1)!), /Preview:.*Worker/);
     assert.equal(toolUpdate(notifications.at(-1)!).status, 'in_progress');
     await mapper.finishTools('turn-1', 'failed');
-    assert.equal(toolUpdate(notifications.at(-1)!).status, 'failed');
-    assert.match(toolText(notifications.at(-1)!), /without a result/);
+    const interrupted = toolUpdate(notifications.at(-1)!);
+    assert.equal(interrupted.status, 'failed');
+    assert.equal('content' in interrupted, false);
+    assert.equal(
+      (interrupted._meta?.maka as { hostStatus?: string } | undefined)?.hostStatus,
+      'interrupted',
+    );
+    assert.match(toolText(notifications.at(-2)!), /working/);
+  });
+
+  test('marks missing live output chunks without joining their text', async () => {
+    const notifications: SessionNotification[] = [];
+    const mapper = eventMapper(notifications);
+    await mapper.accept(toolOutput('tool', 1, 'first'));
+    await mapper.accept(toolOutput('tool', 3, 'third'));
+    const update = toolUpdate(notifications.at(-1)!);
+    assert.match(toolText(notifications.at(-1)!), /\[1 tool output chunk missing\]/);
+    assert.equal(
+      (update._meta?.maka as { liveOutputMissingChunks?: number } | undefined)
+        ?.liveOutputMissingChunks,
+      1,
+    );
+    await mapper.accept(toolOutput('tool', 2, 'second'));
+    assert.doesNotMatch(toolText(notifications.at(-1)!), /chunk missing/);
   });
 
   test('does not label projected stored inputs as complete raw input', async () => {
@@ -354,6 +376,36 @@ describe('ACP Session event mapper', () => {
     }
   });
 
+  test('uses field-appropriate markers for bounded title and previews', async () => {
+    const notifications: SessionNotification[] = [];
+    const mapper = eventMapper(notifications);
+    await mapper.accept(
+      event({
+        type: 'tool_start',
+        toolUseId: 'tool',
+        toolName: 'Read',
+        displayName: 'T'.repeat(5_000),
+        args: undefined,
+        argsPreview: { input: 'I'.repeat(5_000) },
+      }),
+    );
+    const start = toolUpdate(notifications.at(-1)!);
+    assert.equal(typeof start.title, 'string');
+    if (typeof start.title !== 'string') return;
+    assert.equal(start.title.endsWith('…'), true);
+    assert.doesNotMatch(start.title, /Result truncated/);
+    assert.match(toolText(notifications.at(-1)!), /…/);
+    await mapper.accept(
+      event({
+        type: 'tool_result_preview',
+        toolUseId: 'tool',
+        isError: false,
+        content: { kind: 'text', text: 'P'.repeat(5_000) },
+      }),
+    );
+    assert.doesNotMatch(toolText(notifications.at(-1)!), /Result truncated/);
+  });
+
   test('bounds live output, terminal content and raw output, including multibyte truncation', async () => {
     const notifications: SessionNotification[] = [];
     const mapper = eventMapper(notifications);
@@ -371,6 +423,15 @@ describe('ACP Session event mapper', () => {
     assert.ok(toolText(notifications.at(-1)!).length <= 64 * 1024);
     assert.equal('rawOutput' in update, false);
     assert.match(toolText(notifications.at(-1)!), /Result truncated/);
+    assert.equal(
+      (update._meta?.maka as { resultTruncated?: boolean } | undefined)?.resultTruncated,
+      true,
+    );
+    assert.equal(
+      (update._meta?.maka as { liveOutputDroppedChars?: number } | undefined)
+        ?.liveOutputDroppedChars,
+      undefined,
+    );
     assert.equal(
       Buffer.from(toolText(notifications.at(-1)!)).toString('utf8'),
       toolText(notifications.at(-1)!),
@@ -405,14 +466,18 @@ describe('ACP Session event mapper', () => {
     });
   });
 
-  test('a completed turn also rejects a started tool whose result event was entirely missing', async () => {
-    const mapper = eventMapper([]);
+  test('a completed turn leaves a resultless started tool interrupted', async () => {
+    const notifications: SessionNotification[] = [];
+    const mapper = eventMapper(notifications);
     await mapper.accept(
       event({ type: 'tool_start', toolUseId: 'tool', toolName: 'Read', args: undefined }),
     );
-    await assert.rejects(mapper.finishTools('turn-1', 'completed'), {
-      data: { source: 'adapter', code: 'tool_result_missing' },
-    });
+    await mapper.accept(toolOutput('tool', 1, 'diagnostic'));
+    await mapper.finishTools('turn-1', 'completed');
+    const update = toolUpdate(notifications.at(-1)!);
+    assert.equal(update.status, 'failed');
+    assert.equal('content' in update, false);
+    assert.match(toolText(notifications.at(-2)!), /diagnostic/);
   });
 
   test('notification failure remains visible through flush and suppresses later delivery', async () => {

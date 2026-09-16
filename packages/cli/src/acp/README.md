@@ -67,11 +67,15 @@ complete authoritative result replaces the live output. `contentOmitted` preserv
 the existing display and requires transcript reconciliation. Raw input/output is
 omitted when completeness cannot be established or its presentation would exceed
 the limit. Late progress cannot reopen a terminal tool; authoritative results may
-still correct its content.
+still correct its content. A tool without a result is marked interrupted without
+replacing its last displayed output. Only an announced result without a matching
+durable record fails a completed prompt.
 
 Each tool retains at most 64 Ki characters and 512 chunks of presentation state.
-Truncation is visible. A prompt may retain at most 1 Mi characters and 4096 tool
-identities; exceeding either limit explicitly fails projection. Terminal delivery
+Truncation is visible, and detected live output sequence gaps are marked. A
+prompt may retain at most 1 Mi characters and 4096 tool identities; exceeding
+either limit deliberately fails projection, rather than discarding another tool's
+presentation. Terminal delivery
 releases large payloads and retains bounded identity/digest information.
 
 Before `turn.start`, the Session channel captures a transcript watermark. On
@@ -79,7 +83,8 @@ settlement and before successful prompt completion it rereads the target Turn to
 the announced upper watermark, using the same subscription's paged transcript and
 fragment decoder (the existing 16 MiB range assembly budget applies). Recovery
 invalidates reads from the old subscription and starts again at the original cut.
-This does not consume another subscription slot. Missing required results, failed
+This does not consume another subscription slot. Missing announced results, failed
 reads and failed notifications prevent `end_turn`; cancellation and failed Turns
-do not wait for missing results. Only the channel decides Turn terminal state; the
+do not wait for missing results. An explicit cancellation still returns `cancelled`
+if a notification had already failed. Only the channel decides Turn terminal state; the
 registry waits for final projection delivery before returning `end_turn`.

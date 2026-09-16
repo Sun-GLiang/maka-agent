@@ -66,6 +66,7 @@ interface ToolState {
   status: ToolStatus;
   terminal: boolean;
   authoritative: boolean;
+  resultAnnounced: boolean;
   created: boolean;
   output?: BoundedChunkBuffer<Output>;
   progress?: BoundedChunkBuffer<string>;
@@ -172,11 +173,14 @@ export class AcpToolEventMapper {
         tool.terminal = true;
         tool.status = 'failed';
         tool.meta.hostStatus = 'interrupted';
-        await this.#publish(tool, {
-          content: textContent('Tool interrupted: the turn ended without a result.'),
-        });
+        // ACP content patches replace the whole card. Keep the output already
+        // shown to the client when a resultless tool is interrupted.
+        await this.#publish(tool);
       }
-      if (terminalStatus === 'completed') missingResult = true;
+      // A live result announcement promises a durable result. A start, delta or
+      // progress event alone does not: completed turns can contain unfinished
+      // tool calls, and those should remain visible as interrupted cards.
+      if (terminalStatus === 'completed' && tool.resultAnnounced) missingResult = true;
       this.#release(tool);
     }
     if (missingResult)
@@ -204,6 +208,7 @@ export class AcpToolEventMapper {
         status: 'in_progress',
         terminal: false,
         authoritative: false,
+        resultAnnounced: false,
         created: false,
         inputPreview: '',
         preview: '',
@@ -229,6 +234,7 @@ export class AcpToolEventMapper {
       omitted,
     });
     if (tool.resultDigest === resultDigest) return;
+    if (omitted) tool.resultAnnounced = true;
     tool.terminal = true;
     const hostStatus = toolResultActivityStatus(isError, omitted ? undefined : result);
     tool.status = hostStatus === 'completed' ? 'completed' : 'failed';
@@ -240,10 +246,14 @@ export class AcpToolEventMapper {
       await this.#publish(tool);
     } else {
       tool.authoritative = true;
-      const presentation = bounded(formatToolResultContent(result), TOOL_CHARS);
+      const presentation = bounded(
+        formatToolResultContent(result),
+        TOOL_CHARS,
+        '\n[Result truncated]',
+      );
       const raw = JSON.stringify(result);
-      tool.meta.truncated = presentation.dropped > 0;
-      tool.meta.droppedChars = presentation.dropped;
+      tool.meta.resultTruncated = presentation.dropped > 0;
+      tool.meta.resultDroppedChars = presentation.dropped;
       await this.#publish(tool, {
         content: textContent(presentation.text),
         ...(raw.length <= TOOL_CHARS && presentation.dropped === 0 ? { rawOutput: result } : {}),
@@ -315,7 +325,20 @@ export class AcpToolEventMapper {
     if (tool.inputPreview)
       content.push(...textContent(`Input preview (not full input): ${tool.inputPreview}`));
     if (dropped) content.push(...textContent(`[${dropped} earlier output characters truncated]`));
-    for (const output of tool.output?.values() ?? []) {
+    const outputs = tool.output?.values() ?? [];
+    let previousSequence = dropped > 0 ? (outputs[0]?.seq ?? 1) - 1 : 0;
+    let missingChunks = 0;
+    for (const output of outputs) {
+      if (output.seq > previousSequence + 1) missingChunks += output.seq - previousSequence - 1;
+      previousSequence = output.seq;
+    }
+    if (missingChunks)
+      content.push(
+        ...textContent(
+          `[${missingChunks} tool output chunk${missingChunks === 1 ? '' : 's'} missing]`,
+        ),
+      );
+    for (const output of outputs) {
       content.push({
         type: 'content',
         content: {
@@ -340,7 +363,13 @@ export class AcpToolEventMapper {
           turnId: tool.turnId,
           ...(tool.name ? { toolName: tool.name } : {}),
           ...tool.meta,
-          ...(!tool.terminal ? { truncated: dropped > 0, droppedChars: dropped } : {}),
+          ...(!tool.terminal
+            ? {
+                liveOutputTruncated: dropped > 0 || missingChunks > 0,
+                liveOutputDroppedChars: dropped,
+                liveOutputMissingChunks: missingChunks,
+              }
+            : {}),
         },
       },
       ...(!tool.terminal ? { content } : {}),
@@ -385,9 +414,8 @@ function rawInput(toolName: string, args: unknown): { rawInput?: unknown } {
   return JSON.stringify(args).length <= TOOL_CHARS ? { rawInput: args } : {};
 }
 
-function bounded(text: string, max: number): { text: string; dropped: number } {
+function bounded(text: string, max: number, suffix = '…'): { text: string; dropped: number } {
   if (text.length <= max) return { text, dropped: 0 };
-  const suffix = '\n[Result truncated]';
   let length = max - suffix.length;
   const before = text.charCodeAt(length - 1);
   if (before >= 0xd800 && before <= 0xdbff) length -= 1;
