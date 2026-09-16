@@ -222,7 +222,7 @@ describe('Usage feature scope', () => {
     await act(async () => root.unmount());
   });
 
-  it('retains the previous range with its original label while a new range loads or fails', async () => {
+  it('retains the previous result with a concise notice when a new range fails', async () => {
     const { container, root } = setupDom();
     const base: AppSettings = mergeSettings(createDefaultSettings(), {
       usage: { range: '24h', activeTab: 'providers' },
@@ -267,8 +267,8 @@ describe('Usage feature scope', () => {
     });
     assert.match(
       container.textContent ?? '',
-      /Previous result: 24h/,
-      'a failed range retains the original result label',
+      /The last successfully loaded result is still shown/,
+      'a failed range explains that the previous result remains visible',
     );
 
     await act(async () => root.unmount());
@@ -616,7 +616,7 @@ it('revision change retains the complete screen, blocks paging, and refresh inst
   await act(async () => root.unmount());
 });
 
-it('capacity failure never retries and retains only the original query labels until a complete replacement', async () => {
+it('capacity failure never retries and retains the original query until a complete replacement', async () => {
   const {root} = setupDom();
   let scope!: ReturnType<typeof useUsageStats>;
   const Probe = () => {scope = useUsageStats('all'); return null;};

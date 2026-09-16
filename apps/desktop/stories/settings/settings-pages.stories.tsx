@@ -2610,7 +2610,7 @@ export const UsageRevisionChanged: Story = {
     await userEvent.click(more);
     await expect(await canvas.findByText(copy.staleTitle)).toBeVisible();
     await expect(more).toBeDisabled();
-    await expect(await canvas.findByText(new RegExp(copy.previousResult))).toBeVisible();
+    await expect(await canvas.findByText(copy.staleBody)).toBeVisible();
   },
 };
 // Real path: Settings → Usage → change the activity search when a complete new screen exceeds capacity.
@@ -2625,8 +2625,8 @@ export const UsageRetainedCapacityFailure: Story = {
     if (details) await userEvent.click(details);
     await canvas.findByRole('button', {name: copy.loadMore});
     await userEvent.type(await canvas.findByRole('textbox', {name: copy.filterAria}), 'new-filter');
-    await expect(await canvas.findByText(copy.capacityBody)).toBeVisible();
-    await expect(await canvas.findByText(new RegExp(copy.previousResult))).toBeVisible();
+    await expect(await canvas.findByText(new RegExp(copy.capacityBody))).toBeVisible();
+    await expect(await canvas.findByText(new RegExp(copy.retainedBody))).toBeVisible();
     await expect(await canvas.findByRole('button', {name: copy.loadMore})).toBeDisabled();
   },
 };

@@ -93,7 +93,9 @@ limits, five individually valid sections plus bounded metadata cannot reach
 Capacity failure is `screen_response_too_large` with only a bounded section enum.
 It has no rows, totals, revision, or cursor and does not trigger reconnect/retry.
 The first load displays an error; an existing same-Host complete screen remains
-visible with its original range/search/status labels and disabled continuation.
+visible with a retained-result notice and disabled continuation. The query remains
+bound to that retained snapshot, but its raw range/search/status metadata is not
+displayed as a separate row.
 
 Desktop's existing Settings `settings:usageStats` IPC now returns the complete
 screen; `usage:activity` requests a single continuation. The Session Inspector's

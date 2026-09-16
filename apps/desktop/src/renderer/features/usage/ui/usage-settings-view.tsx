@@ -67,8 +67,8 @@ export function UsageSettingsView(props: {
   const copy = getUsageSettingsCopy(locale);
   const toast = useToast();
   const persistedUsage = props.settings;
-  // A retained complete result keeps its original query labels until replacement.
-  const { stats, reload, targetKey, state, error, paging, loadMore, displayedRange, screenVersion } = useUsageStats(persistedUsage.range);
+  // A retained complete result stays bound to its original query until replacement.
+  const { stats, reload, targetKey, state, error, paging, loadMore, screenVersion } = useUsageStats(persistedUsage.range);
   const [refreshing, setRefreshing] = useState(false);
   const usageRefreshGuard = useActionGuard<'refresh'>();
   const {
@@ -159,7 +159,10 @@ export function UsageSettingsView(props: {
           status={state === 'stale' ? 'info' : 'warning'}
           role="status"
           title={state === 'stale' ? copy.staleTitle : copy.loadFailed}
-          description={state === 'stale' ? copy.staleBody : error?.includes('screen_response_too_large') ? copy.capacityBody : error ?? undefined}
+          description={state === 'stale' ? copy.staleBody : [
+            error?.includes('screen_response_too_large') ? copy.capacityBody : error,
+            stats ? copy.retainedBody : undefined,
+          ].filter(Boolean).join(' ')}
           endContent={state === 'stale' ? (
             <Button
               variant="secondary"
@@ -171,9 +174,6 @@ export function UsageSettingsView(props: {
           ) : undefined}
         />
       ) : null}
-      {stats && state !== 'ready' ? <p role="status">{copy.previousResult}: {displayedRange}
-        {stats.navigation ? ` · ${new Date(stats.navigation.query.range.from).toLocaleString(uiLocaleToIntlLocale(locale))} – ${new Date(stats.navigation.query.range.to).toLocaleString(uiLocaleToIntlLocale(locale))} · ${stats.navigation.query.search || '—'} · ${copy.statuses[['all', 'success', 'error', 'aborted'].indexOf(stats.navigation.query.status)]}` : ''}
-      </p> : null}
       {usageIncomplete ? (
         <Banner
           status="warning"
