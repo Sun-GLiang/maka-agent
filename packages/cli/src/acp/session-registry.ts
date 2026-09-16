@@ -123,6 +123,10 @@ interface ActiveAcpPrompt {
   readonly mapper: AcpSessionEventMapper;
   readonly waiters: Set<() => void>;
   attachment?: RuntimeHostSessionChannel;
+  transcript?: ReturnType<RuntimeHostSessionChannel['trackPromptTranscript']>;
+  readonly projectionAbort: AbortController;
+  readonly reconciliationAbort: AbortController;
+  projectionFailure?: unknown;
   dispatchStarted: boolean;
   startRequestSettled: boolean;
   admissionSettled: boolean;
@@ -248,6 +252,8 @@ export class AcpSessionRegistry {
 
   async #prompt(params: PromptRequest, context: AcpPromptContext): Promise<PromptResponse> {
     const turnId = this.#newTurnId();
+    const projectionAbort = new AbortController();
+    const reconciliationAbort = new AbortController();
     const active: ActiveAcpPrompt = {
       sessionId: params.sessionId,
       turnId,
@@ -258,8 +264,11 @@ export class AcpSessionRegistry {
             await context.notify(notification);
           }
         },
+        signal: projectionAbort.signal,
       }),
       waiters: new Set(),
+      projectionAbort,
+      reconciliationAbort,
       dispatchStarted: false,
       startRequestSettled: false,
       admissionSettled: false,
@@ -320,6 +329,7 @@ export class AcpSessionRegistry {
       }
       if (active.cancelled) return { stopReason: await this.#cancelledStopReason(active) };
 
+      active.transcript = attachment.trackPromptTranscript(turnId);
       const observation = this.#consumePromptEvents(active, attachment.eventsForTurn(turnId));
       // Mark the observer as handled immediately: turn.start may still be in flight
       // when the live subscription reports a failure.
@@ -371,6 +381,9 @@ export class AcpSessionRegistry {
       // A terminal subscription event can precede the Stop response. Retain this
       // prompt so close/dispose cannot release its connection while Stop is in flight.
       await active.stopTask?.catch(() => undefined);
+      active.projectionAbort.abort();
+      active.reconciliationAbort.abort();
+      active.transcript?.dispose();
       active.finished = true;
       this.#wake(active);
       this.#removeActivePrompt(active);
@@ -381,13 +394,44 @@ export class AcpSessionRegistry {
     active: ActiveAcpPrompt,
     events: AsyncIterable<SessionEvent>,
   ): Promise<StopReason> {
+    let terminalStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
     try {
       for await (const event of events) {
+        if (event.type === 'abort') terminalStatus = 'cancelled';
+        else if (event.type === 'error' && !event.recoverable) terminalStatus = 'failed';
+        if (terminalStatus !== 'completed') active.reconciliationAbort.abort();
         if (!active.cancelled) await active.mapper.accept(event);
       }
+      if (active.cancelled) return this.#cancelledStopReason(active);
+      if (terminalStatus === 'completed') await this.#reconcilePrompt(active);
+      else active.reconciliationAbort.abort();
+      if (active.projectionFailure) throw active.projectionFailure;
+      await active.mapper.finishTools(active.turnId, terminalStatus);
+      await active.mapper.flush();
       return active.cancelled ? this.#cancelledStopReason(active) : 'end_turn';
     } catch (error) {
       if (active.cancelled) return this.#cancelledStopReason(active);
+      throw error;
+    }
+  }
+
+  async #reconcilePrompt(active: ActiveAcpPrompt): Promise<void> {
+    if (active.cancelled || active.finished || !active.transcript) return;
+    try {
+      await active.transcript.reconcile(
+        (messages) => active.mapper.acceptTranscriptMessages(active.turnId, messages),
+        AbortSignal.any([active.projectionAbort.signal, active.reconciliationAbort.signal]),
+      );
+    } catch (error) {
+      if (
+        active.cancelled ||
+        active.finished ||
+        active.projectionAbort.signal.aborted ||
+        active.reconciliationAbort.signal.aborted
+      )
+        return;
+      active.projectionFailure ??= error;
+      active.attachment?.failTurn(active.turnId, error);
       throw error;
     }
   }
@@ -438,6 +482,8 @@ export class AcpSessionRegistry {
     ) {
       this.#attachmentOpenControllers.get(active.sessionId)?.abort();
     }
+    active.projectionAbort.abort();
+    active.reconciliationAbort.abort();
     active.stopTask ??= this.#stopPromptWhenObservable(active);
     await Promise.all([
       active.mapper.flush(),
@@ -621,8 +667,7 @@ export class AcpSessionRegistry {
           // identity so a later ACP cancel/close can still stop that root.
           return;
         }
-        // Full interaction mapping belongs to the next ACP capability increment.
-        // Retire observation so the prompt's existing failure path stops its exact Turn.
+        // Interaction mapping is added by the next independently reviewable ACP increment.
         failAttachment(
           RequestError.internalError(
             { source: 'adapter', code: 'unsupported_interaction', kind: pending.request.kind },
@@ -631,7 +676,11 @@ export class AcpSessionRegistry {
         );
       },
       onInteractionResolved: () => undefined,
-      onTranscriptSettlement: () => undefined,
+      onTranscriptSettlement: (turnId) => {
+        for (const active of this.#activePrompts.get(sessionId) ?? []) {
+          if (active.turnId === turnId) void this.#reconcilePrompt(active).catch(() => undefined);
+        }
+      },
       onGoalChanged: () => undefined,
       onFailed: failAttachment,
       onRecovered: () => {
