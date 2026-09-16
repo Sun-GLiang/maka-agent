@@ -101,8 +101,6 @@ reads and failed notifications prevent `end_turn`; cancellation and failed Turns
 do not wait for missing results. An explicit cancellation still returns `cancelled`
 if a notification had already failed. Only the channel decides Turn terminal state; the
 registry waits for final projection delivery before returning `end_turn`.
-do not wait for missing results. Only the channel decides Turn terminal state;
-the registry waits for final projection delivery before returning `end_turn`.
 
 ## Session MCP ownership
 

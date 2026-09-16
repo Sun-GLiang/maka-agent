@@ -19,6 +19,25 @@
 
 # PR5 validation record
 
+This file retains the September 15 validation history of the original combined
+PR #5222. The implementation is now split into α (tool projection), β (ACP
+interactions), and γ (Session-scoped MCP). The unrelated Side Chat E2E flake
+change described below is **not** included in these three branches. The original
+commit and branch references below describe that historical run, not the new
+stacked PR heads.
+
+On the rebuilt split γ head based on Apache main `852a9748d`, `npm run build:test`,
+workspace `npm run typecheck`, `npm run lint`, `npm run format:check`, ASF headers,
+CLI third-party notices, and the protocol epoch guard (166 → 167) pass. All five
+official-SDK real Host/MCP child-process tests pass, as do 50 targeted Runtime Host
+capability tests and the Core MCP grant test. The full CLI `test:dist` reached 1148
+passed and 3 skipped; its two failures are the unrelated local managed-Host
+cold-start cases, which fail with the same `connect_failed` result on a clean
+`852a9748d` control worktree. α independently has an official-SDK real Host
+builtin-tool test; β adds the Stop-failure cancellation regression and stdio
+interaction failure coverage. Full Runtime Host, Core and Desktop E2E suites have
+not been repeated on the rebuilt split stack.
+
 Validated on macOS with Node 24.19.0 and ACP SDK 1.4.0.
 Branch: `feat/acp-tools-interactions-mcp`.
 After PR #4862 merged, the branch was rebuilt as one PR5 commit and was most recently
