@@ -89,7 +89,7 @@ test('prompt transcript pages on its existing subscription, preserves sparse cut
   await channel.close();
 });
 
-test('every reconciliation rereads its immutable pre-turn cut and ignores unrelated turns', async () => {
+test('explicit revision replay rereads the admission cut and ignores unrelated turns', async () => {
   const subscription = new TranscriptSubscription('first', 7);
   const channel = await openChannel(async () => subscription);
   const transcript = channel.trackPromptTranscript('turn');
@@ -113,10 +113,17 @@ test('every reconciliation rereads its immutable pre-turn cut and ignores unrela
   await transcript.reconcile(async (messages) => {
     observed.push(...messages);
   });
-  text = 'authoritative archived projection';
-  await transcript.reconcile(async (messages) => {
-    observed.push(...messages);
+  await transcript.reconcile(async () => {
+    assert.fail('An unchanged cut must not be delivered again');
   });
+  text = 'authoritative archived projection';
+  await transcript.reconcile(
+    async (messages) => {
+      observed.push(...messages);
+    },
+    undefined,
+    { replay: true },
+  );
   assert.equal(subscription.pages.length, 2);
   assert.deepEqual(
     subscription.pages.map(({ anchorSequence }) => anchorSequence),
@@ -129,6 +136,109 @@ test('every reconciliation rereads its immutable pre-turn cut and ignores unrela
   );
   const last = observed.filter((message) => message.type === 'tool_result').at(-1)!;
   assert.equal(last.content.kind === 'text' && last.content.text, text);
+  transcript.dispose();
+  await channel.close();
+});
+
+for (const count of [1_024, 2_048]) {
+  test(`ordinary reconciliation decodes each of ${count} sequential results once`, async () => {
+    const subscription = new TranscriptSubscription('first', 7);
+    const channel = await openChannel(async () => subscription);
+    const transcript = channel.trackPromptTranscript('turn');
+    const records: { identity: number; message: StoredMessage }[] = [];
+    subscription.readPage = async (input) =>
+      subscription.page(
+        input,
+        records.filter(
+          ({ identity }) =>
+            identity > (input.anchorSequence ?? -1) && identity <= input.throughSequence!,
+        ),
+      );
+    let delivered = 0;
+    const consume = async (messages: readonly StoredMessage[]) => {
+      delivered += messages.length;
+    };
+    for (let index = 1; index <= count; index += 1) {
+      records.push({ identity: index * 8, message: result(`tool-${index}`, 'result') });
+      subscription.advance(index * 8 + 7);
+      await setImmediate();
+      await transcript.reconcile(consume);
+      await transcript.reconcile(consume);
+    }
+    assert.equal(subscription.pages.length, count);
+    assert.equal(subscription.decodedMessages, count);
+    assert.equal(delivered, count);
+    assert.equal(subscription.pages.at(-1)?.anchorSequence, (count - 1) * 8 + 7);
+    // The end-turn revision replay adds one linear scan, not one per result.
+    await transcript.reconcile(consume, undefined, { replay: true });
+    assert.equal(subscription.decodedMessages, count * 2);
+    assert.equal(delivered, count * 2);
+    transcript.dispose();
+    await channel.close();
+  });
+}
+
+for (const replay of [false, true]) {
+  test(`coalesced ${replay ? 'replay' : 'advance'} waits for consumption before moving the lower cut`, async () => {
+    const subscription = new TranscriptSubscription('first', 7);
+    const channel = await openChannel(async () => subscription);
+    const transcript = channel.trackPromptTranscript('turn');
+    const pending = deferred<void>();
+    subscription.readPage = async (input) =>
+      subscription.page(input, [
+        { identity: input.throughSequence! - 7, message: result('tool', 'result') },
+      ]);
+    subscription.advance(31);
+    await setImmediate();
+    let deliveries = 0;
+    const consume = async () => {
+      deliveries += 1;
+      if (deliveries === 1) await pending.promise;
+    };
+    const first = transcript.reconcile(consume);
+    await setImmediate();
+    subscription.advance(63);
+    await setImmediate();
+    const second = transcript.reconcile(consume, undefined, { replay });
+    assert.equal(subscription.pages.length, 1);
+    pending.resolve();
+    await Promise.all([first, second]);
+    assert.deepEqual(
+      subscription.pages.map((page) => page.anchorSequence),
+      [7, replay ? 7 : 31],
+    );
+    assert.equal(deliveries, 2);
+    transcript.dispose();
+    await channel.close();
+  });
+}
+
+test('a failed later page does not commit partially consumed progress', async () => {
+  const subscription = new TranscriptSubscription('first', 7);
+  const channel = await openChannel(async () => subscription);
+  const transcript = channel.trackPromptTranscript('turn');
+  subscription.advance(63);
+  await setImmediate();
+  subscription.readPage = async (input) =>
+    subscription.page(
+      input,
+      [{ identity: input.cursor === null ? 16 : 40, message: result('tool', 'result') }],
+      input.cursor === null ? 'next' : null,
+    );
+  let deliveries = 0;
+  await assert.rejects(
+    transcript.reconcile(async () => {
+      deliveries += 1;
+      if (deliveries === 2) throw new Error('notification rejected');
+    }),
+    /notification rejected/,
+  );
+  await transcript.reconcile(async () => {});
+  assert.deepEqual(
+    subscription.pages.map((page) => page.anchorSequence),
+    [7, null, 7, null],
+  );
+  await transcript.reconcile(async () => assert.fail('The successful retry consumed this cut'));
   transcript.dispose();
   await channel.close();
 });
@@ -175,6 +285,11 @@ test('recovery across root turns rereads the old prompt below the new bootstrap 
   first.setRoot(runningTurn('turn'));
   first.advance(31);
   await setImmediate();
+  first.readPage = async (input) =>
+    first.page(input, [{ identity: 16, message: result('tool', 'original') }]);
+  await transcript.reconcile(async () => {});
+  first.advance(47);
+  await setImmediate();
   const stale = deferred<SessionTranscriptPage>();
   first.readPage = () => stale.promise;
   second.readPage = async (input) =>
@@ -189,7 +304,9 @@ test('recovery across root turns rereads the old prompt below the new bootstrap 
   await setImmediate();
   first.fail(new RuntimeHostSubscriptionError('connection_closed', 'recover'));
   await reading;
-  stale.resolve(first.page(first.pages[0]!, [{ identity: 16, message: result('stale', 'old') }]));
+  stale.resolve(
+    first.page(first.pages.at(-1)!, [{ identity: 16, message: result('stale', 'old') }]),
+  );
   await setImmediate();
   assert.equal(opens, 2);
   assert.equal(second.pages[0]?.anchorSequence, 7);
@@ -280,6 +397,7 @@ class TranscriptSubscription
   #closed = false;
   #sequence = 0;
   bootstrapReads = 0;
+  decodedMessages = 0;
   initialTranscript: StoredMessage[] = [];
   readPage: (
     input: Omit<SessionTranscriptPageInput, 'subscriptionId'>,
@@ -378,6 +496,7 @@ class TranscriptSubscription
     maxMessageBytes?: number,
   ): Promise<DecodedSessionTranscriptPage<T>> {
     assert.equal(maxMessageBytes, SESSION_TRANSCRIPT_RANGE_MAX_BYTES);
+    this.decodedMessages += this.#decoded.get(page)?.length ?? 0;
     return {
       messages: (this.#decoded.get(page) ?? []).map(({ identity, message }) => ({
         identity,

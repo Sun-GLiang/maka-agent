@@ -70,13 +70,19 @@ export interface RuntimeHostSessionChannelOpenResult {
   terminalTurn?: TerminalTurnSnapshot;
 }
 
-/** A new prompt's immutable durable lower cut, retained across subscription recovery. */
+/** Incremental prompt transcript consumption with replay across subscription recovery. */
 export interface RuntimeHostPromptTranscript {
   reconcile(
     onMessages: (messages: readonly StoredMessage[]) => Promise<void>,
     signal?: AbortSignal,
+    options?: { replay?: boolean },
   ): Promise<void>;
   dispose(): void;
+}
+
+interface PromptTranscriptCut {
+  afterSequence: number | null;
+  generation: AbortSignal;
 }
 
 export interface RuntimeHostSessionChannelOptions {
@@ -297,9 +303,15 @@ export class RuntimeHostSessionChannel {
     const disposed = new AbortController();
     let inFlight: Promise<void> | undefined;
     let requested = 0;
+    let replayRequested = false;
+    let consumed: PromptTranscriptCut = {
+      afterSequence,
+      generation: this.#transcriptGeneration.signal,
+    };
     return {
-      reconcile: (onMessages, signal) => {
+      reconcile: (onMessages, signal, options) => {
         requested += 1;
+        replayRequested ||= options?.replay === true;
         if (inFlight) return awaitTranscript(inFlight, signal);
         const lifetime = AbortSignal.any([
           this.#lifetime.signal,
@@ -312,7 +324,15 @@ export class RuntimeHostSessionChannel {
             let served: number;
             do {
               served = requested;
-              await this.#reconcilePromptTranscript(turnId, afterSequence, onMessages, lifetime);
+              const replay = replayRequested;
+              replayRequested = false;
+              consumed = await this.#reconcilePromptTranscript(
+                turnId,
+                afterSequence,
+                replay ? { ...consumed, afterSequence } : consumed,
+                onMessages,
+                lifetime,
+              );
             } while (served !== requested);
           } finally {
             // Clear before settling: a watermark can arrive between this
@@ -333,10 +353,11 @@ export class RuntimeHostSessionChannel {
 
   async #reconcilePromptTranscript(
     turnId: string,
-    afterSequence: number | null,
+    admissionSequence: number | null,
+    consumed: PromptTranscriptCut,
     onMessages: (messages: readonly StoredMessage[]) => Promise<void>,
     lifetime: AbortSignal,
-  ): Promise<void> {
+  ): Promise<PromptTranscriptCut> {
     for (;;) {
       lifetime.throwIfAborted();
       if (this.#failure) throw this.#failure;
@@ -345,11 +366,16 @@ export class RuntimeHostSessionChannel {
       const generation = this.#transcriptGeneration.signal;
       const signal = AbortSignal.any([lifetime, generation]);
       const throughSequence = this.#transcriptThrough;
-      if (throughSequence === null || throughSequence === afterSequence) return;
+      // A replacement subscription may revise already consumed messages. Only
+      // ordinary advances on the same generation can use the incremental cut.
+      const afterSequence =
+        consumed.generation === generation ? consumed.afterSequence : admissionSequence;
+      const nextCut = { afterSequence: throughSequence, generation };
+      if (throughSequence === null || throughSequence === afterSequence) return nextCut;
       if (afterSequence !== null && throughSequence < afterSequence) {
         throw new RuntimeHostSubscriptionError(
           'correlation_changed',
-          'Session transcript moved behind the prompt admission cut',
+          'Session transcript moved behind the prompt reconciliation cut',
         );
       }
       try {
@@ -407,10 +433,11 @@ export class RuntimeHostSessionChannel {
               (message) => message.type === 'turn_state' && message.status !== 'running',
             )
           )
-            return;
+            return nextCut;
           cursor = decoded.nextCursor;
         } while (cursor !== null);
-        if (subscription === this.#subscription) return;
+        // Commit progress only after every page and its consumer succeed.
+        if (subscription === this.#subscription) return nextCut;
       } catch (error) {
         lifetime.throwIfAborted();
         if (this.#failure) throw this.#failure;

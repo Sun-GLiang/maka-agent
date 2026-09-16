@@ -403,7 +403,7 @@ export class AcpSessionRegistry {
         if (!active.cancelled) await active.mapper.accept(event);
       }
       if (active.cancelled) return this.#cancelledStopReason(active);
-      if (terminalStatus === 'completed') await this.#reconcilePrompt(active);
+      if (terminalStatus === 'completed') await this.#reconcilePrompt(active, true);
       else active.reconciliationAbort.abort();
       if (active.projectionFailure) throw active.projectionFailure;
       await active.mapper.finishTools(active.turnId, terminalStatus);
@@ -415,12 +415,14 @@ export class AcpSessionRegistry {
     }
   }
 
-  async #reconcilePrompt(active: ActiveAcpPrompt): Promise<void> {
+  async #reconcilePrompt(active: ActiveAcpPrompt, replay = false): Promise<void> {
     if (active.cancelled || active.finished || !active.transcript) return;
     try {
       await active.transcript.reconcile(
         (messages) => active.mapper.acceptTranscriptMessages(active.turnId, messages),
         AbortSignal.any([active.projectionAbort.signal, active.reconciliationAbort.signal]),
+        // One final replay observes revisions below the consumed cut before end_turn.
+        { replay },
       );
     } catch (error) {
       if (
