@@ -50,7 +50,7 @@ interface UsageScopeValue {
   readonly error: string | null;
   readonly paging: boolean;
   reload(range: UsageRange, filters?: Filters, preserveRange?: boolean): Promise<void>;
-  loadMore(): Promise<void>;
+  loadMore(): Promise<boolean>;
 }
 const UsageScopeContext = createContext<UsageScopeValue | null>(null);
 
@@ -147,7 +147,7 @@ export const UsageFeatureScope = forwardRef<
       !navigation?.nextCursor ||
       !services.loadUsageActivity
     )
-      return;
+      return false;
     const ticket = ticketRef.current;
     pagingRef.current = true;
     setPaging(true);
@@ -159,17 +159,17 @@ export const UsageFeatureScope = forwardRef<
         queryIdentity: navigation.queryIdentity,
         cursor: navigation.nextCursor,
       });
-      if (!mountedRef.current || ticket !== ticketRef.current) return;
+      if (!mountedRef.current || ticket !== ticketRef.current) return false;
       if (result.kind === 'revision_changed') {
         blockedRef.current = true;
         setState('stale');
-        return;
+        return false;
       }
       if (result.kind === 'screen_response_too_large') {
         blockedRef.current = true;
         setState('error');
         setError(result.kind);
-        return;
+        return false;
       }
       if (
         result.kind !== 'activity' ||
@@ -186,11 +186,13 @@ export const UsageFeatureScope = forwardRef<
           navigation: { ...navigation, nextCursor: result.page.nextCursor },
         },
       });
+      return true;
     } catch (error) {
-      if (!mountedRef.current || ticket !== ticketRef.current) return;
+      if (!mountedRef.current || ticket !== ticketRef.current) return false;
       blockedRef.current = true;
       setState('error');
       setError(describeError(error));
+      return false;
     } finally {
       if (mountedRef.current && ticket === ticketRef.current) {
         pagingRef.current = false;

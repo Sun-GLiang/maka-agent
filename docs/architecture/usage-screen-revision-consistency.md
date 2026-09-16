@@ -100,7 +100,10 @@ displayed as a separate row.
 Desktop's existing Settings `settings:usageStats` IPC now returns the complete
 screen; `usage:activity` requests a single continuation. The Session Inspector's
 separate `usage:summary` API keeps its existing contract. No activity drain loop
-or activity-derived breakdown remains in the Settings adapter.
+or activity-derived breakdown remains in the Settings adapter. The existing table
+pagination requests continuation on Next and revisits loaded pages locally; there
+is no separate Load more control. Failed or superseded reads do not advance the
+visible page.
 
 Range/filter/Refresh requests supersede both screen and page replies, even when
 revisions are equal. Filter edits preserve the resolved time bounds (including

@@ -641,3 +641,47 @@ it('capacity failure never retries and retains the original query until a comple
   assert.equal(scope.stats, null, 'Host replacement drops the retained result and tokens');
   await act(async () => root.unmount());
 });
+
+it('the existing next-page control fetches activity and cached previous pages need no request', async () => {
+  const {container, root} = setupDom();
+  const settings = mergeSettings(createDefaultSettings(), {
+    usage: {range: 'all', activeTab: 'requests', showDetails: true},
+  });
+  const continuation = deferred<UsageScreenResult>();
+  let calls = 0;
+  const row = (id: string) => ({id, ts: 1, kind: 'model' as const, provider: 'p', model: id,
+    inputTokens: 0, outputTokens: 0, status: 'success' as const});
+  const services: UsageServices = {
+    loadUsageStats: async (_range, query) => {
+      assert.ok(query);
+      return {...navigable(51, query, 'query'), logs: Array.from({length: 50}, (_, i) => row(`first-${i}`))};
+    },
+    loadUsageActivity: async () => {calls++; return continuation.promise;},
+    updateUsageSettings: async () => settings.usage,
+  };
+  const button = (label: string) => {
+    const value = container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+    assert.ok(value, `${label}: ${Array.from(container.querySelectorAll('button')).map(b => b.getAttribute('aria-label') || b.textContent).join(',')}`);
+    return value;
+  };
+  await act(async () => {root.render(tree({active: true, settings, targetKey: 'host', services})); await flush();});
+  assert.doesNotMatch(container.textContent ?? '', /Load more activity/);
+  await act(async () => {button('Go to next page').click(); await flush();});
+  assert.equal(calls, 1);
+  assert.equal(button('Go to next page').disabled, true);
+  assert.match(container.textContent ?? '', /first-0/);
+  await act(async () => {
+    continuation.resolve({kind: 'activity', page: {revision: 'same-revision', queryIdentity: 'query',
+      nextCursor: null, logs: [row('second-page')]}});
+    await flush();
+  });
+  assert.match(container.textContent ?? '', /second-page/);
+  assert.doesNotMatch(container.textContent ?? '', /first-0/);
+  assert.equal(button('Go to next page').disabled, true);
+  await act(async () => {button('Go to previous page').click(); await flush();});
+  assert.match(container.textContent ?? '', /first-0/);
+  await act(async () => {button('Go to next page').click(); await flush();});
+  assert.match(container.textContent ?? '', /second-page/);
+  assert.equal(calls, 1, 'returning to a cached page does not fetch again');
+  await act(async () => root.unmount());
+});

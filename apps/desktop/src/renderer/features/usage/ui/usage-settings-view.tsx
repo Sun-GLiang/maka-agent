@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   paginateData,
   SegmentedControl,
@@ -31,7 +31,7 @@ import { uiLocaleToIntlLocale } from '@maka/core/ui-locale';
 import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
 import type { UsageRange, UsageSettings, UsageStats } from '@maka/core/settings';
 import { estimatedUsageCost, hasUnavailableUsage } from '@maka/core/usage-ledger-merge';
-import { Button, TextInput, Selector, Switch, useToast, useUiLocale, Banner } from '@maka/ui';
+import { Button, TextInput, Selector, Switch, useToast, useUiLocale, useMountedRef, Banner } from '@maka/ui';
 import { ICON_SIZE, Activity, BarChart3, Cpu, Database, RefreshCcw, Search } from '@maka/ui/icons';
 import {
   getUsageSettingsCopy,
@@ -233,6 +233,9 @@ export function UsageSettingsView(props: {
           <div className="settingsUsageTabPanel">
             <UsageRequestsPanel
               screenVersion={screenVersion}
+              hasNextPage={Boolean(stats?.navigation?.nextCursor)}
+              canLoadNextPage={state === 'ready' && !paging}
+              onLoadNextPage={loadMore}
               logs={showRequestDetails ? filteredLogs : EMPTY_USAGE_LOGS}
               showDetails={usageDraft.showDetails}
               modelFilter={usageDraft.modelFilter}
@@ -249,8 +252,7 @@ export function UsageSettingsView(props: {
               onToggleDetails={(showDetails) => void updateUsage({ showDetails })}
               onClearFilters={clearRequestFilters}
             />
-            {showRequestDetails && stats?.navigation?.nextCursor ? <Button variant="secondary" size="sm" label={copy.loadMore}
-              isDisabled={state !== 'ready' || paging} isLoading={paging} onClick={() => void loadMore()} /> : null}
+
           </div>
         ) : null}
 
@@ -286,6 +288,9 @@ export function UsageSettingsView(props: {
 
 function UsageRequestsPanel(props: {
   screenVersion: number;
+  hasNextPage: boolean;
+  canLoadNextPage: boolean;
+  onLoadNextPage(): Promise<boolean>;
   logs: UsageStats['logs'];
   showDetails: boolean;
   modelFilter: string;
@@ -303,13 +308,30 @@ function UsageRequestsPanel(props: {
   onClearFilters(): void;
 }) {
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [props.screenVersion]);
+  const mountedRef = useMountedRef();
+  const navigationRequest = useRef(0);
+  useEffect(() => {
+    navigationRequest.current += 1;
+    setPage(1);
+  }, [props.screenVersion]);
   const pageCount = Math.max(1, Math.ceil(props.logs.length / USAGE_REQUESTS_PAGE_SIZE));
   const currentPage = Math.min(page, pageCount);
   const pagination = useTablePagination<UsageTableRow>({
     page: currentPage,
-    onPageChange: setPage,
-    totalItems: props.logs.length,
+    onPageChange: async (nextPage) => {
+      const request = ++navigationRequest.current;
+      if (nextPage <= pageCount) {
+        setPage(nextPage);
+      } else if (props.hasNextPage && props.canLoadNextPage) {
+        const loaded = await props.onLoadNextPage();
+        if (loaded && mountedRef.current && request === navigationRequest.current) {
+          setPage(nextPage);
+        }
+      }
+    },
+    ...(props.hasNextPage
+      ? { hasMore: currentPage < pageCount || props.canLoadNextPage }
+      : { totalItems: props.logs.length }),
     pageSize: USAGE_REQUESTS_PAGE_SIZE,
     size: 'sm',
   });
