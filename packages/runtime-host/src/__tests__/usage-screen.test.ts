@@ -30,6 +30,7 @@ import {
   tryAcquireInteractiveRootOwner,
 } from '@maka/storage/root-authority';
 import { openInteractiveUsageStoresForWrite } from '@maka/storage/usage-stores';
+import { createSessionStore } from '@maka/storage/session-store';
 import { acquireOperationalStateDatabase } from '@maka/storage/operational-state-store';
 import {
   decodeUsageScreenResult,
@@ -311,6 +312,105 @@ test('real Host returns bounded failures, stays usable, and fences a replacement
     });
   } finally {
     lease.close();
+    await stores.close();
+    await owner.close();
+    await rm(join(resolveRootControlNamespace(), capability.rootId), {
+      recursive: true,
+      force: true,
+    });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('real Host keeps Session titles in the screen revision across rename and pagination', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-screen-titles-'));
+  const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const owner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(owner);
+  const stores = await openInteractiveUsageStoresForWrite(owner.lease);
+  const sessions = createSessionStore(root);
+  const lease = acquireOperationalStateDatabase(root);
+  let titleReads = 0;
+  const host = new HostUsagePricingCoordinator(
+    stores,
+    () => {
+      throw new Error('unexpected drain');
+    },
+    new RuntimePolicyActivationGate(),
+    undefined,
+    async (id) => {
+      titleReads++;
+      return (await sessions.readHeaderSnapshot(id)).name;
+    },
+  );
+  const context = {
+    hostEpoch: 'test',
+    connectionId: 'test',
+    principal: 'local_os_user',
+    acquireResidency: () => ({ release() {} }),
+  } satisfies ConnectionContext;
+  const load = () => host.handlers['usage.query']({ kind: 'screen', query }, context);
+  const continueFrom = (value: UsageScreen) => {
+    assert.ok(value.nextCursor);
+    return host.handlers['usage.query'](
+      {
+        kind: 'activity',
+        query,
+        revision: value.revision,
+        queryIdentity: value.queryIdentity,
+        cursor: value.nextCursor,
+      },
+      context,
+    );
+  };
+  try {
+    const session = await sessions.create({
+      cwd: root,
+      llmConnectionSlug: 'test',
+      model: 'model',
+      permissionMode: 'ask',
+      name: 'Before rename',
+      labels: [],
+    });
+    for (let i = 0; i < 60; i++) {
+      lease.database.prepare('INSERT INTO usage_tool_invocations VALUES (?, ?, ?, ?)').run(
+        String(i),
+        String(i),
+        i + 1,
+        JSON.stringify({
+          sessionId: session.id,
+          toolName: 'tool',
+          status: 'success',
+          durationMs: 1,
+        }),
+      );
+    }
+    const first = await load();
+    assert.ok(first.ok && first.result.kind === 'screen');
+    assert.equal(first.result.screen.logs.length, 50);
+    assert.ok(first.result.screen.logs.every((row) => row.sessionName === 'Before rename'));
+    // Flags are unrelated to the activity title and must not invalidate paging.
+    await sessions.setFlagged(session.id, true);
+    const unchanged = await continueFrom(first.result.screen);
+    assert.ok(unchanged.ok && unchanged.result.kind === 'activity');
+    assert.equal(unchanged.result.page.logs.length, 10);
+    assert.ok(unchanged.result.page.logs.every((row) => row.sessionName === 'Before rename'));
+    await sessions.rename(session.id, 'After rename');
+    assert.deepEqual(await continueFrom(first.result.screen), {
+      ok: true,
+      result: { kind: 'revision_changed' },
+    });
+    const refreshed = await load();
+    assert.ok(refreshed.ok && refreshed.result.kind === 'screen');
+    assert.notEqual(refreshed.result.screen.revision, first.result.screen.revision);
+    assert.ok(refreshed.result.screen.logs.every((row) => row.sessionName === 'After rename'));
+    const next = await continueFrom(refreshed.result.screen);
+    assert.ok(next.ok && next.result.kind === 'activity');
+    assert.ok(next.result.page.logs.every((row) => row.sessionName === 'After rename'));
+    assert.equal(titleReads, 0, 'screen pages must not resolve titles outside their snapshot');
+  } finally {
+    lease.close();
+    await sessions.close?.();
     await stores.close();
     await owner.close();
     await rm(join(resolveRootControlNamespace(), capability.rootId), {

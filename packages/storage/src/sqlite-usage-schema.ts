@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_USAGE_SCHEMA_VERSION = 8;
+export const SQLITE_USAGE_SCHEMA_VERSION = 9;
 
 /**
  * The canonical ledger's columns, in the order every statement binds them.
@@ -247,6 +247,7 @@ export function migrateSqliteUsageDatabase(db: DatabaseSync): void {
     'usage_model_call_projection_checkpoints',
     'usage_pricing_overrides',
     'usage_pricing_authority',
+    'session_metadata',
     'core_agent_runs',
     'core_agent_run_events',
   ]) {
@@ -256,7 +257,13 @@ export function migrateSqliteUsageDatabase(db: DatabaseSync): void {
       continue;
     for (const event of ['INSERT', 'UPDATE', 'DELETE']) {
       let when = '';
-      if (table === 'core_agent_run_events') {
+      if (table === 'session_metadata') {
+        // Only title/identity changes affect the Usage activity projection.
+        when =
+          event === 'UPDATE'
+            ? 'WHEN OLD.name IS NOT NEW.name OR OLD.session_id IS NOT NEW.session_id'
+            : '';
+      } else if (table === 'core_agent_run_events') {
         const old = "OLD.event_type = 'model_call_attempt_recorded'";
         const next = "NEW.event_type = 'model_call_attempt_recorded'";
         when = `WHEN ${event === 'INSERT' ? next : event === 'DELETE' ? old : `${old} OR ${next}`}`;

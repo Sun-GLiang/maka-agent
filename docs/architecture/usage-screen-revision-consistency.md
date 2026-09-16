@@ -54,7 +54,9 @@ external replacement of an open SQLite file is not a supported restore path.
 
 ## Writer coverage
 
-Usage schema version 8 adds one singleton revision row. Narrow SQLite triggers
+Usage schema version 8 adds one singleton revision row; version 9 also fences
+Session titles. Activity titles are read from `session_metadata` inside the same
+read transaction as the page and revision. Narrow SQLite triggers
 advance its counter in the same transaction as the mutation, including foreign
 key cascades. Rollback rolls back the counter. Usage-table updates may invalidate
 even when values compare equal; existing no-op pricing and repair paths issue no
@@ -66,6 +68,7 @@ mutation and remain stable. Ordinary non-Usage run metadata/events do not bump i
 | `SqliteTelemetryRepo.insertToolInvocation` | `usage_tool_invocations` | INSERT/UPDATE/DELETE triggers; mixed-source duplicate IDs, tool mutation and deletion tests |
 | `SqliteModelCallLedger.catchUpProjection` | attempts and projection checkpoints | INSERT/UPDATE/DELETE triggers; repair, correction, unreadable checkpoint and no-op catch-up tests |
 | `agent-run-store.ts` append/repair writers | model-call events and `latest_model_call_sequence` | Source triggers limited to model-call events/high-water or run identity changes; pending-source and source deletion tests |
+| Session metadata owner | `session_metadata` | INSERT/DELETE and name/identity UPDATE invalidate continuation; unrelated metadata updates remain stable; real Host rename-between-pages regression |
 | Session purge (`conversation-operational-state.ts`) | run/event/checkpoint cascades | Triggers follow cascades; canonical/legacy Usage facts remain retained and counted |
 | `SqlitePricingStore.upsert/delete` | overrides and pricing authority | INSERT/UPDATE/DELETE triggers; mutation invalidates, identical upsert stays stable |
 | Operational owner migration/restore | singleton incarnation, lifecycle, schema | Existing atomic migration and schema guard; actual backup restore with repeated durable counter rejects old tokens |

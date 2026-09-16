@@ -310,6 +310,9 @@ function activity(db: DatabaseSync, query: UsageScreenQuery, cursor?: string) {
     .all(...args) as Row[];
   const selected = rows.slice(0, 50);
   const last = selected.at(-1);
+  // Resolve only this bounded page inside the same read transaction as its
+  // revision. Metadata title mutations invalidate subsequent continuations.
+  const title = db.prepare('SELECT name FROM session_metadata WHERE session_id = ?');
   return {
     logs: selected.map((row) => {
       const {
@@ -321,6 +324,8 @@ function activity(db: DatabaseSync, query: UsageScreenQuery, cursor?: string) {
         usageBasis: _usage,
         ...log
       } = row;
+      const sessionName = row.sessionId ? String(title.get(row.sessionId)?.name ?? '').trim() : '';
+      if (sessionName) log.sessionName = sessionName;
       return Object.fromEntries(
         Object.entries(log).filter(([, value]) => value !== null),
       ) as unknown as UsageRequestLog;

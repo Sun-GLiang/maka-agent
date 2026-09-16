@@ -264,7 +264,6 @@ export class HostUsagePricingCoordinator {
     if (result.kind !== 'screen' && result.kind !== 'activity') return result;
     const page = result.kind === 'screen' ? result.screen : result.page;
     page.revision = `${this.#screenGeneration}_${page.revision}`;
-    const titles = await this.#resolveSessionTitles(page.logs);
     page.logs = page.logs.map((row) => ({
       ...row,
       id: projectIdentity(row.id),
@@ -273,9 +272,7 @@ export class HostUsagePricingCoordinator {
       ...(row.toolName === undefined ? {} : { toolName: projectIdentity(row.toolName) }),
       ...(row.sessionId === undefined ? {} : { sessionId: projectIdentity(row.sessionId) }),
       ...(row.turnId === undefined ? {} : { turnId: projectIdentity(row.turnId) }),
-      ...(row.sessionId && titles.has(row.sessionId)
-        ? { sessionName: projectText(titles.get(row.sessionId)!) }
-        : {}),
+      ...(row.sessionName === undefined ? {} : { sessionName: projectText(row.sessionName) }),
     }));
     // Preserve complete collections: capacity is checked before codec/transport.
     if (result.kind === 'screen') {
