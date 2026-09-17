@@ -736,32 +736,6 @@ export function useWorkbarController(
     setPendingSideChatClose([]);
   }, [activeSessionId]);
 
-  useLayoutEffect(() => {
-    const stalePanels = sideConversations.panels.filter(
-      (panel) => panel.sourceSessionId !== activeSessionId,
-    );
-    if (stalePanels.length === 0) return;
-    const staleIds = new Set(stalePanels.map((panel) => panel.id));
-    for (const panel of stalePanels) {
-      const tabId = `side-chat:${panel.id}`;
-      const placement = layout.workbarPanelsState.right.tabs.some(
-        (tab) => tab.id === tabId,
-      )
-        ? 'right'
-        : 'bottom';
-      layout.closeWorkbarTabs(placement, [tabId], {
-        preserveVisibility: true,
-      });
-    }
-    sideConversations.removePanels(staleIds);
-  }, [
-    activeSessionId,
-    layout.closeWorkbarTabs,
-    layout.workbarPanelsState,
-    sideConversations.panels,
-    sideConversations.removePanels,
-  ]);
-
   const companionRecoveryStartedRef = useRef(false);
   useLayoutEffect(() => {
     if (companionRecoveryStartedRef.current) return;
@@ -927,9 +901,11 @@ export function useWorkbarController(
       },
       rightResizable: layout.workbarResizable,
       bottomResizable: layout.bottomPanelResizable,
-      quotes: sideConversations.panels.filter(
-        (panel) => panel.sourceSessionId === activeSessionId,
-      ),
+      // Keep every Side Chat mounted while another main Session is selected.
+      // WorkbarSurface projects only the active Session's tabs, but retaining
+      // the inactive panels preserves their hook state and prevents an ordinary
+      // navigation from running the explicit-dismiss cleanup path.
+      quotes: sideConversations.panels,
       onQuotesConsumed: (snapshot) =>
         sideConversations.updatePanel(snapshot.panelId, (panel) =>
           consumeCompanionQuoteSnapshot(panel, snapshot) ?? panel,

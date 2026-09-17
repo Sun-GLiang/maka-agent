@@ -957,7 +957,7 @@ describe('useWorkbarController', () => {
     assert.deepEqual(staleErrors, []);
   });
 
-  it('keeps Side Chat through collapse, confirms content close, and removes it on source switch', async () => {
+  it('keeps Side Chat through collapse and source switches, but confirms explicit content close', async () => {
     const { root } = installReactRenderer();
     const services = createFakeWorkbarServices();
     await act(async () => renderController(root, services, input(session('a'))));
@@ -993,12 +993,23 @@ describe('useWorkbarController', () => {
     );
 
     await act(async () => controller().commands.openTool('side-chat'));
+    const retainedPanelId = controller().host.quotes?.[0]?.id;
+    assert.ok(retainedPanelId);
     await act(async () => renderController(root, services, input(session('b'))));
     assert.equal(
       controller().host.panelsState.right.tabs.some(
-        (candidate) => candidate.kind === 'side-chat',
+        (candidate) => candidate.id === `side-chat:${retainedPanelId}`,
       ),
-      false,
+      true,
+    );
+    assert.equal(
+      controller().host.quotes?.some((panel) => panel.id === retainedPanelId),
+      true,
+    );
+    await act(async () => renderController(root, services, input(session('a'))));
+    assert.equal(
+      controller().host.quotes?.some((panel) => panel.id === retainedPanelId),
+      true,
     );
   });
 
