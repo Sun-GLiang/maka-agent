@@ -3311,7 +3311,6 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
     const page: SessionTranscriptPage = {
       kind: 'page',
       sessionId: this.snapshot.session.sessionId,
-      source: input.source,
       direction: input.direction,
       throughSequence: input.throughSequence,
       rawBytes: 0,

@@ -409,7 +409,6 @@ class TranscriptSubscription
   ) {
     const durable = this.page(
       {
-        source: 'durable',
         direction: 'older',
         throughSequence,
         cursor: null,
@@ -418,12 +417,7 @@ class TranscriptSubscription
       },
       [],
     );
-    this.transcriptBootstrap = {
-      throughSequence,
-      durable,
-      overlay: { ...durable, source: 'overlay' },
-      overlayMessageCount: 0,
-    };
+    this.transcriptBootstrap = { durable };
   }
   subscribePtyData(): () => void {
     return () => {};
@@ -431,6 +425,7 @@ class TranscriptSubscription
   subscribeSessionDomainChanges(): () => void {
     return () => {};
   }
+  async ready(): Promise<void> {}
   [Symbol.asyncIterator](): AsyncIterator<SubscriptionFrame> {
     return this;
   }
@@ -513,7 +508,6 @@ class TranscriptSubscription
     const page: SessionTranscriptPage = {
       kind: 'page',
       sessionId: 'session',
-      source: input.source,
       direction: input.direction,
       throughSequence: input.throughSequence,
       rawBytes: 0,

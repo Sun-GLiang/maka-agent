@@ -162,7 +162,7 @@ export class RuntimeHostSessionChannel {
   ) {
     this.#connection = connection;
     this.#subscription = subscription;
-    this.#transcriptThrough = subscription.transcriptBootstrap?.throughSequence ?? null;
+    this.#transcriptThrough = subscription.transcriptBootstrap?.durable.throughSequence ?? null;
     this.sessionId = subscription.snapshot.session.sessionId;
     this.messages = messages;
     this.#now = options.now;
@@ -383,7 +383,6 @@ export class RuntimeHostSessionChannel {
           signal.throwIfAborted();
           const page: SessionTranscriptPage = await awaitTranscript(
             subscription.loadTranscriptPage({
-              source: 'durable',
               direction: 'newer',
               throughSequence,
               cursor,
@@ -636,7 +635,7 @@ export class RuntimeHostSessionChannel {
       this.#subscription = replacement;
       this.#transcriptGeneration.abort(new Error('Session transcript subscription replaced'));
       this.#transcriptGeneration = new AbortController();
-      this.#transcriptThrough = replacement.transcriptBootstrap?.throughSequence ?? null;
+      this.#transcriptThrough = replacement.transcriptBootstrap?.durable.throughSequence ?? null;
       this.#subscribeSessionDomainChanges(replacement);
       this.#ready = false;
       void this.#pump(replacement);
