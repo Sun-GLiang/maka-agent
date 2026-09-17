@@ -29,7 +29,6 @@ import {
 } from '@maka/runtime-host/client';
 import {
   SESSION_CONTINUITY_SCHEMA_VERSION,
-  SESSION_TRANSCRIPT_RANGE_MAX_BYTES,
   type SessionContinuitySnapshot,
   type SessionTranscriptBootstrap,
   type SessionTranscriptPage,
@@ -490,7 +489,7 @@ class TranscriptSubscription
     decodeMessage: (value: unknown) => T,
     maxMessageBytes?: number,
   ): Promise<DecodedSessionTranscriptPage<T>> {
-    assert.equal(maxMessageBytes, SESSION_TRANSCRIPT_RANGE_MAX_BYTES);
+    assert.equal(maxMessageBytes, 16 * 1024 * 1024);
     this.decodedMessages += this.#decoded.get(page)?.length ?? 0;
     return {
       messages: (this.#decoded.get(page) ?? []).map(({ identity, message }) => ({
@@ -512,9 +511,8 @@ class TranscriptSubscription
       throughSequence: input.throughSequence,
       rawBytes: 0,
       fragments: [],
-      rangeBoundarySequence: null,
-      protectedTurnSequence: null,
       nextCursor,
+      endsAtTurnBoundary: true,
     };
     this.#decoded.set(page, messages);
     return page;

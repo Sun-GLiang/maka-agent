@@ -44,7 +44,6 @@ import {
   InteractionPendingSnapshot,
   SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES,
   SESSION_TRANSCRIPT_PAGE_MAX_BYTES,
-  SESSION_TRANSCRIPT_RANGE_MAX_BYTES,
   SessionContinuitySnapshot,
   SessionDomainChangedFrame,
   SubscriptionFrame,
@@ -55,6 +54,7 @@ import type { MakaPreparedSessionTurn } from './session-driver.js';
 
 const decodeStoredMessage = (value: unknown): StoredMessage =>
   decodePersistedStoredMessage(markPersisted<StoredMessage>(value));
+const PROMPT_TRANSCRIPT_RANGE_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_PENDING_EVENTS_PER_TURN = 1_024;
 const LAG_REARM_PENDING_EVENTS = MAX_PENDING_EVENTS_PER_TURN / 2;
 const MAX_RECOVERY_ATTEMPTS_WITHOUT_LIVE_FRAME = 8;
@@ -396,10 +396,10 @@ export class RuntimeHostSessionChannel {
             subscription.decodeTranscriptPage(
               page,
               decodeStoredMessage,
-              SESSION_TRANSCRIPT_RANGE_MAX_BYTES,
+              PROMPT_TRANSCRIPT_RANGE_MAX_BYTES,
               (delta) => {
                 assemblyBytes += delta;
-                if (assemblyBytes > SESSION_TRANSCRIPT_RANGE_MAX_BYTES) {
+                if (assemblyBytes > PROMPT_TRANSCRIPT_RANGE_MAX_BYTES) {
                   throw new RangeError(
                     'Prompt transcript assembly exceeds the existing range byte limit',
                   );

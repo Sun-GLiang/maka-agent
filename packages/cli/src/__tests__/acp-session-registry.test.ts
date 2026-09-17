@@ -3315,9 +3315,8 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
       throughSequence: input.throughSequence,
       rawBytes: 0,
       fragments: [],
-      rangeBoundarySequence: null,
-      protectedTurnSequence: null,
       nextCursor: null,
+      endsAtTurnBoundary: true,
     };
     this.#decodedPages.set(page, this.#liveTranscript);
     return page;
