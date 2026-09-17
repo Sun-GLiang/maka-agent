@@ -32,6 +32,7 @@ import {
   decodeInteractionAnswer,
   isInteractionAnswerValidForRequest,
   INTERACTION_ANSWER_MAX_BYTES,
+  INTERACTION_ANSWER_SERIALIZED_MAX_BYTES,
   type InteractionAnswer,
   type InteractionFormField,
 } from '@maka/core/interaction';
@@ -44,6 +45,19 @@ import {
   type InteractionSnapshot,
 } from '@maka/runtime-host/protocol';
 import { whileActive } from './active-promise.js';
+
+// JSON Schema maxLength counts Unicode characters, while Core limits UTF-8
+// bytes per answer and for the whole answer object. A character can occupy
+// four UTF-8 bytes or six bytes when JSON-escaped (e.g. a control character).
+function questionAnswerMaxChars(count: number): number {
+  const envelopeBytes = Buffer.byteLength(
+    JSON.stringify({ kind: 'question', answers: Array(count).fill('') }),
+  );
+  return Math.min(
+    Math.floor(INTERACTION_ANSWER_MAX_BYTES / 4),
+    Math.floor((INTERACTION_ANSWER_SERIALIZED_MAX_BYTES - envelopeBytes) / (count * 6)),
+  );
+}
 
 export interface AcpInteractionClient {
   readonly capabilities: ClientCapabilities;
@@ -376,6 +390,7 @@ function elicitationRequest(pending: InteractionPendingSnapshot): CreateElicitat
   const properties: Record<string, ElicitationPropertySchema> = Object.create(null);
   const required: string[] = [];
   if (request.kind === 'question') {
+    const maxChars = questionAnswerMaxChars(request.questions.length);
     request.questions.forEach((question, index) => {
       properties[`q${index}`] = {
         type: 'string',
@@ -385,8 +400,9 @@ function elicitationRequest(pending: InteractionPendingSnapshot): CreateElicitat
             option.description ? `${option.label}: ${option.description}` : option.label,
           ),
           'Enter an option or your own answer. Leave empty to skip this question.',
+          `Limit: ${maxChars} characters (${INTERACTION_ANSWER_MAX_BYTES} UTF-8 bytes per answer).`,
         ].join('\n'),
-        maxLength: INTERACTION_ANSWER_MAX_BYTES,
+        maxLength: maxChars,
       };
     });
   } else {

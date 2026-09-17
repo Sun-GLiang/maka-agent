@@ -31,7 +31,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type { InteractionRequest } from '@maka/core/interaction';
+import { INTERACTION_ANSWER_MAX_BYTES, type InteractionRequest } from '@maka/core/interaction';
 import { RuntimeHostOperationError, type RuntimeHostConnection } from '@maka/runtime-host/client';
 import type {
   InteractionAnswerInput,
@@ -120,6 +120,105 @@ describe('ACP Session interactions', () => {
       fixtures.flatMap((fixture) => fixture.failures),
       [],
     );
+  });
+
+  test('official SDK question schema only advertises answers that fit the Host UTF-8 limit', async () => {
+    const replies = ['界'.repeat(512), '😀'.repeat(512)];
+    const fixtures: ReturnType<typeof interactionFixture>[] = [];
+    let nextReply = 0;
+    const sdkAgent = agent({ name: 'question-limit-test-agent' })
+      .onRequest(methods.agent.initialize, () => ({ protocolVersion: 1, agentCapabilities: {} }))
+      .onRequest(methods.agent.session.prompt, async ({ client: peer }) => {
+        const pending = question();
+        const fixture = interactionFixture(pending, {
+          client: {
+            capabilities: { elicitation: { form: {} } },
+            createElicitation: (params, signal) =>
+              peer.request(methods.client.elicitation.create, params, {
+                cancellationSignal: signal,
+              }),
+            requestPermission: () => {
+              throw new Error('Unexpected permission request');
+            },
+          },
+        });
+        fixtures.push(fixture);
+        await fixture.bridge.pending(pending);
+        return { stopReason: 'end_turn' };
+      });
+    const sdkClient = client({ name: 'question-limit-test-client' }).onRequest(
+      methods.client.elicitation.create,
+      ({ params }) => {
+        assert.equal(params.mode, 'form');
+        const schema = (params as ElicitationFormMode).requestedSchema;
+        const property = schema.properties?.q0;
+        assert.equal(property?.type, 'string');
+        if (property?.type !== 'string') throw new Error('Expected a question string');
+        const maxLength = property.maxLength;
+        assert.equal(maxLength, INTERACTION_ANSWER_MAX_BYTES / 4);
+        assert.ok(typeof maxLength === 'number');
+        assert.ok(Array.from('界'.repeat(700)).length > maxLength);
+        const reply = replies[nextReply++];
+        assert.equal(Array.from(reply).length, maxLength);
+        assert.ok(Buffer.byteLength(reply) <= INTERACTION_ANSWER_MAX_BYTES);
+        return { action: 'accept', content: { q0: reply } };
+      },
+    );
+    await sdkClient.connectWith(sdkAgent, async (peer) => {
+      await peer.request(methods.agent.initialize, {
+        protocolVersion: 1,
+        clientCapabilities: { elicitation: { form: {} } },
+      });
+      for (const _ of replies) {
+        assert.deepEqual(
+          await peer.request(methods.agent.session.prompt, {
+            sessionId: 'session-1',
+            prompt: [{ type: 'text', text: 'Go' }],
+          }),
+          { stopReason: 'end_turn' },
+        );
+      }
+    });
+    assert.equal(nextReply, replies.length);
+    assert.deepEqual(
+      fixtures.map((fixture) => fixture.answers[0]?.answer),
+      replies.map((reply) => ({ kind: 'question', answers: [reply] })),
+    );
+    assert.deepEqual(
+      fixtures.flatMap((fixture) => fixture.failures),
+      [],
+    );
+  });
+
+  test('three schema-valid question answers fit the serialized Host limit after JSON escaping', async () => {
+    const pending = snapshot({
+      kind: 'question',
+      toolUseId: 'tool-1',
+      questions: ['First?', 'Second?', 'Third?'].map((text) => ({
+        question: text,
+        options: [{ label: 'A' }, { label: 'B' }],
+      })),
+    });
+    const fixture = interactionFixture(pending);
+    const task = fixture.bridge.pending(pending);
+    const schema = (await fixture.elicited.promise) as ElicitationFormMode;
+    const property = schema.requestedSchema.properties?.q0;
+    assert.equal(property?.type, 'string');
+    if (property?.type !== 'string') throw new Error('Expected a question string');
+    const maxLength = property.maxLength;
+    assert.equal(maxLength, 452);
+    assert.ok(typeof maxLength === 'number');
+    const escaped = '\0'.repeat(maxLength);
+    fixture.elicitationResponse.resolve({
+      action: 'accept',
+      content: { q0: escaped, q1: escaped, q2: escaped },
+    });
+    await task;
+    assert.deepEqual(fixture.answers[0]?.answer, {
+      kind: 'question',
+      answers: [escaped, escaped, escaped],
+    });
+    assert.deepEqual(fixture.failures, []);
   });
 
   test('questions preserve option hints, free text and individual unanswered questions', async () => {
