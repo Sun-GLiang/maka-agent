@@ -687,11 +687,13 @@ describe('ACP Session interactions', () => {
     await permission.bridge.pending(permission.initial);
     assert.deepEqual(permission.answers, []);
     assert.equal(errorCode(permission.failures[0]), 'invalid_interaction_answer');
+    assert.match(permission.failures[0]?.message ?? '', /Unknown permission option/);
     const form = interactionFixture(question());
     form.elicitationResponse.resolve({ action: '_unknown' });
     await form.bridge.pending(form.initial);
     assert.deepEqual(form.answers, []);
     assert.equal(errorCode(form.failures[0]), 'invalid_interaction_answer');
+    assert.match(form.failures[0]?.message ?? '', /Unknown elicitation action/);
   });
 
   test('Host identities and failures cannot silently rebind a pending request', async () => {

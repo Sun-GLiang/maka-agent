@@ -52,8 +52,10 @@ interactions for an active ACP prompt use the client's negotiated standard
 `session/request_permission` or `elicitation/create` methods. The Host still owns
 canonical answers and grants. The adapter preserves typed form values, permission
 scope, external answers and closure reasons; an unsupported client method fails
-the affected prompt rather than leaving it pending. Interactions belonging to
-another client's Turn are not presented through this ACP connection.
+the affected prompt rather than leaving it pending. Cancelling a question cancels
+the active Turn because Host question answers have no cancellation variant;
+cancelling a form is forwarded as the Host form `cancel` result. Interactions
+belonging to another client's Turn are not presented through this ACP connection.
 
 Cancelling a Turn releases local dialog waits immediately. Its cancellation fence
 remains in place even after the ACP prompt returns if Stop delivery failed and

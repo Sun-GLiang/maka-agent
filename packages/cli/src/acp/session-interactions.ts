@@ -262,7 +262,8 @@ export class AcpSessionInteractions {
       }
       try {
         answer = elicitationAnswer(pending, response.value);
-      } catch {
+      } catch (error) {
+        if (error instanceof RequestError) throw error;
         throw interactionError(pending, 'invalid_interaction_answer');
       }
     } else {
@@ -337,8 +338,12 @@ export class AcpSessionInteractions {
     if (active.aborted || this.#published.has(pending.interactionId)) return;
     assertSameInteraction(pending, resolved);
     this.#published.add(pending.interactionId);
+    // Keep replay deduplication bounded for a long-lived attachment. IDs older
+    // than this window may be projected again only if the Host replays a
+    // pathologically old resolved event.
     if (this.#published.size > INTERACTION_MAX_PENDING_PER_SESSION) {
-      this.#published.delete(this.#published.values().next().value!);
+      const oldest = this.#published.values().next();
+      if (!oldest.done) this.#published.delete(oldest.value);
     }
     if (resolved.status === 'answered') this.#options.onAnswered(resolved, pending);
     await whileActive(
