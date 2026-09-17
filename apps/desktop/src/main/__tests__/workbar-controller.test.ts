@@ -363,6 +363,24 @@ describe('useWorkbarController', () => {
     assert.equal(controller().host.panelsState.bottom.activeTabId, 'workbar:inspector');
   });
 
+  it('opens a Side Chat for the active Session instead of toggling a hidden one', async () => {
+    const { root } = installReactRenderer();
+    const services = createFakeWorkbarServices();
+    const authoritativeSessionIds = new Set(['a', 'b']);
+    const show = (id: string) => renderController(root, services, {
+      ...input(session(id)),
+      authoritativeSessionIds,
+    });
+
+    await act(async () => show('a'));
+    await act(async () => controller().commands.toggleTool('side-chat'));
+    assert.deepEqual(controller().host.quotes?.map((panel) => panel.sourceSessionId), ['a']);
+
+    await act(async () => show('b'));
+    await act(async () => controller().commands.toggleTool('side-chat'));
+    assert.deepEqual(controller().host.quotes?.map((panel) => panel.sourceSessionId), ['a', 'b']);
+  });
+
   it('keeps right-panel visibility independent across Session navigation', async () => {
     const { root } = installReactRenderer();
     const services = createFakeWorkbarServices();

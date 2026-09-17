@@ -773,12 +773,23 @@ export function useWorkbarController(
 
   const toggleTool = useCallback((kind: SessionWorkbarTabKind) => {
     if (!workbarToolsForWorkspace(workspace).some((tool) => tool.kind === kind)) return;
+    const activeSideChatTabIds = kind === 'side-chat'
+      ? new Set(
+        sideConversations.panels
+          .filter((panel) => panel.sourceSessionId === activeSessionIdRef.current)
+          .map((panel) => `side-chat:${panel.id}`),
+      )
+      : undefined;
+    const matchesTool = (candidate: SessionWorkbarTab) =>
+      candidate.kind === kind &&
+      (!activeSideChatTabIds || activeSideChatTabIds.has(candidate.id));
     const panels = panelsStateRef.current;
     const placements = [panels.focusedPanel, 'right', 'bottom'] as const;
     for (const placement of placements) {
       const panel = panels[placement];
-      const tab = panel.tabs.find((candidate) => candidate.id === panel.activeTabId && candidate.kind === kind)
-        ?? panel.tabs.find((candidate) => candidate.kind === kind);
+      const tab = panel.tabs.find(
+        (candidate) => candidate.id === panel.activeTabId && matchesTool(candidate),
+      ) ?? panel.tabs.find(matchesTool);
       if (!tab) continue;
       const visible = placement === 'right' ? !layout.workbarCollapsed : layout.bottomPanelOpen;
       if (visible && !panel.launcherOpen && panel.activeTabId === tab.id) {
@@ -791,8 +802,9 @@ export function useWorkbarController(
       return;
     }
     openTool(kind);
-  }, [workspace, layout.workbarCollapsed, layout.bottomPanelOpen, layout.setWorkbarCollapsed,
-    layout.setBottomPanelOpen, layout.activateWorkbarTab, revealPlacement, openTool]);
+  }, [workspace, sideConversations.panels, layout.workbarCollapsed, layout.bottomPanelOpen,
+    layout.setWorkbarCollapsed, layout.setBottomPanelOpen, layout.activateWorkbarTab,
+    revealPlacement, openTool]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
