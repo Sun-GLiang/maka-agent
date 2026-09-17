@@ -17,18 +17,27 @@
  * under the License.
  */
 
-/** Bridge conversation commands to the active surface's scroll authority. */
-export function createTranscriptViewportNavigation() {
-  const listeners = new Set<(sessionId: string) => void>();
-  return {
-    followLatest(sessionId: string): void {
-      for (const listener of [...listeners]) listener(sessionId);
-    },
-    subscribe(listener: (sessionId: string) => void): () => void {
-      listeners.add(listener);
-      return () => { listeners.delete(listener); };
-    },
-  };
-}
+import { defineConfig } from '@playwright/test';
 
-export type TranscriptViewportNavigation = ReturnType<typeof createTranscriptViewportNavigation>;
+/**
+ * Measurement harnesses that launch a real Electron window but do not belong
+ * to the E2E tier. They seed hundreds of MiB and take minutes each, which is
+ * worth paying when a number is in question and not worth paying on every
+ * push, so nothing here runs in CI.
+ *
+ * Run from apps/desktop via `npm run measure`, which builds the app first.
+ */
+export default defineConfig({
+  testDir: '.',
+  workers: 1,
+  captureGitInfo: { commit: false, diff: false },
+  retries: 0,
+  timeout: 2_400_000,
+  expect: { timeout: 10_000 },
+  outputDir: 'test-results',
+  use: {
+    trace: 'retain-on-failure',
+    video: 'retain-on-failure',
+    screenshot: 'only-on-failure',
+  },
+});
