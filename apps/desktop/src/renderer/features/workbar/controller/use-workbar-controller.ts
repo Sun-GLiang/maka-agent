@@ -682,6 +682,44 @@ export function useWorkbarController(
     [layout.closeWorkbarTabs, sideConversations, terminal, input.toastApi, terminalCopy.stopFailed, locale],
   );
 
+  useEffect(() => {
+    const authoritativeSessionIds = input.authoritativeSessionIds;
+    if (!authoritativeSessionIds) return;
+    const retiredPanelIds = new Set(
+      sideConversations.panels
+        .filter((panel) => !authoritativeSessionIds.has(panel.sourceSessionId))
+        .map((panel) => panel.id),
+    );
+    if (retiredPanelIds.size === 0) return;
+    setPendingSideChatClose((current) => {
+      const retained = current.filter(
+        ({ tab }) =>
+          tab.kind !== 'side-chat' ||
+          !retiredPanelIds.has(tab.id.slice('side-chat:'.length)),
+      );
+      return retained.length === current.length ? current : retained;
+    });
+    for (const placement of ['right', 'bottom'] as const) {
+      const tabs = panelsStateRef.current[placement].tabs.filter(
+        (tab) =>
+          tab.kind === 'side-chat' &&
+          retiredPanelIds.has(tab.id.slice('side-chat:'.length)),
+      );
+      closeTabsWithoutConfirmation(placement, tabs, {
+        preserveVisibility: true,
+      });
+    }
+    // Dropping the quote unmounts QuoteCompanionPanel, which runs the same
+    // durable fork cleanup as an explicit close. An orphan record without a
+    // matching tab must take that path too.
+    sideConversations.removePanels(retiredPanelIds);
+  }, [
+    closeTabsWithoutConfirmation,
+    input.authoritativeSessionIds,
+    sideConversations.panels,
+    sideConversations.removePanels,
+  ]);
+
   const closeTabs = useCallback(
     (
       placement: SessionWorkbarPlacement,

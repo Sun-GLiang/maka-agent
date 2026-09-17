@@ -1031,6 +1031,41 @@ describe('useWorkbarController', () => {
     );
   });
 
+  it('retires a retained Side Chat when its source leaves the authoritative catalog', async () => {
+    const { root } = installReactRenderer();
+    const services = createFakeWorkbarServices();
+    const show = (id: string, authoritativeSessionIds: ReadonlySet<string>) =>
+      renderController(root, services, {
+        ...input(session(id)),
+        authoritativeSessionIds,
+      });
+
+    await act(async () => show('a', new Set(['a', 'b'])));
+    await act(async () => controller().commands.openTool('side-chat'));
+    const panelId = controller().host.quotes?.[0]?.id;
+    assert.ok(panelId);
+    await act(async () => controller().host.onContentStateChange?.(panelId, true));
+
+    await act(async () => show('b', new Set(['a', 'b'])));
+    await act(async () => controller().commands.toggleRight());
+    assert.equal(controller().host.rightCollapsed, false);
+    assert.equal(controller().host.quotes?.[0]?.sourceSessionId, 'a');
+
+    await act(async () => show('b', new Set(['b'])));
+    assert.equal(
+      controller().host.panelsState.right.tabs.some(
+        (tab) => tab.id === `side-chat:${panelId}`,
+      ),
+      false,
+    );
+    assert.equal(
+      controller().host.quotes?.some((panel) => panel.id === panelId),
+      false,
+    );
+    assert.equal(controller().host.closeConfirmation.open, false);
+    assert.equal(controller().host.rightCollapsed, false);
+  });
+
   it('keeps a newly created companion hidden through panel changes and stale catalogs until cleanup', async () => {
     const { root } = installReactRenderer();
     const services = createFakeWorkbarServices();

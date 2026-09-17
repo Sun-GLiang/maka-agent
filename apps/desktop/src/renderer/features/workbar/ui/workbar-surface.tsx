@@ -425,6 +425,14 @@ export function WorkbarSurface(props: {
   if (props.sourceSession) {
     sideChatSourceSessionsRef.current.set(props.sourceSession.id, props.sourceSession);
   }
+  const retainedSideChatSourceIds = new Set(
+    props.quotes?.map((quote) => quote.sourceSessionId),
+  );
+  for (const sourceSessionId of sideChatSourceSessionsRef.current.keys()) {
+    if (!retainedSideChatSourceIds.has(sourceSessionId)) {
+      sideChatSourceSessionsRef.current.delete(sourceSessionId);
+    }
+  }
   const [artifactCount, setArtifactCount] = useState({ sessionId: props.sessionId, count: 0 });
   const allowedPanels = (['right', 'bottom'] as const).reduce((panels, placement) => {
     const tabIds = panels[placement].tabs.filter((tab) => !tools.some((tool) => tool.kind === tab.kind)).map((tab) => tab.id);
