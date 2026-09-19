@@ -943,6 +943,45 @@ describe('revision-consistent Usage screen', () => {
     });
   });
 
+  test('shares the protocol UTF-8 search boundary', async () => {
+    await withScreenStores(async (stores) => {
+      const accepted = { ...screenQuery, search: '界'.repeat(341) + 'x' };
+      assert.equal(
+        (await stores.readUsageScreen({ kind: 'screen', query: accepted })).kind,
+        'screen',
+      );
+      await assert.rejects(
+        stores.readUsageScreen({
+          kind: 'screen',
+          query: { ...screenQuery, search: '界'.repeat(342) },
+        }),
+        /Invalid Usage screen query/,
+      );
+    });
+  });
+
+  test('continues after a fractional timestamp without duplicate or missing rows', async () => {
+    await withScreenStores(async (stores) => {
+      for (let i = 0; i < 49; i++) {
+        await stores.telemetry.recordLlmCall(llmRecord({ id: `newer-${i}`, ts: 200 + i }));
+      }
+      await stores.telemetry.recordLlmCall(llmRecord({ id: 'fractional-boundary', ts: 100.5 }));
+      await stores.telemetry.recordLlmCall(llmRecord({ id: 'older', ts: 100 }));
+
+      const screen = await initialScreen(stores);
+      assert.equal(screen.logs.length, 50);
+      assert.equal(screen.logs.at(-1)?.id, 'fractional-boundary');
+      const result = await stores.readUsageScreen(continuation(screen));
+      assert.ok(result.kind === 'activity');
+      assert.deepEqual(
+        result.page.logs.map((row) => row.id),
+        ['older'],
+      );
+      assert.equal(result.page.nextCursor, null);
+      assert.equal(new Set([...screen.logs, ...result.page.logs].map((row) => row.id)).size, 51);
+    });
+  });
+
   test('filters search the full range with Unicode and do not narrow headline totals or breakdowns', async () => {
     await withScreenStores(async (stores) => {
       await seedScreen(stores);
