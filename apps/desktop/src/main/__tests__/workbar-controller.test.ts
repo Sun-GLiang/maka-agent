@@ -1031,9 +1031,17 @@ describe('useWorkbarController', () => {
     );
   });
 
-  it('retires a retained Side Chat when its source leaves the authoritative catalog', async () => {
+  it('retains a Side Chat through a catalog gap and archive, then retires it on source deletion', async () => {
     const { root } = installReactRenderer();
-    const services = createFakeWorkbarServices();
+    const defaults = createFakeWorkbarServices();
+    const sessionChangeHandlers = new Set<Parameters<WorkbarServices['sideChat']['subscribeSessionChanges']>[0]>();
+    const services = createFakeWorkbarServices({ sideChat: {
+      ...defaults.sideChat,
+      subscribeSessionChanges: (handler) => {
+        sessionChangeHandlers.add(handler);
+        return () => { sessionChangeHandlers.delete(handler); };
+      },
+    } });
     const show = (id: string, authoritativeSessionIds: ReadonlySet<string>) =>
       renderController(root, services, {
         ...input(session(id)),
@@ -1052,6 +1060,27 @@ describe('useWorkbarController', () => {
     assert.equal(controller().host.quotes?.[0]?.sourceSessionId, 'a');
 
     await act(async () => show('b', new Set(['b'])));
+    assert.equal(
+      controller().host.panelsState.right.tabs.some(
+        (tab) => tab.id === `side-chat:${panelId}`,
+      ),
+      true,
+    );
+    assert.equal(controller().host.quotes?.some((panel) => panel.id === panelId), true);
+    await act(async () => {
+      for (const handler of sessionChangeHandlers) handler({ reason: 'archived', sessionId: 'a', ts: Date.now() });
+    });
+    assert.equal(controller().host.quotes?.some((panel) => panel.id === panelId), true);
+
+    await act(async () => show('b', new Set(['a', 'b'])));
+    assert.equal(controller().host.quotes?.some((panel) => panel.id === panelId), true);
+    await act(async () => {
+      for (const handler of sessionChangeHandlers) handler({ reason: 'deleted', sessionId: 'b', ts: Date.now() });
+    });
+    assert.equal(controller().host.quotes?.some((panel) => panel.id === panelId), true);
+    await act(async () => {
+      for (const handler of sessionChangeHandlers) handler({ reason: 'deleted', sessionId: 'a', ts: Date.now() });
+    });
     assert.equal(
       controller().host.panelsState.right.tabs.some(
         (tab) => tab.id === `side-chat:${panelId}`,

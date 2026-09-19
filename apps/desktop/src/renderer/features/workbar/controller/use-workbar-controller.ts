@@ -20,6 +20,7 @@
 import {
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -682,12 +683,10 @@ export function useWorkbarController(
     [layout.closeWorkbarTabs, sideConversations, terminal, input.toastApi, terminalCopy.stopFailed, locale],
   );
 
-  useEffect(() => {
-    const authoritativeSessionIds = input.authoritativeSessionIds;
-    if (!authoritativeSessionIds) return;
+  const retireDeletedSessionSideChats = useEffectEvent((sourceSessionId: string) => {
     const retiredPanelIds = new Set(
       sideConversations.panels
-        .filter((panel) => !authoritativeSessionIds.has(panel.sourceSessionId))
+        .filter((panel) => panel.sourceSessionId === sourceSessionId)
         .map((panel) => panel.id),
     );
     if (retiredPanelIds.size === 0) return;
@@ -713,12 +712,15 @@ export function useWorkbarController(
     // durable fork cleanup as an explicit close. An orphan record without a
     // matching tab must take that path too.
     sideConversations.removePanels(retiredPanelIds);
-  }, [
-    closeTabsWithoutConfirmation,
-    input.authoritativeSessionIds,
-    sideConversations.panels,
-    sideConversations.removePanels,
-  ]);
+  });
+
+  useEffect(() => sideChat.subscribeSessionChanges((event) => {
+    // A catalog refresh can omit a still-live source temporarily. Only the
+    // Host's committed deletion signal may destroy its ephemeral fork.
+    if (event.reason === 'deleted' && event.sessionId) {
+      retireDeletedSessionSideChats(event.sessionId);
+    }
+  }), [sideChat]);
 
   const closeTabs = useCallback(
     (
