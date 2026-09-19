@@ -30,10 +30,9 @@ could merge with current `main` as a focused consistency change. The
 and [follow-up framing](https://github.com/apache/maka/pull/5387#issuecomment-5698633094)
 are the source of this list.
 
-This document is the initial scope for a draft follow-up PR. It changes no
-runtime behavior. Mark each item complete only when its code and regression
-coverage are included; measurement-only findings may instead end with recorded
-evidence and a narrower follow-up decision.
+This document began as the scope for a draft follow-up PR. The implementation
+now closes the code findings below while preserving the complete-or-no-install
+contract. Measurement-only findings record their evidence and decision here.
 
 ## Normal-path P2 findings
 
@@ -84,6 +83,50 @@ leave the other entry points inconsistent.
 | The `usage:activity` IPC handler does not validate the request kind before dispatch | Reject a `screen` request at the activity boundary. |
 | The retained-capacity Story checks its notice and disabled continuation but not retained totals or rows | Assert visible retained data in the Story. |
 | The Desktop bridge overloads `usageStats(range | ActivityRequest, host?, query?)` | Give activity continuation a distinct bridge method if it simplifies the public contract without changing behavior. |
+
+## Implementation outcome
+
+- Free-text edits now wait 250 ms at the renderer query seam. Mount, Host,
+  range, status, and Refresh semantics remain immediate, and Refresh consumes a
+  pending edit.
+- Continuation fences apply only to unloaded pages. A feature-local paginator
+  keeps cached pages available without changing or patching the upstream Astryx
+  component.
+- Protocol and Storage share the 1,024 UTF-8-byte search domain. Persisted
+  timestamps and continuation cursors share a finite, nonnegative,
+  JSON-round-trippable number domain, including fractional timestamps.
+- Accepted screen reads participate in reader and writer close barriers without
+  turning a read failure into a close failure.
+- Capacity remains a typed domain failure through the renderer. The activity
+  IPC boundary decodes and rejects the wrong request kind before Host dispatch.
+  The existing bridge overload remains because splitting it would add bridge
+  debt to the legacy Settings surface rather than simplify that seam.
+- `displayedRange` and its now-unused snapshot field were removed. The retained
+  capacity Story asserts the original total and activity row as well as the
+  notice and continuation fence.
+
+### Measurement decisions
+
+The metadata trigger test exercises 100 Sessions with no Usage activity. The
+old unconditional INSERT/DELETE triggers advanced the Usage revision 200 times;
+the narrowed indexed predicates advance it zero times. Legacy model rows, tool
+rows, canonical model-call rows, title deletion, and rollback remain covered,
+so the churn reduction is material and was implemented.
+
+A numbered jump remains linear in the target page because each keyset token is
+issued by the preceding page. With the 50-row page size, a 10,000-row history
+jump from page 1 to page 200 requires 199 serialized Host reads. Network latency
+alone therefore has lower bounds of 1.99 seconds at 10 ms RTT and 9.95 seconds
+at 50 ms RTT, before query work. The renderer now exposes page-by-page progress
+and keeps already cached pages usable during that walk.
+
+This PR deliberately does not add an offset request. A direct random-page
+contract would also require a sparse page cache instead of the current
+contiguous `UsageStats.logs` seam; adding only offset would either download the
+same intermediate rows or install holes into a contract that currently promises
+complete local pages. Preserve keyset correctness here and treat sparse random
+access as a separate contract change if product evidence shows that deep jumps
+are common enough to justify that larger model.
 
 ## Verification before marking the draft ready
 
