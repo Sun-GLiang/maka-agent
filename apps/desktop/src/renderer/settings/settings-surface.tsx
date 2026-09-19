@@ -406,14 +406,18 @@ function SettingsSurfaceContent(
   // Settings surface. `usageScopeRef.fenceTarget()` rejects an in-flight old-Host
   // load synchronously at a Host change, before React re-renders the new target.
   const usageScopeRef = useRef<UsageScopeHandle>(null);
+  const readUsage = (range: UsageRange | Extract<UsageScreenRequest, {kind: 'activity'}>, query?: UsageScreenQuery) =>
+    selectedRuntimeHost ? window.maka.settings.usageStats(range, selectedRuntimeHost, query) : Promise.resolve(null);
   const usageServices = {
     loadUsageStats: async (range: UsageRange, query?: UsageScreenQuery) => {
-      if (!selectedRuntimeHost) return null;
-      return window.maka.settings.usageStats(range, selectedRuntimeHost, query);
+      const result = await readUsage(range, query);
+      if (result && 'kind' in result && result.kind !== 'screen_response_too_large') throw new Error('Invalid Usage screen response');
+      return result;
     },
     loadUsageActivity: async (input: Extract<UsageScreenRequest, {kind: 'activity'}>) => {
-      if (!selectedRuntimeHost) throw new Error('Usage activity requires a Runtime Host');
-      return window.maka.settings.usageActivity(input, selectedRuntimeHost);
+      const result = await readUsage(input);
+      if (!result || !('kind' in result)) throw new Error('Invalid Usage activity response');
+      return result;
     },
     updateUsageSettings: (patch: Partial<AppSettings['usage']>) =>
       updateSettings({ usage: patch }).then((result) => result.settings.usage),

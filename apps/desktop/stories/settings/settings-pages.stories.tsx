@@ -1718,15 +1718,15 @@ function withUsageConsistencyBridge(outcome: 'stale' | 'capacity' | 'page' = 'st
   return withScopedMakaBridge({...makaBridge, settings: {...makaBridge.settings,
     get: async () => settings,
     update: async (patch: Parameters<typeof window.maka.settings.update>[0]): Promise<UpdateAppSettingsResult> => ({settings: mergeSettings(settings, patch)}),
-    usageStats: async (_range?: UsageRange, _host?: unknown, query?: UsageScreenQuery): Promise<UsageStats | Extract<UsageScreenResult, {kind: 'screen_response_too_large'}>> => {
+    usageStats: async (range?: UsageRange | Extract<UsageScreenRequest, {kind: 'activity'}>, _host?: unknown, query?: UsageScreenQuery): Promise<UsageStats | UsageScreenResult> => {
+      if (typeof range === 'object') return outcome === 'page'
+        ? {kind: 'activity', page: {revision: range.revision, queryIdentity: range.queryIdentity,
+          logs: usageLogs.slice(50), nextCursor: null}}
+        : {kind: 'revision_changed'};
       if (outcome === 'capacity' && query?.search) return {kind: 'screen_response_too_large', section: 'pricing'};
       return {...usageStats, logs: usageLogs.slice(0, 50), navigation: {activityTotal: usageLogs.length, revision: 'revision-A', queryIdentity: 'query-A', nextCursor: 'next-page',
         query: query ?? {range: {from: 0, to: Date.now()}, search: '', status: 'all'}}};
     },
-    usageActivity: async (input: Extract<UsageScreenRequest, {kind: 'activity'}>): Promise<UsageScreenResult> => outcome === 'page'
-      ? {kind: 'activity', page: {revision: input.revision, queryIdentity: input.queryIdentity,
-        logs: usageLogs.slice(50), nextCursor: null}}
-      : {kind: 'revision_changed'},
   }} satisfies Record<string, unknown>);
 }
 const withUsageRevisionBridge = withUsageConsistencyBridge();

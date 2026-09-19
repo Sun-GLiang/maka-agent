@@ -3524,24 +3524,20 @@ const makaBridge = {
       return invokeWhenReady('settings:testBotChannel', provider);
     },
     async usageStats(
-      range?: UsageRange,
+      range?: UsageRange | Extract<UsageScreenRequest, {kind: 'activity'}>,
       host?: DesktopRuntimeHostRef,
       query?: UsageScreenQuery,
-    ): Promise<UsageStats | Extract<UsageScreenFailure, {kind: 'screen_response_too_large'}>> {
+    ): Promise<UsageStats | UsageScreenResult> {
       const scope = await selectedRuntimeHostScope(host);
+      if (range && typeof range === 'object') {
+        const result = await invokeWhenReady('usage:activity', scope, range) as UsageScreenResult;
+        return result.kind === 'activity'
+          ? {...result, page: {...result.page, logs: projectDesktopUsageActivity(scope, result.page.logs)}}
+          : result;
+      }
       const stats = await invokeWhenReady('settings:usageStats', scope, range, query) as UsageStats | Extract<UsageScreenFailure, {kind: 'screen_response_too_large'}>;
       if ('kind' in stats) return stats;
       return projectDesktopUsageStats(scope, stats);
-    },
-    async usageActivity(
-      input: Extract<UsageScreenRequest, {kind: 'activity'}>,
-      host?: DesktopRuntimeHostRef,
-    ): Promise<UsageScreenResult> {
-      const scope = await selectedRuntimeHostScope(host);
-      const result = await invokeWhenReady('usage:activity', scope, input) as UsageScreenResult;
-      return result.kind === 'activity'
-        ? {...result, page: {...result.page, logs: projectDesktopUsageActivity(scope, result.page.logs)}}
-        : result;
     },
     bots: {
       listStatuses(): Promise<Record<BotProvider, BotStatus>> {
