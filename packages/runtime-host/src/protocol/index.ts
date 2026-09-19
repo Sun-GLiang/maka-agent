@@ -93,6 +93,7 @@ export * from './session-retirement.js';
 export * from './session-transcript.js';
 export * from './session-turns.js';
 export * from './session-todo.js';
+export { decodeUsageScreenRequest } from './usage-screen.js';
 export * from './workspace.js';
 export * from './workhub-coordination.js';
 export * from './websocket-path.js';

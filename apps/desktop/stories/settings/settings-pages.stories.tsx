@@ -1718,15 +1718,15 @@ function withUsageConsistencyBridge(outcome: 'stale' | 'capacity' | 'page' = 'st
   return withScopedMakaBridge({...makaBridge, settings: {...makaBridge.settings,
     get: async () => settings,
     update: async (patch: Parameters<typeof window.maka.settings.update>[0]): Promise<UpdateAppSettingsResult> => ({settings: mergeSettings(settings, patch)}),
-    usageStats: async (range?: UsageRange | Extract<UsageScreenRequest, {kind: 'activity'}>, _host?: unknown, query?: UsageScreenQuery): Promise<UsageStats | UsageScreenResult> => {
-      if (typeof range === 'object') return outcome === 'page'
-        ? {kind: 'activity', page: {revision: range.revision, queryIdentity: range.queryIdentity,
-          logs: usageLogs.slice(50), nextCursor: null}}
-        : {kind: 'revision_changed'};
+    usageStats: async (_range?: UsageRange, _host?: unknown, query?: UsageScreenQuery): Promise<UsageStats | Extract<UsageScreenResult, {kind: 'screen_response_too_large'}>> => {
       if (outcome === 'capacity' && query?.search) return {kind: 'screen_response_too_large', section: 'pricing'};
       return {...usageStats, logs: usageLogs.slice(0, 50), navigation: {activityTotal: usageLogs.length, revision: 'revision-A', queryIdentity: 'query-A', nextCursor: 'next-page',
         query: query ?? {range: {from: 0, to: Date.now()}, search: '', status: 'all'}}};
     },
+    usageActivity: async (input: Extract<UsageScreenRequest, {kind: 'activity'}>): Promise<UsageScreenResult> => outcome === 'page'
+      ? {kind: 'activity', page: {revision: input.revision, queryIdentity: input.queryIdentity,
+        logs: usageLogs.slice(50), nextCursor: null}}
+      : {kind: 'revision_changed'},
   }} satisfies Record<string, unknown>);
 }
 const withUsageRevisionBridge = withUsageConsistencyBridge();
@@ -2665,9 +2665,13 @@ export const UsageRetainedCapacityFailure: Story = {
     const details = canvas.queryByRole('button', {name: copy.showDetails});
     if (details) await userEvent.click(details);
     await canvas.findByRole('button', {name: /next page|下一页|下一頁/i});
+    await expect(await canvas.findByText('420')).toBeVisible();
+    await expect(await canvas.findByText(/重构使用统计页请求日志的任务列/)).toBeVisible();
     await userEvent.type(await canvas.findByRole('textbox', {name: copy.filterAria}), 'new-filter');
     await expect(await canvas.findByText(new RegExp(copy.capacityBody))).toBeVisible();
     await expect(await canvas.findByText(new RegExp(copy.retainedBody))).toBeVisible();
+    await expect(await canvas.findByText('420')).toBeVisible();
+    await expect(await canvas.findByText(/重构使用统计页请求日志的任务列/)).toBeVisible();
     await expect(await canvas.findByRole('button', {name: /next page|下一页|下一頁/i})).toBeDisabled();
   },
 };
