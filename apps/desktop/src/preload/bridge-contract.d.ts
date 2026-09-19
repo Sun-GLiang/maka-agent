@@ -45,7 +45,6 @@ import type {
   UsageRange,
   UsageStats,
   UsageScreenQuery,
-  UsageScreenFailure,
   UsageScreenRequest,
   UsageScreenResult,
   ThemePreference,
@@ -1573,8 +1572,7 @@ export interface MakaBridge {
     subscribeExternalChanged(handler: () => void, host?: DesktopRuntimeHostRef): () => void;
     testNetworkProxy(input?: TestProxyInput, host?: DesktopRuntimeHostRef): Promise<SettingsTestResult>;
     testBotChannel(provider: BotProvider): Promise<SettingsTestResult>;
-    usageStats(range?: UsageRange, host?: DesktopRuntimeHostRef, query?: UsageScreenQuery): Promise<UsageStats | Extract<UsageScreenFailure, {kind: 'screen_response_too_large'}>>;
-    usageActivity(input: Extract<UsageScreenRequest, {kind: 'activity'}>, host?: DesktopRuntimeHostRef): Promise<UsageScreenResult>;
+    usageStats(range?: UsageRange | Extract<UsageScreenRequest, {kind: 'activity'}>, host?: DesktopRuntimeHostRef, query?: UsageScreenQuery): Promise<UsageStats | UsageScreenResult>;
     bots: {
       listStatuses(): Promise<Record<BotProvider, BotStatus>>;
       restart(provider: BotProvider): Promise<BotStatus>;
