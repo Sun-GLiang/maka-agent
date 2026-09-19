@@ -344,6 +344,41 @@ describe('InteractiveUsageStores', () => {
     });
   });
 
+  test('close waits an admitted Usage screen read and rejects later reads', async () => {
+    await withInteractiveRoot(async ({ capability }) => {
+      const owner = await tryAcquireInteractiveRootOwner(capability);
+      assert(owner);
+      const stores = await openInteractiveUsageStoresForWrite(owner.lease);
+      const accepted = stores.readUsageScreen({ kind: 'screen', query: screenQuery });
+      const closed = stores.close();
+
+      assert.throws(
+        () => stores.readUsageScreen({ kind: 'screen', query: screenQuery }),
+        InteractiveUsageStoresClosedError,
+      );
+      assert.equal((await accepted).kind, 'screen');
+      await closed;
+      await owner.close();
+    });
+  });
+
+  test('a failed admitted Usage read settles the barrier without poisoning close', async () => {
+    await withInteractiveRoot(async ({ capability }) => {
+      const owner = await tryAcquireInteractiveRootOwner(capability);
+      assert(owner);
+      const stores = await openInteractiveUsageStoresForWrite(owner.lease);
+      const failed = stores.readUsageScreen({
+        kind: 'screen',
+        query: { ...screenQuery, search: '界'.repeat(342) },
+      });
+      const closed = stores.close();
+
+      await assert.rejects(failed, /Invalid Usage screen query/);
+      await closed;
+      await owner.close();
+    });
+  });
+
   test('lease-bound facade exposes separate LLM and filtered tool logs', async () => {
     await withInteractiveRoot(async ({ capability }) => {
       const owner = await tryAcquireInteractiveRootOwner(capability);
@@ -622,6 +657,30 @@ describe('InteractiveUsageStores', () => {
         (error) => error instanceof StorageRootAuthorityError && error.code === 'invalid_lease',
       );
       await stores.close();
+    });
+  });
+
+  test('reader close waits an admitted Usage screen read', async () => {
+    await withInteractiveRoot(async ({ capability }) => {
+      const owner = await tryAcquireInteractiveRootOwner(capability);
+      assert(owner);
+      const writer = await openInteractiveUsageStoresForWrite(owner.lease);
+      await writer.close();
+      await owner.close();
+
+      const readerOwner = await tryAcquireInteractiveRootReader(capability);
+      assert(readerOwner);
+      const reader = await openInteractiveUsageStoresForRead(readerOwner.lease);
+      const accepted = reader.readUsageScreen({ kind: 'screen', query: screenQuery });
+      const closed = reader.close();
+
+      await assert.rejects(
+        reader.readUsageScreen({ kind: 'screen', query: screenQuery }),
+        InteractiveUsageStoresClosedError,
+      );
+      assert.equal((await accepted).kind, 'screen');
+      await closed;
+      await readerOwner.close();
     });
   });
 
