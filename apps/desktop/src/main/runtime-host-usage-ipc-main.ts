@@ -30,7 +30,7 @@ import type {
   UsageQuery,
 } from "@maka/core/usage-stats/types";
 import {
-  decodeUsageScreenRequest,
+  decodeUsageQueryInput,
   USAGE_PAGE_MAX_ITEMS,
 } from "@maka/runtime-host/protocol";
 import {
@@ -67,7 +67,7 @@ export function registerRuntimeHostUsageIpc(
       loadUsageStats(deps.client, normalizeUsageRange(range), query),
   );
   handleReconnectableRead(deps.ipcMain, "usage:activity", async (_event, input: unknown) => {
-    const request = decodeUsageScreenRequest(input);
+    const request = decodeUsageQueryInput(input);
     if (request.kind !== "activity") throw invalidUsageProjection();
     const result = await deps.client.queryUsage(request);
     if (result.kind !== "activity" && result.kind !== "revision_changed" && result.kind !== "screen_response_too_large") throw invalidUsageProjection();
