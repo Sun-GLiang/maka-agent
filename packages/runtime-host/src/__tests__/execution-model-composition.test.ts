@@ -159,7 +159,7 @@ const MAX_IMPLEMENTATION_CHILD_REQUESTS =
 const HEADLESS_CODING_V1_PROMPT_HASH =
   'sha256:b2773282ac4755dc8d8a663eafdec68c3fa6f5680ec8557d261b5f723672b467';
 const HEADLESS_CODING_V1_TOOLS_HASH =
-  'sha256:9ef90b13f64829ae5baba777e929177838b59c9ed73e12a8c0b24c418ea2e473';
+  'sha256:4bb0eb9897640ff723301f274e2b5c91ff704c65672036d7583bc2e846ed30a2';
 const execFileAsync = promisify(execFile);
 test('backend creation resolves a bound Session by immutable Connection identity', async () => {
   let observedRef: unknown;
@@ -2587,14 +2587,25 @@ test('hosted execution freezes the headless coding provider wire contract', asyn
     assert.equal(stableHash(tools), HEADLESS_CODING_V1_TOOLS_HASH);
     assert.deepEqual(responsesToolNames(request?.body), [
       'Bash',
-      'Edit',
       'Glob',
       'Grep',
       'Read',
       'StopBackgroundTask',
-      'Write',
       'WriteStdin',
+      'apply_patch',
     ]);
+    // DeepSeek defaults to portable ApplyPatch instead of Write/Edit, including
+    // hosted headless sessions. Freeze its actual function-call wire format.
+    const patch = tools.find((tool) => tool.name === 'apply_patch');
+    assert.ok(patch);
+    assert.equal(patch.type, 'function');
+    assert.deepEqual(patch.parameters, {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: { patch: { type: 'string' } },
+      required: ['patch'],
+      additionalProperties: false,
+    });
     const bash = (tools as Array<Record<string, unknown>>).find((tool) => tool.name === 'Bash');
     assert.ok(bash);
     // The Eval session runs with Full access: the product Bash, minus the

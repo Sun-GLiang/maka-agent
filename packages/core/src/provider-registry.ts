@@ -1740,7 +1740,6 @@ const providerRegistry = {
     status: 'phase3-experimental',
     runtimeAdapter: {
       kind: 'openai-codex',
-      applyPatchProtocol: 'codex-v4a-freeform',
       responses: { adapter: 'openai', reasoningReplay: 'encrypted-content' },
     },
     modelDiscovery: { kind: 'protocol', auth: 'openai-codex' },
