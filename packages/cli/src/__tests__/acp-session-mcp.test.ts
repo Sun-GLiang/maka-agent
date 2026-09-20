@@ -273,6 +273,79 @@ test('one failed MCP discovery closes every prepared server without publishing a
   await assertFixtureExited(root, 'broken');
 });
 
+test('a crashed MCP server withdraws its tools without blocking later prompts', {
+  timeout: 20_000,
+}, async (t) => {
+  const root = await temporaryRoot();
+  const host = fakeHost();
+  const accepted = deferred();
+  const mcp = new AcpSessionMcp(
+    sessionId,
+    createAcpMcpConfig({
+      cwd: root,
+      mcpServers: [stdioServer(root, 'healthy'), stdioServer(root, 'broken')],
+    }),
+    host.connection,
+  );
+  t.after(async () => {
+    accepted.resolve();
+    await mcp.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await mcp.prepare();
+  assert.equal(host.replacements.length, 1);
+
+  host.replace = () => accepted.promise;
+  const broken = (await fixtureEvents(root, 'broken')).filter((event) => event.event === 'start');
+  assert.ok(broken.length > 0);
+  for (const event of broken) {
+    if (processExists(event.pid)) process.kill(event.pid, 'SIGKILL');
+  }
+  await waitFor(() => host.replacements.length === 2, { timeoutMs: 5_000, pollMs: 10 });
+  let ready = false;
+  const waiting = mcp.ready().then(() => {
+    ready = true;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(ready, false);
+  accepted.resolve();
+  await waiting;
+  const remainingServers = host.replacements[1]!.provider.offers().flatMap((offer) =>
+    offer.tools.map((tool) => tool.serverId),
+  );
+  assert.ok(remainingServers.length > 0);
+  assert.ok(remainingServers.every((serverId) => serverId === 'healthy'));
+  await assertFixtureExited(root, 'broken');
+  await mcp.close();
+  await assertFixtureExited(root, 'healthy');
+});
+
+test('a Session remains ready when its only MCP server crashes and all tools withdraw', {
+  timeout: 20_000,
+}, async (t) => {
+  const root = await temporaryRoot();
+  const host = fakeHost();
+  const mcp = new AcpSessionMcp(
+    sessionId,
+    createAcpMcpConfig({ cwd: root, mcpServers: [stdioServer(root, 'fixture')] }),
+    host.connection,
+  );
+  t.after(async () => {
+    await mcp.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await mcp.prepare();
+  const starts = (await fixtureEvents(root, 'fixture')).filter((event) => event.event === 'start');
+  assert.ok(starts.length > 0);
+  for (const event of starts) {
+    if (processExists(event.pid)) process.kill(event.pid, 'SIGKILL');
+  }
+  await waitFor(() => host.unregisters.length === 1, { timeoutMs: 5_000, pollMs: 10 });
+  await mcp.ready();
+  assert.deepEqual(host.unregisters, [{ sessionId }]);
+  await assertFixtureExited(root, 'fixture');
+});
+
 test('abort during MCP startup closes the child before preparation completes', {
   timeout: 15_000,
 }, async (t) => {

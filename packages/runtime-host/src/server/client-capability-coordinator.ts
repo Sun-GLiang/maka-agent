@@ -64,6 +64,8 @@ import { clientCapabilityProviderId } from './client-capability-provider-id.js';
 // Leave the Host deadline outside the provider's bounded action deadline so an
 // accepted call can return its real terminal result instead of outcome_unknown.
 const DEFAULT_CALL_TIMEOUT_MS = 150_000;
+// Bound pre-creation Session publications even when a client invents Session IDs.
+export const MAX_SESSION_REGISTRATIONS_PER_PROVIDER = 64;
 const DESKTOP_BROWSER_SERVER_ID = 'desktop_browser';
 const DESKTOP_SETTINGS_SERVER_ID = 'desktop_settings';
 const DESKTOP_MCP_OFFER_PREFIX = 'desktop_mcp';
@@ -856,20 +858,22 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
     );
   }
 
-  retireSessions(sessionIds: readonly string[]): void {
+  retireSessions(sessionIds: readonly string[]): Promise<void> {
     const retiredSessionIds = new Set(sessionIds);
-    for (const sessionId of retiredSessionIds) this.#sessions.delete(sessionId);
-    for (const provider of this.#providers.values()) {
-      for (const sessionId of retiredSessionIds) {
-        const registration = provider.sessionRegistrations.get(sessionId);
-        if (!registration) continue;
-        provider.sessionRegistrations.delete(sessionId);
-        this.#revision += 1;
-        if (hasModelToolOffers(registration)) this.#onModelToolsChanged();
-        this.#releaseRegistrationIfUnused(registration);
+    return this.#activation.runMutation(() => {
+      for (const sessionId of retiredSessionIds) this.#sessions.delete(sessionId);
+      for (const provider of this.#providers.values()) {
+        for (const sessionId of retiredSessionIds) {
+          const registration = provider.sessionRegistrations.get(sessionId);
+          if (!registration) continue;
+          provider.sessionRegistrations.delete(sessionId);
+          this.#revision += 1;
+          if (hasModelToolOffers(registration)) this.#onModelToolsChanged();
+          this.#releaseRegistrationIfUnused(registration);
+        }
+        this.#deleteProviderIfUnused(provider);
       }
-      this.#deleteProviderIfUnused(provider);
-    }
+    });
   }
 
   releaseConnection(connectionId: string): Promise<void> {
@@ -957,6 +961,19 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
         };
       }
       const { provider } = connection;
+      if (
+        input.sessionId !== undefined &&
+        !provider.sessionRegistrations.has(input.sessionId) &&
+        provider.sessionRegistrations.size >= MAX_SESSION_REGISTRATIONS_PER_PROVIDER
+      ) {
+        return {
+          ok: false,
+          error: {
+            code: 'invalid_request',
+            message: 'Client Capability Session registration limit reached',
+          },
+        };
+      }
       if (connection.superseded && input.sessionId === undefined) {
         return {
           ok: false,

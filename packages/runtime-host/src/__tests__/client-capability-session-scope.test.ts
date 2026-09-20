@@ -27,7 +27,10 @@ import {
   type ClientCapabilityHostFrame,
   type ClientCapabilityReplaceInput,
 } from '../protocol/index.js';
-import { HostClientCapabilityCoordinator } from '../server/client-capability-coordinator.js';
+import {
+  HostClientCapabilityCoordinator,
+  MAX_SESSION_REGISTRATIONS_PER_PROVIDER,
+} from '../server/client-capability-coordinator.js';
 import { RuntimePolicyActivationGate } from '../server/runtime-policy-activation-gate.js';
 import { clientCapabilityConnectionIdentity } from './fixtures/client-capability.js';
 
@@ -142,8 +145,8 @@ test('Session retirement releases scoped registrations and prevents rebinding re
   await coordinator.bindSession('archived', 'one');
   await coordinator.bindSession('removed', 'one');
 
-  coordinator.retireSessions(['archived']);
-  coordinator.retireSessions(['removed']);
+  await coordinator.retireSessions(['archived']);
+  await coordinator.retireSessions(['removed']);
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(
@@ -156,6 +159,62 @@ test('Session retirement releases scoped registrations and prevents rebinding re
   assert.equal((await coordinator.bindSession('removed', 'one')).ok, true);
   assert.equal(coordinator.snapshotForSession('archived'), undefined);
   assert.equal(coordinator.snapshotForSession('removed'), undefined);
+});
+
+test('a provider cannot retain unbounded fabricated Session registrations', async (t) => {
+  const { coordinator, attach, publish } = fixture();
+  t.after(() => coordinator.close());
+  attach('one');
+  for (let index = 0; index < MAX_SESSION_REGISTRATIONS_PER_PROVIDER; index++) {
+    await publish('one', `fabricated-${index}`, `registration-${index}`);
+  }
+  const rejected = await coordinator.handlers['client.capability.replace'](
+    input('fabricated-over-limit', 'over-limit'),
+    context('one'),
+  );
+  assert.deepEqual(rejected, {
+    ok: false,
+    error: {
+      code: 'invalid_request',
+      message: 'Client Capability Session registration limit reached',
+    },
+  });
+  await publish('one', 'fabricated-0', 'replacement-at-limit');
+  assert.equal(
+    (
+      await coordinator.handlers['client.capability.unregister'](
+        { registrationId: 'registration-1' },
+        context('one'),
+      )
+    ).ok,
+    true,
+  );
+  await publish('one', 'new-after-unregister', 'new-registration');
+});
+
+test('Session retirement follows an already queued replacement', async (t) => {
+  const { coordinator, activation, attach, publish } = fixture();
+  t.after(() => coordinator.close());
+  attach('one');
+  await publish('one', 'retired', 'old');
+  await coordinator.bindSession('retired', 'one');
+
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const activeRead = activation.runReadActivation(() => barrier);
+  const replacing = coordinator.handlers['client.capability.replace'](
+    input('retired', 'new'),
+    context('one'),
+  );
+  const retiring = coordinator.retireSessions(['retired']);
+  release();
+  await activeRead;
+  assert.equal((await replacing).ok, true);
+  await retiring;
+  assert.equal((await coordinator.bindSession('retired', 'one')).ok, true);
+  assert.equal(coordinator.snapshotForSession('retired'), undefined);
 });
 
 test('connection and Session publications reject overlapping identities in either direction', async (t) => {
@@ -262,6 +321,7 @@ test('MCP policy requires a target, session affinity, no Host paths and no servi
 });
 
 function fixture(principalKind: 'local_owner' | 'remote_owner' = 'local_owner') {
+  const activation = new RuntimePolicyActivationGate();
   const approvals: ClientCapabilitySessionGrantKey[] = [];
   const grants = new Map<string, ClientCapabilitySessionGrantKey>();
   const sent: ClientCapabilityHostFrame[] = [];
@@ -274,7 +334,7 @@ function fixture(principalKind: 'local_owner' | 'remote_owner' = 'local_owner') 
       value.scope,
     ]);
   const coordinator = new HostClientCapabilityCoordinator({
-    activation: new RuntimePolicyActivationGate(),
+    activation,
     onModelToolsChanged: () => undefined,
     grants: {
       readClientCapabilitySessionGrant: async (value) =>
@@ -364,7 +424,7 @@ function fixture(principalKind: 'local_owner' | 'remote_owner' = 'local_owner') 
     );
     return prepared.execute(invocation);
   };
-  return { coordinator, attach, publish, invoke, approvals, sent };
+  return { coordinator, activation, attach, publish, invoke, approvals, sent };
 }
 
 function input(

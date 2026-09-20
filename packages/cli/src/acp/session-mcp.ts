@@ -148,6 +148,7 @@ export class AcpSessionMcp {
       this.#assertConnected();
       this.#prepared = true;
       await this.ready(signal);
+      this.#assertConnected();
     } catch (error) {
       await this.close().catch(() => undefined);
       if (error instanceof RequestError) throw error;
@@ -159,10 +160,10 @@ export class AcpSessionMcp {
 
   async ready(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
-    this.#assertConnected();
+    this.#assertOpen();
     const state = await abortable(() => this.#publication.settle(), signal);
     signal?.throwIfAborted();
-    this.#assertConnected();
+    this.#assertOpen();
     if (state !== 'published' && state !== 'not_published') {
       throw mcpUnavailable(this.#sessionId, 'mcp_publication_failed');
     }
@@ -201,14 +202,18 @@ export class AcpSessionMcp {
   }
 
   #assertConnected(): void {
+    this.#assertOpen();
     if (
-      this.#closed ||
       Object.keys(this.#config.mcpServers).some(
         (serverId) => this.#manager.status(serverId)?.state !== 'connected',
       )
     ) {
       throw mcpUnavailable(this.#sessionId, 'mcp_not_ready');
     }
+  }
+
+  #assertOpen(): void {
+    if (this.#closed) throw mcpUnavailable(this.#sessionId, 'mcp_not_ready');
   }
 }
 

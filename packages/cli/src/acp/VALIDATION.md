@@ -19,6 +19,23 @@
 
 # PR5 validation record
 
+## September 20 review follow-up
+
+The γ branch was rebased onto Apache main `64f5e83de`; its Host compatibility
+epoch advances from 168 to 169. Session capability registrations now have a
+per-provider limit, Session retirement is serialized with registration changes,
+and a crashed MCP server no longer blocks later prompt admission after its tool
+withdrawal has been published. The ACP documentation now states the stdio
+transport's direct-child cleanup guarantee without promising cleanup of every
+process a launcher may spawn.
+
+`node scripts/protocol-epoch-check.mjs --base upstream/main` and the full
+`npm run build:test` passed. The affected Runtime Host tests passed 153/153,
+the ACP Session MCP tests passed 14/14, and all five real Host/ACP child-process
+tests passed. Lint and format checks passed. The isolated worktree needed the
+repository's dependency patches after `npm ci --ignore-scripts`; without those
+patches, UI typechecking failed on patched dependency APIs.
+
 This file retains the September 15 validation history of the original combined
 PR #5222. The implementation is now split into α (tool projection), β (ACP
 interactions), and γ (Session-scoped MCP). The unrelated Side Chat E2E flake

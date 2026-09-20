@@ -129,9 +129,13 @@ current connection and tool revision to be published.
 Generic MCP `ask` approval uses `admission: "mcp"` and the existing atomic Session
 grant mechanism with `mcp_tool` scope. It does not elevate provider trust or grant
 Host path access. Desktop MCP continues to use its existing capability. These wire
-changes move the Host compatibility epoch from 166 to 167; grant storage needs no migration.
+changes move the Host compatibility epoch from 168 to 169; grant storage needs no migration.
 Close/EOF stops execution, releases subscriptions, unregisters the corresponding
-capabilities and closes MCP processes before closing the shared Host connection.
+capabilities and closes MCP transports before closing the shared Host connection.
+The stdio transport stops its direct child; launchers that spawn further processes
+must arrange for those processes to exit themselves.
+If a server exits after creation, its tools are withdrawn and later prompts may
+continue with the remaining published tools.
 
 For a Zed custom agent, configure an absolute Maka executable with `args: ["--acp"]`
 under `agent_servers`, following [Zed's external agent documentation](https://zed.dev/docs/ai/external-agents#custom-agents).
