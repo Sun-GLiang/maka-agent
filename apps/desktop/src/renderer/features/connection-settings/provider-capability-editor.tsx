@@ -23,6 +23,7 @@ import { DropdownMenu, DropdownMenuCheckboxItem, Field, FormLayout } from '@astr
 import {
   DECLARABLE_RELAY_THINKING_LEVELS,
   THINKING_LEVELS,
+  modelApplyPatchEnabled,
   type ModelOverride,
   type ThinkingLevel,
 } from '@maka/core/model-thinking';
@@ -93,6 +94,20 @@ export function CapabilityEditor(props: {
         onChange={(value) =>
           props.onChange({ vision: value === 'auto' ? undefined : value === 'enabled' })
         }
+        isDisabled={props.disabled}
+      />
+
+      <Selector
+        label={copy.applyPatch}
+        labelTooltip={copy.applyPatchHelp}
+        size="sm"
+        width="100%"
+        options={[
+          { value: 'enabled', label: copy.applyPatchEnabled },
+          { value: 'disabled', label: copy.applyPatchDisabled },
+        ]}
+        value={modelApplyPatchEnabled(modelId, declared) ? 'enabled' : 'disabled'}
+        onChange={(value) => props.onChange({ applyPatch: value === 'enabled' })}
         isDisabled={props.disabled}
       />
 
