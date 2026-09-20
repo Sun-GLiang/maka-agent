@@ -61,6 +61,7 @@ type UsageActiveTab = UsageSettings['activeTab'];
 const USAGE_REQUESTS_PAGE_SIZE = 50;
 const USAGE_SEARCH_DEBOUNCE_MS = 250;
 const EMPTY_USAGE_LOGS: UsageStats['logs'] = [];
+const normalizeUsageSearch = (search: string) => search.trim().toLowerCase();
 
 /**
  * The Usage settings surface (issue #4425). A disposable view: it unmounts when
@@ -125,7 +126,7 @@ export function UsageSettingsView(props: {
     const query = {
       range: persistedUsage.range,
       targetKey,
-      search: usageDraft.modelFilter,
+      search: normalizeUsageSearch(usageDraft.modelFilter),
       status: usageDraft.status,
     };
     const previous = lastQuery.current;
@@ -158,7 +159,7 @@ export function UsageSettingsView(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [persistedUsage.range, targetKey, usageDraft.modelFilter, usageDraft.status]);
 
-  const normalizedModelFilter = usageDraft.modelFilter.trim().toLowerCase();
+  const normalizedModelFilter = normalizeUsageSearch(usageDraft.modelFilter);
   const hasRequestFilters = usageDraft.status !== 'all' || normalizedModelFilter.length > 0;
   const showRequestDetails = usageDraft.activeTab === 'requests' && usageDraft.showDetails;
   const filteredLogs = useMemo(() => {
@@ -199,7 +200,7 @@ export function UsageSettingsView(props: {
     lastQuery.current = {
       range: usageDraftRef.current.range,
       targetKey,
-      search: usageDraftRef.current.modelFilter,
+      search: normalizeUsageSearch(usageDraftRef.current.modelFilter),
       status: usageDraftRef.current.status,
     };
     try {

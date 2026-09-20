@@ -127,6 +127,43 @@ test('strict screen codecs reject malformed requests, unknown fields, wrong-quer
   );
 });
 
+test('screen and activity codecs accept the persisted fractional timestamp domain', () => {
+  const fractionalQuery: UsageScreenQuery = {
+    ...query,
+    range: { from: 1735689600000.25, to: 1735689600000.75 },
+  };
+  const fractionalRow = { ...row(), ts: 1735689600000.5 };
+  assert.deepEqual(decodeUsageScreenRequest({ kind: 'screen', query: fractionalQuery }), {
+    kind: 'screen',
+    query: fractionalQuery,
+  });
+  assert.deepEqual(
+    decodeUsageScreenResult({
+      kind: 'screen',
+      screen: { ...screen(), query: fractionalQuery, logs: [fractionalRow] },
+    }),
+    { kind: 'screen', screen: { ...screen(), query: fractionalQuery, logs: [fractionalRow] } },
+  );
+  assert.doesNotThrow(() =>
+    decodeUsageScreenResult({
+      kind: 'activity',
+      page: { revision: 'r', queryIdentity: 'q', logs: [fractionalRow], nextCursor: null },
+    }),
+  );
+  assert.throws(() =>
+    decodeUsageScreenRequest({
+      kind: 'screen',
+      query: { ...query, range: { from: 0, to: Number.MAX_SAFE_INTEGER + 1 } },
+    }),
+  );
+  assert.throws(() =>
+    decodeUsageScreenResult({
+      kind: 'screen',
+      screen: { ...screen(), logs: [{ ...row(), ts: -1 }] },
+    }),
+  );
+});
+
 test('each complete section accepts its item limit and fails one above without partial output', () => {
   for (const [key, section, limit, item] of [
     [

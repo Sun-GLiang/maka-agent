@@ -741,6 +741,10 @@ it('debounces search edits, refreshes immediately, and cancels pending queries o
   assert.deepEqual(queries.map((query) => query.search), ['', 'ab']);
   assert.deepEqual(queries[1]!.range, queries[0]!.range, 'typing preserves time bounds');
 
+  await render(' AB  ');
+  await tick(250);
+  assert.equal(queries.length, 2, 'an equivalent normalized search keeps the current screen');
+
   await render('abc');
   await act(async () => {
     const refresh = container.querySelector<HTMLButtonElement>('button[aria-label="Refresh usage"]');

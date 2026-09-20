@@ -110,6 +110,17 @@ test('usage migration backfills Session identity for existing ledger rows', () =
         )
         .get(),
     );
+    database.exec('CREATE INDEX usage_llm_calls_session_id ON usage_llm_calls(session_id)');
+    migrateSqliteUsageDatabase(database);
+    assert.equal(
+      database
+        .prepare(
+          "SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = 'usage_llm_calls_session_id'",
+        )
+        .get(),
+      undefined,
+      'upgraded stores drop the redundant Session-only index',
+    );
   } finally {
     database.close();
   }

@@ -88,13 +88,16 @@ leave the other entry points inconsistent.
 
 - Free-text edits now wait 250 ms at the renderer query seam. Mount, Host,
   range, status, and Refresh semantics remain immediate, and Refresh consumes a
-  pending edit.
+  pending edit. Equivalent whitespace/case-only edits retain the loaded screen
+  and any in-progress page walk.
 - Continuation fences apply only to unloaded pages. A feature-local paginator
   keeps cached pages available without changing or patching the upstream Astryx
   component.
 - Protocol and Storage share the 1,024 UTF-8-byte search domain. Persisted
-  timestamps and continuation cursors share a finite, nonnegative,
-  JSON-round-trippable number domain, including fractional timestamps.
+  timestamps, query bounds, decoded activity rows, and continuation cursors
+  share a finite, nonnegative, JSON-round-trippable number domain, including
+  fractional timestamps. The widened wire domain advances the Runtime Host
+  compatibility epoch to 169.
 - Accepted screen reads participate in reader and writer close barriers without
   turning a read failure into a close failure.
 - Capacity remains a typed domain failure through the renderer. The activity
@@ -112,6 +115,8 @@ old unconditional INSERT/DELETE triggers advanced the Usage revision 200 times;
 the narrowed indexed predicates advance it zero times. Legacy model rows, tool
 rows, canonical model-call rows, title deletion, and rollback remain covered,
 so the churn reduction is material and was implemented.
+The existing `(session_id, ts DESC, id)` index also serves the metadata
+predicate; the redundant Session-only index is removed on migration.
 
 A numbered jump remains linear in the target page because each keyset token is
 issued by the preceding page. With the 50-row page size, a 10,000-row history

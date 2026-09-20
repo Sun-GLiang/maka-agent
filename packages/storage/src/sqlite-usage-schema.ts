@@ -215,6 +215,7 @@ export function migrateSqliteUsageDatabase(db: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS usage_llm_calls_session_ts
       ON usage_llm_calls(session_id, ts DESC, id);
+    DROP INDEX IF EXISTS usage_llm_calls_session_id;
   `);
   // A ledger old enough to predate Session attribution has no column to carry
   // through, and the conversion below reads one.
@@ -235,7 +236,6 @@ export function migrateSqliteUsageDatabase(db: DatabaseSync): void {
     );
     INSERT OR IGNORE INTO usage_screen_revision VALUES (1, lower(hex(randomblob(16))), 0);
     CREATE INDEX IF NOT EXISTS usage_llm_calls_screen ON usage_llm_calls(ts DESC, storage_key DESC);
-    CREATE INDEX IF NOT EXISTS usage_llm_calls_session_id ON usage_llm_calls(session_id);
     CREATE INDEX IF NOT EXISTS usage_tool_invocations_screen ON usage_tool_invocations(ts DESC, storage_key DESC);
     CREATE INDEX IF NOT EXISTS usage_tool_invocations_session_id
       ON usage_tool_invocations(json_extract(record_json, '$.sessionId'));

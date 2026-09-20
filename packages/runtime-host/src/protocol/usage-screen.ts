@@ -19,6 +19,7 @@
 
 import {
   isUsageScreenSearch,
+  isUsageTimestamp,
   type UsageScreenRequest,
   type UsageScreenResult,
   type UsageScreenQuery,
@@ -47,11 +48,15 @@ function amount(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return fail();
   return value;
 }
+function timestamp(value: unknown): number {
+  if (!isUsageTimestamp(value)) return fail();
+  return value;
+}
 function query(value: unknown): UsageScreenQuery {
   const v = requireExactRecord(value, 'Usage screen query', ['range', 'search', 'status']);
   const range = requireExactRecord(v.range, 'Usage range', ['from', 'to']);
-  const from = requireCount(range.from, 'Usage from');
-  const to = requireCount(range.to, 'Usage to');
+  const from = timestamp(range.from);
+  const to = timestamp(range.to);
   if (from > to || !['all', 'success', 'error', 'aborted'].includes(String(v.status)))
     return fail();
   if (!isUsageScreenSearch(v.search)) return fail();
@@ -242,8 +247,8 @@ export function decodeUsageScreenResult(value: unknown): UsageScreenResult {
     );
     for (const key of ['id', 'provider', 'model', 'sessionId', 'sessionName', 'turnId', 'toolName'])
       if (row[key] !== undefined) text(row[key]);
+    timestamp(row.ts);
     for (const key of [
-      'ts',
       'inputTokens',
       'outputTokens',
       'cacheMiss',
