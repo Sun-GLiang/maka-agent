@@ -174,12 +174,23 @@ export function buildSubagentSpawnTool(
             });
           }
           if (!input.profile && !input.subagent_id) {
-            ctx.addIssue({
-              code: z.ZodIssueCode.custom,
-              message:
-                'No child selector was provided. Call agent_list and pass a returned subagent_id to agent_spawn, ' +
-                `or pass one legacy profile: ${profiles.join(', ')}.`,
-            });
+            if (input.target_kind) {
+              const selector = input.target_kind === 'profile' ? 'profile' : 'subagent_id';
+              const catalogSection =
+                input.target_kind === 'profile' ? 'legacy_profiles' : 'presets';
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: [selector],
+                message: `target_kind=${input.target_kind} requires ${selector}. Call agent_list and copy an available ${catalogSection} choice's spawn_args, then add task.`,
+              });
+            } else {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message:
+                  'No child selector was provided. Call agent_list and pass a returned subagent_id to agent_spawn, ' +
+                  `or pass one legacy profile: ${profiles.join(', ')}.`,
+              });
+            }
             return;
           }
           if (input.subagent_id) return;

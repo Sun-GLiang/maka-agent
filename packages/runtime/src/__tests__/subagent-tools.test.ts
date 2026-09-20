@@ -171,6 +171,45 @@ describe('subagent tools', () => {
     );
   });
 
+  for (const { targetKind, selector, value, inactive } of [
+    {
+      targetKind: 'profile',
+      selector: 'profile',
+      value: LOCAL_READ_AGENT_PROFILE,
+      inactive: { subagent_id: 'fast-reader' },
+    },
+    {
+      targetKind: 'preset',
+      selector: 'subagent_id',
+      value: 'fast-reader',
+      inactive: { profile: LOCAL_READ_AGENT_PROFILE },
+    },
+  ] as const) {
+    test(`agent_spawn identifies the missing ${selector} in ${targetKind} mode and accepts the correction`, () => {
+      const schema = buildSubagentSpawnTool().parameters as {
+        safeParse(input: unknown): {
+          success: boolean;
+          data?: Record<string, unknown>;
+          error?: { issues: Array<{ message: string; path: PropertyKey[] }> };
+        };
+      };
+      const input = { target_kind: targetKind, task: 'Inspect the repo.' };
+      for (const args of [input, { ...input, ...inactive }]) {
+        const rejected = schema.safeParse(args);
+        assert.strictEqual(rejected.success, false);
+        assert.strictEqual(rejected.error?.issues.length, 1);
+        const issue = rejected.error!.issues[0]!;
+        assert.deepStrictEqual(issue.path, [selector]);
+        assert.match(issue.message, new RegExp(`target_kind=${targetKind} requires ${selector}`));
+        assert.match(issue.message, /spawn_args/);
+        // Follow the reported field while keeping the mode and inactive field unchanged.
+        const corrected = schema.safeParse({ ...args, [String(issue.path[0])]: value });
+        assert.strictEqual(corrected.success, true);
+        assert.deepStrictEqual(corrected.data, { ...input, [selector]: value });
+      }
+    });
+  }
+
   test('explicit spawn modes discard provider-filled inactive fields and validate active fields', () => {
     const schema = buildSubagentSpawnTool().parameters as {
       safeParse(input: unknown): { success: boolean; data?: Record<string, unknown> };
