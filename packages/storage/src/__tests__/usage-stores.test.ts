@@ -1041,6 +1041,22 @@ describe('revision-consistent Usage screen', () => {
     });
   });
 
+  test('accepts fractional query bounds from the shared timestamp domain', async () => {
+    await withScreenStores(async (stores) => {
+      await stores.telemetry.recordLlmCall(llmRecord({ id: 'inside-fractional-range', ts: 100.5 }));
+      await stores.telemetry.recordLlmCall(llmRecord({ id: 'outside-fractional-range', ts: 101 }));
+
+      const screen = await initialScreen(stores, {
+        ...screenQuery,
+        range: { from: 100.25, to: 100.75 },
+      });
+      assert.deepEqual(
+        screen.logs.map((row) => row.id),
+        ['inside-fractional-range'],
+      );
+    });
+  });
+
   test('filters search the full range with Unicode and do not narrow headline totals or breakdowns', async () => {
     await withScreenStores(async (stores) => {
       await seedScreen(stores);

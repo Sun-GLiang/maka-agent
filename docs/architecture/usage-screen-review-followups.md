@@ -97,7 +97,7 @@ leave the other entry points inconsistent.
   timestamps, query bounds, decoded activity rows, and continuation cursors
   share a finite, nonnegative, JSON-round-trippable number domain, including
   fractional timestamps. The widened wire domain advances the Runtime Host
-  compatibility epoch to 169.
+  compatibility epoch to 172.
 - Accepted screen reads participate in reader and writer close barriers without
   turning a read failure into a close failure.
 - Capacity remains a typed domain failure through the renderer. The activity

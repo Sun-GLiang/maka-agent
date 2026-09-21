@@ -230,9 +230,8 @@ export function createUsageScreenReader(root: string) {
 
 function validateQuery(query: UsageScreenQuery): void {
   if (
-    !Number.isSafeInteger(query.range.from) ||
-    !Number.isSafeInteger(query.range.to) ||
-    query.range.from < 0 ||
+    !isUsageTimestamp(query.range.from) ||
+    !isUsageTimestamp(query.range.to) ||
     query.range.to < query.range.from ||
     !isUsageScreenSearch(query.search) ||
     !['all', 'success', 'error', 'aborted'].includes(query.status)
