@@ -89,7 +89,11 @@ import {
 import { RuntimeHostKernel, type RuntimeHostCompositionContext } from '../server/host-kernel.js';
 import { defineInteractiveRuntimeHostComposition } from '../server/host-composition.js';
 import { connectRuntimeHost, RuntimeHostOperationError } from '../client/index.js';
-import { RUNTIME_HOST_PROTOCOL_VERSION } from '../protocol/index.js';
+import {
+  RUNTIME_HOST_PROTOCOL_VERSION,
+  type ClientCapabilityHostFrame,
+} from '../protocol/index.js';
+import { RootTurnCoordinator } from '../server/root-turn-coordinator.js';
 import { readLedgerMessages } from './fixtures/ledger-transcript.js';
 import { clientCapabilityConnectionIdentity } from './fixtures/client-capability.js';
 import { workHubDesktopCapabilityOffers } from './fixtures/workhub-capabilities.js';
@@ -959,6 +963,71 @@ test('production composition commits automatic titles through Host-owned Session
         return summary?.name === 'Host owns this automatic title';
       });
     } finally {
+      await composition.close();
+    }
+  });
+});
+
+test('a committed Client Capability replacement stays acknowledged when recovery drains the Host', async (t) => {
+  await withCompositionRoot(async ({ owner }) => {
+    let drainRequests = 0;
+    const { composition } = await createCapturedExecutionComposition(owner, {
+      context: {
+        retainUntilProcessExit: () => undefined,
+        requestDrain: () => {
+          drainRequests += 1;
+        },
+      },
+    });
+    const frames: ClientCapabilityHostFrame[] = [];
+    const connectionId = 'capability-recovery-client';
+    const connection = composition.clientCapabilities!.attachConnection(
+      clientCapabilityConnectionIdentity(connectionId),
+      {
+        send: async (frame) => {
+          frames.push(frame);
+        },
+      },
+    );
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId,
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    const firstRegistrationId = randomUUID();
+    try {
+      const first = await composition.handlers['client.capability.replace'](
+        {
+          registrationId: firstRegistrationId,
+          offers: workHubDesktopCapabilityOffers(),
+        },
+        context,
+      );
+      assert.ok(first.ok, JSON.stringify(first));
+
+      t.mock.method(RootTurnCoordinator.prototype, 'recover', async () => {
+        throw new Error('fixture post-commit recovery failure');
+      });
+      const replacement = await composition.handlers['client.capability.replace'](
+        {
+          registrationId: randomUUID(),
+          offers: workHubDesktopCapabilityOffers(),
+        },
+        context,
+      );
+
+      assert.ok(replacement.ok, JSON.stringify(replacement));
+      assert.equal(drainRequests, 1);
+      await waitFor(async () =>
+        frames.some(
+          (frame) =>
+            frame.kind === 'client.capability.registration_release' &&
+            frame.registrationId === firstRegistrationId,
+        ),
+      );
+    } finally {
+      await connection.close();
       await composition.close();
     }
   });

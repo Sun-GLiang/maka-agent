@@ -168,8 +168,12 @@ test('Session preparation waits for scoped publication and reconnect reuses its 
   assert.ok(starts.length > 0);
   assert.ok(starts.every((event) => event.cwd === root && event.fixtureEnv === 'session-setting'));
   host.emit({ kind: 'unavailable' });
-  await assert.rejects(mcp.ready(), isMcpError('mcp_publication_failed'));
-  host.emit({ kind: 'connected', hostEpoch: 'host-1', connectionId: 'connection-2' });
+  await assert.rejects(mcp.ready(), isMcpError('mcp_publication_failed', 'mcp.ready'));
+  host.emit({
+    kind: 'connected',
+    hostEpoch: 'host-1',
+    connectionId: 'connection-2',
+  });
   await mcp.ready();
   assert.equal(host.replacements.length, 2);
   assert.deepEqual(
@@ -207,7 +211,7 @@ test('authoritative retirement of the current Session registration closes its MC
   await provider.currentRegistrationRetired();
 
   await assertFixtureExited(root, 'fixture');
-  await assert.rejects(mcp.ready(), isMcpError('mcp_not_ready'));
+  await assert.rejects(mcp.ready(), isMcpError('mcp_not_ready', 'mcp.ready'));
   await mcp.close();
   assert.deepEqual(host.unregisters, []);
   assert.equal(host.listenerCount(), 0);
@@ -265,7 +269,7 @@ test('one failed MCP discovery closes every prepared server without publishing a
     await mcp.close();
     await rm(root, { recursive: true, force: true });
   });
-  await assert.rejects(mcp.prepare(), isMcpError('mcp_not_ready'));
+  await assert.rejects(mcp.prepare(), isMcpError('mcp_not_ready', 'mcp.prepare'));
   assert.deepEqual(host.replacements, []);
   assert.deepEqual(host.unregisters, []);
   assert.equal(host.listenerCount(), 0);
@@ -364,7 +368,7 @@ test('abort during MCP startup closes the child before preparation completes', {
   });
   const rejected = assert.rejects(
     mcp.prepare(controller.signal),
-    isMcpError('mcp_preparation_failed'),
+    isMcpError('mcp_preparation_failed', 'mcp.prepare'),
   );
   await waitForFixtureStart(root, 'slow');
   controller.abort();
@@ -392,7 +396,7 @@ test('failed Host publication fails preparation and releases discovered MCP proc
     await mcp.close();
     await rm(root, { recursive: true, force: true });
   });
-  await assert.rejects(mcp.prepare(), isMcpError('mcp_publication_failed'));
+  await assert.rejects(mcp.prepare(), isMcpError('mcp_publication_failed', 'mcp.ready'));
   assert.equal(host.replacements.length, 1);
   assert.deepEqual(host.unregisters, []);
   assert.equal(host.listenerCount(), 0);
@@ -645,10 +649,14 @@ async function invokeEnvironment(provider: ClientCapabilityProvider): Promise<un
   return JSON.parse(content.text);
 }
 
-function isMcpError(code: string): (error: unknown) => boolean {
+function isMcpError(
+  code: string,
+  operation: 'mcp.prepare' | 'mcp.ready',
+): (error: unknown) => boolean {
   return (error) => {
     assert.ok(error instanceof RequestError);
     assert.equal(errorData(error).code, code);
+    assert.equal(errorData(error).operation, operation);
     assert.equal(errorData(error).sessionId, sessionId);
     return true;
   };

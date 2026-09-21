@@ -861,13 +861,18 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
   retireSessions(sessionIds: readonly string[]): Promise<void> {
     const retiredSessionIds = new Set(sessionIds);
     return this.#activation.runMutation(() => {
-      for (const sessionId of retiredSessionIds) this.#sessions.delete(sessionId);
+      // Invalidate binding previews even when this Session has not committed a
+      // stored state or scoped registration yet. Otherwise a preview captured
+      // before retirement can commit afterwards and recreate its state.
+      for (const sessionId of retiredSessionIds) {
+        this.#sessions.delete(sessionId);
+        this.#revision += 1;
+      }
       for (const provider of this.#providers.values()) {
         for (const sessionId of retiredSessionIds) {
           const registration = provider.sessionRegistrations.get(sessionId);
           if (!registration) continue;
           provider.sessionRegistrations.delete(sessionId);
-          this.#revision += 1;
           if (hasModelToolOffers(registration)) this.#onModelToolsChanged();
           this.#releaseRegistrationIfUnused(registration);
         }

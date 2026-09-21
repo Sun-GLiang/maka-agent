@@ -152,7 +152,7 @@ export class AcpSessionMcp {
     } catch (error) {
       await this.close().catch(() => undefined);
       if (error instanceof RequestError) throw error;
-      throw mcpUnavailable(this.#sessionId, 'mcp_preparation_failed');
+      throw mcpUnavailable(this.#sessionId, 'mcp.prepare', 'mcp_preparation_failed');
     } finally {
       signal?.removeEventListener('abort', cancel);
     }
@@ -160,12 +160,12 @@ export class AcpSessionMcp {
 
   async ready(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
-    this.#assertOpen();
+    this.#assertOpen('mcp.ready');
     const state = await abortable(() => this.#publication.settle(), signal);
     signal?.throwIfAborted();
-    this.#assertOpen();
+    this.#assertOpen('mcp.ready');
     if (state !== 'published' && state !== 'not_published') {
-      throw mcpUnavailable(this.#sessionId, 'mcp_publication_failed');
+      throw mcpUnavailable(this.#sessionId, 'mcp.ready', 'mcp_publication_failed');
     }
   }
 
@@ -202,18 +202,18 @@ export class AcpSessionMcp {
   }
 
   #assertConnected(): void {
-    this.#assertOpen();
+    this.#assertOpen('mcp.prepare');
     if (
       Object.keys(this.#config.mcpServers).some(
         (serverId) => this.#manager.status(serverId)?.state !== 'connected',
       )
     ) {
-      throw mcpUnavailable(this.#sessionId, 'mcp_not_ready');
+      throw mcpUnavailable(this.#sessionId, 'mcp.prepare', 'mcp_not_ready');
     }
   }
 
-  #assertOpen(): void {
-    if (this.#closed) throw mcpUnavailable(this.#sessionId, 'mcp_not_ready');
+  #assertOpen(operation: 'mcp.prepare' | 'mcp.ready'): void {
+    if (this.#closed) throw mcpUnavailable(this.#sessionId, operation, 'mcp_not_ready');
   }
 }
 
@@ -224,9 +224,13 @@ function invalidMcpInput(reason: string): RequestError {
   );
 }
 
-function mcpUnavailable(sessionId: string, code: string): RequestError {
+function mcpUnavailable(
+  sessionId: string,
+  operation: 'mcp.prepare' | 'mcp.ready',
+  code: string,
+): RequestError {
   return RequestError.internalError(
-    { source: 'adapter', operation: 'mcp.prepare', sessionId, code },
+    { source: 'adapter', operation, sessionId, code },
     'Session MCP tools are unavailable',
   );
 }

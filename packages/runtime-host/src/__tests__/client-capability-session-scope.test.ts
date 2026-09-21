@@ -217,6 +217,24 @@ test('Session retirement follows an already queued replacement', async (t) => {
   assert.equal(coordinator.snapshotForSession('retired'), undefined);
 });
 
+test('Session retirement invalidates a provider-wide binding preview before commit', async (t) => {
+  const { coordinator, attach, publish } = fixture();
+  t.after(() => coordinator.close());
+  attach('one');
+  await publish('one', undefined, 'default');
+
+  const preview = await coordinator.runWithSessionBindingPreview('retired', 'one', async () =>
+    Promise.resolve('previewed'),
+  );
+  assert.equal(preview.ok, true);
+  if (!preview.ok) return;
+
+  await coordinator.retireSessions(['retired']);
+  const committed = await preview.commit();
+  assert.equal(committed.ok, false);
+  assert.equal(coordinator.snapshotForSession('retired'), undefined);
+});
+
 test('connection and Session publications reject overlapping identities in either direction', async (t) => {
   const { coordinator, attach, publish } = fixture();
   t.after(() => coordinator.close());
