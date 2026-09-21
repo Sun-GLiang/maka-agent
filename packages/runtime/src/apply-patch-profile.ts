@@ -38,6 +38,18 @@ export interface ApplyPatchProfileRuntime {
   readonly customTools?: boolean;
 }
 
+const portableApplyPatchParameters = z.object({ patch: z.string() });
+
+/** Project a provider-native ApplyPatch tool into the portable client-executed shape. */
+export function portableApplyPatchTool(tool: MakaTool): MakaTool {
+  return {
+    ...tool,
+    description: CODEX_PATCH_DESCRIPTION,
+    parameters: portableApplyPatchParameters,
+    providerTool: undefined,
+  };
+}
+
 /** User overrides take precedence; new models can opt in through ordinary function calling. */
 export function resolveApplyPatchProfile(
   runtime: ApplyPatchProfileRuntime,
@@ -66,16 +78,14 @@ export function routeApplyPatchTools(
   return routed.map((tool) =>
     tool !== applyPatchTool
       ? tool
-      : {
-          ...tool,
-          description: CODEX_PATCH_DESCRIPTION,
-          parameters:
-            profile.kind === 'codex-v4a-freeform' ? z.string() : z.object({ patch: z.string() }),
-          providerTool:
-            profile.kind === 'codex-v4a-freeform'
-              ? { kind: 'codex-apply-patch' as const }
-              : undefined,
-        },
+      : profile.kind === 'codex-v4a-freeform'
+        ? {
+            ...tool,
+            description: CODEX_PATCH_DESCRIPTION,
+            parameters: z.string(),
+            providerTool: { kind: 'codex-apply-patch' as const },
+          }
+        : portableApplyPatchTool(tool),
   );
 }
 

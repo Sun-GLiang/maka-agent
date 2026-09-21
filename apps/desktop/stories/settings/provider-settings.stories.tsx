@@ -912,9 +912,9 @@ export const ModelCapabilities: Story = {
     configure.click();
     await waitFor(() => expect(document.querySelector('dialog[open] .astryx-form-layout')).not.toBeNull());
     const patch = within(document.body).getByRole('combobox', { name: /^ApplyPatch/ });
-    expect(patch).toHaveTextContent(/^(启用|啟用|Enabled)$/);
+    expect(patch).toHaveTextContent(/^(自动|自動|Automatic)/);
     await userEvent.click(patch);
-    expect(within(document.body).getAllByRole('option')).toHaveLength(2);
+    expect(within(document.body).getAllByRole('option')).toHaveLength(3);
     await userEvent.keyboard('{Escape}');
     const pane = canvasElement.querySelector('.settingsMainPane');
     if (pane) pane.scrollTop = 0;
@@ -938,7 +938,7 @@ export const ModelParameterSave: Story = {
     await userEvent.click(vision());
     await userEvent.click(await body.findByRole('option', { name: /^(支持|支援|Allow images)$/i }));
     const patch = () => body.getByRole('combobox', { name: /^ApplyPatch/ });
-    expect(patch()).toHaveTextContent(/^(关闭|關閉|Disabled)$/);
+    expect(patch()).toHaveTextContent(/^(自动|自動|Automatic)/);
     await userEvent.click(patch());
     await userEvent.click(await body.findByRole('option', { name: /^(启用|啟用|Enabled)$/ }));
     const save = body.getByRole('button', { name: /^(保存|儲存|Save)$/i });
@@ -963,14 +963,14 @@ export const ModelParameterSave: Story = {
     expect(vision()).toHaveTextContent(/^(支持|支援|Allow images)$/i);
     expect(patch()).toHaveTextContent(/^(启用|啟用|Enabled)$/);
     await userEvent.click(patch());
-    await userEvent.click(await body.findByRole('option', { name: /^(关闭|關閉|Disabled)$/ }));
+    await userEvent.click(await body.findByRole('option', { name: /^(自动|自動|Automatic)/ }));
     await userEvent.click(vision());
     await userEvent.click(await body.findByRole('option', { name: /^(自动|自動|Model information)/i }));
     await userEvent.click(body.getByRole('button', { name: /^(保存|儲存|Save)$/i }));
     await waitFor(() => expect(configure).toHaveFocus());
     await userEvent.click(configure);
     expect(vision()).toHaveTextContent(/^(自动|自動|Model information)/i);
-    expect(patch()).toHaveTextContent(/^(关闭|關閉|Disabled)$/);
+    expect(patch()).toHaveTextContent(/^(自动|自動|Automatic)/);
     expect(body.getByRole('textbox', { name: /^(输入上限|輸入上限|Input limit)$/i })).toHaveValue('64000');
     expect(enable).not.toBeChecked();
     const editable = body.getByRole('textbox', { name: /^(上下文窗口|上下文視窗|Context window)$/i });

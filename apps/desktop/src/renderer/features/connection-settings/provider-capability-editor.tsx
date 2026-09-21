@@ -54,6 +54,12 @@ export function CapabilityEditor(props: {
   const thinkingId = useId();
   const visionValue =
     declared?.vision === true ? 'enabled' : declared?.vision === false ? 'disabled' : 'auto';
+  const applyPatchValue =
+    declared?.applyPatch === true
+      ? 'enabled'
+      : declared?.applyPatch === false
+        ? 'disabled'
+        : 'auto';
   const draftLevels = declared?.thinkingLevels ?? [];
   // The menu offers the five declarable levels PLUS anything the stored table
   // already claims — a level saved while it was still declarable (or
@@ -103,11 +109,17 @@ export function CapabilityEditor(props: {
         size="sm"
         width="100%"
         options={[
+          {
+            value: 'auto',
+            label: copy.applyPatchDefaultOption(modelApplyPatchEnabled(modelId)),
+          },
           { value: 'enabled', label: copy.applyPatchEnabled },
           { value: 'disabled', label: copy.applyPatchDisabled },
         ]}
-        value={modelApplyPatchEnabled(modelId, declared) ? 'enabled' : 'disabled'}
-        onChange={(value) => props.onChange({ applyPatch: value === 'enabled' })}
+        value={applyPatchValue}
+        onChange={(value) =>
+          props.onChange({ applyPatch: value === 'auto' ? undefined : value === 'enabled' })
+        }
         isDisabled={props.disabled}
       />
 
