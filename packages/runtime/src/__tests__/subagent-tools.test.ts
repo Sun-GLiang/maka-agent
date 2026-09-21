@@ -1138,6 +1138,14 @@ describe('subagent tools', () => {
           contract: { workspace: 'same_workspace', defaultWriteBack: 'summary' },
           availability: { status: 'available' },
         },
+        {
+          id: 'web-research',
+          profile: 'web_research',
+          name: 'Web Research',
+          description: 'Read-only web research.',
+          contract: { workspace: 'same_workspace', defaultWriteBack: 'summary' },
+          availability: { status: 'unavailable', reason: 'missing_tools' },
+        },
       ],
       presets: Array.from({ length: 11 }, (_, index) => ({
         id: `reader-${index}`,
@@ -1186,6 +1194,16 @@ describe('subagent tools', () => {
       status: 'unavailable',
       reason: 'connection_disabled',
     });
+    assert.strictEqual(
+      'spawn_args' in (diagnosticTail.presets as Array<Record<string, unknown>>)[2]!,
+      false,
+    );
+    const unavailableProfile = (
+      diagnosticTail.legacy_profiles as Array<Record<string, unknown>>
+    ).find((profile) => profile.status === 'unavailable');
+    assert.ok(unavailableProfile);
+    assert.strictEqual(unavailableProfile.reason, 'missing_tools');
+    assert.strictEqual('spawn_args' in unavailableProfile, false);
 
     const worstCase = await call(
       {},

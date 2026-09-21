@@ -433,7 +433,15 @@ function projectAgentList(
       return [
         {
           subagent_id: preset.id,
-          spawn_args: { target_kind: 'preset', subagent_id: preset.id, executor_mode: 'inherit' },
+          ...(availability.status === 'available'
+            ? {
+                spawn_args: {
+                  target_kind: 'preset',
+                  subagent_id: preset.id,
+                  executor_mode: 'inherit',
+                },
+              }
+            : {}),
           name: boundedCatalogText(preset.name, 128),
           description: boundedCatalogText(preset.description, AGENT_LIST_DESCRIPTION_MAX_CHARS),
           profile: preset.profile,
@@ -472,11 +480,15 @@ function projectAgentList(
       {
         agent_id: definition.id,
         profile: definition.profile,
-        spawn_args: {
-          target_kind: 'profile',
-          profile: definition.profile,
-          executor_mode: 'inherit',
-        },
+        ...(availability.status === 'available'
+          ? {
+              spawn_args: {
+                target_kind: 'profile',
+                profile: definition.profile,
+                executor_mode: 'inherit',
+              },
+            }
+          : {}),
         name: boundedCatalogText(definition.name, 128),
         description: boundedCatalogText(definition.description, AGENT_LIST_DESCRIPTION_MAX_CHARS),
         ...(typeof contract?.workspace === 'string'
