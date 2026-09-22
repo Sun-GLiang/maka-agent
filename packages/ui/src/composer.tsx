@@ -1791,6 +1791,14 @@ export const Composer = forwardRef<
   );
   const hasPlusMenuModes = Boolean(props.onPlanModeChange || props.onOrchestrationModeChange);
   const showPlusMenu = Boolean(hasPlusMenuActions || hasPlusMenuModes);
+  const onNativeModelChange = async (
+    target: Parameters<NonNullable<typeof props.onModelChange>>[0],
+  ) => {
+    await props.executorPicker?.onSelect(undefined);
+    await (props.activeSession
+      ? props.onModelChange?.(target)
+      : props.onPickNewChatModel?.(target));
+  };
   const renderNativeThinkingControl = (): ReactNode =>
     props.activeSession ? (
       <ThinkingLevelSelector
@@ -2330,12 +2338,7 @@ export const Composer = forwardRef<
                         renderProviderMark: props.renderProviderMark,
                         newChatModel: props.newChatModel,
                         executorTarget: props.executorTarget,
-                        onNativeModelChange: async (target) => {
-                          await props.executorPicker?.onSelect(undefined);
-                          await (props.activeSession
-                            ? props.onModelChange?.(target)
-                            : props.onPickNewChatModel?.(target));
-                        },
+                        onNativeModelChange,
                         renderNativeThinkingControl,
                         onExecutorTargetChange: props.onExecutorTargetChange,
                       }}
@@ -2359,7 +2362,7 @@ export const Composer = forwardRef<
                                 openNonce={modelPickerNonce}
                                 hideUnavailableCurrentOption={props.hideUnavailableCurrentModel}
                                 renderProviderMark={props.renderProviderMark}
-                                onChange={props.onModelChange}
+                                onChange={props.onModelChange ? onNativeModelChange : undefined}
                               />
                             ) : props.onPickNewChatModel &&
                               (props.modelChoices?.length ?? 0) > 0 ? (
@@ -2379,7 +2382,7 @@ export const Composer = forwardRef<
                                 }
                                 currentProviderType={props.newChatProviderType}
                                 renderProviderMark={props.renderProviderMark}
-                                onPick={props.onPickNewChatModel}
+                                onPick={onNativeModelChange}
                               />
                             ) : (
                               <ModelChipStatic

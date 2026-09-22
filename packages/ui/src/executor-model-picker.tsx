@@ -18,7 +18,7 @@
  */
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Button, Popover } from '@astryxdesign/core';
+import { Button, Popover, TextInput } from '@astryxdesign/core';
 import type { ExecutorCatalogEntry, ExecutorConfiguration } from '@maka/core/executor-catalog';
 import type { UiCatalog, UiLocale } from '@maka/core/ui-locale';
 import { Plug, Settings, ICON_SIZE } from './icons.js';
@@ -175,83 +175,93 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
         content={
           <div className="maka-executor-picker-panel">
             <nav className="maka-executor-picker-rail" aria-label={copy.title}>
-              <button
-                type="button"
+              <Button
+                label="Maka"
+                variant="ghost"
+                size="sm"
                 className="maka-executor-picker-entry"
                 data-active={browsedId === NATIVE ? 'true' : undefined}
-                disabled={lockedTo !== undefined && lockedTo !== NATIVE}
+                isDisabled={lockedTo !== undefined && lockedTo !== NATIVE}
                 onClick={() => browse(NATIVE)}
-              >
-                Maka
-              </button>
+              />
               {props.catalog.map((entry) => (
-                <button
+                <Button
                   key={entry.id}
-                  type="button"
+                  label={entry.displayName}
+                  variant="ghost"
+                  size="sm"
+                  icon={<Plug size={ICON_SIZE.control} aria-hidden="true" />}
                   className="maka-executor-picker-entry"
                   data-active={browsedId === entry.id ? 'true' : undefined}
-                  disabled={lockedTo !== undefined && lockedTo !== entry.id}
+                  isDisabled={lockedTo !== undefined && lockedTo !== entry.id}
                   onClick={() => browse(entry.id)}
                 >
-                  <Plug size={ICON_SIZE.control} aria-hidden="true" />
-                  <span>{entry.displayName}</span>
-                  {entry.readiness !== 'ready' ? (
-                    <span className="maka-executor-picker-entry-status">
-                      {copy[entry.readiness]}
-                    </span>
-                  ) : null}
-                </button>
+                  <span className="maka-executor-picker-label">
+                    <span>{entry.displayName}</span>
+                    {entry.readiness !== 'ready' ? (
+                      <span className="maka-executor-picker-entry-status">
+                        {copy[entry.readiness]}
+                      </span>
+                    ) : null}
+                  </span>
+                </Button>
               ))}
-              <button
-                type="button"
+              <Button
+                label={copy.manage}
+                variant="ghost"
+                size="sm"
+                icon={<Settings size={ICON_SIZE.control} aria-hidden="true" />}
                 className="maka-executor-picker-entry maka-executor-picker-manage"
                 onClick={() => {
                   setOpen(false);
                   props.onSetup();
                 }}
-              >
-                <Settings size={ICON_SIZE.control} aria-hidden="true" />
-                {copy.manage}
-              </button>
+              />
             </nav>
             <section className="maka-executor-picker-models" aria-live="polite">
               {browsedId === NATIVE ? (
                 <div className="maka-executor-picker-native">{props.children}</div>
               ) : browsed?.readiness === 'ready' ? (
                 <>
-                  <input
+                  <TextInput
                     className="maka-executor-picker-search"
-                    type="search"
+                    label={copy.search}
+                    isLabelHidden
+                    size="sm"
+                    width="100%"
                     value={query}
                     placeholder={copy.search}
-                    aria-label={copy.search}
-                    onChange={(event) => setQuery(event.currentTarget.value)}
+                    onChange={setQuery}
                   />
                   <div className="maka-executor-picker-model-list" role="listbox">
                     {!query && !props.fixed ? (
-                      <button
-                        type="button"
+                      <Button
+                        label={copy.default}
+                        variant="ghost"
+                        size="sm"
                         role="option"
                         aria-selected={currentModel === undefined}
                         className="maka-executor-picker-model"
                         onClick={() => void chooseModel({})}
-                      >
-                        {copy.default}
-                      </button>
+                      />
                     ) : null}
                     {models.map((model) => (
-                      <button
+                      <Button
                         key={model.id}
-                        type="button"
+                        label={model.name}
+                        variant="ghost"
+                        size="sm"
                         role="option"
                         aria-selected={currentModel === model.id}
                         className="maka-executor-picker-model"
-                        disabled={props.fixed && !browsed.supportsModelChange}
+                        isDisabled={props.fixed && !browsed.supportsModelChange}
                         onClick={() => void chooseModel({ model: model.id })}
                       >
-                        <span>{model.name}</span>
-                        {model.name !== model.id ? <small>{model.id}</small> : null}
-                      </button>
+                        <span className="maka-executor-picker-label">
+                          <span>{model.name}</span>
+                          {model.name !== model.id ? <small>{model.id}</small> : null}
+                        </span>
+                      </Button>
                     ))}
                   </div>
                 </>

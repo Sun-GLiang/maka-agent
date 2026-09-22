@@ -115,9 +115,13 @@ function summarizeToolResult(content: readonly ToolCallContent[], rawOutput: unk
   }
 }
 
-function boundedText(value: string): string {
-  const safe = value.replaceAll('\r', '');
+export function boundedText(value: string): string {
+  const safe = value.replace(/[\0\r]/gu, '');
   return safe.length <= MAX_EVENT_TEXT ? safe : `${safe.slice(0, MAX_EVENT_TEXT - 1)}…`;
+}
+
+export function toolName(value: string): string {
+  return value.replace(/[\0\r\n]/gu, '').slice(0, 256) || 'external_tool';
 }
 
 export function activityKind(kind: ToolCall['kind'] | undefined) {

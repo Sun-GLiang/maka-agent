@@ -47,10 +47,12 @@ import { readWorkspaceTextFile, writeWorkspaceTextFile } from './acp-filesystem.
 import { createAcpConnection, type AcpConnectionOwner } from './acp-process.js';
 import {
   activityKind,
+  boundedText,
   emitText,
   projectToolResult,
   promptText,
   summarizeToolContent,
+  toolName,
 } from './acp-projection.js';
 
 declare module '@maka/runtime/plugin-kernel' {
@@ -309,8 +311,14 @@ export class AcpExecutor implements PluginExecutorProvider {
       }
       return { status: 'completed', text: active.text };
     } catch (error) {
+      await this.#lose(session);
+      // Before session/new succeeds there is no external conversation to preserve.
+      // Discard only that failed startup, after cleanup; established or historical
+      // sessions must never be silently replaced by a retry.
+      const retryable = !session.acpSessionId && errorCode(error) !== 'acp_history_only';
+      if (retryable && this.#sessions.get(session.conversationKey) === session)
+        this.#sessions.delete(session.conversationKey);
       if (context.signal.aborted) {
-        await this.#lose(session);
         if (
           error === context.signal.reason ||
           (error instanceof DOMException && error.name === 'AbortError')
@@ -318,8 +326,7 @@ export class AcpExecutor implements PluginExecutorProvider {
           return { status: 'cancelled' };
         return { status: 'cancelled', reason: 'crash', providerStopReason: errorCode(error) };
       }
-      await this.#lose(session);
-      return failure(safeErrorMessage(error), errorCode(error));
+      return failure(safeErrorMessage(error), errorCode(error), retryable);
     } finally {
       if (session.active === active) session.active = undefined;
     }
@@ -556,15 +563,15 @@ export class AcpExecutor implements PluginExecutorProvider {
     if (update.rawOutput !== undefined) snapshot.rawOutput = update.rawOutput;
     active.tools.set(snapshot.id, snapshot);
     if (!snapshot.started) {
-      snapshot.started = true;
       active.context.emit({
         type: 'tool_start',
         toolCallId: snapshot.id,
-        name: snapshot.name ?? snapshot.kind ?? 'external_tool',
-        displayName: snapshot.title,
+        name: toolName(snapshot.name ?? snapshot.kind ?? 'external_tool'),
+        displayName: boundedText(snapshot.title),
         input: snapshot.rawInput ?? {},
         activityKind: activityKind(snapshot.kind),
       });
+      snapshot.started = true;
     }
     if (partial && snapshot.status !== 'completed' && snapshot.status !== 'failed') {
       emitText(
@@ -575,13 +582,13 @@ export class AcpExecutor implements PluginExecutorProvider {
       );
     }
     if (!snapshot.terminal && (snapshot.status === 'completed' || snapshot.status === 'failed')) {
-      snapshot.terminal = true;
       active.context.emit({
         type: 'tool_result',
         toolCallId: snapshot.id,
         content: projectToolResult(snapshot.content, snapshot.rawOutput),
         ...(snapshot.status === 'failed' ? { isError: true } : {}),
       });
+      snapshot.terminal = true;
     }
   }
 

@@ -128,6 +128,81 @@ test('runtime rejects a historical conversation after process continuity was los
   }
 });
 
+for (const startupFailure of ['request', 'crash', 'abort'] as const) {
+  test(`a pre-session ${startupFailure} failure is cleaned up and can be retried`, async () => {
+    const fixture = await executableFixture();
+    const protocol = fakeProtocol();
+    const abort = new AbortController();
+    let attempts = 0;
+    let disposals = 0;
+    let marks = 0;
+    const executor = new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      {
+        state: {
+          has: async () => false,
+          mark: async () => {
+            marks++;
+          },
+        },
+        createConnection: (input) => {
+          if (++attempts > 1) return protocol.factory(input);
+          input.configureClient(chainableApp());
+          let crash!: (error: Error) => void;
+          const failed = new Promise<never>((_resolve, reject) => {
+            crash = reject;
+          });
+          return {
+            failed,
+            dispose: async () => {
+              disposals++;
+            },
+            connection: {
+              agent: {
+                request: async (method: string) => {
+                  assert.equal(method, methods.agent.initialize);
+                  if (startupFailure === 'abort') {
+                    abort.abort(new DOMException('Stopped during startup', 'AbortError'));
+                    throw abort.signal.reason;
+                  }
+                  if (startupFailure === 'crash') {
+                    crash(new Error('Process exited before initialization'));
+                    return await new Promise(() => {});
+                  }
+                  throw new Error('Temporary initialization failure');
+                },
+              },
+            } as unknown as ClientConnection,
+          };
+        },
+      },
+    );
+    try {
+      const first = await executor.execute(request('first'), executorContext([], abort.signal));
+      assert.equal(first.status, startupFailure === 'abort' ? 'cancelled' : 'failed');
+      assert.equal(disposals, 1);
+      assert.equal(marks, 0, 'no external session was established');
+      assert.equal(
+        (await executor.inspectConversation({ conversationKey: 'session-a', cwd: fixture.root }))
+          .readiness,
+        'ready',
+      );
+      assert.equal(
+        (await executor.execute(request('retry'), executorContext([]))).status,
+        'completed',
+      );
+      assert.equal(attempts, 2);
+      assert.equal(protocol.sessions, 1);
+      assert.equal(protocol.prompts, 1);
+      assert.equal(marks, 1);
+    } finally {
+      await executor.dispose();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
 for (const stopReason of [
   'cancelled',
   'end_turn',

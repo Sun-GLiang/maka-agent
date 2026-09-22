@@ -56,6 +56,10 @@ createInterface({input:process.stdin}).on('line',async line=>{
  if(value.startsWith('write:')){
   const result=await call('fs/write_text_file',{sessionId:'fixture',...JSON.parse(value.slice(6))});
   text(JSON.stringify(result));
+ }else if(value.startsWith('metadata:')){
+  const metadata=JSON.parse(value.slice(9));
+  update({sessionUpdate:'tool_call',toolCallId:'metadata-tool',title:metadata.title,name:metadata.name,kind:'edit',status:'in_progress'});
+  update({sessionUpdate:'tool_call_update',toolCallId:'metadata-tool',status:'completed',content:[{type:'content',content:{type:'text',text:'edit completed'}}]});
  }else if(value.startsWith('diff:')){
   const newline=JSON.parse(value.slice(5));
   const content='new'+newline;
@@ -224,6 +228,48 @@ test('file writes create and truncate regular files but reject links inside the 
     await f.dispose();
   }
 });
+
+for (const metadata of [
+  { title: 'Long title '.repeat(1000), name: 'edit'.repeat(100) },
+  { title: 'Edit\0file\r\nnow', name: 'edit\0\r\nfile' },
+  { title: 'Edit file', name: '\0\r\n' },
+]) {
+  test(`real tool metadata is bounded without losing activity (${metadata.name.length} characters)`, async () => {
+    const f = await fixture();
+    const root = new Context();
+    const executors = new PluginExecutorService(root);
+    root
+      .extend({
+        maka: { rootId: 'profile', packageId: 'fixture', entryId: 'stdio', generation: 1 },
+      })
+      .executors.register(f.executor);
+    const backend = new PluginExecutorBackend({
+      sessionId: 'task',
+      cwd: f.root,
+      binding: executors.bind('task', f.executor.id),
+    });
+    try {
+      const events = [];
+      for await (const event of backend.send({
+        turnId: 'metadata',
+        text: `metadata:${JSON.stringify(metadata)}`,
+      }))
+        events.push(event);
+      const start = events.find((event) => event.type === 'tool_start');
+      const result = events.find((event) => event.type === 'tool_result');
+      assert.ok(start && start.type === 'tool_start', 'tool activity must reach the transcript');
+      assert.ok(result && result.type === 'tool_result');
+      assert.equal(result.toolUseId, start.toolUseId);
+      assert.notEqual(result.isError, true);
+      assert.deepEqual(result.content, { kind: 'text', text: 'edit completed' });
+      assert.equal(events.at(-1)?.type, 'complete');
+    } finally {
+      await backend.dispose();
+      await root.fiber.dispose();
+      await f.dispose();
+    }
+  });
+}
 
 for (const newline of ['\n', '\r\n']) {
   test(`real ${JSON.stringify(newline)} file diffs survive executor validation and backend projection`, async () => {
