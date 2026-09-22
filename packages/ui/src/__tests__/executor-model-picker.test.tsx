@@ -73,62 +73,64 @@ const choices: ChatModelChoice[] = [
   },
 ];
 
-test('the Composer native fallback commits Maka after browsing an external executor', async () => {
-  const dom = installTranscriptDom();
-  dom.window.getSelection = () => null;
-  const selected: unknown[] = [];
-  function Harness() {
-    const [selection, setSelection] = useState<ExecutorSelection>();
-    const [model, setModel] = useState({
-      llmConnectionId: 'native', llmConnectionSlug: 'native', model: 'native-model',
-    });
-    return (
-      <LocaleProvider locale="en">
-        <Composer
-          executorPicker={{
-            catalog, selection,
-            onSelect: (next) => { selected.push(next); setSelection(next); },
-            onSetup: () => {}, onRetry: () => {}, onNewTask: () => {},
-          }}
-          modelChoices={choices}
-          newChatModel={model}
-          onPickNewChatModel={setModel}
-          onSend={() => assert.fail('Selecting a model must not send the draft')}
-          onStop={() => {}}
-        />
-      </LocaleProvider>
+for (const nativeModel of ['native-model', 'native-model-2']) {
+  test(`the Composer native fallback commits Maka with ${nativeModel} after browsing an external executor`, async () => {
+    const dom = installTranscriptDom();
+    dom.window.getSelection = () => null;
+    const selected: unknown[] = [];
+    function Harness() {
+      const [selection, setSelection] = useState<ExecutorSelection>();
+      const [model, setModel] = useState({
+        llmConnectionId: 'native', llmConnectionSlug: 'native', model: 'native-model',
+      });
+      return (
+        <LocaleProvider locale="en">
+          <Composer
+            executorPicker={{
+              catalog, selection,
+              onSelect: (next) => { selected.push(next); setSelection(next); },
+              onSetup: () => {}, onRetry: () => {}, onNewTask: () => {},
+            }}
+            modelChoices={choices}
+            newChatModel={model}
+            onPickNewChatModel={setModel}
+            onSend={() => assert.fail('Selecting a model must not send the draft')}
+            onStop={() => {}}
+          />
+        </LocaleProvider>
+      );
+    }
+    const click = async (element: Element | null | undefined) => {
+      assert.ok(element);
+      await act(async () => { element.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
+    };
+    const button = (text: string) => [...dom.document.querySelectorAll('button')].find(
+      (element) => element.textContent === text,
     );
-  }
-  const click = async (element: Element | null | undefined) => {
-    assert.ok(element);
-    await act(async () => { element.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
-  };
-  const button = (text: string) => [...dom.document.querySelectorAll('button')].find(
-    (element) => element.textContent === text,
-  );
-  try {
-    await dom.render(<Harness />);
-    await click(dom.document.querySelector('.maka-executor-selector'));
-    await click(button('Antigravity'));
-    assert.equal(selected.length, 0, 'browsing must not change the executor');
-    await click([...dom.document.querySelectorAll('.maka-executor-picker-model')].find(
-      (element) => element.textContent?.includes('Agent model 31'),
-    ));
-    assert.deepEqual(selected, [{ executorId: 'antigravity', configuration: { model: 'model-31' } }]);
-    await click(dom.document.querySelector('.maka-executor-selector'));
-    await click(button('Maka'));
-    assert.equal(selected.length, 1, 'browsing back to Maka must not commit it');
-    await click(dom.document.querySelector('.maka-new-chat-model-selector [aria-haspopup="listbox"]'));
-    await click([...dom.document.querySelectorAll('[role="option"]')].find(
-      (element) => element.textContent?.includes('Native model 2'),
-    ));
-    assert.equal(selected.length, 2);
-    assert.equal(selected.at(-1), undefined, 'the native choice must clear the external executor');
-    assert.ok(!dom.document.querySelector('.maka-executor-selector')?.textContent?.includes('Antigravity'));
-  } finally {
-    await dom.cleanup();
-  }
-});
+    try {
+      await dom.render(<Harness />);
+      await click(dom.document.querySelector('.maka-executor-selector'));
+      await click(button('Antigravity'));
+      assert.equal(selected.length, 0, 'browsing must not change the executor');
+      await click([...dom.document.querySelectorAll('.maka-executor-picker-model')].find(
+        (element) => element.textContent?.includes('Agent model 31'),
+      ));
+      assert.deepEqual(selected, [{ executorId: 'antigravity', configuration: { model: 'model-31' } }]);
+      await click(dom.document.querySelector('.maka-executor-selector'));
+      await click(button('Maka'));
+      assert.equal(selected.length, 1, 'browsing back to Maka must not commit it');
+      await click(dom.document.querySelector('.maka-new-chat-model-selector [aria-haspopup="listbox"]'));
+      await click([...dom.document.querySelectorAll('[role="option"]')].find(
+        (element) => element.textContent?.includes(choices.find((choice) => choice.model === nativeModel)!.description!),
+      ));
+      assert.equal(selected.length, 2);
+      assert.equal(selected.at(-1), undefined, 'the native choice must clear the external executor');
+      assert.ok(!dom.document.querySelector('.maka-executor-selector')?.textContent?.includes('Antigravity'));
+    } finally {
+      await dom.cleanup();
+    }
+  });
+}
 
 test('executor choice keeps the native picker intact and exposes every external model with exact identity', async () => {
   const dom = installTranscriptDom();

@@ -21,7 +21,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Button, Popover, TextInput } from '@astryxdesign/core';
 import type { ExecutorCatalogEntry, ExecutorConfiguration } from '@maka/core/executor-catalog';
 import type { UiCatalog, UiLocale } from '@maka/core/ui-locale';
-import { Plug, Settings, ICON_SIZE } from './icons.js';
+import { Settings, ICON_SIZE } from './icons.js';
 import { useUiLocale } from './locale-context.js';
 
 export interface ExecutorSelection {
@@ -190,7 +190,6 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                   label={entry.displayName}
                   variant="ghost"
                   size="sm"
-                  icon={<Plug size={ICON_SIZE.control} aria-hidden="true" />}
                   className="maka-executor-picker-entry"
                   data-active={browsedId === entry.id ? 'true' : undefined}
                   isDisabled={lockedTo !== undefined && lockedTo !== entry.id}
@@ -283,7 +282,6 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
           label={triggerLabel}
           variant="ghost"
           size="sm"
-          icon={props.selection ? <Plug size={ICON_SIZE.control} aria-hidden="true" /> : undefined}
           isDisabled={props.disabled || props.isReadOnly}
           tooltip={props.fixed ? copy.fixed : undefined}
           className="maka-model-switcher-trigger maka-executor-selector"

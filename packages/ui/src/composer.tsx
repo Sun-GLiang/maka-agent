@@ -2372,7 +2372,7 @@ export const Composer = forwardRef<
                                 isReadOnly={props.pickersReadOnly}
                                 choices={props.modelChoices ?? []}
                                 currentValue={
-                                  props.newChatModel
+                                  props.newChatModel && !props.executorPicker?.selection
                                     ? exactModelChoiceValue(
                                         props.newChatModel.llmConnectionId,
                                         props.newChatModel.llmConnectionSlug,
