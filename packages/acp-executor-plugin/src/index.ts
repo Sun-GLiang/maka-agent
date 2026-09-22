@@ -86,6 +86,9 @@ export interface AcpAgentAdapter<TConfig = unknown> {
   configure(config: TConfig): AcpConfiguredAgent;
   permissionKind?(request: RequestPermissionRequest): 'permission' | 'question';
   executionFailed?(text: string): boolean;
+  describeModels?(
+    models: ExecutorCatalogEntry['models'],
+  ): Pick<ExecutorCatalogEntry, 'models' | 'modelGroups'>;
 }
 
 export interface AcpConnectionFactoryInput extends AcpLaunchSpec {
@@ -132,6 +135,7 @@ interface RetainedSession {
   configOptions: readonly SessionConfigOption[];
   initialization?: Promise<void>;
   active?: ActivePrompt;
+  configuring?: boolean;
   lost: boolean;
   loss?: Promise<void>;
 }
@@ -217,9 +221,20 @@ export class AcpExecutor implements PluginExecutorProvider {
     signal: AbortSignal,
   ): Promise<void> {
     const session = this.#sessions.get(input.conversationKey);
-    if (!session?.connection || session.lost || session.active || !input.configuration?.model)
+    if (
+      !session?.connection ||
+      session.lost ||
+      session.active ||
+      session.configuring ||
+      !input.configuration?.model
+    )
       throw new Error('ACP model change is unavailable');
-    await this.#applyInitialConfig(session, { model: input.configuration.model }, signal);
+    session.configuring = true;
+    try {
+      await this.#applyInitialConfig(session, { model: input.configuration.model }, signal, true);
+    } finally {
+      session.configuring = false;
+    }
   }
 
   #catalogEntry(
@@ -241,7 +256,7 @@ export class AcpExecutor implements PluginExecutorProvider {
       id: this.id,
       displayName: this.displayName,
       readiness,
-      models,
+      ...(this.#adapter.describeModels?.(models) ?? { models }),
       ...(model?.type === 'select'
         ? { currentModel: model.currentValue }
         : selected
@@ -279,7 +294,8 @@ export class AcpExecutor implements PluginExecutorProvider {
     } catch (error) {
       return failure(safeErrorMessage(error), errorCode(error));
     }
-    if (session.active) return failure(`${this.displayName} ACP Session is busy`, 'acp_busy', true);
+    if (session.active || session.configuring)
+      return failure(`${this.displayName} ACP Session is busy`, 'acp_busy', true);
     const active: ActivePrompt = { context, tools: new Map(), text: '' };
     session.active = active;
     try {
@@ -453,6 +469,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     session: RetainedSession,
     values: Readonly<Record<string, string>>,
     signal: AbortSignal,
+    restoreOnFailure = false,
   ): Promise<void> {
     for (const [key, value] of Object.entries(values)) {
       const option = session.configOptions.find(
@@ -488,9 +505,32 @@ export class AcpExecutor implements PluginExecutorProvider {
           );
         session.configOptions = updated.configOptions;
       } catch (error) {
-        // The Agent may have applied the change before its response failed. Until
-        // restoration can reconcile it, the cached model must not admit another prompt.
-        await this.#lose(session);
+        // A rejected/unconfirmed mutation can have reached the Agent. Restore the
+        // previous real ID and require an acknowledgement before permitting retry.
+        let restored = false;
+        if (restoreOnFailure && !session.lost && !signal.aborted) {
+          try {
+            const rollback = await session.connection!.agent.request(
+              methods.agent.session.setConfigOption,
+              { sessionId: session.acpSessionId!, configId: option.id, value: option.currentValue },
+              { cancellationSignal: AbortSignal.timeout(5_000) },
+            );
+            const confirmed = rollback.configOptions.find(
+              (candidate) => candidate.id === option.id,
+            );
+            if (
+              confirmed?.type === 'select' &&
+              confirmed.currentValue === option.currentValue &&
+              !session.lost
+            ) {
+              session.configOptions = rollback.configOptions;
+              restored = true;
+            }
+          } catch {
+            /* Uncertain configuration remains history-only. */
+          }
+        }
+        if (!restored) await this.#lose(session);
         throw error;
       }
     }
@@ -531,6 +571,11 @@ export class AcpExecutor implements PluginExecutorProvider {
   }
 
   #acceptUpdate(session: RetainedSession, update: SessionUpdate): void {
+    if (update.sessionUpdate === 'config_option_update') {
+      // During our mutation, its response (or rollback response) is authoritative.
+      if (!session.configuring && !session.lost) session.configOptions = update.configOptions;
+      return;
+    }
     const active = session.active;
     if (!active) return;
     if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {

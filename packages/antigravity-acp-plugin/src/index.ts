@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { describeAntigravityModels } from './model-presentation.js';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import type { RequestPermissionRequest } from '@agentclientprotocol/sdk';
 import type { AcpAgentAdapter, AcpConfiguredAgent } from '@maka/acp-executor-plugin';
@@ -35,6 +36,7 @@ export const antigravityAcpAdapter: AcpAgentAdapter<AntigravityAcpConfig> = Obje
   id: ANTIGRAVITY_ACP_EXECUTOR_ID,
   displayName: 'Antigravity',
   clientName: 'maka-antigravity-acp-plugin',
+  describeModels: describeAntigravityModels,
   // Verified with official 1.1.1: structured questions use interaction_ ids and choice options.
   permissionKind: (request: RequestPermissionRequest) =>
     request.toolCall.toolCallId.startsWith('interaction_') && request.toolCall.kind == null

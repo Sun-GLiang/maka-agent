@@ -896,6 +896,7 @@ export const Composer = forwardRef<
   });
   // PR-UI-15: locale-aware copy for placeholder + toolbar states.
   const locale = useUiLocale();
+  const [executorModelPending, setExecutorModelPending] = useState(false);
   const executorNativeDisabledReason = props.executorPicker?.selection ? executorCopy(locale).nativeOperations : undefined;
   const copy = getConversationCopy(locale).composer;
   const mentionCopy = getConversationCopy(locale).mentions;
@@ -1396,6 +1397,7 @@ export const Composer = forwardRef<
     if (
       props.disabled
       || props.sendBlocked
+      || executorModelPending
       || sendPendingRef.current
       || importActionOwnerRef.current?.pending
     ) return;
@@ -1597,6 +1599,7 @@ export const Composer = forwardRef<
   const sendDisabled =
     props.disabled ||
     props.sendBlocked ||
+    executorModelPending ||
     sendPending ||
     importActionBusy ||
     (!text.trim() && !hasStagedContext) ||
@@ -2320,6 +2323,9 @@ export const Composer = forwardRef<
                     isReadOnly={props.pickersReadOnly}
                     nativeLabel={modelChipLabel}
                     renderProviderMark={props.renderProviderMark}
+                    nativeThinkingControl={!props.executorTarget ? renderNativeThinkingControl() : null}
+                    scopeKey={props.activeSession?.id ?? activeDraftKey()}
+                    onPendingChange={setExecutorModelPending}
                   >
                     <MakaClientSlotOutlet
                       name="conversation.composer.model-selection"
@@ -2400,9 +2406,6 @@ export const Composer = forwardRef<
                       }}
                     />
                   </ExecutorModelPickerBoundary>
-                  {props.executorPicker && !props.executorPicker.selection && !props.executorTarget
-                    ? renderNativeThinkingControl()
-                    : null}
                 </MakaClientSessionScope>
                 {props.contextUsage ? <ContextUsageAction {...props.contextUsage} /> : null}
               </div>
@@ -2566,15 +2569,22 @@ function ExecutorModelPickerBoundary(props: {
   isReadOnly?: boolean;
   nativeLabel?: string;
   renderProviderMark?: ComposerProps['renderProviderMark'];
+  nativeThinkingControl?: ReactNode;
+  scopeKey?: string;
+  onPendingChange?(pending: boolean): void;
   children: ReactNode;
 }) {
   return props.picker ? (
     <ExecutorModelPicker
+      key={props.scopeKey}
       {...props.picker}
       presentation={props.presentation}
       isReadOnly={props.isReadOnly}
       nativeLabel={props.nativeLabel}
       renderProviderMark={props.renderProviderMark}
+      nativeThinkingControl={props.nativeThinkingControl}
+      scopeKey={props.scopeKey}
+      onPendingChange={props.onPendingChange}
     >
       {props.children}
     </ExecutorModelPicker>

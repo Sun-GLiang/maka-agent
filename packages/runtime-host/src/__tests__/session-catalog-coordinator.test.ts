@@ -2525,3 +2525,31 @@ test('native execution settings cannot mutate an external task', async () => {
     assert.equal(fixture.drainRequests(), 0);
   }
 });
+
+test('reselecting the persisted executor model still confirms the Agent state and respects busy locks', async () => {
+  for (const busy of [false, true]) {
+    let confirmations = 0;
+    const fixture = createFixture({
+      header: {
+        backend: 'plugin-executor',
+        executorId: 'remote',
+        executorConfig: { model: 'same' },
+      },
+      manager: { runningTurnIds: () => (busy ? ['turn'] : []) },
+      configureExecutor: async () => {
+        confirmations++;
+      },
+    });
+    const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+      {
+        sessionId: fixture.sessionId,
+        expectedRevision: fixture.revision(),
+        patch: { executorConfig: { model: 'same' } },
+      },
+      context,
+    );
+    assert.equal(outcome.ok, !busy);
+    assert.equal(confirmations, busy ? 0 : 1);
+    assert.equal(fixture.header().executorConfig?.model, 'same');
+  }
+});

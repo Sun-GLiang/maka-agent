@@ -18,6 +18,8 @@
  */
 
 import { isExecutorId } from './executor-id.js';
+import { CATALOG_PROVIDER_TYPES, type ProviderType } from './provider-registry.js';
+import { isThinkingLevel, type ThinkingLevel } from './model-thinking.js';
 
 /** Provider-owned choices; no model Connection or external protocol identity crosses this seam. */
 export interface ExecutorConfiguration {
@@ -33,6 +35,14 @@ export type ExecutorReadiness =
 export interface ExecutorModelChoice {
   readonly id: string;
   readonly name: string;
+  readonly providerType?: ProviderType;
+}
+
+/** Presentation capability only: every variant references a real catalog model ID. */
+export interface ExecutorModelGroup {
+  readonly id: string;
+  readonly name: string;
+  readonly variants: readonly { readonly modelId: string; readonly level: ThinkingLevel }[];
 }
 
 export interface ExecutorCatalogEntry {
@@ -40,6 +50,7 @@ export interface ExecutorCatalogEntry {
   readonly displayName: string;
   readonly readiness: ExecutorReadiness;
   readonly models: readonly ExecutorModelChoice[];
+  readonly modelGroups?: readonly ExecutorModelGroup[];
   readonly currentModel?: string;
   readonly supportsAttachments: boolean;
   readonly supportsModelChange: boolean;
@@ -78,7 +89,8 @@ export function normalizeCatalogEntry(
         model &&
         isExecutorConfiguration({ model: model.id }) &&
         typeof model.id === 'string' &&
-        isCatalogText(model.name),
+        isCatalogText(model.name) &&
+        (model.providerType === undefined || CATALOG_PROVIDER_TYPES.includes(model.providerType)),
     ) ||
     new Set(value.models.map((model) => model.id)).size !== value.models.length ||
     !isExecutorConfiguration({ model: value.currentModel }) ||
@@ -87,11 +99,72 @@ export function normalizeCatalogEntry(
     typeof value.supportsModelChange !== 'boolean'
   )
     throw new TypeError('Executor catalog is invalid');
+  const usedModels = new Set<string>();
+  const groupIds = new Set<string>();
+  if (
+    value.modelGroups !== undefined &&
+    (!Array.isArray(value.modelGroups) ||
+      value.modelGroups.length > value.models.length ||
+      !value.modelGroups.every((group) => {
+        if (
+          !group ||
+          !isExecutorConfiguration({ model: group.id }) ||
+          typeof group.id !== 'string' ||
+          !isCatalogText(group.name) ||
+          groupIds.has(group.id) ||
+          !Array.isArray(group.variants) ||
+          group.variants.length < 2 ||
+          group.variants.length > 7
+        )
+          return false;
+        groupIds.add(group.id);
+        const levels = new Set<ThinkingLevel>();
+        return group.variants.every((variant: ExecutorModelGroup['variants'][number]) => {
+          if (
+            !variant ||
+            !isThinkingLevel(variant.level) ||
+            levels.has(variant.level) ||
+            usedModels.has(variant.modelId) ||
+            !value.models.some((model) => model.id === variant.modelId)
+          )
+            return false;
+          levels.add(variant.level);
+          usedModels.add(variant.modelId);
+          return true;
+        });
+      }))
+  )
+    throw new TypeError('Executor model groups are invalid');
   return Object.freeze({
     id,
     displayName: value.displayName,
     readiness: value.readiness,
-    models: Object.freeze(value.models.map(({ id, name }) => Object.freeze({ id, name }))),
+    models: Object.freeze(
+      value.models.map(({ id, name, providerType }) =>
+        Object.freeze({
+          id,
+          name,
+          ...(providerType !== undefined ? { providerType } : {}),
+        }),
+      ),
+    ),
+    ...(value.modelGroups !== undefined
+      ? {
+          modelGroups: Object.freeze(
+            value.modelGroups.map((group) =>
+              Object.freeze({
+                id: group.id,
+                name: group.name,
+                variants: Object.freeze(
+                  group.variants.map(({ modelId, level }: ExecutorModelGroup['variants'][number]) =>
+                    Object.freeze({ modelId, level }),
+                  ),
+                ),
+              }),
+            ),
+          ),
+        }
+      : {}),
     ...(value.currentModel !== undefined ? { currentModel: value.currentModel } : {}),
     ...(value.message !== undefined ? { message: value.message } : {}),
     supportsAttachments: value.supportsAttachments,

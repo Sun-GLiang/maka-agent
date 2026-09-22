@@ -393,7 +393,7 @@ test('discovery shares a disposable probe, does not mark a task, and first promp
   }
 });
 
-for (const failure of ['response_lost', 'unconfirmed', 'timeout'] as const) {
+for (const failure of ['response_lost', 'timeout'] as const) {
   test(`an applied model change with ${failure} prevents prompts using stale configuration`, async () => {
     const fixture = await executableFixture();
     const protocol = fakeProtocol();
@@ -419,7 +419,7 @@ for (const failure of ['response_lost', 'unconfirmed', 'timeout'] as const) {
         ),
       );
       // The external mutation happened even though no matching confirmation arrived.
-      assert.equal(protocol.selectedModel, 'fast');
+      assert.equal(protocol.selectedModel, failure === 'timeout' ? 'fast' : 'default');
       assert.equal(
         (await executor.inspectConversation({ conversationKey: 'session-a', cwd: fixture.root }))
           .readiness,
@@ -518,8 +518,9 @@ function fakeProtocol(): {
   prompts: number;
   disposals: number;
   selectedModel?: string;
-  configurationFailure?: 'response_lost' | 'unconfirmed' | 'timeout';
+  configurationFailure?: 'response_lost' | 'unconfirmed' | 'timeout' | 'once';
   promptModels: string[];
+  notifyConfiguration(model: string): void;
 } {
   const fixture = {
     connections: 0,
@@ -527,8 +528,14 @@ function fakeProtocol(): {
     prompts: 0,
     disposals: 0,
     selectedModel: undefined as string | undefined,
-    configurationFailure: undefined as 'response_lost' | 'unconfirmed' | 'timeout' | undefined,
+    configurationFailure: undefined as
+      | 'response_lost'
+      | 'unconfirmed'
+      | 'timeout'
+      | 'once'
+      | undefined,
     promptModels: [] as string[],
+    notifyConfiguration: (_model: string): void => {},
     factory: undefined as unknown as AcpConnectionFactory,
   };
   fixture.factory = (input) => {
@@ -546,6 +553,28 @@ function fakeProtocol(): {
       },
     } as unknown as ClientApp;
     input.configureClient(app);
+    fixture.notifyConfiguration = (model) => {
+      notifications.get(methods.client.session.update)?.({
+        params: {
+          sessionId: 'acp-session',
+          update: {
+            sessionUpdate: 'config_option_update',
+            configOptions: [
+              {
+                type: 'select',
+                id: 'model',
+                name: 'Model',
+                currentValue: model,
+                options: [
+                  { value: 'default', name: 'Default' },
+                  { value: 'fast', name: 'Fast' },
+                ],
+              },
+            ],
+          },
+        } as never,
+      });
+    };
     const connection = {
       agent: {
         request: async (
@@ -574,6 +603,10 @@ function fakeProtocol(): {
           }
           if (method === methods.agent.session.setConfigOption) {
             fixture.selectedModel = String(params.value);
+            if (fixture.configurationFailure === 'once') {
+              fixture.configurationFailure = undefined;
+              throw new Error('Transient rejection after mutation');
+            }
             if (fixture.configurationFailure === 'response_lost')
               throw new Error('Configuration response lost after applying the model');
             if (fixture.configurationFailure === 'timeout') {
@@ -660,3 +693,64 @@ function fakeProtocol(): {
   };
   return fixture;
 }
+
+for (const failure of ['once', 'unconfirmed'] as const)
+  test(`confirmed rollback preserves the previous model and permits retry after ${failure}`, async () => {
+    const fixture = await executableFixture();
+    const protocol = fakeProtocol();
+    const executor = new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      { createConnection: protocol.factory },
+    );
+    const input = {
+      conversationKey: 'session-a',
+      cwd: fixture.root,
+      configuration: { model: 'fast' },
+    };
+    try {
+      await executor.execute(
+        { ...request('first'), configuration: { model: 'default' } },
+        executorContext([]),
+      );
+      protocol.configurationFailure = failure;
+      await assert.rejects(executor.configureConversation(input, new AbortController().signal));
+      assert.equal(protocol.selectedModel, 'default');
+      const state = await executor.inspectConversation(input);
+      assert.equal(state.currentModel, 'default');
+      assert.equal(state.readiness, 'ready');
+      protocol.configurationFailure = undefined;
+      await executor.configureConversation(input, new AbortController().signal);
+      assert.equal((await executor.inspectConversation(input)).currentModel, 'fast');
+      assert.equal(protocol.disposals, 0);
+    } finally {
+      await executor.dispose();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+test('idle Agent configuration notifications update the inspected model without another prompt', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory },
+  );
+  try {
+    await executor.execute(
+      { ...request('first'), configuration: { model: 'default' } },
+      executorContext([]),
+    );
+    protocol.notifyConfiguration('fast');
+    assert.equal(
+      (await executor.inspectConversation({ conversationKey: 'session-a', cwd: fixture.root }))
+        .currentModel,
+      'fast',
+    );
+    assert.equal(protocol.prompts, 1);
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});

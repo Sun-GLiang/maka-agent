@@ -42,7 +42,8 @@ export function useExecutorSelection(input: {
     loading: boolean;
     error?: string;
   }>();
-  const [changing, setChanging] = useState(false);
+  const [changingKey, setChangingKey] = useState<string>();
+  const inFlight = useRef<string | undefined>(undefined);
   const sessionId = input.session?.id;
   const executorId = input.session?.executorId;
   const key = sessionId ?? input.key;
@@ -80,6 +81,7 @@ export function useExecutorSelection(input: {
     key,
     sessionId,
     executorId,
+    input.session?.executorConfig?.model,
     input.target?.hostId,
     input.target?.profileId,
     input.target?.projectId,
@@ -111,29 +113,47 @@ export function useExecutorSelection(input: {
   useEffect(() => {
     if (sessionId) setDraft(undefined);
   }, [sessionId]);
+  const catalog = snapshot?.key === key ? snapshot.catalog : [];
+  const inspected = catalog.find(candidate => candidate.id === executorId);
   const selection = executorId
-    ? { executorId, configuration: input.session?.executorConfig ?? {} }
+    ? { executorId, configuration: inspected?.readiness === 'ready' && inspected.currentModel
+        ? { model: inspected.currentModel } : input.session?.executorConfig ?? {} }
     : sessionId
       ? undefined
       : draft?.key === input.key
         ? draft.selection
         : undefined;
   const select = async (next: ExecutorSelection | undefined) => {
+    if (inFlight.current === key) throw new Error('Executor configuration is pending');
     if (!sessionId) {
+      if (next && !catalog.some(entry => entry.id === next.executorId && entry.readiness === 'ready' &&
+        entry.models.some(model => model.id === next.configuration.model))) throw new Error('Executor model is unavailable');
       setDraft({ key: input.key, selection: next });
       return;
     }
     if (!next || next.executorId !== executorId || !services.sessions.setExecutorModelConfiguration)
-      return;
-    setChanging(true);
+      throw new Error('Executor configuration is unavailable');
+    inFlight.current = key;
+    setChangingKey(key);
     try {
       const result = await services.sessions.setExecutorModelConfiguration(
         sessionId,
         next.configuration,
       );
       if (!result.ok) throw new Error(result.code);
-      await refresh();
+      if (result.session.executorConfig?.model !== next.configuration.model)
+        throw new Error('Executor model change was not confirmed');
+      if (current.current === key) {
+        revision.current++;
+        setSnapshot(previous => ({
+          key, loading: false,
+          catalog: (previous?.key === key ? previous.catalog : []).map(entry => entry.id === executorId
+            ? { ...entry, currentModel: result.session.executorConfig!.model } : entry),
+        }));
+        await refresh();
+      }
     } catch (error) {
+      if (current.current === key) await refresh();
       if (current.current === key)
         setSnapshot((previous) => ({
           key,
@@ -141,11 +161,12 @@ export function useExecutorSelection(input: {
           loading: false,
           error: error instanceof Error ? error.message : 'Executor configuration failed',
         }));
+      throw error;
     } finally {
-      setChanging(false);
+      if (inFlight.current === key) inFlight.current = undefined;
+      setChangingKey(previous => previous === key ? undefined : previous);
     }
   };
-  const catalog = snapshot?.key === key ? snapshot.catalog : [];
   const entry = catalog.find((candidate) => candidate.id === selection?.executorId);
   return {
     selection,
@@ -153,7 +174,7 @@ export function useExecutorSelection(input: {
     entry,
     select,
     refresh,
-    changing,
+    changing: changingKey === key,
     loading: snapshot?.key !== key || snapshot.loading,
     error: snapshot?.key === key ? snapshot.error : undefined,
   };

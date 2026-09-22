@@ -113,6 +113,8 @@ function renderNativePanelOption(option: ModelPickerPanelOption): ReactNode {
  */
 export function ThinkingLevelSelector(props: {
   levels: readonly ThinkingLevel[];
+  includeDefault?: boolean;
+  confirmedOnly?: boolean;
   current?: ThinkingLevel;
   /** Same surface as the model picker; compact windows that cannot fit an anchored popup use 'bottom-sheet'. */
   presentation?: 'popover' | 'bottom-sheet';
@@ -127,33 +129,33 @@ export function ThinkingLevelSelector(props: {
   const hasVariants = props.levels.length > 0 && Boolean(props.onChange);
   const options = useMemo(
     () => [
-      { value: DEFAULT_THINKING_LEVEL, label: copy.defaultLevel },
+      ...(props.includeDefault === false ? [] : [{ value: DEFAULT_THINKING_LEVEL, label: copy.defaultLevel }]),
       ...props.levels.map((level) => ({ value: level, label: copy.level[level] })),
     ],
-    [copy.defaultLevel, copy.level, props.levels],
+    [copy.defaultLevel, copy.level, props.levels, props.includeDefault],
   );
 
-  const currentValue = props.current ?? DEFAULT_THINKING_LEVEL;
+  const currentValue = props.current ?? (props.includeDefault === false ? '' : DEFAULT_THINKING_LEVEL);
   const selection = usePendingSelection(currentValue, (value) =>
     props.onChange?.(value === DEFAULT_THINKING_LEVEL ? undefined : (value as ThinkingLevel)),
   );
 
   if (!hasVariants) return null;
 
-  const currentLabel = options.find((option) => option.value === currentValue)?.label ?? copy.defaultLevel;
+  const currentLabel = options.find((option) => option.value === currentValue)?.label ?? (props.includeDefault === false ? copy.chooseThinkingLevel : copy.defaultLevel);
 
   return (
     <Selector
       label={`${copy.thinkingLevel}: ${currentLabel}`}
       isLabelHidden
       options={options}
-      value={selection.value}
+      value={props.confirmedOnly ? currentValue : selection.value}
       variant="ghost"
       size="sm"
       placement="above"
       presentation={props.presentation}
       isReadOnly={props.isReadOnly}
-      isDisabled={props.disabled}
+      isDisabled={props.disabled || (props.confirmedOnly && selection.value !== currentValue)}
       disabledMessage={props.disabledReason}
       placeholder={currentLabel}
       className="maka-thinking-level-selector"

@@ -140,52 +140,100 @@ Regression verification after these fixes:
 - Exact-base protocol epoch and renderer architecture checks passed, together with their
   **17** and **112** checker tests; the Astryx inventory and its **19** tests passed.
 
-## Model list alignment and thinking control
+## Unified model and thinking selection
 
-Maka and Antigravity now share the same searchable model-list component inside the executor
-panel. Native choices retain connection grouping and exact connection/model identity, while
-reusing main's provider-icon and single-line-name renderer instead of nesting another selector.
-Native rows have no extra model-ID line; IDs and descriptions remain searchable.
-External Gemini rows reuse the existing Gemini provider mark. The synthetic Agent default
-option is removed; selecting any listed model sends its exact catalog ID. The existing
-session-switch warning, availability locks, and standalone/wheel model controls are preserved.
+Maka retains main's connection groups, provider icons and single-line native model names.
+Gemini icons remain present; Antigravity has no plug icon or synthetic Agent default option.
+Thinking intensity is selected exclusively beside the model trigger in the composer footer.
+Native models still use their native thinking parameter. External models use the exact opaque
+variant ID returned by ACP; the generic UI consumes structured catalog capabilities and has
+no Gemini naming rules.
 
-Native thinking levels are mounted beside the model trigger in the composer footer. They remain
-available while the model panel is closed and disappear when an external executor is selected;
-browsing another executor alone does not change this state. The original native thinking
-capabilities and callbacks still govern the control.
+The Antigravity adapter recognizes only the verified Gemini Flash/Pro `(High|Medium|Low)`
+label shape. A family with at least two unambiguous levels appears as one base-model row.
+Selecting that row automatically selects its **highest supported level**, regardless of the
+previous model's intensity. Afterwards the footer permits choosing only actual supported levels.
+The external model replaces the native model trigger; there is no pending model caption,
+extra native model, Cancel action, invented default, or invented off level. Unknown, singleton
+and ambiguous families keep their original model rows without a fabricated thinking control.
+Merely browsing or reopening the panel does not change configuration.
 
-The latest pass verified native search in Desktop, external selection hiding native thinking,
-and Tab/arrow/Enter selection in the shared control's browser fixture. Complete UI and Desktop
-suites passed (**625 + 2,809 tests**), as did renderer build, type checks, architecture, Knip,
-Astryx inventory, lint, formatting, stale-output and ASF header checks.
+For existing sessions, UI state advances only after the Host confirms the requested model ID.
+A failed or unconfirmed request restores the previous real ID and requires an ACP acknowledgement
+before allowing retry. If rollback cannot be confirmed, or the process is lost, the existing
+history-only restriction remains. Selection and prompt execution cannot overlap. Catalog updates,
+scope changes, reopening a menu, and retained sessions use the same confirmed model mapping.
+New-task selection validates a real ID against the ready catalog; ACP applies and confirms that
+ID when the first prompt creates the session.
 
-The native-row formatting was checked against main at `c6e3eb0cd0535736f328252ab137f9cc06496da3`.
-The complete UI suite (**625 tests**), production renderer build, Desktop type check, lint,
-format, Astryx inventory, and stale-output check passed again for the native formatting,
-Gemini icons, and removal of the synthetic default option.
+### Official ACP and Desktop verification
+
+The official 1.1.1 server returned 11 model variants: Gemini 3.8, 3.7 and 3.6 Flash each with
+Low/Medium/High, plus Gemini 3.1 Pro with Low/High. These form four base-model rows.
+Its initial current model was `gemini-3.7-flash-high`; no per-family default was supplied.
+Actual `session/set_config_option` responses confirmed `gemini-3.8-flash-medium`,
+`gemini-pro-agent` (Pro High), and `gemini-3.1-pro-low`. No IDs were synthesized.
+The separate ACP mode option was not interpreted as thinking strength.
+
+On 2026-09-22 the rebuilt Electron renderer was checked with an isolated fixture profile:
+
+- Native provider icons, single-line rows, search, and composer thinking remained intact.
+- Selecting Flash replaced the native model with Antigravity / Flash and automatically chose High.
+  Its footer listed only Low/Medium/High; a manual change to Medium survived reopening the list.
+- Switching to Pro automatically selected High and listed only Low/High in the footer.
+- A real Pro High task returned `THINKING_UI_OK`, with `gemini-pro-agent` in the transcript.
+  While running, model selection was disabled. An idle footer change to Low was acknowledged;
+  the session summary then carried `gemini-3.1-pro-low` and the footer displayed Low.
+- No native prompt or full coding task was repeated in this screenshot pass.
+
+### Regression verification
+
+Affected suites passed: Core **887**, Runtime **3,514 / 14 skipped**, Runtime Host
+**2,027 / 12 skipped**, Desktop **2,809**, UI **633**, ACP executor **37**, and Antigravity
+adapter **9**: **9,916 passed, 26 skipped, zero failed**.
+Coverage includes complete/partial levels, unsorted capabilities, opaque IDs, unknown and
+ambiguous families, highest-level selection, failed confirmation and rollback/retry, idle
+catalog notifications, same-model verification, session scope races, execution locks, native
+model reselection and executor switching.
+
+Production renderer build, Desktop type checks, renderer architecture, Desktop/UI Knip,
+lint/format, ASF headers, locale hygiene, Astryx inventory and stale-output checks passed.
+Structured model-group/provider capabilities advance the protocol to epoch **180** at this
+independent implementation checkpoint. The browser-safe declaration is pinned to the same epoch.
+
+The four failing checks on `def615305` all reported an unresolved `modelChoiceDescription`
+in the synthetic merge with main: main removed the wheel helper import, while the PR's new
+panel still referenced it. A separate CI fix gives the panel its own import so main's wheel
+change cannot remove it. Integration with the newest main and its protocol epoch is recorded
+in the following delivery update.
 
 ## Current UI screenshots
 
-Captured on 2026-09-22 from the latest production renderer in a real Electron Desktop window,
-using an isolated fixture profile and the official ACP 1.1.1 model catalog. These images replace
-the earlier UI captures and show the shared Astryx controls without an Antigravity plug icon.
-Images are hosted as GitHub attachments; no screenshot binaries are included in the branch.
+Captured on 2026-09-22 from the production renderer in a real Electron Desktop window with the
+official ACP 1.1.1 catalog. Screenshots are GitHub attachments only; no binaries are committed.
+The native connection is an isolated fixture.
 
-### Antigravity model selection
+### Base models with Gemini icons
 
-![Antigravity Gemini model icons without an Agent default option](https://github.com/user-attachments/assets/1938c268-0450-4bbe-8fe3-949851c064d7)
+![Four Antigravity base models with Gemini icons](https://github.com/user-attachments/assets/359c589b-8500-4524-b396-faf35449a24d)
 
-### Maka model list and composer thinking control
+### Flash thinking in the composer
 
-![Maka main-style model rows with composer thinking control](https://github.com/user-attachments/assets/ed966371-1859-4359-be5a-5247de12add6)
+![Only the external model and actual Flash thinking levels in the footer](https://github.com/user-attachments/assets/94704904-c034-45d2-9e59-21f7b3025be2)
 
-The native screenshot shows two fixture models using main's provider icons and single-line
-names, with the thinking control beside the composer model trigger. The external screenshot shows Gemini 3.8 Flash (High) selected,
-with native thinking hidden. The native connection is a fixture; no native prompt was sent. The earlier completed-task capture remains
+### Pro thinking in the composer
+
+![Pro offers only its supported Low and High levels](https://github.com/user-attachments/assets/53defac2-e25a-4101-b12a-325e631b717c)
+
+### Maka native model format
+
+![Native model rows retain main formatting and footer thinking](https://github.com/user-attachments/assets/9074a33d-3fb3-42ae-8efc-24186b0f3c72)
+
+The earlier completed-task capture remains
 [historical execution evidence](https://github.com/user-attachments/assets/4fc2827b-feed-4639-9a6a-d50caf203055),
-not a claim about the current picker appearance or a fresh end-to-end coding run.
+not a claim about the current picker or a repeated coding run.
 
 Public CI, independent human approval and merge remain repository gates. This document does not
-mark issue #5103's PR 2 checkbox complete. Cross-process restoration belongs to PR 3; modes and
-expanded catalog lifecycle belong to PR 4. Neither is claimed by this PR.
+mark issue #5103's PR 2 checkbox complete. Unknown future label shapes remain raw models until
+verified. Cross-process restoration belongs to PR 3; modes and expanded catalog lifecycle belong
+to PR 4. Neither is claimed by this PR.

@@ -25,6 +25,8 @@ import type { UiCatalog, UiLocale } from '@maka/core/ui-locale';
 import { Settings, ICON_SIZE } from './icons.js';
 import { ModelPickerPanel, ModelPickerPanelContext } from './model-picker-panel.js';
 import { providerMarkIcon } from './model-picker-internals.js';
+import { executorModelGroup, highestExecutorModelVariant } from './executor-model-presentation.js';
+import { ThinkingLevelSelector } from './chat-model-switcher.js';
 import { useUiLocale } from './locale-context.js';
 
 export interface ExecutorSelection {
@@ -35,6 +37,9 @@ export interface ExecutorModelPickerProps {
   catalog: readonly ExecutorCatalogEntry[];
   selection?: ExecutorSelection;
   nativeLabel?: string;
+  nativeThinkingControl?: ReactNode;
+  scopeKey?: string;
+  onPendingChange?(pending: boolean): void;
   renderProviderMark?(type: ProviderType): ReactNode;
   children?: ReactNode;
   presentation?: 'popover' | 'bottom-sheet' | 'wheel';
@@ -63,6 +68,7 @@ interface ExecutorCopy {
   attachments: string;
   retry: string;
   newTask: string;
+  selectionFailed: string;
 }
 
 const EXECUTOR_COPY = {
@@ -82,6 +88,7 @@ const EXECUTOR_COPY = {
       'This executor does not support these attachments. Remove them or select Maka. Your draft is preserved.',
     retry: 'Retry',
     newTask: 'New task',
+    selectionFailed: 'Model change failed. Try again.',
   },
   'zh-CN': {
     title: '执行者',
@@ -97,6 +104,7 @@ const EXECUTOR_COPY = {
     attachments: '此执行者不支持这些附件。请移除附件或选择 Maka，草稿会保留。',
     retry: '重试',
     newTask: '新建任务',
+    selectionFailed: '模型切换失败，请重试。',
   },
   'zh-TW': {
     title: '執行者',
@@ -112,6 +120,7 @@ const EXECUTOR_COPY = {
     attachments: '此執行者不支援這些附件。請移除附件或選擇 Maka，草稿會保留。',
     retry: '重試',
     newTask: '建立新任務',
+    selectionFailed: '模型切換失敗，請重試。',
   },
 } satisfies UiCatalog<ExecutorCopy>;
 
@@ -127,32 +136,49 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
   const copy = executorCopy(locale);
   const selected = props.catalog.find((entry) => entry.id === props.selection?.executorId);
   const [open, setOpen] = useState(false);
+  const [selecting, setSelecting] = useState(false);
+  const [selectionFailed, setSelectionFailed] = useState(false);
   const [browsedId, setBrowsedId] = useState(props.selection?.executorId ?? NATIVE);
   useEffect(() => {
-    if (!open) setBrowsedId(props.selection?.executorId ?? NATIVE);
+    if (!open) {
+      setBrowsedId(props.selection?.executorId ?? NATIVE);
+      setSelectionFailed(false);
+    }
   }, [open, props.selection?.executorId]);
+  useEffect(() => { props.onPendingChange?.(selecting); }, [selecting, props.onPendingChange]);
+  useEffect(() => () => props.onPendingChange?.(false), [props.onPendingChange]);
   const browsed = props.catalog.find((entry) => entry.id === browsedId);
   const currentModel =
     browsedId === props.selection?.executorId
       ? (props.selection?.configuration.model ?? browsed?.currentModel)
       : browsed?.currentModel;
   const selectedUnavailable = !!props.selection && selected?.readiness !== 'ready';
+  const selectedModel = props.selection?.configuration.model ?? selected?.currentModel;
+  const selectedGroup = selected && executorModelGroup(selected, selectedModel);
+  const currentGroup = browsed && executorModelGroup(browsed, currentModel);
   const triggerLabel = props.selection
     ? `${selected?.displayName ?? props.selection.executorId} · ${
-        props.selection.configuration.model ?? selected?.currentModel ?? copy.default
+        selectedGroup?.name ?? selected?.models.find(model => model.id === selectedModel)?.name ?? selectedModel ?? copy.default
       }`
     : (props.nativeLabel ?? 'Maka');
-  const chooseModel = async (configuration: ExecutorConfiguration) => {
-    if (!browsed || browsed.readiness !== 'ready') return;
+  const chooseModel = async (configuration: ExecutorConfiguration, entry = browsed) => {
+    if (!entry || entry.readiness !== 'ready' || props.disabled || props.isReadOnly || selecting ||
+      (props.fixed && !entry.supportsModelChange)) return;
+    setSelecting(true);
+    setSelectionFailed(false);
     try {
-      await props.onSelect({ executorId: browsed.id, configuration });
+      await props.onSelect({ executorId: entry.id, configuration });
       setOpen(false);
     } catch {
       // Keep the surface open so the owner's error state can explain the failed commit.
+      setSelectionFailed(true);
+    } finally {
+      setSelecting(false);
     }
   };
   const browse = (id: string) => {
     setBrowsedId(id);
+    setSelectionFailed(false);
   };
   const lockedTo = props.fixed ? props.selection?.executorId ?? NATIVE : undefined;
   return (
@@ -215,20 +241,33 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                   <div className="maka-executor-picker-native">{props.children}</div>
                 </ModelPickerPanelContext.Provider>
               ) : browsed?.readiness === 'ready' ? (
-                <ModelPickerPanel
-                  key={browsed.id}
-                  value={currentModel}
-                  disabled={props.fixed && !browsed.supportsModelChange}
-                  options={browsed.models.map((model) => ({
-                    value: model.id,
-                    label: model.name,
-                    detail: model.id,
-                    icon: /(^|\/)gemini(?:[-\s.]|$)/i.test(model.id) || /^gemini(?:[-\s.]|$)/i.test(model.name)
-                      ? providerMarkIcon('google', props.renderProviderMark)
-                      : undefined,
-                  }))}
-                  onSelect={(model) => chooseModel({ model })}
-                />
+                <>
+                  <ModelPickerPanel
+                    key={browsed.id}
+                    value={currentGroup ? `group:${currentGroup.id}` : `model:${currentModel}`}
+                    disabled={props.disabled || props.isReadOnly || selecting || (props.fixed && !browsed.supportsModelChange)}
+                    options={browsed.models.flatMap((model) => {
+                      const group = executorModelGroup(browsed, model.id);
+                      if (group && browsed.models.find(candidate => group.variants.some(variant => variant.modelId === candidate.id))?.id !== model.id) return [];
+                      return [{
+                        value: group ? `group:${group.id}` : `model:${model.id}`,
+                        label: group?.name ?? model.name,
+                        detail: group ? undefined : model.id,
+                        description: group?.variants.map(variant => variant.modelId).join(' '),
+                        icon: providerMarkIcon(model.providerType, props.renderProviderMark),
+                      }];
+                    })}
+                    onSelect={(value) => {
+                      const group = browsed.modelGroups?.find(candidate => `group:${candidate.id}` === value);
+                      const model = group
+                        ? highestExecutorModelVariant(group)
+                        : value.slice('model:'.length);
+                      if (model !== undefined) return chooseModel({ model });
+
+                    }}
+                  />
+                  {selectionFailed ? <span role="alert">{copy.selectionFailed}</span> : null}
+                </>
               ) : (
                 <div className="maka-executor-picker-readiness">
                   <p>{browsed ? copy[browsed.readiness] : copy.unavailable}</p>
@@ -252,6 +291,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
           className="maka-model-switcher-trigger maka-executor-selector"
         />
       </Popover>
+      {props.selection ? <ExecutorThinkingLevelSelector {...props} disabled={props.disabled || selecting} /> : props.nativeThinkingControl}
       {(selectedUnavailable || props.error) && (
         <span role="status" className="maka-executor-notice">
           {selected && selected.readiness !== 'ready' ? copy[selected.readiness] : copy.unavailable}
@@ -273,4 +313,26 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
       )}
     </>
   );
+}
+
+
+/** Same footer control as native thinking; external levels select exact model variants. */
+export function ExecutorThinkingLevelSelector(props: ExecutorModelPickerProps) {
+  const entry = props.catalog.find(candidate => candidate.id === props.selection?.executorId);
+  const model = props.selection?.configuration.model ?? entry?.currentModel;
+  const group = entry && executorModelGroup(entry, model);
+  if (!props.selection || !entry || !group || group.variants.length < 2) return null;
+  return <ThinkingLevelSelector
+    levels={group.variants.map(variant => variant.level)}
+    current={group.variants.find(variant => variant.modelId === model)?.level}
+    includeDefault={false}
+    confirmedOnly
+    presentation={props.presentation === 'popover' ? 'popover' : props.presentation ? 'bottom-sheet' : undefined}
+    isReadOnly={props.isReadOnly}
+    disabled={props.disabled || entry.readiness !== 'ready' || (props.fixed && !entry.supportsModelChange)}
+    onChange={async (level) => {
+      const variant = group.variants.find(candidate => candidate.level === level);
+      if (variant) await props.onSelect({ executorId: entry.id, configuration: { model: variant.modelId } });
+    }}
+  />;
 }

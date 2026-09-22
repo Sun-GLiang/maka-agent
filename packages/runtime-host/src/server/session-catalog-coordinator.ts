@@ -816,7 +816,11 @@ export class HostSessionCatalogCoordinator {
         const clearsConnectionBlock =
           input.patch.modelTarget !== undefined &&
           current.header.blockedReason === 'NO_REAL_CONNECTION';
-        if (!clearsConnectionBlock && sessionConfigurationMatches(current.header, configuration)) {
+        if (
+          !clearsConnectionBlock &&
+          !input.patch.executorConfig &&
+          sessionConfigurationMatches(current.header, configuration)
+        ) {
           return configurationSuccess({
             kind: 'committed',
             session: projectSessionCatalogRecord(

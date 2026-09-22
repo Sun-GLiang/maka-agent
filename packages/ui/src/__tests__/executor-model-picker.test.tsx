@@ -23,9 +23,11 @@ import { act, useState } from 'react';
 import type { ChatModelChoice } from '@maka/core/chat-model-choice';
 import {
   ExecutorModelPicker,
+  ExecutorThinkingLevelSelector,
   type ExecutorSelection,
   type ExecutorModelPickerProps,
 } from '../executor-model-picker.js';
+import { highestExecutorModelVariant } from '../executor-model-presentation.js';
 import { NewChatModelPicker } from '../chat-model-switcher.js';
 import { Composer } from '../composer.js';
 import { exactModelChoiceValue } from '../chat-model-helpers.js';
@@ -39,6 +41,7 @@ const catalog: ExecutorModelPickerProps['catalog'] = [
     readiness: 'ready',
     models: Array.from({ length: 32 }, (_, index) => ({
       id: `model-${index}`,
+      ...(index === 0 ? { providerType: 'google' as const } : {}),
       name: index === 0 ? 'Gemini 3.8 Flash' : `Agent model ${index}`,
     })),
     currentModel: 'model-0',
@@ -383,4 +386,122 @@ test('a failed native choice keeps the shared list open for retry', async () => 
   } finally {
     await dom.cleanup();
   }
+});
+
+const groupedCatalog: ExecutorModelPickerProps['catalog'] = [{
+  ...catalog[0]!, currentModel: 'flash-high',
+  models: [
+    { id: 'flash-high', name: 'Gemini 3.8 Flash (High)', providerType: 'google' },
+    { id: 'flash-mid', name: 'Gemini 3.8 Flash (Medium)', providerType: 'google' },
+    { id: 'flash-low', name: 'Gemini 3.8 Flash (Low)', providerType: 'google' },
+    { id: 'gemini-pro-agent', name: 'Gemini 3.1 Pro (High)', providerType: 'google' },
+    { id: 'pro-low', name: 'Gemini 3.1 Pro (Low)', providerType: 'google' },
+    { id: 'opaque-unknown', name: 'Unrecognized (High)' },
+  ],
+  modelGroups: [
+    { id: 'flash', name: 'Gemini 3.8 Flash', variants: [{ modelId: 'flash-low', level: 'low' }, { modelId: 'flash-mid', level: 'medium' }, { modelId: 'flash-high', level: 'high' }] },
+    { id: 'pro', name: 'Gemini 3.1 Pro', variants: [{ modelId: 'pro-low', level: 'low' }, { modelId: 'gemini-pro-agent', level: 'high' }] },
+  ],
+}];
+
+test('highest external intensity uses supported levels and opaque IDs regardless of catalog order', () => {
+  assert.equal(highestExecutorModelVariant({ id: 'partial', name: 'Partial', variants: [
+    { level: 'medium', modelId: 'server-selected-opaque' }, { level: 'low', modelId: 'other-opaque' },
+  ] }), 'server-selected-opaque');
+  assert.equal(highestExecutorModelVariant({ id: 'complete', name: 'Complete', variants: [
+    { level: 'high', modelId: 'gemini-pro-agent' }, { level: 'low', modelId: 'low-opaque' },
+  ] }), 'gemini-pro-agent');
+});
+
+for (const initial of [undefined, 'flash-high', 'flash-mid']) test(`grouped external models select the highest supported intensity from ${initial}`, async () => {
+  const dom = installTranscriptDom();
+  dom.window.getSelection = () => null;
+  const selected: string[] = [];
+  let rejectNext = false;
+  let finish!: () => void;
+  let hold = false;
+  function Harness() {
+    const [selection, setSelection] = useState<ExecutorSelection | undefined>(initial ? { executorId: 'antigravity', configuration: { model: initial } } : undefined);
+    return <LocaleProvider locale="en"><Composer
+      executorPicker={{ catalog: groupedCatalog, selection, onSelect: async next => {
+        selected.push(next!.configuration.model!);
+        if (hold) await new Promise<void>(resolve => { finish = resolve; });
+        if (rejectNext) { rejectNext = false; throw new Error('rejected'); }
+        setSelection(next!);
+      }, onSetup: () => {}, onRetry: () => {}, onNewTask: () => {} }}
+      onSend={() => {}} onStop={() => {}}
+    /></LocaleProvider>;
+  }
+  const click = async (element: Element | undefined | null) => {
+    assert.ok(element);
+    await act(async () => { element.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
+  };
+  const row = (name: string) => [...dom.document.querySelectorAll('[role="option"]')].find(el => el.textContent === name);
+  const thinking = () => [...dom.document.querySelectorAll('.maka-thinking-level-selector')].find(el => !el.closest('.maka-executor-picker-panel'));
+  const openModels = () => click(dom.document.querySelector('.maka-executor-selector'));
+  try {
+    await dom.render(<Harness />);
+    if (initial) assert.ok(thinking(), 'external intensity is beside the composer model trigger');
+    await openModels();
+    if (!initial) await click([...dom.document.querySelectorAll('button')].find(el => el.textContent === 'Antigravity'));
+    assert.equal(dom.document.querySelectorAll('.maka-executor-picker-model').length, 3);
+    if (initial === 'flash-high') rejectNext = true;
+    await click(row('Gemini 3.1 Pro'));
+    if (initial === 'flash-high') {
+      assert.equal(dom.document.querySelector('.maka-executor-selector')?.getAttribute('aria-expanded'), 'true');
+      assert.ok(dom.document.querySelector('.maka-executor-selector')?.textContent?.includes('Gemini 3.8 Flash'));
+      await click(row('Gemini 3.1 Pro'));
+    }
+    assert.equal(dom.document.querySelector('.maka-executor-picker-panel .maka-thinking-level-selector'), null, 'all thinking controls stay in the composer footer');
+    assert.equal(dom.document.querySelectorAll('.maka-model-switcher-trigger').length, 1, 'the external model replaces the native model trigger');
+    assert.equal([...dom.document.querySelectorAll('button')].some(el => el.textContent === 'Cancel'), false);
+    assert.equal(selected.at(-1), 'gemini-pro-agent');
+    assert.ok(dom.document.querySelector('.maka-executor-selector')?.textContent?.includes('Gemini 3.1 Pro'));
+    assert.ok(thinking()?.textContent?.includes('High'));
+    await click(thinking()?.querySelector('[aria-haspopup="listbox"]'));
+    assert.deepEqual([...dom.document.querySelectorAll('[role="option"]')].filter(el => !el.classList.contains('maka-executor-picker-model')).map(el => el.textContent), ['Low', 'High']);
+    hold = true;
+    rejectNext = true;
+    await click(row('Low'));
+    assert.ok(thinking()?.textContent?.includes('High'), 'unconfirmed changes are not displayed');
+    await act(async () => { finish(); });
+    assert.ok(thinking()?.textContent?.includes('High'), 'failure preserves the original intensity');
+    hold = false;
+    await click(thinking()?.querySelector('[aria-haspopup="listbox"]'));
+    await click(row('Low'));
+    assert.equal(selected.at(-1), 'pro-low');
+    assert.ok(thinking()?.textContent?.includes('Low'));
+    await openModels();
+    assert.equal(row('Gemini 3.1 Pro')?.getAttribute('aria-selected'), 'true');
+    await click(row('Gemini 3.8 Flash'));
+    assert.equal(selected.at(-1), 'flash-high', 'switching base models selects the highest supported level');
+    await openModels();
+    await click([...dom.document.querySelectorAll('[role="option"]')].find(el => el.textContent?.includes('Unrecognized (High)')));
+    assert.equal(selected.at(-1), 'opaque-unknown');
+    assert.equal(thinking(), undefined, 'unknown models retain their row and have no invented levels');
+  } finally { await dom.cleanup(); }
+});
+
+for (const lock of ['disabled', 'readOnly', 'fixed', 'lost'] as const) test(`external thinking respects ${lock} locks`, async () => {
+  const dom = installTranscriptDom();
+  let calls = 0;
+  try {
+    await dom.render(<LocaleProvider locale="en"><ExecutorThinkingLevelSelector
+      catalog={[{ ...groupedCatalog[0]!, supportsModelChange: lock !== 'fixed', readiness: lock === 'lost' ? 'history_only' : 'ready' }]}
+      selection={{ executorId: 'antigravity', configuration: { model: 'flash-high' } }}
+      disabled={lock === 'disabled'} isReadOnly={lock === 'readOnly'} fixed={lock === 'fixed'}
+      onSelect={() => { calls++; }} onSetup={() => {}} onRetry={() => {}} onNewTask={() => {}}
+    /></LocaleProvider>);
+    const trigger = dom.document.querySelector<HTMLElement>('[aria-haspopup="listbox"]');
+    if (lock === 'readOnly') {
+      assert.equal(trigger, null, 'read-only Selector has no interactive trigger');
+      assert.equal(calls, 0);
+      return;
+    }
+    assert.ok(trigger);
+    assert.ok(trigger.hasAttribute('disabled') || trigger.getAttribute('aria-disabled') === 'true' || trigger.getAttribute('aria-readonly') === 'true');
+    await act(async () => { trigger.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
+    assert.equal(calls, 0);
+    assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+  } finally { await dom.cleanup(); }
 });

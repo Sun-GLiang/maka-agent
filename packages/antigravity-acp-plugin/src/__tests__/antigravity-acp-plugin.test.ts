@@ -109,3 +109,52 @@ test('official interaction requests are questions; ordinary tool permissions sta
     'permission',
   );
 });
+
+// Labels are the verified adapter contract; IDs must never be synthesized.
+test('official variants group complete and partial families while preserving opaque IDs', () => {
+  const result = antigravityAcpAdapter.describeModels!([
+    { id: 'flash-high', name: 'Gemini 3.8 Flash (High)' },
+    { id: 'flash-mid', name: 'Gemini 3.8 Flash (Medium)' },
+    { id: 'flash-low', name: 'Gemini 3.8 Flash (Low)' },
+    { id: 'gemini-pro-agent', name: 'Gemini 3.1 Pro (High)' },
+    { id: 'pro-low', name: 'Gemini 3.1 Pro (Low)' },
+    { id: 'other', name: 'Unknown (High)' },
+  ]);
+  assert.deepEqual(result.modelGroups, [
+    {
+      id: 'Gemini 3.8 Flash',
+      name: 'Gemini 3.8 Flash',
+      variants: [
+        { modelId: 'flash-low', level: 'low' },
+        { modelId: 'flash-mid', level: 'medium' },
+        { modelId: 'flash-high', level: 'high' },
+      ],
+    },
+    {
+      id: 'Gemini 3.1 Pro',
+      name: 'Gemini 3.1 Pro',
+      variants: [
+        { modelId: 'pro-low', level: 'low' },
+        { modelId: 'gemini-pro-agent', level: 'high' },
+      ],
+    },
+  ]);
+  assert.equal(result.models[0]?.providerType, 'google');
+  assert.deepEqual(result.models.at(-1), { id: 'other', name: 'Unknown (High)' });
+});
+
+for (const names of [
+  ['Gemini 3.8 Flash (High)'],
+  ['Gemini 3.8 Flash (High)', 'Gemini 3.8 Flash (High)', 'Gemini 3.8 Flash (Low)'],
+  ['Gemini 3.8 Flash (High)', 'Gemini 3.8 Flash (Low)', 'Gemini 3.8 Flash (Auto)'],
+  ['Unrecognized (High)', 'Unrecognized (Low)'],
+])
+  test(`ambiguous or non-switchable families keep their original rows: ${names.join(', ')}`, () => {
+    const models = names.map((name, index) => ({ id: `opaque-${index}`, name }));
+    const result = antigravityAcpAdapter.describeModels!(models);
+    assert.deepEqual(result.modelGroups, []);
+    assert.deepEqual(
+      result.models.map(({ id, name }) => ({ id, name })),
+      models,
+    );
+  });

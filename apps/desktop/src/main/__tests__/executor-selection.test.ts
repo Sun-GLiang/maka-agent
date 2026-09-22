@@ -38,10 +38,13 @@ test('late draft discovery cannot replace the current target; existing tasks ins
   let discoveryCalls = 0, inspectionCalls = 0;
   let finishOld!: (value: readonly ExecutorCatalogEntry[]) => void;
   const old = new Promise<readonly ExecutorCatalogEntry[]>(resolve => { finishOld = resolve; });
+  let ready = false;
+  let serverModel = 'selected';
+  let write: () => Promise<unknown> = async () => ({ ok: false, code: 'operation_unavailable' });
   const services = {
     subscribeChanges: () => () => {},
     newTasks: { subscribeChanges: () => () => {}, getExecutors: async () => { discoveryCalls++; return discoveryCalls === 1 ? old : [entry]; } },
-    sessions: { getExecutorState: async () => { inspectionCalls++; return [{ ...entry, readiness: 'history_only' }]; }, setExecutorModelConfiguration: async () => ({ ok: false, code: 'operation_unavailable' }) },
+    sessions: { getExecutorState: async () => { inspectionCalls++; return [{ ...entry, currentModel: serverModel, readiness: ready ? 'ready' : 'history_only' }]; }, setExecutorModelConfiguration: () => write() },
   } as unknown as ConversationServices;
   function Probe(props: { draftKey: string; session?: SessionSummary }) {
     latest = useExecutorSelection({ key: props.draftKey, cwd: '/fixture', target: { hostId: 'host', profileId: 'profile', projectId: null }, session: props.session });
@@ -63,10 +66,34 @@ test('late draft discovery cannot replace the current target; existing tasks ins
     assert.equal(latest.entry?.readiness, 'history_only');
     assert.equal(discoveryCalls, 3);
     assert.equal(inspectionCalls, 1);
-    await act(async () => latest.select({ executorId: 'external', configuration: { model: 'rejected' } }));
+    await act(async () => { await assert.rejects(latest.select({ executorId: 'external', configuration: { model: 'rejected' } })); });
     assert.equal(latest.selection?.configuration.model, 'selected');
     assert.equal(latest.error, 'operation_unavailable');
+    ready = true;
+    await act(async () => latest.refresh());
+    let confirm!: (value: unknown) => void;
+    write = () => new Promise(resolve => { confirm = resolve; });
+    let pending!: Promise<void>;
+    await act(async () => { pending = latest.select({ executorId: 'external', configuration: { model: 'fast' } }); });
+    assert.equal(latest.selection?.configuration.model, 'selected', 'pending write is not displayed');
+    assert.equal(latest.changing, true);
+    await act(async () => {
+      await assert.rejects(latest.select({ executorId: 'external', configuration: { model: 'other' } }), /pending/);
+      serverModel = 'fast';
+      confirm({ ok: true, session: { executorConfig: { model: 'fast' } } });
+      await pending;
+    });
+    assert.equal(latest.selection?.configuration.model, 'fast', 'confirmed state replaces stale Session props');
+    assert.equal(latest.changing, false);
+    serverModel = 'selected';
+    await act(async () => latest.refresh());
+    assert.equal(latest.selection?.configuration.model, 'selected', 'Agent state updates synchronize the control');
+    await act(async () => { pending = latest.select({ executorId: 'external', configuration: { model: 'fast' } }); });
     await render('next-draft');
+    await act(async () => {
+      confirm({ ok: true, session: { executorConfig: { model: 'fast' } } });
+      await pending;
+    });
     assert.equal(latest.selection, undefined);
   } finally {
     await act(async () => root.unmount());
