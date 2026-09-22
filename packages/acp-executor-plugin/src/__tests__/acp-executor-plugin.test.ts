@@ -303,11 +303,64 @@ test('discovery shares a disposable probe, does not mark a task, and first promp
       /unavailable/u,
     );
     assert.equal(protocol.selectedModel, 'default');
+    assert.equal(
+      (await executor.inspectConversation({ conversationKey: 'session-a', cwd: fixture.root }))
+        .readiness,
+      'ready',
+    );
+    assert.equal(
+      (await executor.execute(request('after-invalid-model'), executorContext([]))).status,
+      'completed',
+    );
   } finally {
     await executor.dispose();
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+for (const failure of ['response_lost', 'unconfirmed', 'timeout'] as const) {
+  test(`an applied model change with ${failure} prevents prompts using stale configuration`, async () => {
+    const fixture = await executableFixture();
+    const protocol = fakeProtocol();
+    const executor = new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      { createConnection: protocol.factory },
+    );
+    const abort = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const selectedRequest = { ...request('first'), configuration: { model: 'default' } };
+      assert.equal(
+        (await executor.execute(selectedRequest, executorContext([]))).status,
+        'completed',
+      );
+      protocol.configurationFailure = failure;
+      timeout = setTimeout(() => abort.abort(new DOMException('Timed out', 'TimeoutError')), 50);
+      await assert.rejects(
+        executor.configureConversation(
+          { conversationKey: 'session-a', cwd: fixture.root, configuration: { model: 'fast' } },
+          abort.signal,
+        ),
+      );
+      // The external mutation happened even though no matching confirmation arrived.
+      assert.equal(protocol.selectedModel, 'fast');
+      assert.equal(
+        (await executor.inspectConversation({ conversationKey: 'session-a', cwd: fixture.root }))
+          .readiness,
+        'history_only',
+      );
+      assert.equal((await executor.execute(selectedRequest, executorContext([]))).status, 'failed');
+      assert.deepEqual(protocol.promptModels, ['default']);
+      assert.equal(protocol.connections, 1);
+      assert.equal(protocol.disposals, 1);
+    } finally {
+      clearTimeout(timeout);
+      await executor.dispose();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
 
 test('questions retain option identity and output updates retain arrival order', async () => {
   const fixture = await executableFixture();
@@ -390,6 +443,8 @@ function fakeProtocol(): {
   prompts: number;
   disposals: number;
   selectedModel?: string;
+  configurationFailure?: 'response_lost' | 'unconfirmed' | 'timeout';
+  promptModels: string[];
 } {
   const fixture = {
     connections: 0,
@@ -397,6 +452,8 @@ function fakeProtocol(): {
     prompts: 0,
     disposals: 0,
     selectedModel: undefined as string | undefined,
+    configurationFailure: undefined as 'response_lost' | 'unconfirmed' | 'timeout' | undefined,
+    promptModels: [] as string[],
     factory: undefined as unknown as AcpConnectionFactory,
   };
   fixture.factory = (input) => {
@@ -416,7 +473,11 @@ function fakeProtocol(): {
     input.configureClient(app);
     const connection = {
       agent: {
-        request: async (method: string, params: Record<string, unknown>) => {
+        request: async (
+          method: string,
+          params: Record<string, unknown>,
+          options?: { cancellationSignal?: AbortSignal },
+        ) => {
           if (method === methods.agent.initialize) return { protocolVersion: 1 };
           if (method === methods.agent.session.new) {
             fixture.sessions += 1;
@@ -438,13 +499,23 @@ function fakeProtocol(): {
           }
           if (method === methods.agent.session.setConfigOption) {
             fixture.selectedModel = String(params.value);
+            if (fixture.configurationFailure === 'response_lost')
+              throw new Error('Configuration response lost after applying the model');
+            if (fixture.configurationFailure === 'timeout') {
+              const signal = options!.cancellationSignal!;
+              signal.throwIfAborted();
+              await new Promise((_, reject) =>
+                signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+              );
+            }
             return {
               configOptions: [
                 {
                   type: 'select',
                   id: 'model',
                   name: 'Model',
-                  currentValue: params.value,
+                  currentValue:
+                    fixture.configurationFailure === 'unconfirmed' ? 'default' : params.value,
                   options: [
                     { value: 'default', name: 'Default' },
                     { value: 'fast', name: 'Fast' },
@@ -455,6 +526,7 @@ function fakeProtocol(): {
           }
           if (method === methods.agent.session.prompt) {
             fixture.prompts += 1;
+            fixture.promptModels.push(fixture.selectedModel ?? 'default');
             const text = (params.prompt as Array<{ text: string }>)[0]!.text;
             await requests.get(methods.client.session.requestPermission)?.({
               params: {

@@ -20,7 +20,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { access, mkdtemp, rm, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdtemp, open, rm, readFile, realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import type { ExecutorCatalogEntry, ExecutorConfiguration } from '@maka/core/executor-catalog';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
@@ -473,18 +473,26 @@ export class AcpExecutor implements PluginExecutorProvider {
           'acp_config_invalid',
         );
       if (option.currentValue === value) continue;
-      const updated = await session.connection!.agent.request(
-        methods.agent.session.setConfigOption,
-        { sessionId: session.acpSessionId!, configId: option.id, value },
-        { cancellationSignal: signal },
-      );
-      const confirmed = updated.configOptions.find((candidate) => candidate.id === option.id);
-      if (confirmed?.type !== 'select' || confirmed.currentValue !== value)
-        throw new AcpRuntimeError(
-          'Agent did not confirm the selected configuration',
-          'acp_config_unconfirmed',
+      signal.throwIfAborted();
+      try {
+        const updated = await session.connection!.agent.request(
+          methods.agent.session.setConfigOption,
+          { sessionId: session.acpSessionId!, configId: option.id, value },
+          { cancellationSignal: signal },
         );
-      session.configOptions = updated.configOptions;
+        const confirmed = updated.configOptions.find((candidate) => candidate.id === option.id);
+        if (confirmed?.type !== 'select' || confirmed.currentValue !== value)
+          throw new AcpRuntimeError(
+            'Agent did not confirm the selected configuration',
+            'acp_config_unconfirmed',
+          );
+        session.configOptions = updated.configOptions;
+      } catch (error) {
+        // The Agent may have applied the change before its response failed. Until
+        // restoration can reconcile it, the cached model must not admit another prompt.
+        await this.#lose(session);
+        throw error;
+      }
     }
   }
 
@@ -515,7 +523,15 @@ export class AcpExecutor implements PluginExecutorProvider {
         if (Buffer.byteLength(params.content) > MAX_TEXT_FILE_BYTES)
           throw new Error('ACP text file is too large');
         const path = await checkedWorkspacePath(session.cwd, params.path, true);
-        await writeFile(path, params.content, 'utf8');
+        const file = await open(
+          path,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0),
+        );
+        try {
+          await file.writeFile(params.content, 'utf8');
+        } finally {
+          await file.close();
+        }
         return {};
       })
       .onRequest(methods.client.session.requestPermission, ({ params }) =>
@@ -894,6 +910,13 @@ async function checkedWorkspacePath(cwd: string, path: string, forWrite: boolean
       resolvedPath = await realpath(candidate);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      // realpath also reports ENOENT for a dangling link. It is not an absent
+      // directory entry: opening it for creation would follow its unchecked target.
+      const entry = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error;
+        return undefined;
+      });
+      if (entry) throw new Error('ACP file path could not be resolved');
       resolvedPath = resolve(await realpath(dirname(candidate)), basename(candidate));
     }
   }
@@ -959,8 +982,9 @@ function projectToolResult(
 }
 
 function createWholeFileDiff(path: string, oldText: string, newText: string): string {
-  const oldLines = oldText.split('\n');
-  const newLines = newText.split('\n');
+  // Canonical presentation events use LF; this does not modify the workspace file.
+  const oldLines = oldText.replaceAll('\r', '').split('\n');
+  const newLines = newText.replaceAll('\r', '').split('\n');
   return [
     `--- a/${path}`,
     `+++ b/${path}`,

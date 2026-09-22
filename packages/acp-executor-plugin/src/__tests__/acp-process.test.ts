@@ -23,6 +23,9 @@ import { mkdtemp, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AcpExecutor, type AcpAgentAdapter } from '../index.js';
+import { Context } from '@maka/runtime/plugin-kernel';
+import { PluginExecutorService } from '@maka/runtime/plugin-executor-service';
+import { PluginExecutorBackend } from '@maka/runtime/plugin-executor-backend';
 import type {
   PluginExecutorContext,
   PluginExecutorOutputEvent,
@@ -50,7 +53,16 @@ createInterface({input:process.stdin}).on('line',async line=>{
  if(value==='ignore-cancel'){text('waiting');return;}
  if(value==='wait'){promptId=m.id;text('waiting');return;}
  if(value==='helper'){const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});text(String(child.pid));respond(m.id,{stopReason:'end_turn'});return;}
- if(value==='files'){
+ if(value.startsWith('write:')){
+  const result=await call('fs/write_text_file',{sessionId:'fixture',...JSON.parse(value.slice(6))});
+  text(JSON.stringify(result));
+ }else if(value.startsWith('diff:')){
+  const newline=JSON.parse(value.slice(5));
+  const content='new'+newline;
+  await call('fs/write_text_file',{sessionId:'fixture',path:cwd+'/edited.txt',content});
+  update({sessionUpdate:'tool_call',toolCallId:'edit',title:'Edit file',kind:'edit',status:'in_progress'});
+  update({sessionUpdate:'tool_call_update',toolCallId:'edit',status:'completed',content:[{type:'diff',path:'edited.txt',oldText:'old'+newline,newText:content}]});
+ }else if(value==='files'){
   const write=await call('fs/write_text_file',{sessionId:'fixture',path:cwd+'/created.txt',content:'fixture'});
   const read=await call('fs/read_text_file',{sessionId:'fixture',path:cwd+'/created.txt'});
   const escape=await call('fs/read_text_file',{sessionId:'fixture',path:cwd+'/escape.txt'});
@@ -151,6 +163,102 @@ test('real filesystem callbacks reject a symlink escape and permit workspace fil
     await rm(outside, { recursive: true, force: true });
   }
 });
+
+test('file writes reject existing and dangling links outside the workspace', async () => {
+  const f = await fixture();
+  const outside = await mkdtemp(join(tmpdir(), 'maka-acp-outside-'));
+  try {
+    const existing = join(outside, 'existing.txt');
+    const missing = join(outside, 'missing.txt');
+    await writeFile(existing, 'unchanged');
+    await symlink(existing, join(f.root, 'existing-link.txt'));
+    await symlink(missing, join(f.root, 'dangling-link.txt'));
+    await symlink('dangling-link.txt', join(f.root, 'indirect-link.txt'));
+    for (const name of ['existing-link.txt', 'dangling-link.txt', 'indirect-link.txt']) {
+      const result = await f.executor.execute(
+        f.request(
+          `write:${JSON.stringify({ path: join(f.root, name), content: 'must not escape' })}`,
+        ),
+        f.context(),
+      );
+      assert.equal(result.status, 'completed');
+      if (result.status !== 'completed') throw new Error('Expected completion');
+      assert.ok(JSON.parse(result.text).error, name);
+      assert.equal(await readFile(existing, 'utf8'), 'unchanged');
+      await assert.rejects(readFile(missing), { code: 'ENOENT' });
+    }
+    // Refusing a file callback must not lose the retained conversation.
+    assert.equal((await f.executor.execute(f.request('after'), f.context())).status, 'completed');
+  } finally {
+    await f.dispose();
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test('file writes still create, truncate, and follow resolved links inside the workspace', async () => {
+  const f = await fixture();
+  try {
+    const target = join(f.root, 'target.txt');
+    const write = async (path: string, content: string) => {
+      const result = await f.executor.execute(
+        f.request(`write:${JSON.stringify({ path, content })}`),
+        f.context(),
+      );
+      if (result.status !== 'completed') throw new Error('Expected completion');
+      assert.deepEqual(JSON.parse(result.text).result, {});
+    };
+    await write(target, 'long initial content');
+    assert.equal(await readFile(target, 'utf8'), 'long initial content');
+    await write(target, 'short');
+    assert.equal(await readFile(target, 'utf8'), 'short');
+    const link = join(f.root, 'internal-link.txt');
+    await symlink(target, link);
+    await write(link, 'via link');
+    assert.equal(await readFile(target, 'utf8'), 'via link');
+  } finally {
+    await f.dispose();
+  }
+});
+
+for (const newline of ['\n', '\r\n']) {
+  test(`real ${JSON.stringify(newline)} file diffs survive executor validation and backend projection`, async () => {
+    const f = await fixture();
+    const root = new Context();
+    const executors = new PluginExecutorService(root);
+    root
+      .extend({
+        maka: { rootId: 'profile', packageId: 'fixture', entryId: 'stdio', generation: 1 },
+      })
+      .executors.register(f.executor);
+    const backend = new PluginExecutorBackend({
+      sessionId: 'task',
+      cwd: f.root,
+      binding: executors.bind('task', f.executor.id),
+    });
+    try {
+      const events = [];
+      for await (const event of backend.send({
+        turnId: 'edit',
+        text: `diff:${JSON.stringify(newline)}`,
+      }))
+        events.push(event);
+      const result = events.find((event) => event.type === 'tool_result');
+      assert.ok(result && result.type === 'tool_result');
+      assert.notEqual(result.isError, true);
+      assert.deepEqual(result.content, {
+        kind: 'file_diff',
+        paths: ['edited.txt'],
+        diff: '--- a/edited.txt\n+++ b/edited.txt\n@@ -1,2 +1,2 @@\n-old\n-\n+new\n+',
+      });
+      assert.equal(events.at(-1)?.type, 'complete');
+      assert.equal(await readFile(join(f.root, 'edited.txt'), 'utf8'), `new${newline}`);
+    } finally {
+      await backend.dispose();
+      await root.fiber.dispose();
+      await f.dispose();
+    }
+  });
+}
 
 test('real cancellation settles before follow-up; crash makes the task history-only', async () => {
   const f = await fixture();

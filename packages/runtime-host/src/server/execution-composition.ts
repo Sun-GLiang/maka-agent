@@ -2118,7 +2118,11 @@ export async function createExecutionRuntimeHostComposition(
       },
       assertExecutorAvailable: async (sessionId, executorId, configuration, cwd) => {
         pluginExecutors.identity(sessionId, executorId);
-        const [entry] = await pluginExecutors.catalog({ cwd, executorId });
+        const [entry] = await pluginExecutors.catalog({
+          cwd,
+          executorId,
+          discoverySessionId: sessionId,
+        });
         if (!entry || entry.readiness !== 'ready') throw new Error('Executor is not ready');
         // Catalog-managed executors pin their confirmed configuration on every create path.
         // Providers without model discovery retain main's executor-specific model contract.

@@ -369,3 +369,69 @@ test('catalog inspection stays process-free and model configuration is isolated 
   assert.equal(retired, 'session-a');
   await root.fiber.dispose();
 });
+
+test('catalog discovery uses session visibility without inspecting a conversation', async () => {
+  const root = new Context();
+  const service = new PluginExecutorService(root);
+  const calls: string[] = [];
+  const register = (rootId: 'profile' | `session:${string}`, id: string, model: string) => {
+    const catalog = {
+      id,
+      displayName: id,
+      readiness: 'ready' as const,
+      models: [{ id: model, name: model }],
+      supportsAttachments: false,
+      supportsModelChange: true,
+    };
+    plugin(root, rootId, `${id}-${model}`, 1).executors.register({
+      id,
+      discover: async () => {
+        calls.push(`discover:${model}`);
+        return catalog;
+      },
+      inspectConversation: async () => {
+        calls.push(`inspect:${model}`);
+        return { ...catalog, readiness: 'history_only' };
+      },
+      execute: async () => ({ status: 'completed', text: '' }),
+    });
+  };
+  register('profile', 'shared', 'profile-model');
+  register('session:session-a', 'shared', 'session-model');
+  register('session:session-a', 'private', 'private-model');
+  try {
+    for (const [executorId, model] of [
+      ['shared', 'session-model'],
+      ['private', 'private-model'],
+    ] as const) {
+      const [entry] = await service.catalog({
+        cwd: '/workspace',
+        discoverySessionId: 'session-a',
+        executorId,
+      });
+      assert.equal(entry?.readiness, 'ready');
+      assert.deepEqual(
+        entry.models.map((model) => model.id),
+        [model],
+      );
+    }
+    assert.deepEqual(calls, ['discover:session-model', 'discover:private-model']);
+    const [hidden] = await service.catalog({
+      cwd: '/workspace',
+      discoverySessionId: 'session-b',
+      executorId: 'private',
+    });
+    assert.equal(hidden?.readiness, 'unavailable');
+    const [profile] = await service.catalog({ cwd: '/workspace', executorId: 'shared' });
+    assert.equal(profile?.models[0]?.id, 'profile-model');
+    const [inspection] = await service.catalog({
+      cwd: '/workspace',
+      sessionId: 'session-a',
+      executorId: 'shared',
+    });
+    assert.equal(inspection?.readiness, 'history_only');
+    assert.equal(calls.at(-1), 'inspect:session-model');
+  } finally {
+    await root.fiber.dispose();
+  }
+});

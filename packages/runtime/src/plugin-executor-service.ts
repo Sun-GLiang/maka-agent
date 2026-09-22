@@ -322,13 +322,16 @@ export class PluginExecutorService extends Service {
     input: {
       cwd: string;
       sessionId?: string;
+      /** Discover within this Session's scope without inspecting a retained conversation. */
+      discoverySessionId?: string;
       executorId?: string;
       configuration?: ExecutorConfiguration;
     },
     signal = AbortSignal.timeout(35_000),
   ): Promise<readonly ExecutorCatalogEntry[]> {
-    const entries = input.sessionId
-      ? [...this.registry.visible(input.sessionId).values()]
+    const scopeSessionId = input.sessionId ?? input.discoverySessionId;
+    const entries = scopeSessionId
+      ? [...this.registry.visible(scopeSessionId).values()]
       : [...this.registry.entries('profile')];
     const selected = entries.filter(
       (entry) => !entry.retired && (!input.executorId || entry.provider.id === input.executorId),
