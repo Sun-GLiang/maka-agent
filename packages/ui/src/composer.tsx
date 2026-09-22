@@ -2319,6 +2319,7 @@ export const Composer = forwardRef<
                     presentation={props.pickerPresentation}
                     isReadOnly={props.pickersReadOnly}
                     nativeLabel={modelChipLabel}
+                    renderProviderMark={props.renderProviderMark}
                   >
                     <MakaClientSlotOutlet
                       name="conversation.composer.model-selection"
@@ -2564,6 +2565,7 @@ function ExecutorModelPickerBoundary(props: {
   presentation?: ExecutorModelPickerProps['presentation'];
   isReadOnly?: boolean;
   nativeLabel?: string;
+  renderProviderMark?: ComposerProps['renderProviderMark'];
   children: ReactNode;
 }) {
   return props.picker ? (
@@ -2572,6 +2574,7 @@ function ExecutorModelPickerBoundary(props: {
       presentation={props.presentation}
       isReadOnly={props.isReadOnly}
       nativeLabel={props.nativeLabel}
+      renderProviderMark={props.renderProviderMark}
     >
       {props.children}
     </ExecutorModelPicker>

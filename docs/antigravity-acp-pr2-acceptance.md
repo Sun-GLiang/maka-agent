@@ -144,7 +144,10 @@ Regression verification after these fixes:
 
 Maka and Antigravity now share the same searchable model-list component inside the executor
 panel. Native choices retain connection grouping and exact connection/model identity, while
-showing the model name and ID directly instead of nesting another selector. The existing
+reusing main's provider-icon and single-line-name renderer instead of nesting another selector.
+Native rows have no extra model-ID line; IDs and descriptions remain searchable.
+External Gemini rows reuse the existing Gemini provider mark. The synthetic Agent default
+option is removed; selecting any listed model sends its exact catalog ID. The existing
 session-switch warning, availability locks, and standalone/wheel model controls are preserved.
 
 Native thinking levels are mounted beside the model trigger in the composer footer. They remain
@@ -157,6 +160,11 @@ and Tab/arrow/Enter selection in the shared control's browser fixture. Complete 
 suites passed (**625 + 2,809 tests**), as did renderer build, type checks, architecture, Knip,
 Astryx inventory, lint, formatting, stale-output and ASF header checks.
 
+The native-row formatting was checked against main at `c6e3eb0cd0535736f328252ab137f9cc06496da3`.
+The complete UI suite (**625 tests**), production renderer build, Desktop type check, lint,
+format, Astryx inventory, and stale-output check passed again for the native formatting,
+Gemini icons, and removal of the synthetic default option.
+
 ## Current UI screenshots
 
 Captured on 2026-09-22 from the latest production renderer in a real Electron Desktop window,
@@ -166,14 +174,14 @@ Images are hosted as GitHub attachments; no screenshot binaries are included in 
 
 ### Antigravity model selection
 
-![Antigravity model selection without a plug icon](https://github.com/user-attachments/assets/49903194-f43f-4439-8733-769cbfa4c7da)
+![Antigravity Gemini model icons without an Agent default option](https://github.com/user-attachments/assets/1938c268-0450-4bbe-8fe3-949851c064d7)
 
 ### Maka model list and composer thinking control
 
-![Maka searchable model list with thinking beside the composer model trigger](https://github.com/user-attachments/assets/cc386789-11ea-4a4b-ad40-5964b38b67da)
+![Maka main-style model rows with composer thinking control](https://github.com/user-attachments/assets/ed966371-1859-4359-be5a-5247de12add6)
 
-The native screenshot filters the fixture catalog with `4.5` and shows the thinking control
-beside the composer model trigger. The external screenshot shows Gemini 3.8 Flash (High) selected,
+The native screenshot shows two fixture models using main's provider icons and single-line
+names, with the thinking control beside the composer model trigger. The external screenshot shows Gemini 3.8 Flash (High) selected,
 with native thinking hidden. The native connection is a fixture; no native prompt was sent. The earlier completed-task capture remains
 [historical execution evidence](https://github.com/user-attachments/assets/4fc2827b-feed-4639-9a6a-d50caf203055),
 not a claim about the current picker appearance or a fresh end-to-end coding run.

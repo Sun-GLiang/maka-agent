@@ -47,6 +47,7 @@ import {
   buildModelPickerOptions,
   providerMarkIcon,
   renderChatModelPickerOption,
+  renderModelPickerOption,
   renderModelPickerValue,
 } from './model-picker-internals.js';
 import { type ProviderType } from '@maka/core/llm-connections';
@@ -83,14 +84,24 @@ function wheelOptions(
   );
 }
 
-function panelOptions(groups: readonly ModelMenuGroup[], locale: Parameters<typeof modelChoiceDescription>[1]): ModelPickerPanelOption[] {
+function panelOptions(
+  groups: readonly ModelMenuGroup[],
+  locale: Parameters<typeof modelChoiceDescription>[1],
+  renderProviderMark?: (type: ProviderType) => ReactNode,
+): ModelPickerPanelOption[] {
   return groups.flatMap((group) => group.choices.map((choice) => ({
     value: exactChoiceValue(choice),
     label: choice.label,
     detail: choice.model,
     description: modelChoiceDescription(choice, locale),
     group: group.heading,
+    icon: providerMarkIcon(group.providerType, renderProviderMark),
   })));
+}
+
+/** Keep the native icon/name row identical to main; metadata remains searchable. */
+function renderNativePanelOption(option: ModelPickerPanelOption): ReactNode {
+  return renderModelPickerOption({ value: option.value, label: option.label, icon: option.icon });
 }
 
 /**
@@ -311,15 +322,21 @@ export function ChatModelSwitcher(props: {
   }, [props.presentation]);
   useEffect(() => setWheelOpen(false), [props.activeSession.id]);
   if (panel) {
-    const rows = panelOptions(grouped, locale);
+    const rows = panelOptions(grouped, locale, props.renderProviderMark);
     if (!currentKnownChoice && currentValue && !props.hideUnavailableCurrentOption) {
-      rows.unshift({ value: currentValue, label: displayLabel, disabled: true });
+      rows.unshift({
+        value: currentValue,
+        label: displayLabel,
+        icon: providerMarkIcon(props.currentProviderType, props.renderProviderMark),
+        disabled: true,
+      });
     }
     return (
       <>
         {noticeShown ? <UiButton label={copy.switchWarning} tooltip={copy.switchWarningDismiss} variant="ghost" size="sm" onClick={acknowledgeNotice} /> : null}
         <ModelPickerPanel
           options={rows}
+          renderOption={renderNativePanelOption}
           value={selection.value}
           disabled={disabled || props.isReadOnly}
           disabledReason={props.disabledReason}
@@ -451,7 +468,8 @@ export function NewChatModelPicker(props: {
   if (panel) {
     return (
       <ModelPickerPanel
-        options={panelOptions(grouped, locale)}
+        options={panelOptions(grouped, locale, props.renderProviderMark)}
+        renderOption={renderNativePanelOption}
         value={currentValue}
         disabled={props.isReadOnly}
         onSelect={async (value) => {

@@ -39,7 +39,7 @@ const catalog: ExecutorModelPickerProps['catalog'] = [
     readiness: 'ready',
     models: Array.from({ length: 32 }, (_, index) => ({
       id: `model-${index}`,
-      name: `Agent model ${index}`,
+      name: index === 0 ? 'Gemini 3.8 Flash' : `Agent model ${index}`,
     })),
     currentModel: 'model-0',
     supportsAttachments: false,
@@ -121,7 +121,7 @@ for (const nativeModel of ['native-model', 'native-model-2']) {
       assert.equal(selected.length, 1, 'browsing back to Maka must not commit it');
       assert.equal(dom.document.querySelector('.maka-executor-picker-native [aria-haspopup="listbox"]'), null, 'native models are directly visible');
       await click([...dom.document.querySelectorAll('[role="option"]')].find(
-        (element) => element.textContent?.endsWith(nativeModel),
+        (element) => element.textContent === choices.find((choice) => choice.model === nativeModel)!.label,
       ));
       assert.equal(selected.length, 2);
       assert.equal(selected.at(-1), undefined, 'the native choice must clear the external executor');
@@ -141,6 +141,7 @@ test('executor choice shares the native searchable list and exposes every extern
       <LocaleProvider locale="en">
         <ExecutorModelPicker
           catalog={catalog}
+          renderProviderMark={(type) => <span data-external-mark={type} />}
           selection={selection}
           onSelect={(value) => {
             selected.push(value);
@@ -185,6 +186,7 @@ test('executor choice shares the native searchable list and exposes every extern
     await dom.render(<Harness />);
     await click('.maka-executor-selector');
     assert.ok(dom.document.querySelector('.maka-executor-picker-search input'));
+    assert.ok(dom.document.querySelector('.maka-executor-picker-native .modelPickerOptionLabel bdi'), 'reuse main label formatting');
     assert.equal(dom.document.querySelectorAll('.maka-executor-picker-native [role="option"]').length, 2);
     const antigravity = [...dom.document.querySelectorAll<HTMLButtonElement>('button')].find(
       (button) => button.textContent?.includes('Antigravity'),
@@ -197,10 +199,13 @@ test('executor choice shares the native searchable list and exposes every extern
     const rows = [
       ...dom.document.querySelectorAll<HTMLElement>('.maka-executor-picker-model[role="option"]'),
     ];
-    assert.equal(rows.length, 33, 'the provider default and full catalog are rendered');
+    assert.equal(rows.length, 32, 'only the actual model catalog is rendered');
+    assert.ok(!rows.some((row) => row.textContent?.includes('Agent default')));
+    assert.ok(rows[0]?.querySelector('[data-external-mark="google"]'), 'Gemini uses the existing provider icon');
+    assert.equal(rows[1]?.querySelector('[data-external-mark]'), null, 'unknown models receive no guessed icon');
     for (const model of catalog[0]!.models)
       assert.ok(rows.some((row) => row.textContent?.includes(model.name)));
-    assert.equal(rows[1]?.getAttribute('aria-selected'), 'true', 'provider default is reflected');
+    assert.equal(rows[0]?.getAttribute('aria-selected'), 'true', 'the current catalog model is reflected');
     const model31 = rows.find((row) => row.textContent?.includes('Agent model 31'));
     assert.ok(model31);
     await act(async () => {
@@ -223,7 +228,8 @@ test('executor choice shares the native searchable list and exposes every extern
       configuration: { model: 'model-31' },
     });
     assert.ok(dom.document.body.textContent?.includes('My account'));
-    assert.ok(dom.document.body.textContent?.includes('native-model'));
+    assert.ok(dom.document.querySelector('[data-native-mark]'));
+    assert.equal(dom.document.querySelector('.maka-executor-picker-native small'), null, 'main native rows have no model-ID second line');
     await choose('Native model 2');
     assert.equal(selected.at(-1), undefined);
     assert.equal(dom.document.querySelector('.maka-executor-selector')?.getAttribute('aria-expanded'), 'false', 'choosing a native model closes the shared panel');
@@ -344,7 +350,7 @@ test('native thinking stays beside the composer model trigger and follows execut
     await click(dom.document.querySelector('.maka-executor-selector'));
     await click(button('Maka'));
     assert.ok(!thinking(), 'browsing native models does not change executor settings');
-    await click([...dom.document.querySelectorAll('[role="option"]')].find((row) => row.textContent?.endsWith('native-model')));
+    await click([...dom.document.querySelectorAll('[role="option"]')].find((row) => row.textContent === 'Native model'));
     assert.ok(thinking(), 'the native thinking control returns after committing a native model');
   } finally {
     await dom.cleanup();

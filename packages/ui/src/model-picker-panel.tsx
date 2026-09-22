@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import { createContext, useState, type KeyboardEvent } from 'react';
+import { createContext, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Button, TextInput } from '@astryxdesign/core';
 import { useUiLocale } from './locale-context.js';
 import { getSharedUiCopy } from './shared-ui-copy.js';
@@ -30,9 +30,9 @@ export interface ModelPickerPanelOption {
   label: string;
   detail?: string;
   description?: string;
+  icon?: ReactNode;
   group?: string;
   disabled?: boolean;
-  hideWhenSearching?: boolean;
 }
 
 export function ModelPickerPanel(props: {
@@ -41,13 +41,13 @@ export function ModelPickerPanel(props: {
   disabled?: boolean;
   disabledReason?: string;
   onSelect(value: string): void | Promise<void>;
+  renderOption?(option: ModelPickerPanelOption): ReactNode;
 }) {
   const locale = useUiLocale();
   const copy = getSharedUiCopy(locale).modelPicker;
   const [query, setQuery] = useState('');
   const normalized = query.trim().toLocaleLowerCase(locale);
   const options = props.options.filter((option) => !normalized || (
-    !option.hideWhenSearching &&
     [option.label, option.detail, option.description, option.group].join(' ').toLocaleLowerCase(locale).includes(normalized)
   ));
   const navigate = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -84,16 +84,19 @@ export function ModelPickerPanel(props: {
               variant="ghost"
               size="sm"
               role="option"
+              icon={props.renderOption ? undefined : option.icon}
               aria-selected={props.value === option.value}
               className="maka-executor-picker-model"
               isDisabled={props.disabled || option.disabled}
               tooltip={props.disabledReason ?? option.description}
               onClick={() => void props.onSelect(option.value)}
             >
-              <span className="maka-executor-picker-label">
-                <span>{option.label}</span>
-                {option.detail && option.detail !== option.label ? <small>{option.detail}</small> : null}
-              </span>
+              {props.renderOption ? props.renderOption(option) : (
+                <span className="maka-executor-picker-label">
+                  <span>{option.label}</span>
+                  {option.detail && option.detail !== option.label ? <small>{option.detail}</small> : null}
+                </span>
+              )}
             </Button>
           </div>
         ))}

@@ -20,9 +20,11 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Button, Popover } from '@astryxdesign/core';
 import type { ExecutorCatalogEntry, ExecutorConfiguration } from '@maka/core/executor-catalog';
+import type { ProviderType } from '@maka/core/llm-connections';
 import type { UiCatalog, UiLocale } from '@maka/core/ui-locale';
 import { Settings, ICON_SIZE } from './icons.js';
 import { ModelPickerPanel, ModelPickerPanelContext } from './model-picker-panel.js';
+import { providerMarkIcon } from './model-picker-internals.js';
 import { useUiLocale } from './locale-context.js';
 
 export interface ExecutorSelection {
@@ -33,6 +35,7 @@ export interface ExecutorModelPickerProps {
   catalog: readonly ExecutorCatalogEntry[];
   selection?: ExecutorSelection;
   nativeLabel?: string;
+  renderProviderMark?(type: ProviderType): ReactNode;
   children?: ReactNode;
   presentation?: 'popover' | 'bottom-sheet' | 'wheel';
   isReadOnly?: boolean;
@@ -214,13 +217,17 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
               ) : browsed?.readiness === 'ready' ? (
                 <ModelPickerPanel
                   key={browsed.id}
-                  value={currentModel === undefined ? 'default' : `model:${currentModel}`}
+                  value={currentModel}
                   disabled={props.fixed && !browsed.supportsModelChange}
-                  options={[
-                    ...(!props.fixed ? [{ value: 'default', label: copy.default, hideWhenSearching: true }] : []),
-                    ...browsed.models.map((model) => ({ value: `model:${model.id}`, label: model.name, detail: model.id })),
-                  ]}
-                  onSelect={(model) => chooseModel(model === 'default' ? {} : { model: model.slice('model:'.length) })}
+                  options={browsed.models.map((model) => ({
+                    value: model.id,
+                    label: model.name,
+                    detail: model.id,
+                    icon: /(^|\/)gemini(?:[-\s.]|$)/i.test(model.id) || /^gemini(?:[-\s.]|$)/i.test(model.name)
+                      ? providerMarkIcon('google', props.renderProviderMark)
+                      : undefined,
+                  }))}
+                  onSelect={(model) => chooseModel({ model })}
                 />
               ) : (
                 <div className="maka-executor-picker-readiness">
