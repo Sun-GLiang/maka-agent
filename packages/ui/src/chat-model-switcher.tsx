@@ -39,11 +39,9 @@ import { ICON_SIZE, AlertTriangle, Settings, X } from './icons.js';
 import {
   type ChatModelChoice,
   exactModelChoiceValue,
-  modelChoiceDescription,
   modelMenuGroups,
   type ModelMenuGroup,
 } from './chat-model-helpers.js';
-import { modelChoiceDescription as describePanelModel } from './chat-model-helpers.js';
 import {
   buildModelPickerOptions,
   providerMarkIcon,
@@ -73,28 +71,25 @@ const exactChoiceValue = (choice: ChatModelChoice) =>
 
 function wheelOptions(
   groups: readonly ModelMenuGroup[],
-  locale: Parameters<typeof modelChoiceDescription>[1],
 ): ModelWheelOption[] {
   return groups.flatMap((group) =>
     group.choices.map((choice) => ({
       value: exactChoiceValue(choice),
       label: choice.label,
       heading: group.heading,
-      description: modelChoiceDescription(choice, locale),
     })),
   );
 }
 
 function panelOptions(
   groups: readonly ModelMenuGroup[],
-  locale: Parameters<typeof describePanelModel>[1],
   renderProviderMark?: (type: ProviderType) => ReactNode,
 ): ModelPickerPanelOption[] {
   return groups.flatMap((group) => group.choices.map((choice) => ({
     value: exactChoiceValue(choice),
     label: choice.label,
     detail: choice.model,
-    description: describePanelModel(choice, locale),
+    description: [choice.description, choice.knowledgeCutoff].filter(Boolean).join(' ') || undefined,
     group: group.heading,
     icon: providerMarkIcon(group.providerType, renderProviderMark),
   })));
@@ -242,7 +237,7 @@ export function ChatModelSwitcher(props: {
         ? { value: currentValue, label: displayLabel, providerType: props.currentProviderType, disabled: true }
         : undefined,
       exactChoiceValue,
-      { locale, renderProviderMark: props.renderProviderMark },
+      props.renderProviderMark,
     );
     // A regular option, not a disabled one: activating it is the dismissal,
     // so a click, Enter on the highlight, and a screen reader's activate all
@@ -258,7 +253,7 @@ export function ChatModelSwitcher(props: {
     return list;
   }, [grouped, currentKnownChoice, currentValue, props.hideUnavailableCurrentOption,
       noticeShown, displayLabel, props.currentProviderType, copy.switchWarning,
-      copy.switchWarningDismiss, locale, props.renderProviderMark]);
+      copy.switchWarningDismiss, props.renderProviderMark]);
   const renderOption = useCallback((option: SelectorOptionData) => (
     option.value === SWITCH_WARNING_VALUE
       ? (
@@ -325,7 +320,7 @@ export function ChatModelSwitcher(props: {
   }, [props.presentation]);
   useEffect(() => setWheelOpen(false), [props.activeSession.id]);
   if (panel) {
-    const rows = panelOptions(grouped, locale, props.renderProviderMark);
+    const rows = panelOptions(grouped, props.renderProviderMark);
     if (!currentKnownChoice && currentValue && !props.hideUnavailableCurrentOption) {
       rows.unshift({
         value: currentValue,
@@ -349,7 +344,7 @@ export function ChatModelSwitcher(props: {
     );
   }
   if (props.presentation === 'wheel') {
-    const wheelList = wheelOptions(grouped, locale);
+    const wheelList = wheelOptions(grouped);
     if (!currentKnownChoice && currentValue && !props.hideUnavailableCurrentOption) {
       wheelList.unshift({ value: currentValue, label: displayLabel, disabled: true });
     }
@@ -451,10 +446,10 @@ export function NewChatModelPicker(props: {
         ? { label: props.label, value: currentValue, providerType: props.currentProviderType, disabled: true }
         : undefined,
       exactChoiceValue,
-      { locale, renderProviderMark: props.renderProviderMark },
+      props.renderProviderMark,
     ),
     [grouped, currentKnownChoice, currentValue, props.label, props.currentProviderType,
-      locale, props.renderProviderMark],
+      props.renderProviderMark],
   );
   // The only producer is synchronous state (pending new-chat model), so the
   // pick shows through `currentValue` on the same render — no pending state.
@@ -471,7 +466,7 @@ export function NewChatModelPicker(props: {
   if (panel) {
     return (
       <ModelPickerPanel
-        options={panelOptions(grouped, locale, props.renderProviderMark)}
+        options={panelOptions(grouped, props.renderProviderMark)}
         renderOption={renderNativePanelOption}
         value={currentValue}
         disabled={props.isReadOnly}
@@ -485,7 +480,7 @@ export function NewChatModelPicker(props: {
     );
   }
   if (props.presentation === 'wheel') {
-    const wheelList = wheelOptions(grouped, locale);
+    const wheelList = wheelOptions(grouped);
     if (!currentKnownChoice && currentValue) {
       wheelList.unshift({ value: currentValue, label: props.label, disabled: true });
     }

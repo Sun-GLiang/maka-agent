@@ -203,9 +203,28 @@ independent implementation checkpoint. The browser-safe declaration is pinned to
 
 The four failing checks on `def615305` all reported an unresolved `modelChoiceDescription`
 in the synthetic merge with main: main removed the wheel helper import, while the PR's new
-panel still referenced it. A separate CI fix gives the panel its own import so main's wheel
-change cannot remove it. Integration with the newest main and its protocol epoch is recorded
-in the following delivery update.
+panel still referenced it. Integration with current main removes this obsolete helper dependency
+altogether. The panel searches the catalog's existing description/cutoff fields directly;
+main's native row and wheel formatting remain unchanged. The delivery merge also preserves
+main's epoch-177 external-session workspace change and advances the combined protocol to
+**181**, with the browser-safe compatibility declaration pinned to 181.
+
+## Delivery integration with current main
+
+Integrated main at `0052f1cfd517abb0d3fab6cefa6f80a592b55589`, preserving its native model
+formatting and external-session workspace protocol. The combined epoch is **181**.
+The model-panel import failure is resolved in this actual merged source, not just on the PR head.
+A clean test build, production renderer build, all workspace type checks, renderer architecture
+against that main commit, Desktop/UI Knip, lint/format, ASF/locale checks, Astryx and Windows
+inventories, shell-hook checks and the 17 protocol checker tests passed.
+
+All 13 workspace suites passed after rechecks: **12,995 Node tests passed, 38 skipped**.
+The first complete run had two intermittent failures (owned-candidate shutdown timing and a
+context-offload lease assertion). Both focused checks and both complete affected suites passed
+again without source changes: Host **2,033 / 12 skipped**, Storage **1,411 / 8 skipped**.
+Release checks passed **203 tests**, plus their prerequisite metadata/notice/stale-output gates,
+when run serially after the suite workload. The earlier concurrent release run hit a Node test
+worker deserialization error and a real-Host shutdown timeout; these did not recur serially.
 
 ## Current UI screenshots
 

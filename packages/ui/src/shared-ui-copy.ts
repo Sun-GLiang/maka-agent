@@ -65,7 +65,6 @@ export interface SharedUiCopy {
     empty: string;
     noResults: string;
     searchPlaceholder: string;
-    knowledgeCutoff: (date: string) => string;
   };
   moduleHubs: {
     extensions: {
@@ -163,7 +162,6 @@ const SHARED_UI_COPY = {
       empty: '暂无可用模型',
       noResults: '没有匹配的模型',
       searchPlaceholder: '搜索模型…',
-      knowledgeCutoff: (date) => `知识截止：${date}`,
     },
     moduleHubs: {
       extensions: {
@@ -244,7 +242,6 @@ const SHARED_UI_COPY = {
       empty: '暫無可用模型',
       noResults: '沒有符合的模型',
       searchPlaceholder: '搜尋模型…',
-      knowledgeCutoff: (date) => `知識截止：${date}`,
     },
     moduleHubs: {
       extensions: {
@@ -325,7 +322,6 @@ const SHARED_UI_COPY = {
       empty: 'No models available',
       noResults: 'No matching models',
       searchPlaceholder: 'Search models…',
-      knowledgeCutoff: (date) => `Knowledge cutoff: ${date}`,
     },
     moduleHubs: {
       extensions: {
