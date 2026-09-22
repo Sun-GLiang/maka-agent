@@ -101,7 +101,8 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 178 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 179 as const;
+// 179: Canonical executor models and retained provider stop reasons after cancellation.
 // 178: Reject contradictory executor configuration and legacy model targets.
 // 177: Generic executor discovery and confirmed per-Session configuration.
 // 176: Session-scoped capability publication and MCP admission require compatible

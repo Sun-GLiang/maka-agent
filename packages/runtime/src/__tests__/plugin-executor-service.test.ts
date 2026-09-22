@@ -280,7 +280,7 @@ test('cancellation drains final updates and preserves timeout interruption', asy
       context.emit({ type: 'output_delta', text: 'before' });
       abort.abort(new Error('user_stop'));
       context.emit({ type: 'output_delta', text: 'after cancel' });
-      return { status: 'cancelled', reason: 'timeout' };
+      return { status: 'cancelled', reason: 'timeout', providerStopReason: 'max_tokens' };
     },
   });
   const events: string[] = [];
@@ -291,7 +291,12 @@ test('cancellation drains final updates and preserves timeout interruption', asy
     },
   });
   assert.deepEqual(events, ['before', 'after cancel']);
-  assert.deepEqual(result, { status: 'cancelled', source: 'caller', reason: 'timeout' });
+  assert.deepEqual(result, {
+    status: 'cancelled',
+    source: 'caller',
+    reason: 'timeout',
+    providerStopReason: 'max_tokens',
+  });
   await root.fiber.dispose();
 });
 

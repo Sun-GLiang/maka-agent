@@ -64,7 +64,7 @@ test('executor backend turns stop into abort and terminal events', async () => {
   const { root, binding } = fixture(async (_request, context) => {
     started();
     await new Promise<void>((resolve) => context.signal.addEventListener('abort', () => resolve()));
-    return { status: 'cancelled' };
+    return { status: 'cancelled', providerStopReason: 'end_turn' };
   });
   const backend = new PluginExecutorBackend({
     sessionId: 'session-a',
@@ -81,6 +81,10 @@ test('executor backend turns stop into abort and terminal events', async () => {
     ['abort', 'complete'],
   );
   assert.equal(events[1]?.type === 'complete' ? events[1].stopReason : undefined, 'user_stop');
+  assert.equal(
+    events[1]?.type === 'complete' ? events[1].providerStopReason : undefined,
+    'end_turn',
+  );
   await root.fiber.dispose();
 });
 

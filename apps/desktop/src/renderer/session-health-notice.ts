@@ -19,7 +19,4 @@
 
 export {
   deriveSessionHealthNotice,
-  type SessionHealthNoticeInput,
-  type SessionHealthNoticeTarget,
-  type SessionHealthNotice,
 } from './features/conversation/index.js';

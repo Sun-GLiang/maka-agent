@@ -357,6 +357,7 @@ export class PluginExecutorBackend implements AgentBackend {
       turnId,
       ts: this.#now(),
       stopReason: 'user_stop',
+      ...(result.providerStopReason ? { providerStopReason: result.providerStopReason } : {}),
     });
   }
 
@@ -488,6 +489,7 @@ function cancellationEventReason(
 ): 'user_stop' | 'redirect' | 'timeout' | 'crash' {
   if (result.reason === 'redirect') return 'redirect';
   if (result.reason === 'timeout') return 'timeout';
+  if (result.reason === 'crash') return 'crash';
   if (result.source === 'executor_retired') return 'crash';
   return 'user_stop';
 }

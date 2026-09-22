@@ -268,6 +268,16 @@ export class AcpExecutor implements PluginExecutorProvider {
         'acp_attachments_unsupported',
       );
     }
+    if (
+      request.configuration?.model &&
+      request.model &&
+      request.model !== this.id &&
+      request.configuration.model !== request.model
+    )
+      return failure('Conflicting executor models', 'acp_config_invalid');
+    const model =
+      request.configuration?.model ?? (request.model === this.id ? undefined : request.model);
+    if (model) request = { ...request, configuration: { model } };
     let session: RetainedSession;
     try {
       session = this.#session(request);
@@ -292,8 +302,8 @@ export class AcpExecutor implements PluginExecutorProvider {
       });
       const response = await this.#awaitPrompt(session, prompt, context.signal);
       if (!response) return { status: 'cancelled', reason: 'timeout' };
-      if (response === 'cancelled' || response.stopReason === 'cancelled') {
-        return { status: 'cancelled' };
+      if (context.signal.aborted || response.stopReason === 'cancelled') {
+        return { status: 'cancelled', providerStopReason: response.stopReason };
       }
       if (this.#adapter.executionFailed?.(active.text)) {
         return failure(`${this.displayName} reported an execution failure`, 'acp_prompt_failed');
@@ -308,7 +318,12 @@ export class AcpExecutor implements PluginExecutorProvider {
     } catch (error) {
       if (context.signal.aborted) {
         await this.#lose(session);
-        return { status: 'cancelled' };
+        if (
+          error === context.signal.reason ||
+          (error instanceof DOMException && error.name === 'AbortError')
+        )
+          return { status: 'cancelled' };
+        return { status: 'cancelled', reason: 'crash', providerStopReason: errorCode(error) };
       }
       await this.#lose(session);
       return failure(safeErrorMessage(error), errorCode(error));
@@ -587,7 +602,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     session: RetainedSession,
     prompt: Promise<T>,
     signal: AbortSignal,
-  ): Promise<T | 'cancelled' | undefined> {
+  ): Promise<T | undefined> {
     const running = Promise.race([prompt, session.owner!.failed]);
     if (!signal.aborted) {
       let onAbort!: () => void;
@@ -604,20 +619,19 @@ export class AcpExecutor implements PluginExecutorProvider {
     if (!signal.aborted) return await running;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     // Cancellation notification and settlement share one deadline; a blocked stdin cannot hang stop.
-    const completed = await Promise.race([
+    const result = await Promise.race([
       (async () => {
         await session.connection?.agent
           .notify(methods.agent.session.cancel, { sessionId: session.acpSessionId! })
           .catch(() => undefined);
-        await running.catch(() => undefined);
-        return true;
+        return { response: await running };
       })(),
-      new Promise<false>((resolveTimeout) => {
-        timeout = setTimeout(() => resolveTimeout(false), CANCEL_TIMEOUT_MS);
+      new Promise<undefined>((resolveTimeout) => {
+        timeout = setTimeout(() => resolveTimeout(undefined), CANCEL_TIMEOUT_MS);
       }),
     ]).finally(() => clearTimeout(timeout));
-    if (!completed) await this.#lose(session);
-    return completed ? 'cancelled' : undefined;
+    if (!result) await this.#lose(session);
+    return result?.response;
   }
 
   #assertSession(session: RetainedSession, sessionId: string): void {

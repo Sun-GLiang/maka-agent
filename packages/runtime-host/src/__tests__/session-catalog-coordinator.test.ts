@@ -931,6 +931,80 @@ test('plugin executor creation bypasses model resolution and persists the execut
   }
 });
 
+for (const selection of [
+  { executorModel: 'chosen' },
+  { executorModel: 'chosen', executorConfig: {} },
+  { executorConfig: { model: 'chosen' } },
+  { executorModel: 'chosen', executorConfig: { model: 'chosen' } },
+  {},
+]) {
+  test(`catalog-managed executor creation pins configuration for ${JSON.stringify(selection)}`, async () => {
+    let persistedInput: Parameters<CatalogStores['createStableSession']>[0]['input'] | undefined;
+    const expected =
+      'executorModel' in selection || 'executorConfig' in selection ? { model: 'chosen' } : {};
+    const fixture = createFixture({
+      assertExecutorAvailable: (_session, _executor, configuration) => {
+        assert.deepEqual(configuration ?? {}, expected);
+        return configuration ?? {};
+      },
+      stores: {
+        createStableSession: async (args) => {
+          persistedInput = args.input;
+          return {
+            kind: 'existing' as const,
+            record: headerSnapshot(sessionHeader(args.sessionId, []), 1),
+          };
+        },
+      },
+    });
+    const result = await fixture.coordinator.handlers['session.create'](
+      {
+        sessionId: fixture.sessionId,
+        workspace: { kind: 'host_path', path: process.cwd() },
+        executorId: 'fixture-acp',
+        ...selection,
+      },
+      context,
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(persistedInput?.executorConfig, expected);
+    assert.equal(persistedInput?.model, expected.model ?? 'fixture-acp');
+  });
+}
+
+for (const selection of [
+  { executorModel: 'removed' },
+  { executorModel: 'removed', executorConfig: {} },
+  { executorConfig: { model: 'removed' } },
+  { executorModel: 'fast', executorConfig: { model: 'slow' } },
+]) {
+  test(`invalid executor model selection never persists: ${JSON.stringify(selection)}`, async () => {
+    const fixture = createFixture({
+      assertExecutorAvailable: (_session, _executor, configuration) => {
+        if (configuration?.model === 'removed') throw new Error('model unavailable');
+      },
+      stores: {
+        createStableSession: async () => assert.fail('Invalid selection must not persist'),
+      },
+    });
+    const result = await fixture.coordinator.handlers['session.create'](
+      {
+        sessionId: fixture.sessionId,
+        workspace: { kind: 'host_path', path: process.cwd() },
+        executorId: 'fixture-acp',
+        ...selection,
+      },
+      context,
+    );
+    assert.equal(result.ok, false);
+    if (!result.ok)
+      assert.equal(
+        result.error.code,
+        selection.executorModel === 'fast' ? 'invalid_request' : 'operation_unavailable',
+      );
+  });
+}
+
 test('plugin executor creation fails before persistence when the executor is unavailable', async () => {
   let createAttempts = 0;
   const fixture = createFixture({

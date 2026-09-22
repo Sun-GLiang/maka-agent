@@ -1,5 +1,5 @@
 {
-  "epoch": 177,
+  "epoch": 178,
   "files": ["packages/runtime-host/src/protocol/plugin-platform.ts"],
   "reason": "Moves the unchanged executor catalog normalizer from the Node-only runtime service into core and updates its import. Catalog validation, accepted values, output fields, errors, and wire encoding remain unchanged; the renderer no longer evaluates the service's Node crypto dependency."
 }

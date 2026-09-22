@@ -2120,8 +2120,16 @@ export async function createExecutionRuntimeHostComposition(
         pluginExecutors.identity(sessionId, executorId);
         const [entry] = await pluginExecutors.catalog({ cwd, executorId });
         if (!entry || entry.readiness !== 'ready') throw new Error('Executor is not ready');
-        if (configuration?.model && !entry.models.some((model) => model.id === configuration.model))
-          throw new Error('Executor model is unavailable');
+        // Catalog-managed executors pin their confirmed configuration on every create path.
+        // Providers without model discovery retain main's executor-specific model contract.
+        if (entry.supportsModelChange || entry.models.length > 0) {
+          if (
+            configuration?.model &&
+            !entry.models.some((model) => model.id === configuration.model)
+          )
+            throw new Error('Executor model is unavailable');
+          return configuration ?? {};
+        }
       },
       ...(context.sessionAccessAuthority
         ? { sessionAccessAuthority: context.sessionAccessAuthority }

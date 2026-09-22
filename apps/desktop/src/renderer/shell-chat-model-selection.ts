@@ -20,7 +20,5 @@
 export {
   composerModelSupportsVision,
   pickNewChatModel,
-  chatModelChoiceLabel,
   type NewChatModel,
-  type NewChatModelCandidate,
 } from './features/conversation/index.js';

@@ -123,6 +123,8 @@ export type PluginExecutorResult =
   | {
       readonly status: 'cancelled';
       readonly reason?: string;
+      /** Provider terminal reason observed while cancellation drained. */
+      readonly providerStopReason?: string;
       /** Service-owned provenance; provider-supplied values are ignored. */
       readonly source?: PluginExecutorCancellationSource;
     }
@@ -511,8 +513,13 @@ export class PluginExecutorService extends Service {
         });
         if (signal.aborted) {
           const cancelled = cancelledResult(signal.reason);
-          return result.status === 'cancelled' && typeof result.reason === 'string'
-            ? { ...cancelled, reason: result.reason }
+          const normalized = normalizeResult(result);
+          return normalized.status === 'cancelled'
+            ? {
+                ...normalized,
+                ...cancelled,
+                ...(normalized.reason ? { reason: normalized.reason } : {}),
+              }
             : cancelled;
         }
         return normalizeResult(result);
@@ -702,11 +709,15 @@ function normalizeResult(result: PluginExecutorResult): PluginExecutorResult {
   }
   if (
     result.status === 'cancelled' &&
-    (result.reason === undefined || typeof result.reason === 'string')
+    (result.reason === undefined || typeof result.reason === 'string') &&
+    (result.providerStopReason === undefined || isSafeEventText(result.providerStopReason))
   ) {
     return Object.freeze({
       status: result.status,
       ...(result.reason === undefined ? {} : { reason: result.reason }),
+      ...(result.providerStopReason === undefined
+        ? {}
+        : { providerStopReason: result.providerStopReason }),
       source: 'provider',
     });
   }

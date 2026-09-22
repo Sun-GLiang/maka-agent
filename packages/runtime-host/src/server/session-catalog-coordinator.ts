@@ -212,7 +212,10 @@ export interface HostSessionCatalogCoordinatorOptions {
     executorId: string,
     config: import('@maka/core/executor-catalog').ExecutorConfiguration | undefined,
     cwd: string,
-  ) => void | Promise<void>;
+  ) =>
+    | void
+    | import('@maka/core/executor-catalog').ExecutorConfiguration
+    | Promise<void | import('@maka/core/executor-catalog').ExecutorConfiguration>;
   readonly sessionAccessAuthority?: Pick<
     RuntimeHostAccessAuthority,
     'activeSessionGrantForPrincipal'
@@ -425,7 +428,7 @@ export class HostSessionCatalogCoordinator {
           ...(model.executorId
             ? {
                 executorId: model.executorId,
-                ...(input.executorConfig ? { executorConfig: input.executorConfig } : {}),
+                ...(model.executorConfig ? { executorConfig: model.executorConfig } : {}),
               }
             : {}),
           ...(model.connectionId ? { llmConnectionId: model.connectionId } : {}),
@@ -664,7 +667,7 @@ export class HostSessionCatalogCoordinator {
               ...(model.executorId
                 ? {
                     executorId: model.executorId,
-                    ...(input.executorConfig ? { executorConfig: input.executorConfig } : {}),
+                    ...(model.executorConfig ? { executorConfig: model.executorConfig } : {}),
                   }
                 : {}),
               ...(model.connectionId ? { llmConnectionId: model.connectionId } : {}),
@@ -1342,11 +1345,12 @@ export class HostSessionCatalogCoordinator {
         ? current.thinkingLevel
         : (patch.thinkingLevel ?? undefined);
     if (patch.executorTarget !== undefined) {
+      let executorConfig;
       try {
-        await this.#assertExecutorAvailable?.(
+        executorConfig = await this.#assertExecutorAvailable?.(
           current.id,
           patch.executorTarget.executorId,
-          undefined,
+          patch.executorTarget.model ? { model: patch.executorTarget.model } : undefined,
           current.cwd,
         );
       } catch {
@@ -1358,6 +1362,7 @@ export class HostSessionCatalogCoordinator {
       return {
         backend: 'plugin-executor',
         executorId: patch.executorTarget.executorId,
+        ...(executorConfig ? { executorConfig } : {}),
         llmConnectionId: undefined,
         llmConnectionSlug: `executor:${patch.executorTarget.executorId}`,
         model: patch.executorTarget.model ?? patch.executorTarget.executorId,
@@ -1411,17 +1416,20 @@ export class HostSessionCatalogCoordinator {
     cwd: string,
   ): Promise<{
     readonly executorId?: string;
+    readonly executorConfig?: import('@maka/core/executor-catalog').ExecutorConfiguration;
     readonly connectionId?: string;
     readonly connectionSlug: string;
     readonly model: string;
     readonly thinkingLevel?: SessionHeader['thinkingLevel'];
   }> {
     if (input.executorId) {
+      const requestedModel = input.executorConfig?.model ?? input.executorModel;
+      let executorConfig;
       try {
-        await this.#assertExecutorAvailable?.(
+        executorConfig = await this.#assertExecutorAvailable?.(
           input.sessionId,
           input.executorId,
-          input.executorConfig,
+          requestedModel ? { model: requestedModel } : input.executorConfig,
           cwd,
         );
       } catch {
@@ -1432,6 +1440,9 @@ export class HostSessionCatalogCoordinator {
       }
       return {
         executorId: input.executorId,
+        ...((executorConfig ?? input.executorConfig)
+          ? { executorConfig: executorConfig ?? input.executorConfig }
+          : {}),
         connectionSlug: `executor:${input.executorId}`,
         model: input.executorConfig?.model ?? input.executorModel ?? input.executorId,
         thinkingLevel: input.thinkingLevel ?? undefined,

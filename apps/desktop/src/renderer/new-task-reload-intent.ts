@@ -25,5 +25,4 @@ export {
   writeNewTaskReloadDraft,
   readNewTaskReloadDraft,
   clearNewTaskReloadIntent,
-  type NewTaskReloadIntent,
 } from './features/conversation/index.js';

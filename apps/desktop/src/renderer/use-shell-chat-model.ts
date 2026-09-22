@@ -20,7 +20,5 @@
 export {
   useShellChatModel,
   resolveNewChatExecutionThinkingLevel,
-  type NewChatExecutionTarget,
-  type NewChatModel,
   type SessionHealthNoticeView,
 } from './features/conversation/index.js';

@@ -128,60 +128,114 @@ test('runtime rejects a historical conversation after process continuity was los
   }
 });
 
-test('runtime forwards cancellation to ACP and waits for settlement', async () => {
-  const fixture = await executableFixture();
-  let started!: () => void;
-  const ready = new Promise<void>((resolve) => {
-    started = resolve;
-  });
-  let settle!: () => void;
-  const settled = new Promise<void>((resolve) => {
-    settle = resolve;
-  });
-  let cancellations = 0;
-  const factory: AcpConnectionFactory = (input) => {
-    input.configureClient(chainableApp());
-    return {
-      connection: {
-        agent: {
-          request: async (method: string) => {
-            if (method === methods.agent.initialize) return { protocolVersion: 1 };
-            if (method === methods.agent.session.new) return { sessionId: 'acp-session' };
-            if (method === methods.agent.session.prompt) {
-              started();
-              await settled;
-              return { stopReason: 'cancelled' };
-            }
-            throw new Error(`Unexpected ACP method: ${method}`);
+for (const stopReason of [
+  'cancelled',
+  'end_turn',
+  'max_tokens',
+  'refusal',
+  'request_error',
+  'process_crash',
+]) {
+  test(`runtime drains cancellation and preserves ${stopReason}`, async () => {
+    const fixture = await executableFixture();
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    let cancellations = 0;
+    let crash!: (error: Error) => void;
+    const failed = new Promise<never>((_resolve, reject) => {
+      crash = reject;
+    });
+    const factory: AcpConnectionFactory = (input) => {
+      input.configureClient(chainableApp());
+      return {
+        connection: {
+          agent: {
+            request: async (method: string) => {
+              if (method === methods.agent.initialize) return { protocolVersion: 1 };
+              if (method === methods.agent.session.new) return { sessionId: 'acp-session' };
+              if (method === methods.agent.session.prompt) {
+                started();
+                await settled;
+                if (stopReason === 'request_error') throw new Error('request failed');
+                return { stopReason };
+              }
+              throw new Error(`Unexpected ACP method: ${method}`);
+            },
+            notify: async () => {
+              cancellations += 1;
+              if (stopReason === 'process_crash') crash(new Error('process exited'));
+              else settle();
+            },
           },
-          notify: async () => {
-            cancellations += 1;
-            settle();
-          },
-        },
-        close: () => undefined,
-      } as unknown as ClientConnection,
-      failed: new Promise<never>(() => undefined),
-      dispose: async () => undefined,
+          close: () => undefined,
+        } as unknown as ClientConnection,
+        failed,
+        dispose: async () => undefined,
+      };
     };
-  };
-  const executor = new AcpExecutor(
-    adapter,
-    { executable: fixture.executable },
-    { createConnection: factory },
-  );
-  const abort = new AbortController();
-  const execution = executor.execute(request('cancel'), executorContext([], abort.signal));
-  await ready;
-  abort.abort(new Error('user_stop'));
-  try {
-    assert.deepEqual(await execution, { status: 'cancelled' });
-    assert.equal(cancellations, 1);
-  } finally {
-    await executor.dispose();
-    await rm(fixture.root, { recursive: true, force: true });
-  }
-});
+    const executor = new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      { createConnection: factory },
+    );
+    const abort = new AbortController();
+    const execution = executor.execute(request('cancel'), executorContext([], abort.signal));
+    await ready;
+    abort.abort(new Error('user_stop'));
+    try {
+      assert.deepEqual(await execution, {
+        status: 'cancelled',
+        ...(['request_error', 'process_crash'].includes(stopReason)
+          ? { reason: 'crash', providerStopReason: 'acp_execution_failed' }
+          : { providerStopReason: stopReason }),
+      });
+      assert.equal(cancellations, 1);
+    } finally {
+      await executor.dispose();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const selection of [
+  { model: 'fast' },
+  { configuration: { model: 'fast' } },
+  { model: 'fast', configuration: { model: 'fast' } },
+  { model: 'fixture-acp', configuration: {} },
+  { model: 'removed' },
+  { model: 'default', configuration: { model: 'fast' } },
+]) {
+  test(`runtime consumes or rejects the exact model selection ${JSON.stringify(selection)}`, async () => {
+    const fixture = await executableFixture();
+    const protocol = fakeProtocol();
+    const executor = new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      { createConnection: protocol.factory },
+    );
+    try {
+      const result = await executor.execute(
+        { ...request('model'), ...selection },
+        executorContext([]),
+      );
+      const invalid = selection.model === 'removed' || selection.model === 'default';
+      assert.equal(result.status, invalid ? 'failed' : 'completed');
+      assert.equal(protocol.prompts, invalid ? 0 : 1);
+      if (!invalid && selection.model !== 'fixture-acp')
+        assert.equal(protocol.selectedModel, 'fast');
+      if (invalid && result.status === 'failed') assert.equal(result.code, 'acp_config_invalid');
+    } finally {
+      await executor.dispose();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
 
 test('discovery shares a disposable probe, does not mark a task, and first prompt applies the task model', async () => {
   const fixture = await executableFixture();
