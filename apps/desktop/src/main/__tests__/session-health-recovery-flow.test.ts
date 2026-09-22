@@ -33,7 +33,7 @@ import {
 } from '@maka/ui';
 import { SessionHealthRecoveryNotice } from '../../renderer/chat-recovery-notice.js';
 import { ConversationServicesProvider, type ConversationServices } from '../../renderer/features/conversation/index.js';
-import { useShellChatModel } from '../../renderer/use-shell-chat-model.js';
+import { useShellChatModel } from '../../renderer/features/conversation/index.js';
 
 const originalGlobals = {
   document: globalThis.document,

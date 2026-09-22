@@ -77,7 +77,6 @@ export { sessionIdSetsEqual, type LiveTurnSnapshot } from './model/live-turn-sna
 export { useExecutorSelection } from './controller/use-executor-selection.js';
 export * from './model/shell-chat-model-selection.js';
 export * from './model/session-health-notice.js';
-export * from './model/new-task-reload-intent.js';
 export * from './controller/use-new-task-choice.js';
 export * from './controller/use-shell-chat-model.js';
 export * from './model/executor-submission.js';

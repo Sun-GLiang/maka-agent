@@ -348,44 +348,33 @@ export class PluginExecutorService extends Service {
         },
       ];
     return await Promise.all(
-      selected.map(async (entry) => {
-        const abort = new AbortController();
-        const combined = AbortSignal.any([signal, abort.signal]);
-        let settle!: () => void;
-        const active = {
-          abort,
-          settled: new Promise<void>((resolve) => {
-            settle = resolve;
-          }),
-        };
-        entry.active.add(active);
-        const fallback: ExecutorCatalogEntry = {
-          id: entry.provider.id,
-          displayName: entry.provider.displayName ?? entry.provider.id,
-          readiness: 'ready',
-          models: [],
-          supportsAttachments: false,
-          supportsModelChange: false,
-        };
-        try {
-          combined.throwIfAborted();
-          const result = input.sessionId
-            ? await entry.provider.inspectConversation?.({
-                conversationKey: input.sessionId,
-                cwd: input.cwd,
-                ...(input.configuration ? { configuration: input.configuration } : {}),
-              })
-            : await entry.provider.discover?.({ cwd: input.cwd, signal: combined });
-          combined.throwIfAborted();
-          if (!result) return fallback;
-          return normalizeCatalogEntry(result, entry.provider.id);
-        } catch {
-          return { ...fallback, readiness: 'unavailable' as const };
-        } finally {
-          entry.active.delete(active);
-          settle();
-        }
-      }),
+      selected.map((entry) =>
+        this.withActiveOperation(entry, { signal }, async (combined) => {
+          const fallback: ExecutorCatalogEntry = {
+            id: entry.provider.id,
+            displayName: entry.provider.displayName ?? entry.provider.id,
+            readiness: 'ready',
+            models: [],
+            supportsAttachments: false,
+            supportsModelChange: false,
+          };
+          try {
+            combined.throwIfAborted();
+            const result = input.sessionId
+              ? await entry.provider.inspectConversation?.({
+                  conversationKey: input.sessionId,
+                  cwd: input.cwd,
+                  ...(input.configuration ? { configuration: input.configuration } : {}),
+                })
+              : await entry.provider.discover?.({ cwd: input.cwd, signal: combined });
+            combined.throwIfAborted();
+            if (!result) return fallback;
+            return normalizeCatalogEntry(result, entry.provider.id);
+          } catch {
+            return { ...fallback, readiness: 'unavailable' as const };
+          }
+        }),
+      ),
     );
   }
 
@@ -395,32 +384,21 @@ export class PluginExecutorService extends Service {
     input: PluginExecutorConversationInput,
   ): Promise<void> {
     const entry = this.entry(sessionId, executorId);
+    const configure = entry.provider.configureConversation;
     if (
       [...entry.active].some((execution) => execution.conversationKey === input.conversationKey) ||
-      !entry.provider.configureConversation
+      !configure
     )
       throw new Error('Executor configuration is unavailable or busy');
     if (!isExecutorConfiguration(input.configuration))
       throw new TypeError('Invalid executor configuration');
-    const abort = new AbortController();
-    let settle!: () => void;
-    const active = {
-      abort,
-      conversationKey: input.conversationKey,
-      settled: new Promise<void>((resolve) => {
-        settle = resolve;
-      }),
-    };
-    entry.active.add(active);
-    try {
-      await entry.provider.configureConversation(
-        input,
-        AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]),
-      );
-    } finally {
-      entry.active.delete(active);
-      settle();
-    }
+    await this.withActiveOperation(
+      entry,
+      { conversationKey: input.conversationKey },
+      async (signal) => {
+        await configure(input, AbortSignal.any([signal, AbortSignal.timeout(30_000)]));
+      },
+    );
   }
 
   /** Task retirement releases retained provider resources; backend refresh must not. */
@@ -478,58 +456,71 @@ export class PluginExecutorService extends Service {
     options: PluginExecutorExecutionOptions,
   ): Promise<PluginExecutorResult> {
     const normalizedRequest = normalizeRequest(request);
+    return await this.withActiveOperation(
+      entry,
+      { conversationKey: normalizedRequest.conversationKey, signal: options.signal },
+      async (signal) => {
+        if (entry.retired) return cancelledResult(new ExecutorRetiredAbort(entry.provider.id));
+        try {
+          const result = await entry.provider.execute(normalizedRequest, {
+            signal,
+            emit: (event) => {
+              if (entry.retired) return;
+              const normalized = normalizeOutputEvent(event, entry.provider.capabilities);
+              try {
+                options.onEvent?.(normalized);
+              } catch {
+                // A presentation observer must not change external execution.
+              }
+            },
+            requestPermission: async (request) => {
+              if (signal.aborted || entry.retired) return Object.freeze({ outcome: 'cancelled' });
+              const normalized = normalizePermissionRequest(request);
+              const result = options.onPermissionRequest
+                ? await options.onPermissionRequest(normalized)
+                : ({ outcome: 'cancelled' } as const);
+              if (signal.aborted || entry.retired) return Object.freeze({ outcome: 'cancelled' });
+              return normalizePermissionResult(result, normalized);
+            },
+          });
+          if (signal.aborted) {
+            const cancelled = cancelledResult(signal.reason);
+            const normalized = normalizeResult(result);
+            return normalized.status === 'cancelled'
+              ? {
+                  ...normalized,
+                  ...cancelled,
+                  ...(normalized.reason ? { reason: normalized.reason } : {}),
+                }
+              : cancelled;
+          }
+          return normalizeResult(result);
+        } catch (error) {
+          if (signal.aborted) return cancelledResult(signal.reason);
+          throw error;
+        }
+      },
+    );
+  }
+
+  private async withActiveOperation<T>(
+    entry: RegisteredExecutor,
+    input: { readonly conversationKey?: string; readonly signal?: AbortSignal },
+    run: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
     const abort = new AbortController();
-    const signal = options.signal ? AbortSignal.any([options.signal, abort.signal]) : abort.signal;
+    const signal = input.signal ? AbortSignal.any([input.signal, abort.signal]) : abort.signal;
     let settle!: () => void;
-    const settled = new Promise<void>((resolve) => {
-      settle = resolve;
-    });
     const active: ActiveExecution = {
       abort,
-      settled,
-      conversationKey: normalizedRequest.conversationKey,
+      ...(input.conversationKey ? { conversationKey: input.conversationKey } : {}),
+      settled: new Promise<void>((resolve) => {
+        settle = resolve;
+      }),
     };
     entry.active.add(active);
     try {
-      if (entry.retired) return cancelledResult(new ExecutorRetiredAbort(entry.provider.id));
-      try {
-        const result = await entry.provider.execute(normalizedRequest, {
-          signal,
-          emit: (event) => {
-            if (entry.retired) return;
-            const normalized = normalizeOutputEvent(event, entry.provider.capabilities);
-            try {
-              options.onEvent?.(normalized);
-            } catch {
-              // A presentation observer must not change external execution.
-            }
-          },
-          requestPermission: async (request) => {
-            if (signal.aborted || entry.retired) return Object.freeze({ outcome: 'cancelled' });
-            const normalized = normalizePermissionRequest(request);
-            const result = options.onPermissionRequest
-              ? await options.onPermissionRequest(normalized)
-              : ({ outcome: 'cancelled' } as const);
-            if (signal.aborted || entry.retired) return Object.freeze({ outcome: 'cancelled' });
-            return normalizePermissionResult(result, normalized);
-          },
-        });
-        if (signal.aborted) {
-          const cancelled = cancelledResult(signal.reason);
-          const normalized = normalizeResult(result);
-          return normalized.status === 'cancelled'
-            ? {
-                ...normalized,
-                ...cancelled,
-                ...(normalized.reason ? { reason: normalized.reason } : {}),
-              }
-            : cancelled;
-        }
-        return normalizeResult(result);
-      } catch (error) {
-        if (signal.aborted) return cancelledResult(signal.reason);
-        throw error;
-      }
+      return await run(signal);
     } finally {
       entry.active.delete(active);
       settle();

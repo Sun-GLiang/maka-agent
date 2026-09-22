@@ -58,8 +58,9 @@ The isolation harness used the **real Host execution path**, not the fake native
 The external executor used the official binary and production Plugin bundles throughout.
 This Desktop sequence was repeated after the final rebuild and review fixes on 2026-09-22.
 
-- Selected Antigravity with the separate executor control, retained the main-style model menu,
-  browsed all 11 models and selected Gemini 3.8 Flash (High).
+- Selected Antigravity, browsed all 11 models and selected Gemini 3.8 Flash (High). The review
+  follow-up consolidated executor browsing and model selection into one browse-then-commit panel;
+  the native Maka model control remains embedded in that same boundary.
 - Created a task through the UI. The Agent wrote `add.js` and `add.test.js` and ran Node tests.
   An independent `node --test add.test.js` check also passed (1/1).
 - Approved tool permissions and answered the structured alpha/beta question with beta through
@@ -80,7 +81,8 @@ recap regression tests protect that boundary.
 
 The final 2026-09-22 rebuild uses main commit `e6db756890c36a8d4396241cc4f3a6f180529d20`.
 Merge conflicts were resolved against main's executor-specific model/reasoning fields and client
-model-selection extension slot. Compatibility epoch **178** follows main's epoch 175.
+model-selection extension slot. Compatibility epoch **179** follows main's epoch 176; PR 2's
+three incompatible protocol steps occupy epochs 177–179.
 Native model selection, thinking defaults and the distinction between untouched (`undefined`) and
 explicit provider defaults (`null`) remain intact.
 
@@ -110,15 +112,12 @@ and symlink containment, retained identity, helper cleanup and history-only refu
 
 ## UI screenshots
 
-These are actual Desktop screenshots captured from the isolated fixture profile on the rebuilt
-branch. The original captures are hosted as GitHub attachments, not committed repository assets.
-The Maka model control keeps main's UI logic. Antigravity has a separate executor selector, the
-full 11-model catalog, untruncated selected names, and no Plugin icon in model labels. Both model
-popovers have the same fixed height; long catalogs scroll.
+The completed-task screenshot was captured from the isolated fixture profile on the rebuilt branch
+and is hosted as a GitHub attachment rather than a repository asset. The earlier picker screenshot
+was removed from this evidence because the review follow-up replaced the two-control layout with a
+single executor/model panel.
 
-| Maka model menu | Completed Antigravity task |
-| --- | --- |
-| ![Maka model menu](https://github.com/user-attachments/assets/c78dbf70-0e34-49ae-b455-e4bbda8a3971) | ![Antigravity completed task](https://github.com/user-attachments/assets/4fc2827b-feed-4639-9a6a-d50caf203055) |
+![Completed Antigravity task](https://github.com/user-attachments/assets/4fc2827b-feed-4639-9a6a-d50caf203055)
 
 Public CI, independent human approval and merge remain repository gates. This document does not
 mark issue #5103's PR 2 checkbox complete. Cross-process restoration belongs to PR 3; modes and

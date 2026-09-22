@@ -195,7 +195,7 @@ test('file writes reject existing and dangling links outside the workspace', asy
   }
 });
 
-test('file writes still create, truncate, and follow resolved links inside the workspace', async () => {
+test('file writes create and truncate regular files but reject links inside the workspace', async () => {
   const f = await fixture();
   try {
     const target = join(f.root, 'target.txt');
@@ -213,8 +213,13 @@ test('file writes still create, truncate, and follow resolved links inside the w
     assert.equal(await readFile(target, 'utf8'), 'short');
     const link = join(f.root, 'internal-link.txt');
     await symlink(target, link);
-    await write(link, 'via link');
-    assert.equal(await readFile(target, 'utf8'), 'via link');
+    const result = await f.executor.execute(
+      f.request(`write:${JSON.stringify({ path: link, content: 'via link' })}`),
+      f.context(),
+    );
+    if (result.status !== 'completed') throw new Error('Expected completion');
+    assert.ok(JSON.parse(result.text).error);
+    assert.equal(await readFile(target, 'utf8'), 'short');
   } finally {
     await f.dispose();
   }

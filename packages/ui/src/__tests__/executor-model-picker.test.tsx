@@ -58,6 +58,18 @@ const choices: ChatModelChoice[] = [
     isDefault: true,
     thinkingLevels: [],
   },
+  {
+    connectionId: 'native',
+    connectionSlug: 'native',
+    connectionName: 'My account',
+    providerType: 'openai',
+    providerLabel: 'OpenAI',
+    model: 'native-model-2',
+    label: 'Native model 2',
+    description: 'Alternative native model',
+    isDefault: false,
+    thinkingLevels: [],
+  },
 ];
 
 test('executor choice keeps the native picker intact and exposes every external model with exact identity', async () => {
@@ -84,7 +96,10 @@ test('executor choice keeps the native picker intact and exposes every external 
             currentValue={exactModelChoiceValue('native', 'native', 'native-model')}
             currentProviderType="openai"
             renderProviderMark={() => <span data-native-mark>Provider icon</span>}
-            onPick={() => {}}
+            onPick={() => {
+              selected.push(undefined);
+              setSelection(undefined);
+            }}
           />
         </ExecutorModelPicker>
       </LocaleProvider>
@@ -95,48 +110,63 @@ test('executor choice keeps the native picker intact and exposes every external 
     const element = dom.document.querySelector<HTMLElement>(selector);
     assert.ok(element, selector);
     activeList = element.getAttribute('aria-controls') ?? '';
-    await act(() => element.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
+    await act(async () => {
+      element.dispatchEvent(new dom.window.Event('click', { bubbles: true }));
+    });
   };
   const choose = async (text: string) => {
     const row = [
       ...dom.document.getElementById(activeList)!.querySelectorAll<HTMLElement>('[role="option"]'),
     ].find((row) => row.textContent?.includes(text));
     assert.ok(row, text);
-    await act(() => row.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
+    await act(async () => {
+      row.dispatchEvent(new dom.window.Event('click', { bubbles: true }));
+    });
   };
   try {
     await dom.render(<Harness />);
-    await click('.maka-new-chat-model-selector [aria-haspopup="listbox"]');
-    assert.ok(dom.document.body.textContent?.includes('My account'));
-    assert.ok(dom.document.body.textContent?.includes('Native model description'));
-    assert.ok(dom.document.querySelector('[role="option"] [data-native-mark]'));
-    assert.equal(
-      dom.document.querySelector('[role="option"]')?.getAttribute('aria-selected'),
-      'true',
+    await click('.maka-executor-selector');
+    assert.ok(dom.document.querySelector('[data-native-mark]'));
+    const antigravity = [...dom.document.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent?.includes('Antigravity'),
     );
-    await choose('Native model');
-    await click('.maka-executor-selector [aria-haspopup="listbox"]');
-    await choose('Antigravity');
-    assert.deepEqual(selected.at(-1), { executorId: 'antigravity', configuration: {} });
-    await click('.maka-model-switcher-trigger [aria-haspopup="listbox"]');
+    assert.ok(antigravity);
+    await act(async () => {
+      antigravity.dispatchEvent(new dom.window.Event('click', { bubbles: true }));
+    });
+    assert.equal(selected.length, 0, 'browsing an executor does not commit it');
     const rows = [
-      ...dom.document.getElementById(activeList)!.querySelectorAll<HTMLElement>('[role="option"]'),
+      ...dom.document.querySelectorAll<HTMLElement>('.maka-executor-picker-model[role="option"]'),
     ];
-    assert.equal(
-      rows.length,
-      32,
-      'the full provider catalog is rendered, not just its current model',
-    );
+    assert.equal(rows.length, 33, 'the provider default and full catalog are rendered');
     for (const model of catalog[0]!.models)
       assert.ok(rows.some((row) => row.textContent?.includes(model.name)));
-    assert.equal(rows[0]?.getAttribute('aria-selected'), 'true', 'provider default is reflected');
-    await choose('Agent model 31');
+    assert.equal(rows[1]?.getAttribute('aria-selected'), 'true', 'provider default is reflected');
+    const model31 = rows.find((row) => row.textContent?.includes('Agent model 31'));
+    assert.ok(model31);
+    await act(async () => {
+      model31.dispatchEvent(new dom.window.Event('click', { bubbles: true }));
+    });
     assert.deepEqual(selected.at(-1), {
       executorId: 'antigravity',
       configuration: { model: 'model-31' },
     });
-    await click('.maka-executor-selector [aria-haspopup="listbox"]');
-    await choose('Maka');
+    await click('.maka-executor-selector');
+    const maka = [...dom.document.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent === 'Maka',
+    );
+    assert.ok(maka);
+    await act(async () => {
+      maka.dispatchEvent(new dom.window.Event('click', { bubbles: true }));
+    });
+    assert.deepEqual(selected.at(-1), {
+      executorId: 'antigravity',
+      configuration: { model: 'model-31' },
+    });
+    await click('.maka-new-chat-model-selector [aria-haspopup="listbox"]');
+    assert.ok(dom.document.body.textContent?.includes('My account'));
+    assert.ok(dom.document.body.textContent?.includes('Native model description'));
+    await choose('Native model 2');
     assert.equal(selected.at(-1), undefined);
     assert.ok(
       dom.document
@@ -168,16 +198,49 @@ test('history-only state keeps the executor fixed and offers a new task', async 
       </LocaleProvider>,
     );
     assert.ok(dom.document.body.textContent?.includes('歷史仍可閱讀'));
-    const executorTrigger = dom.document.querySelector(
-      '.maka-executor-selector [aria-haspopup="listbox"]',
-    );
-    assert.equal(executorTrigger?.getAttribute('aria-disabled'), 'true');
+    const executorTrigger = dom.document.querySelector('.maka-executor-selector');
+    assert.notEqual(executorTrigger?.getAttribute('aria-disabled'), 'true');
     const button = [...dom.document.querySelectorAll('button')].find(
       (b) => b.textContent === '建立新任務',
     );
     assert.ok(button);
     await act(() => button.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
     assert.equal(newTasks, 1);
+  } finally {
+    await dom.cleanup();
+  }
+});
+
+test('unavailable executors can be inspected but never committed', async () => {
+  const dom = installTranscriptDom();
+  const selections: unknown[] = [];
+  try {
+    await dom.render(
+      <LocaleProvider locale="en">
+        <ExecutorModelPicker
+          catalog={[{ ...catalog[0]!, readiness: 'authentication_required' }]}
+          nativeLabel="Native model"
+          onSelect={(selection) => {
+            selections.push(selection);
+          }}
+          onSetup={() => {}}
+          onRetry={() => {}}
+          onNewTask={() => {}}
+        >
+          <span>Native models</span>
+        </ExecutorModelPicker>
+      </LocaleProvider>,
+    );
+    const trigger = dom.document.querySelector<HTMLElement>('.maka-executor-selector');
+    assert.ok(trigger);
+    await act(() => trigger.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
+    const entry = [...dom.document.querySelectorAll<HTMLButtonElement>('button')].find((button) =>
+      button.textContent?.includes('Antigravity'),
+    );
+    assert.ok(entry);
+    await act(() => entry.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
+    assert.match(dom.document.body.textContent ?? '', /Sign in from External Agents settings/);
+    assert.deepEqual(selections, []);
   } finally {
     await dom.cleanup();
   }

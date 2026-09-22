@@ -17,12 +17,12 @@
  * under the License.
  */
 
-export {
-  UNRESOLVED_NEW_TASK_DRAFT_KEY,
-  hasNewTaskReloadIntent,
-  markNewTaskReloadIntent,
-  readNewTaskReloadIntent,
-  writeNewTaskReloadDraft,
-  readNewTaskReloadDraft,
-  clearNewTaskReloadIntent,
-} from './features/conversation/index.js';
+export class AcpRuntimeError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = 'AcpRuntimeError';
+  }
+}

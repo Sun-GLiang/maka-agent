@@ -112,11 +112,11 @@ Context label and an explicit consumer Context instead of relying on cross-bundl
 | C: execution | Retained ACP Session → generic events/Hosted Forms → transcript → original option identity | Implemented; includes question forms, tools/diffs, file callbacks, follow-up, cancellation and cleanup |
 | D: continuity | Plugin-owned durable continuity marker → process-free inspection → Session admission/Desktop readiness | Implemented; lost processes leave readable history and a new-task action, without replacement |
 
-The existing Composer owns text and attachment drafts. A separate small executor selector chooses
-Maka or an external executor; the model control retains main's native component and row layout.
-Both model popovers use the same fixed height. The external list includes every discovered model,
-shows complete selected names, and has no Plugin icon in model rows or the selected model label.
-The executor itself retains its identifying icon. Main's client model-selection extension slot remains intact. Existing tasks keep their executor; model changes require idle state,
+The existing Composer owns text and attachment drafts. One executor/model picker presents executors
+in its left rail and the browsed executor's models in its main pane. Browsing never changes the draft;
+choosing a model commits the executor and model together. The Maka pane embeds main's native model
+component, so contributed executors and native models share one boundary without duplicating
+selection state. Main's client model-selection extension slot remains intact. Existing tasks keep their executor; model changes require idle state,
 confirmation from the Agent, and a successful Session configuration write. Unsupported attachments
 and native operations produce validation instead of changing or discarding the user's input.
 External task naming uses a message-derived title; native recap generation is unavailable and does

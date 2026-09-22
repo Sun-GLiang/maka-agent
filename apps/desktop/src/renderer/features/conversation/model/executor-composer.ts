@@ -42,9 +42,7 @@ export function executorComposerProps(
             disabled: executor.changing || (fixed && input.turnActive),
             loading: executor.loading,
             error: executor.error,
-            onSelect: (selection) => {
-              void executor.select(selection);
-            },
+            onSelect: (selection) => executor.select(selection),
             onRetry: () => {
               void executor.refresh();
             },

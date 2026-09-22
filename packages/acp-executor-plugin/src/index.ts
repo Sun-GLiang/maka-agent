@@ -17,19 +17,14 @@
  * under the License.
  */
 
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { access, lstat, mkdtemp, open, rm, readFile, realpath, stat } from 'node:fs/promises';
+import { access, mkdtemp, rm, realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import type { ExecutorCatalogEntry, ExecutorConfiguration } from '@maka/core/executor-catalog';
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
-import { Readable, Writable } from 'node:stream';
-import { setTimeout as delay } from 'node:timers/promises';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import {
-  client,
   methods,
-  ndJsonStream,
   type ClientApp,
   type ClientConnection,
   type RequestPermissionRequest,
@@ -45,10 +40,18 @@ import type {
   PluginExecutorProvider,
   PluginExecutorRequest,
   PluginExecutorResult,
-  PluginExecutorToolResultContent,
 } from '@maka/runtime/plugin-executor-service';
 import type { Context, Disposable } from '@maka/runtime/plugin-kernel';
-import { terminateProcessTree } from '@maka/runtime/process-tree-terminator';
+import { AcpRuntimeError } from './acp-errors.js';
+import { readWorkspaceTextFile, writeWorkspaceTextFile } from './acp-filesystem.js';
+import { createAcpConnection, type AcpConnectionOwner } from './acp-process.js';
+import {
+  activityKind,
+  emitText,
+  projectToolResult,
+  promptText,
+  summarizeToolContent,
+} from './acp-projection.js';
 
 declare module '@maka/runtime/plugin-kernel' {
   interface Context {
@@ -58,10 +61,6 @@ declare module '@maka/runtime/plugin-kernel' {
 
 const CANCEL_TIMEOUT_MS = 15_000;
 const INITIALIZE_TIMEOUT_MS = 30_000;
-const PROCESS_EXIT_TIMEOUT_MS = 2_000;
-const MAX_TEXT_FILE_BYTES = 8 * 1024 * 1024;
-const MAX_EVENT_TEXT = 8_192;
-const MAX_TOOL_RESULT_DIFF = 1024 * 1024;
 
 export interface AcpLaunchSpec {
   readonly executable: string;
@@ -93,12 +92,6 @@ export interface AcpConnectionFactoryInput extends AcpLaunchSpec {
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
   readonly configureClient: (app: ClientApp) => void;
-}
-
-export interface AcpConnectionOwner {
-  readonly connection: ClientConnection;
-  readonly failed: Promise<never>;
-  dispose(): Promise<void>;
 }
 
 export type AcpConnectionFactory = (input: AcpConnectionFactoryInput) => AcpConnectionOwner;
@@ -503,35 +496,13 @@ export class AcpExecutor implements PluginExecutorProvider {
       })
       .onRequest(methods.client.fs.readTextFile, async ({ params }) => {
         this.#assertSession(session, params.sessionId);
-        const path = await checkedWorkspacePath(session.cwd, params.path, false);
-        const info = await stat(path);
-        if (info.size > MAX_TEXT_FILE_BYTES) throw new Error('ACP text file is too large');
-        const text = await readFile(path, 'utf8');
-        const start = params.line ? params.line - 1 : 0;
         return {
-          content:
-            params.line || params.limit
-              ? text
-                  .split('\n')
-                  .slice(start, params.limit ? start + params.limit : undefined)
-                  .join('\n')
-              : text,
+          content: await readWorkspaceTextFile(session.cwd, params.path, params.line, params.limit),
         };
       })
       .onRequest(methods.client.fs.writeTextFile, async ({ params }) => {
         this.#assertSession(session, params.sessionId);
-        if (Buffer.byteLength(params.content) > MAX_TEXT_FILE_BYTES)
-          throw new Error('ACP text file is too large');
-        const path = await checkedWorkspacePath(session.cwd, params.path, true);
-        const file = await open(
-          path,
-          constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0),
-        );
-        try {
-          await file.writeFile(params.content, 'utf8');
-        } finally {
-          await file.close();
-        }
+        await writeWorkspaceTextFile(session.cwd, params.path, params.content);
         return {};
       })
       .onRequest(methods.client.session.requestPermission, ({ params }) =>
@@ -699,105 +670,6 @@ export class AcpRuntimeService {
   }
 }
 
-export function createAcpConnection(input: AcpConnectionFactoryInput): AcpConnectionOwner {
-  let child: ChildProcessWithoutNullStreams;
-  try {
-    child = spawn(input.executable, [...(input.args ?? [])], {
-      cwd: input.cwd,
-      env: input.env,
-      stdio: 'pipe',
-      detached: true,
-      shell: false,
-    });
-  } catch {
-    throw new AcpRuntimeError('ACP executable is unavailable', 'acp_executable_unavailable');
-  }
-  let disposing = false;
-  let disposed = false;
-  let disposal: Promise<void> | undefined;
-  let rejectFailure!: (error: Error) => void;
-  const failed = new Promise<never>((_resolve, reject) => {
-    rejectFailure = reject;
-  });
-  void failed.catch(() => undefined);
-  const fail = () => {
-    if (!disposing) rejectFailure(new Error('ACP connection failed'));
-  };
-  child.once('error', fail);
-  child.stdin.once('error', fail);
-  child.stderr.once('error', fail);
-  child.stderr.on('data', () => undefined);
-  child.once('close', fail);
-  const app = client({ name: input.clientName });
-  input.configureClient(app);
-  const connection = app.connect(
-    ndJsonStream(
-      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
-    ),
-  );
-  void connection.closed.then(fail, fail);
-  return {
-    connection,
-    failed,
-    dispose() {
-      if (disposed) return Promise.resolve();
-      if (disposal) return disposal;
-      disposing = true;
-      disposal = terminate(child, connection).then(
-        () => {
-          disposed = true;
-        },
-        (error) => {
-          disposal = undefined;
-          throw error;
-        },
-      );
-      return disposal;
-    },
-  };
-}
-
-async function terminate(
-  child: ChildProcessWithoutNullStreams,
-  connection: ClientConnection,
-): Promise<void> {
-  const pid = child.pid;
-  const alive = () => {
-    if (!pid) return false;
-    if (process.platform === 'win32') return child.exitCode === null && child.signalCode === null;
-    try {
-      process.kill(-pid, 0);
-      return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-    }
-  };
-  try {
-    // Preserve ancestry until signalling; the owned process group may outlive its leader.
-    if (pid) {
-      await terminateProcessTree({ pid, signal: 'SIGTERM', fallback: () => child.kill('SIGTERM') });
-      for (let elapsed = 0; elapsed < PROCESS_EXIT_TIMEOUT_MS && alive(); elapsed += 50)
-        await delay(50);
-      if (alive()) {
-        await terminateProcessTree({
-          pid,
-          signal: 'SIGKILL',
-          fallback: () => child.kill('SIGKILL'),
-        });
-        for (let elapsed = 0; elapsed < PROCESS_EXIT_TIMEOUT_MS && alive(); elapsed += 50)
-          await delay(50);
-      }
-      if (alive()) throw new Error('ACP process cleanup failed');
-    }
-  } finally {
-    connection.close();
-    child.stdin.destroy();
-    child.stdout.destroy();
-    child.stderr.destroy();
-  }
-}
-
 function pluginStateStore(
   storage: PluginStorageService,
   executorId: string,
@@ -898,147 +770,6 @@ async function checkedExecutable(path: string): Promise<string> {
   if (!(await stat(resolved)).isFile()) throw new Error('ACP executable is not a file');
   await access(resolved, constants.X_OK);
   return resolved;
-}
-
-async function checkedWorkspacePath(cwd: string, path: string, forWrite: boolean): Promise<string> {
-  if (!isAbsolute(path)) throw new Error('ACP file path must be absolute');
-  const candidate = resolve(path);
-  let resolvedPath: string;
-  if (!forWrite) resolvedPath = await realpath(candidate);
-  else {
-    try {
-      resolvedPath = await realpath(candidate);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      // realpath also reports ENOENT for a dangling link. It is not an absent
-      // directory entry: opening it for creation would follow its unchecked target.
-      const entry = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== 'ENOENT') throw error;
-        return undefined;
-      });
-      if (entry) throw new Error('ACP file path could not be resolved');
-      resolvedPath = resolve(await realpath(dirname(candidate)), basename(candidate));
-    }
-  }
-  const relation = relative(await realpath(cwd), resolvedPath);
-  if (relation === '..' || relation.startsWith('../') || isAbsolute(relation))
-    throw new Error('ACP file path leaves the workspace');
-  if (!forWrite) await access(resolvedPath, constants.R_OK);
-  return resolvedPath;
-}
-
-function promptText(request: Readonly<PluginExecutorRequest>): string {
-  const sections = [request.text];
-  if (request.instructions) sections.push(`Agent instructions:\n${request.instructions}`);
-  for (const quote of request.quotes ?? []) sections.push(`Quoted context:\n${quote.text}`);
-  for (const reference of request.directoryReferences ?? [])
-    sections.push(`Project directory reference: ${reference.path}`);
-  return sections.filter(Boolean).join('\n\n');
-}
-
-function emitText(
-  context: PluginExecutorContext,
-  type: 'output_delta' | 'thinking_delta' | 'tool_progress',
-  text: string,
-  toolCallId?: string,
-): void {
-  const safeText = text.replaceAll('\r', '');
-  for (let offset = 0; offset < safeText.length; offset += MAX_EVENT_TEXT) {
-    const chunk = safeText.slice(offset, offset + MAX_EVENT_TEXT);
-    if (type === 'output_delta' || type === 'thinking_delta') context.emit({ type, text: chunk });
-    else context.emit({ type, toolCallId: toolCallId!, text: chunk });
-  }
-}
-
-function projectToolResult(
-  content: readonly ToolCallContent[],
-  rawOutput: unknown,
-): PluginExecutorToolResultContent {
-  const diffs = content.flatMap((item) =>
-    item.type === 'diff'
-      ? [
-          {
-            path: item.path,
-            diff: createWholeFileDiff(item.path, item.oldText ?? '', item.newText ?? ''),
-          },
-        ]
-      : [],
-  );
-  const combinedDiff = diffs.map(({ diff }) => diff).join('\n');
-  if (diffs.length && diffs.length <= 64 && combinedDiff.length <= MAX_TOOL_RESULT_DIFF)
-    return {
-      kind: 'file_diff',
-      paths: diffs.map(({ path }) => path),
-      diff: combinedDiff,
-    };
-  if (diffs.length)
-    return {
-      kind: 'text',
-      text: boundedText(
-        `${diffs.map(({ path }) => `Updated ${path}`).join('\n')}\nDiff omitted because it exceeds the executor event limit.`,
-      ),
-    };
-  return { kind: 'text', text: boundedText(summarizeToolResult(content, rawOutput)) };
-}
-
-function createWholeFileDiff(path: string, oldText: string, newText: string): string {
-  // Canonical presentation events use LF; this does not modify the workspace file.
-  const oldLines = oldText.replaceAll('\r', '').split('\n');
-  const newLines = newText.replaceAll('\r', '').split('\n');
-  return [
-    `--- a/${path}`,
-    `+++ b/${path}`,
-    `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
-    ...oldLines.map((line) => `-${line}`),
-    ...newLines.map((line) => `+${line}`),
-  ].join('\n');
-}
-
-function summarizeToolContent(content: readonly ToolCallContent[]): string {
-  return content
-    .map((item) => {
-      if (item.type === 'diff') return `Updated ${item.path}`;
-      if (item.type === 'terminal') return item.terminalId ? `Terminal ${item.terminalId}` : '';
-      return item.content.type === 'text' ? item.content.text : '';
-    })
-    .filter(Boolean)
-    .join('\n');
-}
-
-function summarizeToolResult(content: readonly ToolCallContent[], rawOutput: unknown): string {
-  const summary = summarizeToolContent(content);
-  if (summary) return summary;
-  if (rawOutput === undefined) return '';
-  try {
-    return JSON.stringify(rawOutput);
-  } catch {
-    return 'External tool completed';
-  }
-}
-
-function boundedText(value: string): string {
-  const safe = value.replaceAll('\r', '');
-  return safe.length <= MAX_EVENT_TEXT ? safe : `${safe.slice(0, MAX_EVENT_TEXT - 1)}…`;
-}
-
-function activityKind(kind: ToolCall['kind'] | undefined) {
-  if (kind === 'read') return 'read' as const;
-  if (kind === 'edit' || kind === 'delete' || kind === 'move') return 'edit' as const;
-  if (kind === 'search') return 'search' as const;
-  if (kind === 'fetch') return 'webfetch' as const;
-  if (kind === 'execute') return 'command' as const;
-  if (kind === 'think') return 'explore' as const;
-  return 'tool' as const;
-}
-
-class AcpRuntimeError extends Error {
-  constructor(
-    message: string,
-    readonly code: string,
-  ) {
-    super(message);
-    this.name = 'AcpRuntimeError';
-  }
 }
 
 function failure(
