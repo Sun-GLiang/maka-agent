@@ -56,17 +56,19 @@ Launched the built Electron app against an isolated temporary profile and a fixt
 The isolation harness used the **real Host execution path**, not the fake native-model backend;
 `MAKA_CU_REAL_MODEL_E2E` only selected the isolated profile and bounded native computer-use policy.
 The external executor used the official binary and production Plugin bundles throughout.
+This Desktop sequence was repeated after the final rebuild and review fixes on 2026-09-22.
 
-- Opened the existing Composer model menu, browsed Antigravity, retained draft text and selected
-  Gemini 3.8 Flash (High).
+- Selected Antigravity with the separate executor control, retained the main-style model menu,
+  browsed all 11 models and selected Gemini 3.8 Flash (High).
 - Created a task through the UI. The Agent wrote `add.js` and `add.test.js` and ran Node tests.
   An independent `node --test add.test.js` check also passed (1/1).
 - Approved tool permissions and answered the structured alpha/beta question with beta through
   Hosted Forms. The completed transcript recorded the selected answer.
-- Submitted a follow-up; the Agent recalled the first-turn synthetic token correctly.
+- The rebuilt Desktop task returned `PR2_UI_DONE`; its follow-up recalled `UI_ALPHA_5224` and
+  the selected `beta` fixture name correctly. The fixture test independently passed (1/1).
 - Changed the model while idle to Gemini 3.7 Flash (High); the menu displayed the confirmed value.
 - Started a long response, pressed Stop, and observed cancelled/interrupted settlement.
-- Closed and relaunched Desktop using the same isolated profile. The transcript remained readable;
+- Stopped the isolated Host and relaunched Desktop using the same isolated profile. The transcript remained readable;
   the Composer showed process-lost/history-only guidance and a New Task action.
 
 This run found and fixed an integration defect: automatic task naming tried to resolve an executor
@@ -74,44 +76,50 @@ as a native LLM connection, which drained the Host and cancelled the prompt. Ext
 uses the first message; unsupported native auxiliary calls fail as configuration errors. Naming and
 recap regression tests protect that boundary.
 
-## Automated coverage and review gate
+## Rebuilt on current main and final verification
 
-Controlled SDK/stdio process tests cover retained multi-turn identity, exact option IDs, file and
-symlink containment, cancellation settlement/timeouts, process crashes, descendant cleanup, and
-history-only after loss. Contract/service tests additionally cover initial configuration, cached
-catalog discovery, process-free inspection, per-task configuration isolation, question bridging,
-atomic storage, malformed protocol input, and Host admission. Desktop tests cover stale discovery,
-confirmed configuration, draft attachment refusal, native picker recovery and history-only UI.
+The final 2026-09-22 rebuild uses main commit `e6db756890c36a8d4396241cc4f3a6f180529d20`.
+Merge conflicts were resolved against main's executor-specific model/reasoning fields and client
+model-selection extension slot. Compatibility epoch **178** follows main's epoch 175.
+Native model selection, thinking defaults and the distinction between untouched (`undefined`) and
+explicit provider defaults (`null`) remain intact.
 
-Local validation includes all workspace suites, the production build, workspace type checks,
-renderer architecture and hook checks, locale hygiene, ASF headers, Windows inventory, and the
-release check (203 tests plus notice/dependency gates). The official binary and temporary test
-profiles are kept outside the source tree.
+The official production Plugin acceptance above was **repeated after this rebuild** with official
+ACP 1.1.1. All eleven checks passed, including model confirmation, file edits/tests, original
+permission/question option identities, multi-turn context, independent tasks, idle model changes,
+cancellation and restart history-only behavior. Existing Google authentication was reused.
 
-Before the main rebuild below, high-concurrency runs exposed timing failures in existing code-mode,
-shell-environment and Host-launcher tests. The code-mode suite (33 tests), complete runtime suite (3,564 tests), and
-shell-environment suite (12 tests) passed on rerun. Those Host and Desktop reruns used four test
-workers. Desktop passed all 2,777 tests; Host passed 1,989 tests with 12 platform skips (2,001 total).
-No production behavior or test threshold was changed to accommodate timing failures.
+Final local validation:
 
-Public CI, final PR review and merge remain the repository merge gate. This document does not mark
-issue #5103's PR 2 checkbox complete or claim cross-process restoration.
+- Clean test build, production renderer build and every workspace type check passed.
+- All 13 workspace suites passed: **12,883 Node tests passed, 38 skipped, zero failed**.
+  Python: **75 passed, 12 skipped** (87 total). Workspaces ran sequentially.
+- After adding the final empty-config/model compatibility edge cases, the complete Host Session
+  catalog suite passed again (**67 tests**). The preceding targeted ACP, executor service/backend,
+  durable-event mapping and catalog run passed **145 tests**.
+- Renderer architecture passed against the exact main base; lint, formatting, Desktop/UI Knip,
+  shell hook, locale, ASF header and Windows inventory gates passed.
+- Release checks passed (**203 tests**, plus stale-output, notice and metadata checks).
 
-## Rebuilt on current main
+Regression coverage verifies both model input forms, matching/contradictory values, an empty
+configuration with an explicit model, unknown models before persistence, model pinning, and
+cancellation racing `end_turn`, `max_tokens`, `refusal`, request failure or process crash. The
+provider stop reason crosses the service/backend boundary and is stored in the runtime ledger;
+timeouts and crashes remain interruption states. Controlled stdio tests also exercise filesystem
+and symlink containment, retained identity, helper cleanup and history-only refusal.
 
-On 2026-09-22 this implementation was rebuilt on `8bde344b18d2c3b79f8f367d8b3645a4612606fc`
-from `apache/maka` main. The rebuild retains main's per-model thinking defaults and the distinction
-between untouched (`undefined`) and explicitly requested provider defaults (`null`), target-aware
-message submission, and Session-local subscriptions. Executor configuration remains separate from
-native model settings. Compatibility epoch 173 follows main's epoch 172. The branch contains the
-three implementation commits directly on this base, without the previous history-only merge.
+## UI screenshots
 
-Validation after the rebuild: all 13 workspace suites passed (12,856 Node tests passed,
-38 skipped, zero failed; 87 Python tests passed). This includes 2,803 Desktop tests, 1,999 Host
-tests with 12 platform skips, and all ACP runtime/adapter tests. Workspaces ran sequentially with
-four Node test workers per suite. The production build, all workspace type checks, renderer
-architecture against the exact main base, hook checks, locale hygiene, lint/format, ASF headers,
-Windows inventory (102 declarations), and release checks (203 tests) passed. New regressions cover
-untouched/provider-default/explicit native thinking choices and external configuration isolation.
-The locale catalogs now follow main's typed `UiCatalog` convention. The live official-Agent and
-Desktop acceptance above predates this rebuild; it was not repeated against the rebuilt commits.
+These are actual Desktop screenshots captured from the isolated fixture profile on the rebuilt
+branch. The original captures are hosted as GitHub attachments, not committed repository assets.
+The Maka model control keeps main's UI logic. Antigravity has a separate executor selector, the
+full 11-model catalog, untruncated selected names, and no Plugin icon in model labels. Both model
+popovers have the same fixed height; long catalogs scroll.
+
+| Maka model menu | Completed Antigravity task |
+| --- | --- |
+| ![Maka model menu](https://github.com/user-attachments/assets/c78dbf70-0e34-49ae-b455-e4bbda8a3971) | ![Antigravity completed task](https://github.com/user-attachments/assets/4fc2827b-feed-4639-9a6a-d50caf203055) |
+
+Public CI, independent human approval and merge remain repository gates. This document does not
+mark issue #5103's PR 2 checkbox complete. Cross-process restoration belongs to PR 3; modes and
+expanded catalog lifecycle belong to PR 4. Neither is claimed by this PR.

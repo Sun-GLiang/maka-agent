@@ -66,6 +66,7 @@ policy, initial model configuration, and Antigravity question/failure recognitio
 - ACP file callbacks with workspace and symlink containment;
 - ACP tool/thought/text projection into generic executor events;
 - ACP permission/question option identity and settlement;
+- cancellation drain with the actual provider stop reason retained in the durable runtime ledger;
 - bounded, cached model discovery and Agent-confirmed idle model changes;
 - generic initial ACP configuration validation/application;
 - durable history-only detection so a Host/Plugin restart cannot silently fork an existing external
@@ -111,9 +112,11 @@ Context label and an explicit consumer Context instead of relying on cross-bundl
 | C: execution | Retained ACP Session → generic events/Hosted Forms → transcript → original option identity | Implemented; includes question forms, tools/diffs, file callbacks, follow-up, cancellation and cleanup |
 | D: continuity | Plugin-owned durable continuity marker → process-free inspection → Session admission/Desktop readiness | Implemented; lost processes leave readable history and a new-task action, without replacement |
 
-The existing Composer owns text and attachment drafts. Browsing the executor rail does not change
-the selection; selecting a model commits the executor/model pair. Native model choices remain
-available under Maka. Existing tasks keep their executor; model changes require idle state,
+The existing Composer owns text and attachment drafts. A separate small executor selector chooses
+Maka or an external executor; the model control retains main's native component and row layout.
+Both model popovers use the same fixed height. The external list includes every discovered model,
+shows complete selected names, and has no Plugin icon in model rows or the selected model label.
+The executor itself retains its identifying icon. Main's client model-selection extension slot remains intact. Existing tasks keep their executor; model changes require idle state,
 confirmation from the Agent, and a successful Session configuration write. Unsupported attachments
 and native operations produce validation instead of changing or discarding the user's input.
 External task naming uses a message-derived title; native recap generation is unavailable and does
@@ -121,7 +124,9 @@ not call an unrelated model or drain the Host.
 
 The generic contract consists of `ExecutorCatalogEntry`, `ExecutorConfiguration`, the
 `plugin.executor.query` Host operation, and provider discovery/inspection/configuration methods.
-Session storage persists only `executorId` and generic configuration. External ACP Session identity,
+Session storage persists `executorId`, generic configuration and the compatible main model field.
+The Host canonicalizes `executorModel` and `executorConfig.model`, rejects contradictions and
+unavailable models, and pins catalog-managed executor configuration even when the caller omits it. External ACP Session identity,
 process handles, credentials, and continuity markers stay inside the Plugin.
 
 The model-selection controller now lives in the existing Conversation feature so the Desktop
