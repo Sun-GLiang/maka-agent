@@ -17,8 +17,7 @@
  * under the License.
  */
 
-import type { ExecutorCatalogEntry } from '@maka/core/executor-catalog';
-import { normalizeCatalogEntry } from '@maka/runtime/plugin-executor-service';
+import { normalizeCatalogEntry, type ExecutorCatalogEntry } from '@maka/core/executor-catalog';
 import {
   validateCompositionEntry,
   validatePluginRootId,
