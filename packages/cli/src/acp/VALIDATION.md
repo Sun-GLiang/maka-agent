@@ -36,7 +36,22 @@ Review still identified two reproducible P2 lifecycle gaps: a replacement queued
 after Session retirement can recreate its registration without notifying the
 Client of retirement; and an empty MCP snapshot after a connection loss does not
 withdraw the Host's lost binding, blocking subsequent prompt admission. These
-findings remain open; the passing suites do not cover those operation orderings.
+findings were fixed in `7a1874d5a`: publication consults durable Session lifecycle
+state inside the mutation lane, and ACP publishes an explicit empty scoped
+registration to reconcile lost contracts while retaining retirement notification.
+Both focused regression tests failed before the behavior changes and pass after
+them. Additional tests cover a real MCP process killed while disconnected,
+durable archive/removal and unarchive behavior, pre-creation publication, and
+the registration bound for both empty and populated scopes.
+
+On the fix commit, the complete Runtime Host dist suite passed 2006 tests with
+12 skipped, and the complete CLI dist suite passed 1154 tests with 3 skipped;
+both had zero failures or cancellations. The Core capability-grant test passed.
+`npm run build:test`, `npm run build`, workspace typechecking, lint, format,
+Desktop/UI knip, ASF headers, CLI third-party notices and the protocol epoch
+guard all passed again. Standards and Spec reviews found no further actionable
+P-level issues in the fix. Desktop E2E and other complete workspace suites were
+not rerun; independent human review remains required.
 
 ## September 20 review follow-up
 

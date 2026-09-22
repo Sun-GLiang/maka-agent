@@ -125,6 +125,12 @@ Session registration may not expose the same tool identity. Another Session cann
 borrow the registration through provider fallback. Reconnection republishes the
 current tool snapshot without replaying calls, and prompt admission waits for the
 current connection and tool revision to be published.
+An empty snapshot is published too: it clears contracts lost during disconnection
+and retains the Session retirement notification. Empty registrations share the
+same per-provider limit as registrations with tools and are released on close.
+Host publication checks durable archive/removal state inside its mutation queue;
+never-created Session IDs remain valid for preparation, but retired IDs cannot
+be republished. Unarchiving permits a fresh publication.
 
 Generic MCP `ask` approval uses `admission: "mcp"` and the existing atomic Session
 grant mechanism with `mcp_tool` scope. It does not elevate provider trust or grant
