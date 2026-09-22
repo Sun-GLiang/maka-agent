@@ -43,6 +43,7 @@ import {
   modelMenuGroups,
   type ModelMenuGroup,
 } from './chat-model-helpers.js';
+import { modelChoiceDescription as describePanelModel } from './chat-model-helpers.js';
 import {
   buildModelPickerOptions,
   providerMarkIcon,
@@ -86,14 +87,14 @@ function wheelOptions(
 
 function panelOptions(
   groups: readonly ModelMenuGroup[],
-  locale: Parameters<typeof modelChoiceDescription>[1],
+  locale: Parameters<typeof describePanelModel>[1],
   renderProviderMark?: (type: ProviderType) => ReactNode,
 ): ModelPickerPanelOption[] {
   return groups.flatMap((group) => group.choices.map((choice) => ({
     value: exactChoiceValue(choice),
     label: choice.label,
     detail: choice.model,
-    description: modelChoiceDescription(choice, locale),
+    description: describePanelModel(choice, locale),
     group: group.heading,
     icon: providerMarkIcon(group.providerType, renderProviderMark),
   })));
