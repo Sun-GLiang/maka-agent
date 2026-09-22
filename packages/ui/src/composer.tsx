@@ -2339,7 +2339,9 @@ export const Composer = forwardRef<
                         newChatModel: props.newChatModel,
                         executorTarget: props.executorTarget,
                         onNativeModelChange,
-                        renderNativeThinkingControl,
+                        // The shared executor panel owns model browsing only; native
+                        // thinking stays mounted beside its trigger in the footer.
+                        renderNativeThinkingControl: props.executorPicker ? () => null : renderNativeThinkingControl,
                         onExecutorTargetChange: props.onExecutorTargetChange,
                       }}
                       options={{
@@ -2391,12 +2393,15 @@ export const Composer = forwardRef<
                                 showUnavailableStatus={props.showStaticModelUnavailableStatus}
                               />
                             )}
-                            {renderNativeThinkingControl()}
+                            {!props.executorPicker && renderNativeThinkingControl()}
                           </>
                         ),
                       }}
                     />
                   </ExecutorModelPickerBoundary>
+                  {props.executorPicker && !props.executorPicker.selection && !props.executorTarget
+                    ? renderNativeThinkingControl()
+                    : null}
                 </MakaClientSessionScope>
                 {props.contextUsage ? <ContextUsageAction {...props.contextUsage} /> : null}
               </div>

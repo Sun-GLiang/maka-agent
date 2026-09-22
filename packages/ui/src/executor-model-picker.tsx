@@ -17,11 +17,12 @@
  * under the License.
  */
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Button, Popover, TextInput } from '@astryxdesign/core';
+import { useEffect, useState, type ReactNode } from 'react';
+import { Button, Popover } from '@astryxdesign/core';
 import type { ExecutorCatalogEntry, ExecutorConfiguration } from '@maka/core/executor-catalog';
 import type { UiCatalog, UiLocale } from '@maka/core/ui-locale';
 import { Settings, ICON_SIZE } from './icons.js';
+import { ModelPickerPanel, ModelPickerPanelContext } from './model-picker-panel.js';
 import { useUiLocale } from './locale-context.js';
 
 export interface ExecutorSelection {
@@ -124,7 +125,6 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
   const selected = props.catalog.find((entry) => entry.id === props.selection?.executorId);
   const [open, setOpen] = useState(false);
   const [browsedId, setBrowsedId] = useState(props.selection?.executorId ?? NATIVE);
-  const [query, setQuery] = useState('');
   useEffect(() => {
     if (!open) setBrowsedId(props.selection?.executorId ?? NATIVE);
   }, [open, props.selection?.executorId]);
@@ -133,13 +133,6 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
     browsedId === props.selection?.executorId
       ? (props.selection?.configuration.model ?? browsed?.currentModel)
       : browsed?.currentModel;
-  const models = useMemo(() => {
-    const normalized = query.trim().toLocaleLowerCase(locale);
-    if (!normalized) return browsed?.models ?? [];
-    return (browsed?.models ?? []).filter((model) =>
-      `${model.name}\n${model.id}`.toLocaleLowerCase(locale).includes(normalized),
-    );
-  }, [browsed?.models, locale, query]);
   const selectedUnavailable = !!props.selection && selected?.readiness !== 'ready';
   const triggerLabel = props.selection
     ? `${selected?.displayName ?? props.selection.executorId} · ${
@@ -157,7 +150,6 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
   };
   const browse = (id: string) => {
     setBrowsedId(id);
-    setQuery('');
   };
   const lockedTo = props.fixed ? props.selection?.executorId ?? NATIVE : undefined;
   return (
@@ -167,10 +159,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
         placement="above"
         width="min(620px, 92vw)"
         isOpen={open}
-        onOpenChange={(next) => {
-          setOpen(next);
-          if (!next) setQuery('');
-        }}
+        onOpenChange={setOpen}
         isEnabled={!props.disabled && !props.isReadOnly}
         content={
           <div className="maka-executor-picker-panel">
@@ -219,51 +208,20 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
             </nav>
             <section className="maka-executor-picker-models" aria-live="polite">
               {browsedId === NATIVE ? (
-                <div className="maka-executor-picker-native">{props.children}</div>
+                <ModelPickerPanelContext.Provider value={{ onSelected: () => setOpen(false) }}>
+                  <div className="maka-executor-picker-native">{props.children}</div>
+                </ModelPickerPanelContext.Provider>
               ) : browsed?.readiness === 'ready' ? (
-                <>
-                  <TextInput
-                    className="maka-executor-picker-search"
-                    label={copy.search}
-                    isLabelHidden
-                    size="sm"
-                    width="100%"
-                    value={query}
-                    placeholder={copy.search}
-                    onChange={setQuery}
-                  />
-                  <div className="maka-executor-picker-model-list" role="listbox">
-                    {!query && !props.fixed ? (
-                      <Button
-                        label={copy.default}
-                        variant="ghost"
-                        size="sm"
-                        role="option"
-                        aria-selected={currentModel === undefined}
-                        className="maka-executor-picker-model"
-                        onClick={() => void chooseModel({})}
-                      />
-                    ) : null}
-                    {models.map((model) => (
-                      <Button
-                        key={model.id}
-                        label={model.name}
-                        variant="ghost"
-                        size="sm"
-                        role="option"
-                        aria-selected={currentModel === model.id}
-                        className="maka-executor-picker-model"
-                        isDisabled={props.fixed && !browsed.supportsModelChange}
-                        onClick={() => void chooseModel({ model: model.id })}
-                      >
-                        <span className="maka-executor-picker-label">
-                          <span>{model.name}</span>
-                          {model.name !== model.id ? <small>{model.id}</small> : null}
-                        </span>
-                      </Button>
-                    ))}
-                  </div>
-                </>
+                <ModelPickerPanel
+                  key={browsed.id}
+                  value={currentModel === undefined ? 'default' : `model:${currentModel}`}
+                  disabled={props.fixed && !browsed.supportsModelChange}
+                  options={[
+                    ...(!props.fixed ? [{ value: 'default', label: copy.default, hideWhenSearching: true }] : []),
+                    ...browsed.models.map((model) => ({ value: `model:${model.id}`, label: model.name, detail: model.id })),
+                  ]}
+                  onSelect={(model) => chooseModel(model === 'default' ? {} : { model: model.slice('model:'.length) })}
+                />
               ) : (
                 <div className="maka-executor-picker-readiness">
                   <p>{browsed ? copy[browsed.readiness] : copy.unavailable}</p>

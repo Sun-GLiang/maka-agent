@@ -25,15 +25,15 @@
  * helpers, so they form a clean seam. `index.ts` does not re-export them (they
  * are internal to the `@maka/ui` Composer surface).
  *
- * Both are ghost-trigger Astryx Selectors — the same searchable single-select
- * list the settings pages use, so every model picker in the product shares one
- * interaction. The one exception is the collapsed WorkHub window, which keeps
- * the inline wheel (`presentation="wheel"`) it was built for.
+ * Inside the unified executor panel, both render the shared searchable model
+ * list directly. Standalone surfaces retain their Astryx Selector, and the
+ * collapsed WorkHub window retains its wheel (`presentation="wheel"`).
  */
 
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useContext, useCallback, useEffect, useMemo, useState } from 'react';
 import { Button as UiButton } from '@astryxdesign/core';
 import { Selector, SelectorOption, type SelectorOptionData } from '@astryxdesign/core/Selector';
+import { ModelPickerPanel, ModelPickerPanelContext, type ModelPickerPanelOption } from './model-picker-panel.js';
 import { ModelWheelPicker, type ModelWheelOption } from './model-wheel-picker.js';
 import { ICON_SIZE, AlertTriangle, Settings, X } from './icons.js';
 import {
@@ -81,6 +81,16 @@ function wheelOptions(
       description: modelChoiceDescription(choice, locale),
     })),
   );
+}
+
+function panelOptions(groups: readonly ModelMenuGroup[], locale: Parameters<typeof modelChoiceDescription>[1]): ModelPickerPanelOption[] {
+  return groups.flatMap((group) => group.choices.map((choice) => ({
+    value: exactChoiceValue(choice),
+    label: choice.label,
+    detail: choice.model,
+    description: modelChoiceDescription(choice, locale),
+    group: group.heading,
+  })));
 }
 
 /**
@@ -172,6 +182,7 @@ export function ChatModelSwitcher(props: {
     model: string;
   }): void | Promise<void>;
 }) {
+  const panel = useContext(ModelPickerPanelContext);
   const locale = useUiLocale();
   const copy = getConversationCopy(locale).model;
   const searchPlaceholder = getSharedUiCopy(locale).modelPicker.searchPlaceholder;
@@ -299,6 +310,24 @@ export function ChatModelSwitcher(props: {
     if (props.presentation !== 'wheel') setWheelOpen(false);
   }, [props.presentation]);
   useEffect(() => setWheelOpen(false), [props.activeSession.id]);
+  if (panel) {
+    const rows = panelOptions(grouped, locale);
+    if (!currentKnownChoice && currentValue && !props.hideUnavailableCurrentOption) {
+      rows.unshift({ value: currentValue, label: displayLabel, disabled: true });
+    }
+    return (
+      <>
+        {noticeShown ? <UiButton label={copy.switchWarning} tooltip={copy.switchWarningDismiss} variant="ghost" size="sm" onClick={acknowledgeNotice} /> : null}
+        <ModelPickerPanel
+          options={rows}
+          value={selection.value}
+          disabled={disabled || props.isReadOnly}
+          disabledReason={props.disabledReason}
+          onSelect={async (value) => { await selection.onChange(value); panel.onSelected(); }}
+        />
+      </>
+    );
+  }
   if (props.presentation === 'wheel') {
     const wheelList = wheelOptions(grouped, locale);
     if (!currentKnownChoice && currentValue && !props.hideUnavailableCurrentOption) {
@@ -382,6 +411,7 @@ export function NewChatModelPicker(props: {
     model: string;
   }): void | Promise<void>;
 }) {
+  const panel = useContext(ModelPickerPanelContext);
   const locale = useUiLocale();
   const copy = getConversationCopy(locale).model;
   const searchPlaceholder = getSharedUiCopy(locale).modelPicker.searchPlaceholder;
@@ -418,6 +448,21 @@ export function NewChatModelPicker(props: {
       model: choice.model,
     }));
   };
+  if (panel) {
+    return (
+      <ModelPickerPanel
+        options={panelOptions(grouped, locale)}
+        value={currentValue}
+        disabled={props.isReadOnly}
+        onSelect={async (value) => {
+          try {
+            await pick(value);
+            panel.onSelected();
+          } catch { /* The action owner reports the failure; keep the list open for retry. */ }
+        }}
+      />
+    );
+  }
   if (props.presentation === 'wheel') {
     const wheelList = wheelOptions(grouped, locale);
     if (!currentKnownChoice && currentValue) {

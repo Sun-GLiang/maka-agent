@@ -231,7 +231,29 @@
   white-space: nowrap;
 }
 
-.maka-executor-picker-native,
+.maka-executor-picker-native {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 0;
+}
+
+.maka-executor-picker-option {
+  flex-shrink: 0;
+}
+
+.maka-executor-picker-option .maka-executor-picker-model {
+  width: 100%;
+}
+
+.maka-executor-picker-group {
+  padding: var(--space-1) var(--space-2);
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
 .maka-executor-picker-readiness {
   display: flex;
   flex: 1 1 auto;

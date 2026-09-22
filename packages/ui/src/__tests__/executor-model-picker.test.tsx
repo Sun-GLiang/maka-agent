@@ -119,9 +119,9 @@ for (const nativeModel of ['native-model', 'native-model-2']) {
       await click(dom.document.querySelector('.maka-executor-selector'));
       await click(button('Maka'));
       assert.equal(selected.length, 1, 'browsing back to Maka must not commit it');
-      await click(dom.document.querySelector('.maka-new-chat-model-selector [aria-haspopup="listbox"]'));
+      assert.equal(dom.document.querySelector('.maka-executor-picker-native [aria-haspopup="listbox"]'), null, 'native models are directly visible');
       await click([...dom.document.querySelectorAll('[role="option"]')].find(
-        (element) => element.textContent?.includes(choices.find((choice) => choice.model === nativeModel)!.description!),
+        (element) => element.textContent?.endsWith(nativeModel),
       ));
       assert.equal(selected.length, 2);
       assert.equal(selected.at(-1), undefined, 'the native choice must clear the external executor');
@@ -132,7 +132,7 @@ for (const nativeModel of ['native-model', 'native-model-2']) {
   });
 }
 
-test('executor choice keeps the native picker intact and exposes every external model with exact identity', async () => {
+test('executor choice shares the native searchable list and exposes every external model with exact identity', async () => {
   const dom = installTranscriptDom();
   const selected: unknown[] = [];
   function Harness() {
@@ -165,18 +165,16 @@ test('executor choice keeps the native picker intact and exposes every external 
       </LocaleProvider>
     );
   }
-  let activeList = '';
   const click = async (selector: string) => {
     const element = dom.document.querySelector<HTMLElement>(selector);
     assert.ok(element, selector);
-    activeList = element.getAttribute('aria-controls') ?? '';
     await act(async () => {
       element.dispatchEvent(new dom.window.Event('click', { bubbles: true }));
     });
   };
   const choose = async (text: string) => {
     const row = [
-      ...dom.document.getElementById(activeList)!.querySelectorAll<HTMLElement>('[role="option"]'),
+      ...dom.document.querySelectorAll<HTMLElement>('[role="option"]'),
     ].find((row) => row.textContent?.includes(text));
     assert.ok(row, text);
     await act(async () => {
@@ -186,7 +184,8 @@ test('executor choice keeps the native picker intact and exposes every external 
   try {
     await dom.render(<Harness />);
     await click('.maka-executor-selector');
-    assert.ok(dom.document.querySelector('[data-native-mark]'));
+    assert.ok(dom.document.querySelector('.maka-executor-picker-search input'));
+    assert.equal(dom.document.querySelectorAll('.maka-executor-picker-native [role="option"]').length, 2);
     const antigravity = [...dom.document.querySelectorAll<HTMLButtonElement>('button')].find(
       (button) => button.textContent?.includes('Antigravity'),
     );
@@ -223,16 +222,11 @@ test('executor choice keeps the native picker intact and exposes every external 
       executorId: 'antigravity',
       configuration: { model: 'model-31' },
     });
-    await click('.maka-new-chat-model-selector [aria-haspopup="listbox"]');
     assert.ok(dom.document.body.textContent?.includes('My account'));
-    assert.ok(dom.document.body.textContent?.includes('Native model description'));
+    assert.ok(dom.document.body.textContent?.includes('native-model'));
     await choose('Native model 2');
     assert.equal(selected.at(-1), undefined);
-    assert.ok(
-      dom.document
-        .querySelector('.maka-new-chat-model-selector')
-        ?.textContent?.includes('Native model'),
-    );
+    assert.equal(dom.document.querySelector('.maka-executor-selector')?.getAttribute('aria-expanded'), 'false', 'choosing a native model closes the shared panel');
   } finally {
     await dom.cleanup();
   }
@@ -301,6 +295,85 @@ test('unavailable executors can be inspected but never committed', async () => {
     await act(() => entry.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
     assert.match(dom.document.body.textContent ?? '', /Sign in from External Agents settings/);
     assert.deepEqual(selections, []);
+  } finally {
+    await dom.cleanup();
+  }
+});
+
+
+test('native thinking stays beside the composer model trigger and follows executor selection', async () => {
+  const dom = installTranscriptDom();
+  dom.window.getSelection = () => null;
+  const levels: unknown[] = [];
+  function Harness() {
+    const [selection, setSelection] = useState<ExecutorSelection>();
+    return (
+      <LocaleProvider locale="en">
+        <Composer
+          executorPicker={{ catalog, selection, onSelect: setSelection, onSetup: () => {}, onRetry: () => {}, onNewTask: () => {} }}
+          modelChoices={choices}
+          newChatModel={{ llmConnectionId: 'native', llmConnectionSlug: 'native', model: 'native-model' }}
+          onPickNewChatModel={() => {}}
+          newChatThinkingLevels={['low', 'high']}
+          onNewChatThinkingLevelChange={(level) => { levels.push(level); }}
+          onSend={() => {}}
+          onStop={() => {}}
+        />
+      </LocaleProvider>
+    );
+  }
+  const click = async (element: Element | null | undefined) => {
+    assert.ok(element);
+    await act(async () => { element.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
+  };
+  const button = (text: string) => [...dom.document.querySelectorAll('button')].find((element) => element.textContent === text);
+  try {
+    await dom.render(<Harness />);
+    const thinking = () => dom.document.querySelector('.maka-thinking-level-selector');
+    assert.ok(thinking(), 'thinking is available while the model panel is closed');
+    await click(thinking()?.querySelector('[aria-haspopup="listbox"]'));
+    await click([...dom.document.querySelectorAll('[role="option"]')].find((row) => row.textContent === 'High'));
+    assert.deepEqual(levels, ['high']);
+    await click(dom.document.querySelector('.maka-executor-selector'));
+    assert.ok(!thinking()?.closest('.maka-executor-picker-panel'));
+    assert.equal(dom.document.querySelectorAll('.maka-thinking-level-selector').length, 1);
+    await click(button('Antigravity'));
+    assert.ok(thinking(), 'browsing does not change the selected executor');
+    await click([...dom.document.querySelectorAll('[role="option"]')].find((row) => row.textContent?.includes('Agent model 1')));
+    assert.ok(!thinking(), 'native thinking is not offered for the external executor');
+    await click(dom.document.querySelector('.maka-executor-selector'));
+    await click(button('Maka'));
+    assert.ok(!thinking(), 'browsing native models does not change executor settings');
+    await click([...dom.document.querySelectorAll('[role="option"]')].find((row) => row.textContent?.endsWith('native-model')));
+    assert.ok(thinking(), 'the native thinking control returns after committing a native model');
+  } finally {
+    await dom.cleanup();
+  }
+});
+
+
+test('a failed native choice keeps the shared list open for retry', async () => {
+  const dom = installTranscriptDom();
+  let attempts = 0;
+  try {
+    await dom.render(
+      <LocaleProvider locale="en">
+        <ExecutorModelPicker catalog={catalog} onSelect={() => {}} onSetup={() => {}} onRetry={() => {}} onNewTask={() => {}}>
+          <NewChatModelPicker label="Native model" choices={choices} onPick={async () => {
+            if (++attempts === 1) throw new Error('selection failed');
+          }} />
+        </ExecutorModelPicker>
+      </LocaleProvider>,
+    );
+    const trigger = dom.document.querySelector('.maka-executor-selector')!;
+    await act(async () => { trigger.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
+    const row = dom.document.querySelector('[role="option"]')!;
+    await act(async () => { row.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
+    assert.equal(attempts, 1);
+    assert.equal(trigger.getAttribute('aria-expanded'), 'true');
+    await act(async () => { row.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
+    assert.equal(attempts, 2);
+    assert.equal(trigger.getAttribute('aria-expanded'), 'false');
   } finally {
     await dom.cleanup();
   }

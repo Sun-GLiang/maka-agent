@@ -131,14 +131,31 @@ and selected-model trigger omit the plug icon.
 Regression verification after these fixes:
 
 - Clean test build; Runtime **3,514 passed / 14 skipped**, Runtime Host **2,026 / 12**,
-  Desktop **2,809**, UI **623**, ACP executor **35**, Antigravity adapter **4**:
-  **9,011 passed, 26 skipped, zero failed**. The final UI change reran the complete UI suite.
+  Desktop **2,809**, UI **625**, ACP executor **35**, Antigravity adapter **4**:
+  **9,013 passed, 26 skipped, zero failed**. The final layout change reran the complete UI and Desktop suites.
 - Native-selection, initialization-retry and long/control-character tool metadata tests reproduce
   the failures before the corresponding fixes.
 - Production renderer build, stale-output check, workspace type checks, Desktop/UI Knip,
   lint/format, ASF headers, locales, shell hooks and Windows inventory passed.
 - Exact-base protocol epoch and renderer architecture checks passed, together with their
   **17** and **112** checker tests; the Astryx inventory and its **19** tests passed.
+
+## Model list alignment and thinking control
+
+Maka and Antigravity now share the same searchable model-list component inside the executor
+panel. Native choices retain connection grouping and exact connection/model identity, while
+showing the model name and ID directly instead of nesting another selector. The existing
+session-switch warning, availability locks, and standalone/wheel model controls are preserved.
+
+Native thinking levels are mounted beside the model trigger in the composer footer. They remain
+available while the model panel is closed and disappear when an external executor is selected;
+browsing another executor alone does not change this state. The original native thinking
+capabilities and callbacks still govern the control.
+
+The latest pass verified native search in Desktop, external selection hiding native thinking,
+and Tab/arrow/Enter selection in the shared control's browser fixture. Complete UI and Desktop
+suites passed (**625 + 2,809 tests**), as did renderer build, type checks, architecture, Knip,
+Astryx inventory, lint, formatting, stale-output and ASF header checks.
 
 ## Current UI screenshots
 
@@ -149,15 +166,15 @@ Images are hosted as GitHub attachments; no screenshot binaries are included in 
 
 ### Antigravity model selection
 
-![Antigravity model selection without a plug icon](https://github.com/user-attachments/assets/37ca0890-01ea-4fbe-91b5-f12569d39985)
+![Antigravity model selection without a plug icon](https://github.com/user-attachments/assets/49903194-f43f-4439-8733-769cbfa4c7da)
 
-### Native model selection after switching back
+### Maka model list and composer thinking control
 
-![Maka native model selection after switching back](https://github.com/user-attachments/assets/8c839484-6a74-4ef1-81d6-2e19e47c7497)
+![Maka searchable model list with thinking beside the composer model trigger](https://github.com/user-attachments/assets/cc386789-11ea-4a4b-ad40-5964b38b67da)
 
-The screenshot pass selected Gemini 3.8 Flash (High), then selected the already-configured
-Claude Sonnet 4.5 native model and confirmed that the composer returned to Maka. The native
-connection is a fixture; no native prompt was sent. The earlier completed-task capture remains
+The native screenshot filters the fixture catalog with `4.5` and shows the thinking control
+beside the composer model trigger. The external screenshot shows Gemini 3.8 Flash (High) selected,
+with native thinking hidden. The native connection is a fixture; no native prompt was sent. The earlier completed-task capture remains
 [historical execution evidence](https://github.com/user-attachments/assets/4fc2827b-feed-4639-9a6a-d50caf203055),
 not a claim about the current picker appearance or a fresh end-to-end coding run.
 
