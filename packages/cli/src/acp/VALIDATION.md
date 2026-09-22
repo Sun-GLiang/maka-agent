@@ -19,6 +19,25 @@
 
 # PR5 validation record
 
+## September 22 conflict resolution and review
+
+Merged Apache main `8bde344b18d2c3b79f8f367d8b3645a4612606fc`, preserving its
+usage timestamp protocol change and moving Session-scoped MCP compatibility
+from epoch 172 to 173. The protocol epoch guard passed against that main commit.
+
+After a clean dependency install and application of the repository patches,
+`npm run build:test`, `npm run build`, workspace typechecking, lint, format,
+Desktop/UI knip, ASF headers and CLI third-party notices passed. The affected
+ACP, MCP publication, TUI MCP, Host capability/composition/retirement and Core
+grant suites passed 453 tests, including the real Host ACP child-process tests.
+Full workspace tests and Desktop E2E were not rerun.
+
+Review still identified two reproducible P2 lifecycle gaps: a replacement queued
+after Session retirement can recreate its registration without notifying the
+Client of retirement; and an empty MCP snapshot after a connection loss does not
+withdraw the Host's lost binding, blocking subsequent prompt admission. These
+findings remain open; the passing suites do not cover those operation orderings.
+
 ## September 20 review follow-up
 
 The γ branch was rebased onto Apache main `879e0a4bc`; its Host compatibility
