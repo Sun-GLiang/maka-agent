@@ -72,10 +72,7 @@ type RefBox<T> = { current: T };
 type MessageLoadErrorUpdater = (updater: (current: Record<string, string>) => Record<string, string>) => void;
 type InteractionQueueUpdater = (updater: (current: InteractionQueues) => InteractionQueues) => void;
 
-type PendingNewChatModel =
-  | { llmConnectionId: string; llmConnectionSlug: string; model: string }
-  | { executorId: string; model: string }
-  | null;
+type PendingNewChatModel = Conversation.NewChatExecutionTarget | null;
 
 type PendingNewChatThinkingLevel = ThinkingLevel | null | undefined;
 type DesktopNewTaskTarget = DesktopBridge.DesktopNewTaskTarget;
@@ -225,12 +222,8 @@ export function createAppShellChatActions(deps: {
     respondToUserForm: submitUserForm,
     showModelSetupToast,
     toastApi,
-    newChatModel,
-    pendingNewChatThinkingLevel,
     newChatPermissionChoice,
     clearNewChatPermissionChoice,
-    newChatCollaborationMode,
-    newChatOrchestrationMode,
     newTaskTarget,
   } = deps;
   const copy = getShellCopy(uiLocale).chatActions;

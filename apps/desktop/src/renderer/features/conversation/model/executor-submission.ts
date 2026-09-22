@@ -72,7 +72,7 @@ export function newTaskConfiguration(
   return {
     ...(executor
       ? { executorId: executor.executorId, executorConfig: executor.configuration }
-      : (input.newChatModel ?? {})),
+      : { ...(input.newChatModel ?? {}), executorConfig: undefined }),
     ...(!executor ? { thinkingLevel: input.pendingNewChatThinkingLevel } : {}),
     ...(input.newChatPermissionChoice ? { permissionMode: input.newChatPermissionChoice } : {}),
     collaborationMode: executor ? ('agent' as const) : input.newChatCollaborationMode,

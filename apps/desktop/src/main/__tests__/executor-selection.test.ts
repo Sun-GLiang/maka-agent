@@ -41,7 +41,7 @@ test('late draft discovery cannot replace the current target; existing tasks ins
   const services = {
     subscribeChanges: () => () => {},
     newTasks: { subscribeChanges: () => () => {}, getExecutors: async () => { discoveryCalls++; return discoveryCalls === 1 ? old : [entry]; } },
-    sessions: { getExecutorState: async () => { inspectionCalls++; return [{ ...entry, readiness: 'history_only' }]; }, setExecutorConfiguration: async () => ({ ok: false, code: 'operation_unavailable' }) },
+    sessions: { getExecutorState: async () => { inspectionCalls++; return [{ ...entry, readiness: 'history_only' }]; }, setExecutorModelConfiguration: async () => ({ ok: false, code: 'operation_unavailable' }) },
   } as unknown as ConversationServices;
   function Probe(props: { draftKey: string; session?: SessionSummary }) {
     latest = useExecutorSelection({ key: props.draftKey, cwd: '/fixture', target: { hostId: 'host', profileId: 'profile', projectId: null }, session: props.session });

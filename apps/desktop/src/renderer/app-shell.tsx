@@ -733,6 +733,7 @@ function AppShellContent({
     newChatProviderType,
     newChatThinkingLevels,
     newChatThinkingLevel,
+    pendingNewChatThinkingLevel,
     newChatExecutionThinkingLevel,
     composerSupportsVision,
     setPendingNewChatModel,

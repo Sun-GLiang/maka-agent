@@ -1310,7 +1310,10 @@ export class HostSessionCatalogCoordinator {
       );
     if (
       patch.executorConfig &&
-      (!current.executorId || !isExecutorConfiguration(patch.executorConfig))
+      (!current.executorId ||
+        patch.executorTarget !== undefined ||
+        patch.modelTarget !== undefined ||
+        !isExecutorConfiguration(patch.executorConfig))
     )
       throw new SessionOperationFailure('invalid_request', 'Invalid executor configuration');
     if (
@@ -1340,7 +1343,12 @@ export class HostSessionCatalogCoordinator {
         : (patch.thinkingLevel ?? undefined);
     if (patch.executorTarget !== undefined) {
       try {
-        await this.#assertExecutorAvailable?.(current.id, patch.executorTarget.executorId);
+        await this.#assertExecutorAvailable?.(
+          current.id,
+          patch.executorTarget.executorId,
+          undefined,
+          current.cwd,
+        );
       } catch {
         throw new SessionOperationFailure(
           'operation_unavailable',
@@ -1477,6 +1485,7 @@ function isPermissionModeOnlyPatch(patch: SessionConfigurationUpdateInput['patch
     patch.permissionMode !== undefined &&
     patch.modelTarget === undefined &&
     patch.executorTarget === undefined &&
+    patch.executorConfig === undefined &&
     patch.thinkingLevel === undefined &&
     patch.collaborationMode === undefined &&
     patch.orchestrationMode === undefined
@@ -1503,6 +1512,13 @@ async function prepareCreate(input: SessionCreateInput): Promise<PreparedSession
   }
   if (input.executorId !== undefined && !isExecutorId(input.executorId)) {
     throw new SessionOperationFailure('invalid_request', 'Session executor id is invalid');
+  }
+  if (
+    input.executorConfig?.model &&
+    input.executorModel !== undefined &&
+    input.executorConfig.model !== input.executorModel
+  ) {
+    throw new SessionOperationFailure('invalid_request', 'Conflicting executor models');
   }
   if (input.executorModel !== undefined && input.executorId === undefined) {
     throw new SessionOperationFailure('invalid_request', 'Executor model requires an executor id');

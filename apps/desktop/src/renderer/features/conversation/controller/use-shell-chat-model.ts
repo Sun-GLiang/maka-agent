@@ -344,7 +344,10 @@ export function useShellChatModel(options: {
   ]);
 
   return {
-    executor,
+    executor: { ...executor, select: async (next) => {
+      if (!activeSession && pendingExecutorTarget) setPendingExecutionChoice(null);
+      await executor.select(next);
+    } },
     composerModelProps: {
       modelLabel: activeModelLabel ?? newChatModelLabel,
       activeModelConnectionId: options.activeSession?.llmConnectionId,
@@ -388,6 +391,7 @@ export function useShellChatModel(options: {
       if (activeSession) {
         await options.setSessionExecutor?.(activeSession.id, target);
       } else {
+        await executor.select(undefined);
         setPendingExecutionChoice(target);
         setPendingNewChatThinkingLevel(target.thinkingLevel ?? null);
       }

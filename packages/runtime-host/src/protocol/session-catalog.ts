@@ -565,6 +565,13 @@ export function decodeSessionCreateInput(value: unknown): SessionCreateInput {
   if ((executorId === undefined) === (target === undefined)) {
     throw invalidProtocolFrame('Session creation requires exactly one model target or executor id');
   }
+  if (
+    executorModel !== undefined &&
+    (input.executorConfig as ExecutorConfiguration | undefined)?.model !== undefined &&
+    executorModel !== (input.executorConfig as ExecutorConfiguration).model
+  ) {
+    throw invalidProtocolFrame('Conflicting executor models');
+  }
   if (executorModel !== undefined && executorId === undefined) {
     throw invalidProtocolFrame('Executor model requires an executor id');
   }
@@ -665,7 +672,9 @@ export function decodeSessionConfigurationUpdateInput(
   );
   if (
     patch.executorConfig !== undefined &&
-    (!isExecutorConfiguration(patch.executorConfig) || patch.modelTarget !== undefined)
+    (!isExecutorConfiguration(patch.executorConfig) ||
+      patch.modelTarget !== undefined ||
+      patch.executorTarget !== undefined)
   )
     throw invalidProtocolFrame('Invalid executor configuration');
   if (Object.keys(patch).length === 0) {
