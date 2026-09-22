@@ -385,6 +385,8 @@ export const Composer = forwardRef<
     waitForSessionReference?(): Promise<boolean>;
     modelLabel?: string;
     activeSession?: SessionSummary;
+    executorTarget?: import('./client-plugin-slots.js').MakaClientExecutorTarget;
+    onExecutorTargetChange?(target: import('./client-plugin-slots.js').MakaClientExecutorTarget): void | Promise<void>;
     activeModelConnectionId?: string;
     activeModelConnectionSlug?: string;
     activeModel?: string;
@@ -393,6 +395,8 @@ export const Composer = forwardRef<
     modelChoices?: ChatModelChoice[];
     /** Model-picker surface; 'wheel' is the collapsed WorkHub's inline picker, and any non-popover surface drops the thinking picker to a bottom sheet. */
     pickerPresentation?: 'popover' | 'bottom-sheet' | 'wheel';
+    /** Distinguishes the active Session model from defaults applied only to newly created WorkHub Sessions. */
+    modelSelectionPurpose?: 'session' | 'new-work-default';
     /**
      * Close the model/thinking pickers' open surfaces while an interaction
      * prompt occludes the composer — a bottom sheet stays a modal dialog even
@@ -1784,6 +1788,26 @@ export const Composer = forwardRef<
   );
   const hasPlusMenuModes = Boolean(props.onPlanModeChange || props.onOrchestrationModeChange);
   const showPlusMenu = Boolean(hasPlusMenuActions || hasPlusMenuModes);
+  const renderNativeThinkingControl = (): ReactNode =>
+    props.activeSession ? (
+      <ThinkingLevelSelector
+        levels={props.activeThinkingLevels ?? []}
+        current={props.activeThinkingLevel}
+        presentation={thinkingPresentation}
+        isReadOnly={props.pickersReadOnly}
+        onChange={props.onThinkingLevelChange}
+        disabled={!modelSwitchAvailability.available}
+        disabledReason={thinkingSwitcherDisabledReason}
+      />
+    ) : (
+      <ThinkingLevelSelector
+        levels={props.newChatThinkingLevels ?? []}
+        current={props.newChatThinkingLevel}
+        presentation={thinkingPresentation}
+        isReadOnly={props.pickersReadOnly}
+        onChange={props.onNewChatThinkingLevelChange}
+      />
+    );
 
   return (
     <>
@@ -2276,6 +2300,34 @@ export const Composer = forwardRef<
                   its explanation, so the footer never reflows when a turn
                   starts or ends. */}
               <div className="maka-model-selection-controls">
+                <MakaClientSessionScope sessionId={props.activeSession?.id}>
+                  <MakaClientSlotOutlet
+                    name="conversation.composer.model-selection"
+                    owner={{
+                      disabled: props.disabled === true,
+                      streaming: props.streaming === true,
+                      hasSession: props.activeSession !== undefined,
+                      presentation: props.pickerPresentation,
+                      isReadOnly: props.pickersReadOnly,
+                      purpose: props.modelSelectionPurpose,
+                      modelChoices: props.modelChoices ?? [],
+                      activeModel: props.activeModel,
+                      activeModelLabel: props.activeModelLabel,
+                      activeModelConnectionId: props.activeModelConnectionId,
+                      activeModelConnectionSlug: props.activeModelConnectionSlug,
+                      activeProviderType: props.activeProviderType,
+                      renderProviderMark: props.renderProviderMark,
+                      newChatModel: props.newChatModel,
+                      executorTarget: props.executorTarget,
+                      onNativeModelChange: props.activeSession
+                        ? props.onModelChange
+                        : props.onPickNewChatModel,
+                      renderNativeThinkingControl,
+                      onExecutorTargetChange: props.onExecutorTargetChange,
+                    }}
+                    options={{
+                      fallback: (
+                        <>
                 {props.activeSession ? (
                   <ChatModelSwitcher
                     presentation={props.pickerPresentation}
@@ -2321,25 +2373,12 @@ export const Composer = forwardRef<
                     showUnavailableStatus={props.showStaticModelUnavailableStatus}
                   />
                 )}
-                {props.activeSession ? (
-                  <ThinkingLevelSelector
-                    levels={props.activeThinkingLevels ?? []}
-                    current={props.activeThinkingLevel}
-                    presentation={thinkingPresentation}
-                    isReadOnly={props.pickersReadOnly}
-                    onChange={props.onThinkingLevelChange}
-                    disabled={!modelSwitchAvailability.available}
-                    disabledReason={thinkingSwitcherDisabledReason}
+                {renderNativeThinkingControl()}
+                        </>
+                      ),
+                    }}
                   />
-                ) : (
-                  <ThinkingLevelSelector
-                    levels={props.newChatThinkingLevels ?? []}
-                    current={props.newChatThinkingLevel}
-                    presentation={thinkingPresentation}
-                    isReadOnly={props.pickersReadOnly}
-                    onChange={props.onNewChatThinkingLevelChange}
-                  />
-                )}
+                </MakaClientSessionScope>
                 {props.contextUsage ? <ContextUsageAction {...props.contextUsage} /> : null}
               </div>
               {/* The project decides where a NEW chat starts, which makes it a
@@ -2393,6 +2432,8 @@ export const Composer = forwardRef<
                     disabled: props.disabled === true,
                     streaming: props.streaming === true,
                     hasSession: props.activeSession !== undefined,
+                    executorTarget: props.executorTarget,
+                    onExecutorTargetChange: props.onExecutorTargetChange,
                   }}
                 />
               </MakaClientSessionScope>

@@ -19,6 +19,18 @@
 
 # PR5 validation record
 
+## Follow-up main refresh
+
+Merged Apache main `e6db756890c36a8d4396241cc4f3a6f180529d20`. Main now uses
+epoch 175 for executor-model protocol changes; Session MCP advances it to 176,
+preserving the complete main protocol history and both lifecycle fixes below.
+The protocol epoch guard passed against that main commit.
+
+On this merge result, `build:test`, the production build, workspace typechecking,
+lint, format and Desktop/UI knip passed. The full Runtime Host dist suite passed
+2006 tests with 12 skipped; the full CLI dist suite passed 1155 tests with 3
+skipped. Neither suite had failures or cancellations. Desktop E2E was not rerun.
+
 ## September 22 conflict resolution and review
 
 Merged Apache main `8bde344b18d2c3b79f8f367d8b3645a4612606fc`, preserving its
