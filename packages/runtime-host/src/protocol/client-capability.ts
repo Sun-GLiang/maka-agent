@@ -314,7 +314,10 @@ export function decodeClientCapabilityReplaceInput(value: unknown): ClientCapabi
   if (!Array.isArray(serviceValues) || serviceValues.length > CLIENT_CAPABILITY_MAX_SERVICES) {
     throw invalidProtocolFrame('Invalid Client Capability services');
   }
-  if (record.offers.length === 0 && serviceValues.length === 0) {
+  // An empty Session snapshot clears lost contracts after reconnect and keeps
+  // a bounded registration through which the Host can signal Session retirement.
+  // Connection-wide publications still use unregister for withdrawal.
+  if (record.offers.length === 0 && serviceValues.length === 0 && record.sessionId === undefined) {
     throw invalidProtocolFrame('Client Capability registration is empty');
   }
   const offers = record.offers.map((offer) => decodeClientCapabilityOffer(offer));

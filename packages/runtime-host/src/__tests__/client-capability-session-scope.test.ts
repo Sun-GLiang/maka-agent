@@ -32,6 +32,7 @@ import {
   MAX_SESSION_REGISTRATIONS_PER_PROVIDER,
 } from '../server/client-capability-coordinator.js';
 import { RuntimePolicyActivationGate } from '../server/runtime-policy-activation-gate.js';
+import { ClientCapabilityChannel } from '../client/client-capability-channel.js';
 import { clientCapabilityConnectionIdentity } from './fixtures/client-capability.js';
 
 test('one connection isolates same-named Session tools, replacements and unregisters', async (t) => {
@@ -161,36 +162,42 @@ test('Session retirement releases scoped registrations and prevents rebinding re
   assert.equal(coordinator.snapshotForSession('removed'), undefined);
 });
 
-test('a provider cannot retain unbounded fabricated Session registrations', async (t) => {
-  const { coordinator, attach, publish } = fixture();
-  t.after(() => coordinator.close());
-  attach('one');
-  for (let index = 0; index < MAX_SESSION_REGISTRATIONS_PER_PROVIDER; index++) {
-    await publish('one', `fabricated-${index}`, `registration-${index}`);
-  }
-  const rejected = await coordinator.handlers['client.capability.replace'](
-    input('fabricated-over-limit', 'over-limit'),
-    context('one'),
-  );
-  assert.deepEqual(rejected, {
-    ok: false,
-    error: {
-      code: 'invalid_request',
-      message: 'Client Capability Session registration limit reached',
-    },
-  });
-  await publish('one', 'fabricated-0', 'replacement-at-limit');
-  assert.equal(
-    (
-      await coordinator.handlers['client.capability.unregister'](
-        { registrationId: 'registration-1' },
+for (const empty of [false, true])
+  test(`a provider cannot retain unbounded ${empty ? 'empty' : 'populated'} Session registrations`, async (t) => {
+    const { coordinator, attach, publish } = fixture();
+    t.after(() => coordinator.close());
+    attach('one');
+    for (let index = 0; index < MAX_SESSION_REGISTRATIONS_PER_PROVIDER; index++) {
+      const registration = input(`fabricated-${index}`, `registration-${index}`);
+      const outcome = await coordinator.handlers['client.capability.replace'](
+        empty ? { ...registration, offers: [] } : registration,
         context('one'),
-      )
-    ).ok,
-    true,
-  );
-  await publish('one', 'new-after-unregister', 'new-registration');
-});
+      );
+      assert.equal(outcome.ok, true);
+    }
+    const rejected = await coordinator.handlers['client.capability.replace'](
+      input('fabricated-over-limit', 'over-limit'),
+      context('one'),
+    );
+    assert.deepEqual(rejected, {
+      ok: false,
+      error: {
+        code: 'invalid_request',
+        message: 'Client Capability Session registration limit reached',
+      },
+    });
+    await publish('one', 'fabricated-0', 'replacement-at-limit');
+    assert.equal(
+      (
+        await coordinator.handlers['client.capability.unregister'](
+          { registrationId: 'registration-1' },
+          context('one'),
+        )
+      ).ok,
+      true,
+    );
+    await publish('one', 'new-after-unregister', 'new-registration');
+  });
 
 test('Session retirement follows an already queued replacement', async (t) => {
   const { coordinator, activation, attach, publish } = fixture();
@@ -233,6 +240,91 @@ test('Session retirement invalidates a provider-wide binding preview before comm
   const committed = await preview.commit();
   assert.equal(committed.ok, false);
   assert.equal(coordinator.snapshotForSession('retired'), undefined);
+});
+
+test('retirement rejects a later queued refresh and notifies the current Client provider', async (t) => {
+  const { coordinator, activation, retiredSessions } = fixture();
+  let retired = 0;
+  const channel = new ClientCapabilityChannel({
+    write: async () => undefined,
+    replace: async (registration) => {
+      const outcome = await coordinator.handlers['client.capability.replace'](
+        registration,
+        context('one'),
+      );
+      if (!outcome.ok) throw new Error(outcome.error.message);
+      return outcome.result;
+    },
+    unregister: async (registration) => {
+      const outcome = await coordinator.handlers['client.capability.unregister'](
+        registration,
+        context('one'),
+      );
+      if (!outcome.ok) throw new Error(outcome.error.message);
+      return outcome.result;
+    },
+    onFailure: (error) => {
+      throw error;
+    },
+  });
+  coordinator.attachConnection(clientCapabilityConnectionIdentity('one'), {
+    send: async (frame) => channel.accept(frame),
+  });
+  t.after(async () => {
+    await coordinator.close();
+    channel.close(new Error('test complete'));
+  });
+  const provider = {
+    offers: () => input('retired', 'unused').offers,
+    currentRegistrationRetired: () => {
+      retired += 1;
+    },
+  };
+  await channel.replace(provider, 1_000, 'retired');
+  await coordinator.bindSession('retired', 'one');
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const active = activation.runReadActivation(() => barrier);
+  const retiring = coordinator.retireSessions(['retired']);
+  const refresh = assert.rejects(channel.replace(provider, 1_000, 'retired'), /retired/);
+  // The lifecycle owner commits archive/removal before capability retirement.
+  // Change it after replace was called: the guard must run inside the queue.
+  retiredSessions.add('retired');
+  release();
+  await Promise.all([active, retiring, refresh]);
+  assert.equal(retired, 1);
+  assert.equal(coordinator.snapshotForSession('retired'), undefined);
+  await assert.rejects(channel.unregister(1_000, 'retired'), /No Client Capability registration/);
+  await assert.rejects(channel.replace(provider, 1_000, 'retired'), /retired/);
+  // Pre-creation publication and unrelated Session slots remain available.
+  await channel.replace(provider, 1_000, 'new-session');
+});
+
+test('an empty scoped replacement reconciles lost tools without touching other Sessions', async (t) => {
+  const { coordinator, attach, publish } = fixture();
+  t.after(() => coordinator.close());
+  const first = attach('first');
+  await publish('first', 'a', 'old-a');
+  await publish('first', 'b', 'old-b');
+  await coordinator.bindSession('a', 'first');
+  await coordinator.bindSession('b', 'first');
+  await first.close();
+  attach('reconnected');
+  const outcome = await coordinator.handlers['client.capability.replace'](
+    { sessionId: 'a', registrationId: 'empty-a', offers: [] },
+    context('reconnected'),
+  );
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  assert.equal((await coordinator.bindSession('a', 'reconnected')).ok, true);
+  assert.equal(coordinator.snapshotForSession('a'), undefined);
+  assert.equal((await coordinator.bindSession('b', 'reconnected')).ok, false);
+  await publish('reconnected', 'a', 'recovered-a');
+  assert.equal((await coordinator.bindSession('a', 'reconnected')).ok, true);
+  const recovered = coordinator.snapshotForSession('a');
+  assert.ok(recovered);
+  recovered.release();
 });
 
 test('connection and Session publications reject overlapping identities in either direction', async (t) => {
@@ -327,6 +419,10 @@ test('local and remote MCP admission grant only the declared tool in its target 
 test('MCP policy requires a target, session affinity, no Host paths and no services', () => {
   const valid = input('a', 'a');
   assert.equal(decodeClientCapabilityReplaceInput(valid).sessionId, 'a');
+  assert.deepEqual(decodeClientCapabilityReplaceInput({ ...valid, offers: [] }).offers, []);
+  for (const sessionId of [undefined, '', null]) {
+    assert.throws(() => decodeClientCapabilityReplaceInput({ ...valid, sessionId, offers: [] }));
+  }
   for (const invalid of [
     { ...valid, sessionId: undefined },
     { ...valid, sessionId: '' },
@@ -340,6 +436,7 @@ test('MCP policy requires a target, session affinity, no Host paths and no servi
 
 function fixture(principalKind: 'local_owner' | 'remote_owner' = 'local_owner') {
   const activation = new RuntimePolicyActivationGate();
+  const retiredSessions = new Set<string>();
   const approvals: ClientCapabilitySessionGrantKey[] = [];
   const grants = new Map<string, ClientCapabilitySessionGrantKey>();
   const sent: ClientCapabilityHostFrame[] = [];
@@ -353,6 +450,7 @@ function fixture(principalKind: 'local_owner' | 'remote_owner' = 'local_owner') 
     ]);
   const coordinator = new HostClientCapabilityCoordinator({
     activation,
+    isSessionRetired: async (sessionId) => retiredSessions.has(sessionId),
     onModelToolsChanged: () => undefined,
     grants: {
       readClientCapabilitySessionGrant: async (value) =>
@@ -442,7 +540,7 @@ function fixture(principalKind: 'local_owner' | 'remote_owner' = 'local_owner') 
     );
     return prepared.execute(invocation);
   };
-  return { coordinator, activation, attach, publish, invoke, approvals, sent };
+  return { coordinator, activation, attach, publish, invoke, approvals, sent, retiredSessions };
 }
 
 function input(

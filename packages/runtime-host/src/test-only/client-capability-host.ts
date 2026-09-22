@@ -27,6 +27,7 @@ export { RuntimePolicyActivationGate } from '../server/runtime-policy-activation
 
 export function clientCapabilityCoordinatorTestAdmission() {
   return {
+    isSessionRetired: async () => false,
     interactions: {
       requestClientCapabilityApproval: async () => {
         throw new Error('Unexpected Client Capability approval request');

@@ -182,6 +182,7 @@ type ClientCapabilityToolBinding = ClientCapabilityBoundTool['binding'];
 
 export interface HostClientCapabilityCoordinatorOptions {
   readonly activation: RuntimePolicyActivationGate;
+  readonly isSessionRetired: (sessionId: string) => Promise<boolean>;
   readonly onModelToolsChanged: () => void;
   readonly interactions: Pick<HostInteractionCoordinator, 'requestClientCapabilityApproval'>;
   readonly grants: Pick<
@@ -216,6 +217,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
   };
 
   readonly #activation: RuntimePolicyActivationGate;
+  readonly #isSessionRetired: HostClientCapabilityCoordinatorOptions['isSessionRetired'];
   readonly #onModelToolsChanged: () => void;
   readonly #interactions: HostClientCapabilityCoordinatorOptions['interactions'];
   readonly #grants: HostClientCapabilityCoordinatorOptions['grants'];
@@ -231,6 +233,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
 
   constructor(options: HostClientCapabilityCoordinatorOptions) {
     this.#activation = options.activation;
+    this.#isSessionRetired = options.isSessionRetired;
     this.#onModelToolsChanged = options.onModelToolsChanged;
     this.#interactions = options.interactions;
     this.#grants = options.grants;
@@ -952,6 +955,18 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
           error: {
             code: 'host_draining',
             message: 'Client Capability registry is draining',
+          },
+        };
+      }
+      // The lifecycle owner commits archive/removal before retiring capabilities.
+      // Read that authority inside the mutation lane: a queued refresh must not
+      // recreate a retired slot. Never-created IDs remain valid for ACP preparation.
+      if (input.sessionId !== undefined && (await this.#isSessionRetired(input.sessionId))) {
+        return {
+          ok: false,
+          error: {
+            code: 'invalid_request',
+            message: 'Client Capability target Session is retired',
           },
         };
       }

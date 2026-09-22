@@ -25,6 +25,12 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { RequestError, type NewSessionRequest } from '@agentclientprotocol/sdk';
 import { MCP_CONFIG_VERSION } from '@maka/core/mcp';
+import { McpClientManager } from '@maka/mcp';
+import {
+  HostClientCapabilityCoordinator,
+  RuntimePolicyActivationGate,
+  clientCapabilityCoordinatorTestAdmission,
+} from '@maka/runtime-host/test-only/client-capability-host';
 import { deferred, waitFor, withTimeout } from '@maka/core/test-only/async-primitives';
 import {
   RuntimeHostOperationError,
@@ -344,9 +350,105 @@ test('a Session remains ready when its only MCP server crashes and all tools wit
   for (const event of starts) {
     if (processExists(event.pid)) process.kill(event.pid, 'SIGKILL');
   }
-  await waitFor(() => host.unregisters.length === 1, { timeoutMs: 5_000, pollMs: 10 });
+  await waitFor(() => host.replacements.length === 2, { timeoutMs: 5_000, pollMs: 10 });
   await mcp.ready();
+  assert.deepEqual(host.replacements[1]!.provider.offers(), []);
+  assert.deepEqual(host.unregisters, []);
+  await assertFixtureExited(root, 'fixture');
+  await mcp.close();
   assert.deepEqual(host.unregisters, [{ sessionId }]);
+});
+
+test('a server crash while disconnected publishes an empty scope before Host prompt admission', {
+  timeout: 20_000,
+}, async (t) => {
+  const root = await temporaryRoot();
+  const host = fakeHost();
+  const coordinator = new HostClientCapabilityCoordinator({
+    ...clientCapabilityCoordinatorTestAdmission(),
+    activation: new RuntimePolicyActivationGate(),
+    onModelToolsChanged: () => undefined,
+  });
+  let connectionId = 'connection-1';
+  const attach = () =>
+    coordinator.attachConnection(
+      {
+        connectionId,
+        clientInstanceId: 'acp',
+        principalId: 'owner',
+        principalKind: 'local_owner',
+      },
+      { send: async () => undefined },
+    );
+  let connection = attach();
+  const context = () => ({
+    connectionId,
+    hostEpoch: 'host-1',
+    principal: 'local_os_user',
+    acquireResidency: () => ({ release: () => undefined }),
+  });
+  host.replace = async () => {
+    const replacement = host.replacements.at(-1)!;
+    const outcome = await coordinator.handlers['client.capability.replace'](
+      {
+        sessionId,
+        registrationId: `registration-${host.replacements.length}`,
+        offers: replacement.provider.offers(),
+      },
+      context(),
+    );
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+  };
+  host.unregister = async () => {
+    const outcome = await coordinator.handlers['client.capability.unregister'](
+      {
+        registrationId: `registration-${host.replacements.length}`,
+      },
+      context(),
+    );
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+  };
+  // Observe the actual manager's disconnect event before reconnecting the Host.
+  const disconnected = deferred();
+  const onChange = McpClientManager.prototype.onChange;
+  t.mock.method(
+    McpClientManager.prototype,
+    'onChange',
+    function (this: McpClientManager, listener: () => void) {
+      return onChange.call(this, () => {
+        if (this.status('fixture')?.state === 'disconnected') disconnected.resolve();
+        listener();
+      });
+    },
+  );
+  const mcp = new AcpSessionMcp(
+    sessionId,
+    createAcpMcpConfig({ cwd: root, mcpServers: [stdioServer(root, 'fixture')] }),
+    host.connection,
+  );
+  t.after(async () => {
+    await mcp.close();
+    await connection.close();
+    await coordinator.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await mcp.prepare();
+  assert.equal((await coordinator.bindSession(sessionId, connectionId)).ok, true);
+  host.emit({ kind: 'unavailable' });
+  await connection.close();
+  const starts = (await fixtureEvents(root, 'fixture')).filter((event) => event.event === 'start');
+  assert.ok(starts.length > 0);
+  for (const event of starts) if (processExists(event.pid)) process.kill(event.pid, 'SIGKILL');
+  await withTimeout(disconnected.promise, 5_000, 'MCP disconnect was not observed');
+  connectionId = 'connection-2';
+  connection = attach();
+  host.emit({ kind: 'connected', hostEpoch: 'host-1', connectionId });
+  await mcp.ready();
+  assert.deepEqual(host.replacements.at(-1)!.provider.offers(), []);
+  assert.equal((await coordinator.bindSession(sessionId, connectionId)).ok, true);
+  assert.equal(coordinator.snapshotForSession(sessionId), undefined);
+  await mcp.ready();
+  assert.equal(host.replacements.length, 2);
   await assertFixtureExited(root, 'fixture');
 });
 

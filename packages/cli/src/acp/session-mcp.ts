@@ -121,7 +121,13 @@ export class AcpSessionMcp {
         createMcpCapabilityProvider(this.#manager, {
           admission: 'mcp',
           onCurrentRegistrationRetired: () => this.#retire(),
-        }),
+        }) ?? {
+          // Empty is still an authoritative Session snapshot. Publish it on a
+          // new connection to clear lost Host contracts, and retain retirement
+          // notification even while every configured server has no tools.
+          offers: () => [],
+          currentRegistrationRetired: () => this.#retire(),
+        },
       replace: (provider) => connection.replaceClientCapabilities(provider, { sessionId }),
       unregister: () => connection.unregisterClientCapabilities({ sessionId }),
       onState: () => undefined,

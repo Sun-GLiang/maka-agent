@@ -1809,6 +1809,7 @@ function createCoordinator(
 ): HostClientCapabilityCoordinator {
   return new HostClientCapabilityCoordinator({
     ...admission,
+    isSessionRetired: async () => false,
     activation: new RuntimePolicyActivationGate(),
     onModelToolsChanged,
   });

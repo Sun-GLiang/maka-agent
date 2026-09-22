@@ -1033,6 +1033,73 @@ test('a committed Client Capability replacement stays acknowledged when recovery
   });
 });
 
+test('Session capability publication follows durable archive and removal state, including after reconnect', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const session = await stores.sessionStore.create({
+      cwd: root,
+      llmConnectionId: FAKE_CONNECTION_ID,
+      llmConnectionSlug: 'fake',
+      model: 'fake-model',
+      permissionMode: 'ask',
+    });
+    const { composition } = await createCapturedExecutionComposition(owner);
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'scoped-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    const attach = () =>
+      composition.clientCapabilities!.attachConnection(
+        clientCapabilityConnectionIdentity(context.connectionId),
+        { send: async () => undefined },
+      );
+    let connection = attach();
+    const publish = (sessionId: string) =>
+      composition.handlers['client.capability.replace'](
+        {
+          registrationId: randomUUID(),
+          sessionId,
+          offers: [],
+        },
+        context,
+      );
+    const setArchived = async (archived: boolean) => {
+      const snapshot = await stores.sessionStore.readHeaderRecordSnapshot(session.id);
+      await stores.sessionStore.setSessionsArchivedVersioned(
+        [{ sessionId: session.id, expectedVersion: snapshot.revision }],
+        archived,
+      );
+    };
+    try {
+      assert.equal(
+        (await publish(randomUUID())).ok,
+        true,
+        'ACP may publish before Session creation',
+      );
+      assert.equal((await publish(session.id)).ok, true);
+      await setArchived(true);
+      const archived = await publish(session.id);
+      assert.equal(archived.ok, false);
+      if (!archived.ok) assert.match(archived.error.message, /retired/);
+      await connection.close();
+      connection = attach();
+      assert.equal((await publish(session.id)).ok, false, 'reconnect must not bypass retirement');
+      await setArchived(false);
+      assert.equal((await publish(session.id)).ok, true, 'unarchiving allows a fresh publication');
+      const snapshot = await stores.sessionStore.readHeaderRecordSnapshot(session.id);
+      await stores.sessionStore.removeSessionsVersioned([
+        { sessionId: session.id, expectedVersion: snapshot.revision },
+      ]);
+      assert.equal((await publish(session.id)).ok, false, 'a tombstone is not a pre-creation ID');
+    } finally {
+      await connection.close();
+      await composition.close();
+    }
+  });
+});
+
 test('default production WorkHub selects and delegates through its durable Host interaction', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
