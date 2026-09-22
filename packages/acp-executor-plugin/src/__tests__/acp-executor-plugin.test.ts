@@ -183,6 +183,108 @@ test('runtime forwards cancellation to ACP and waits for settlement', async () =
   }
 });
 
+test('discovery shares a disposable probe, does not mark a task, and first prompt applies the task model', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  let marks = 0;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      createConnection: protocol.factory,
+      state: {
+        has: async () => false,
+        mark: async () => {
+          marks++;
+        },
+      },
+    },
+  );
+  try {
+    const [a, b] = await Promise.all([
+      executor.discover({ cwd: fixture.root, signal: new AbortController().signal }),
+      executor.discover({ cwd: fixture.root, signal: new AbortController().signal }),
+    ]);
+    assert.deepEqual(a, b);
+    assert.equal(a.readiness, 'ready');
+    assert.equal(a.currentModel, 'default');
+    assert.deepEqual(
+      a.models.map((model) => model.id),
+      ['default', 'fast'],
+    );
+    assert.equal(protocol.connections, 1);
+    assert.equal(protocol.disposals, 1);
+    assert.equal(marks, 0);
+    assert.equal(protocol.prompts, 0);
+    assert.equal(
+      (
+        await executor.execute(
+          { ...request('selected'), configuration: { model: 'fast' } },
+          executorContext([]),
+        )
+      ).status,
+      'completed',
+    );
+    assert.equal(protocol.selectedModel, 'fast');
+    assert.equal(marks, 1);
+    assert.equal(protocol.connections, 2);
+    const before = protocol.connections;
+    const status = await executor.inspectConversation({
+      conversationKey: 'session-a',
+      cwd: fixture.root,
+    });
+    assert.equal(status.currentModel, 'fast');
+    assert.equal(protocol.connections, before);
+    await executor.configureConversation(
+      { conversationKey: 'session-a', cwd: fixture.root, configuration: { model: 'default' } },
+      new AbortController().signal,
+    );
+    assert.equal(protocol.selectedModel, 'default');
+    await assert.rejects(
+      () =>
+        executor.configureConversation(
+          { conversationKey: 'session-a', cwd: fixture.root, configuration: { model: 'removed' } },
+          new AbortController().signal,
+        ),
+      /unavailable/u,
+    );
+    assert.equal(protocol.selectedModel, 'default');
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('questions retain option identity and output updates retain arrival order', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const executor = new AcpExecutor(
+    { ...adapter, permissionKind: () => 'question' },
+    { executable: fixture.executable },
+    { createConnection: protocol.factory },
+  );
+  const events: unknown[] = [];
+  try {
+    const result = await executor.execute(request('question'), {
+      ...executorContext(events),
+      requestPermission: async (request) => {
+        assert.equal(request.kind, 'question');
+        assert.equal(request.options[0]?.optionId, 'allow_once');
+        events.push({ type: 'question' });
+        return { outcome: 'selected', optionId: 'allow_once' };
+      },
+    });
+    assert.equal(result.status, 'completed');
+    assert.deepEqual(
+      events.map((event) => (event as { type: string }).type),
+      ['question', 'output_delta', 'tool_start', 'tool_result'],
+    );
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 function request(text: string) {
   return {
     sessionId: 'session-a',
@@ -282,7 +384,20 @@ function fakeProtocol(): {
           }
           if (method === methods.agent.session.setConfigOption) {
             fixture.selectedModel = String(params.value);
-            return { configOptions: [] };
+            return {
+              configOptions: [
+                {
+                  type: 'select',
+                  id: 'model',
+                  name: 'Model',
+                  currentValue: params.value,
+                  options: [
+                    { value: 'default', name: 'Default' },
+                    { value: 'fast', name: 'Fast' },
+                  ],
+                },
+              ],
+            };
           }
           if (method === methods.agent.session.prompt) {
             fixture.prompts += 1;

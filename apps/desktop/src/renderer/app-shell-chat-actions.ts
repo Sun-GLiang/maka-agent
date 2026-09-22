@@ -183,6 +183,8 @@ export function createAppShellChatActions(deps: {
   ) => void;
   toastApi: ToastApi;
   newChatModel: PendingNewChatModel;
+  executorSelection?: { executorId: string; configuration: import('@maka/core/executor-catalog').ExecutorConfiguration };
+  executorEntry?: Conversation.ExecutorSubmission['executorEntry'];
   /** Undefined applies the Host's model default; null explicitly keeps the provider default. */
   pendingNewChatThinkingLevel: PendingNewChatThinkingLevel;
   /**
@@ -309,6 +311,7 @@ export function createAppShellChatActions(deps: {
   ): Promise<boolean> {
     const { directoryReferences, quotes } = options;
     const initialSessionId = options.targetSessionId ?? activeIdRef.current;
+    if (!Conversation.canSubmitExecutor(deps, pending?.length ?? 0)) return false;
     const sendOwner = captureComposerImportOwner();
     const selectionIsCurrent = captureSelection();
     if (!initialSessionId && !newTaskTarget) return false;
@@ -379,11 +382,7 @@ export function createAppShellChatActions(deps: {
         if (pending?.length) preflightAttachmentItems(pending);
         const session = await window.maka.newTasks.create(newTaskTarget, {
           name: DEFAULT_SESSION_NAME,
-          ...(newChatModel !== null ? { ...newChatModel } : {}),
-          thinkingLevel: pendingNewChatThinkingLevel,
-          ...(newChatPermissionChoice ? { permissionMode: newChatPermissionChoice } : {}),
-          collaborationMode: newChatCollaborationMode,
-          orchestrationMode: newChatOrchestrationMode,
+          ...Conversation.newTaskConfiguration(deps),
         });
         unsentSessionId = session.id;
         // Creation can also yield while a same-target New Task is reopened.

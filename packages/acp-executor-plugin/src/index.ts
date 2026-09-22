@@ -20,7 +20,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { access, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, rm, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import type { ExecutorCatalogEntry, ExecutorConfiguration } from '@maka/core/executor-catalog';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -46,7 +48,7 @@ import type {
   PluginExecutorToolResultContent,
 } from '@maka/runtime/plugin-executor-service';
 import type { Context, Disposable } from '@maka/runtime/plugin-kernel';
-import { terminateChildProcessTree } from '@maka/runtime/process-tree-terminator';
+import { terminateProcessTree } from '@maka/runtime/process-tree-terminator';
 
 declare module '@maka/runtime/plugin-kernel' {
   interface Context {
@@ -73,7 +75,6 @@ export interface AcpLaunchSpec {
 
 export interface AcpConfiguredAgent {
   readonly launch: AcpLaunchSpec;
-  readonly supportsAttachments?: boolean;
 }
 
 /** Product-specific code ends at this interface. */
@@ -82,6 +83,8 @@ export interface AcpAgentAdapter<TConfig = unknown> {
   readonly displayName: string;
   readonly clientName?: string;
   configure(config: TConfig): AcpConfiguredAgent;
+  permissionKind?(request: RequestPermissionRequest): 'permission' | 'question';
+  executionFailed?(text: string): boolean;
 }
 
 export interface AcpConnectionFactoryInput extends AcpLaunchSpec {
@@ -126,6 +129,7 @@ interface ToolSnapshot {
 
 interface RetainedSession {
   readonly conversationKey: string;
+  readonly configuration?: ExecutorConfiguration;
   readonly cwd: string;
   owner?: AcpConnectionOwner;
   connection?: ClientConnection;
@@ -147,6 +151,8 @@ export class AcpExecutor implements PluginExecutorProvider {
   readonly #state?: AcpConversationStateStore;
   readonly #sessions = new Map<string, RetainedSession>();
   #disposed = false;
+  #catalog?: ExecutorCatalogEntry;
+  #discovery?: Promise<ExecutorCatalogEntry>;
 
   constructor(
     adapter: AcpAgentAdapter,
@@ -164,12 +170,99 @@ export class AcpExecutor implements PluginExecutorProvider {
     this.#state = options.state;
   }
 
+  async discover(input: { cwd: string; signal: AbortSignal }): Promise<ExecutorCatalogEntry> {
+    if (this.#disposed) return this.#catalogEntry('unavailable');
+    if (this.#catalog) return this.#catalog;
+    if (this.#discovery) return this.#discovery;
+    const probe = async () => {
+      // A bounded disposable ACP probe never creates a Maka task or joins the retained-session map.
+      const cwd = await mkdtemp(resolve(tmpdir(), 'maka-acp-catalog-'));
+      const session: RetainedSession = {
+        conversationKey: 'catalog-probe',
+        cwd,
+        configOptions: [],
+        lost: false,
+      };
+      try {
+        await this.#initialize(session, input.signal, true);
+        const result = this.#catalogEntry('ready', session.configOptions);
+        this.#catalog = result;
+        return result;
+      } catch (error) {
+        return this.#catalogEntry(
+          (error as { code?: unknown })?.code === -32000
+            ? 'authentication_required'
+            : 'unavailable',
+        );
+      } finally {
+        await this.#disposeSession(session);
+        await rm(cwd, { recursive: true, force: true });
+      }
+    };
+    this.#discovery = probe().finally(() => {
+      this.#discovery = undefined;
+    });
+    return this.#discovery;
+  }
+
+  async inspectConversation(input: {
+    conversationKey: string;
+    cwd: string;
+    configuration?: ExecutorConfiguration;
+  }): Promise<ExecutorCatalogEntry> {
+    const session = this.#sessions.get(input.conversationKey);
+    if (this.#disposed) return this.#catalogEntry('unavailable');
+    if (session?.lost || (!session && (await this.#state?.has(input.conversationKey, input.cwd))))
+      return this.#catalogEntry('history_only');
+    return this.#catalogEntry('ready', session?.configOptions ?? [], input.configuration?.model);
+  }
+
+  async configureConversation(
+    input: { conversationKey: string; cwd: string; configuration?: ExecutorConfiguration },
+    signal: AbortSignal,
+  ): Promise<void> {
+    const session = this.#sessions.get(input.conversationKey);
+    if (!session?.connection || session.lost || session.active || !input.configuration?.model)
+      throw new Error('ACP model change is unavailable');
+    await this.#applyInitialConfig(session, { model: input.configuration.model }, signal);
+  }
+
+  #catalogEntry(
+    readiness: ExecutorCatalogEntry['readiness'],
+    options: readonly SessionConfigOption[] = [],
+    selected?: string,
+  ): ExecutorCatalogEntry {
+    const model = options.find(
+      (option) =>
+        option.type === 'select' && (option.category === 'model' || option.id === 'model'),
+    );
+    const models =
+      model?.type === 'select'
+        ? model.options
+            .flatMap((entry) => ('options' in entry ? entry.options : [entry]))
+            .map((entry) => ({ id: entry.value, name: entry.name }))
+        : [];
+    return {
+      id: this.id,
+      displayName: this.displayName,
+      readiness,
+      models,
+      ...(model?.type === 'select'
+        ? { currentModel: model.currentValue }
+        : selected
+          ? { currentModel: selected }
+          : {}),
+      supportsAttachments: false,
+      supportsModelChange: model?.type === 'select',
+    };
+  }
+
   async execute(
     request: Readonly<PluginExecutorRequest>,
     context: PluginExecutorContext,
   ): Promise<PluginExecutorResult> {
     if (this.#disposed) return failure('ACP executor is unavailable', 'acp_unavailable');
-    if (request.attachments?.length && !this.#configured.supportsAttachments) {
+    if (request.attachments?.length) {
       return failure(
         `${this.displayName} ACP supports project files and text only`,
         'acp_attachments_unsupported',
@@ -187,6 +280,12 @@ export class AcpExecutor implements PluginExecutorProvider {
     try {
       await this.#ensureInitialized(session, context.signal);
       context.signal.throwIfAborted();
+      if (request.configuration?.model)
+        await this.#applyInitialConfig(
+          session,
+          { model: request.configuration.model },
+          context.signal,
+        );
       const prompt = session.connection!.agent.request(methods.agent.session.prompt, {
         sessionId: session.acpSessionId!,
         prompt: [{ type: 'text', text: promptText(request) }],
@@ -196,7 +295,7 @@ export class AcpExecutor implements PluginExecutorProvider {
       if (response === 'cancelled' || response.stopReason === 'cancelled') {
         return { status: 'cancelled' };
       }
-      if (active.text.trimStart().startsWith('Agent execution error:')) {
+      if (this.#adapter.executionFailed?.(active.text)) {
         return failure(`${this.displayName} reported an execution failure`, 'acp_prompt_failed');
       }
       if (response.stopReason !== 'end_turn') {
@@ -216,6 +315,11 @@ export class AcpExecutor implements PluginExecutorProvider {
     } finally {
       if (session.active === active) session.active = undefined;
     }
+  }
+
+  async disposeConversation(conversationKey: string): Promise<void> {
+    const session = this.#sessions.get(conversationKey);
+    if (session) await this.#lose(session);
   }
 
   async dispose(): Promise<void> {
@@ -247,6 +351,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     }
     const created: RetainedSession = {
       conversationKey: request.conversationKey,
+      ...(request.configuration ? { configuration: request.configuration } : {}),
       cwd,
       configOptions: [],
       lost: false,
@@ -267,8 +372,8 @@ export class AcpExecutor implements PluginExecutorProvider {
     }
   }
 
-  async #initialize(session: RetainedSession, signal: AbortSignal): Promise<void> {
-    if (await this.#state?.has(session.conversationKey, session.cwd)) {
+  async #initialize(session: RetainedSession, signal: AbortSignal, probe = false): Promise<void> {
+    if (!probe && (await this.#state?.has(session.conversationKey, session.cwd))) {
       throw new AcpRuntimeError(
         'ACP conversation is history-only after the Plugin or Host was restarted',
         'acp_history_only',
@@ -298,7 +403,7 @@ export class AcpExecutor implements PluginExecutorProvider {
         {
           protocolVersion: 1,
           clientCapabilities: {
-            fs: { readTextFile: true, writeTextFile: true },
+            fs: { readTextFile: !probe, writeTextFile: !probe },
             terminal: false,
           },
         },
@@ -317,8 +422,16 @@ export class AcpExecutor implements PluginExecutorProvider {
     ]);
     session.acpSessionId = created.sessionId;
     session.configOptions = created.configOptions ?? [];
-    await this.#applyInitialConfig(session, launch.initialConfig ?? {}, startupSignal);
-    await this.#state?.mark(session.conversationKey, session.cwd);
+    if (!probe) {
+      await this.#applyInitialConfig(
+        session,
+        session.configuration?.model
+          ? { model: session.configuration.model }
+          : (launch.initialConfig ?? {}),
+        startupSignal,
+      );
+      await this.#state?.mark(session.conversationKey, session.cwd);
+    }
   }
 
   async #applyInitialConfig(
@@ -350,6 +463,12 @@ export class AcpExecutor implements PluginExecutorProvider {
         { sessionId: session.acpSessionId!, configId: option.id, value },
         { cancellationSignal: signal },
       );
+      const confirmed = updated.configOptions.find((candidate) => candidate.id === option.id);
+      if (confirmed?.type !== 'select' || confirmed.currentValue !== value)
+        throw new AcpRuntimeError(
+          'Agent did not confirm the selected configuration',
+          'acp_config_unconfirmed',
+        );
       session.configOptions = updated.configOptions;
     }
   }
@@ -394,6 +513,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     const active = session.active;
     if (!active) return { outcome: { outcome: 'cancelled' as const } };
     const outcome = await active.context.requestPermission({
+      kind: this.#adapter.permissionKind?.(request) ?? 'permission',
       toolCallId: request.toolCall.toolCallId,
       title: request.toolCall.title || `${this.displayName} requests permission`,
       options: request.options.map((option) => ({ optionId: option.optionId, name: option.name })),
@@ -482,15 +602,16 @@ export class AcpExecutor implements PluginExecutorProvider {
       }
     }
     if (!signal.aborted) return await running;
-    await session.connection?.agent
-      .notify(methods.agent.session.cancel, { sessionId: session.acpSessionId! })
-      .catch(() => undefined);
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    // Cancellation notification and settlement share one deadline; a blocked stdin cannot hang stop.
     const completed = await Promise.race([
-      running.then(
-        () => true,
-        () => true,
-      ),
+      (async () => {
+        await session.connection?.agent
+          .notify(methods.agent.session.cancel, { sessionId: session.acpSessionId! })
+          .catch(() => undefined);
+        await running.catch(() => undefined);
+        return true;
+      })(),
       new Promise<false>((resolveTimeout) => {
         timeout = setTimeout(() => resolveTimeout(false), CANCEL_TIMEOUT_MS);
       }),
@@ -611,20 +732,40 @@ async function terminate(
   child: ChildProcessWithoutNullStreams,
   connection: ClientConnection,
 ): Promise<void> {
-  connection.close();
-  child.stdin.destroy();
-  child.stdout.destroy();
-  child.stderr.destroy();
-  const alive = () => child.exitCode === null && child.signalCode === null;
-  if (!child.pid || !alive()) return;
-  await terminateChildProcessTree(child, 'SIGTERM');
-  for (let attempt = 0; attempt < 40 && alive(); attempt += 1) await delay(50);
-  if (alive()) {
-    await terminateChildProcessTree(child, 'SIGKILL');
-    for (let elapsed = 0; elapsed < PROCESS_EXIT_TIMEOUT_MS && alive(); elapsed += 50)
-      await delay(50);
+  const pid = child.pid;
+  const alive = () => {
+    if (!pid) return false;
+    if (process.platform === 'win32') return child.exitCode === null && child.signalCode === null;
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
+  };
+  try {
+    // Preserve ancestry until signalling; the owned process group may outlive its leader.
+    if (pid) {
+      await terminateProcessTree({ pid, signal: 'SIGTERM', fallback: () => child.kill('SIGTERM') });
+      for (let elapsed = 0; elapsed < PROCESS_EXIT_TIMEOUT_MS && alive(); elapsed += 50)
+        await delay(50);
+      if (alive()) {
+        await terminateProcessTree({
+          pid,
+          signal: 'SIGKILL',
+          fallback: () => child.kill('SIGKILL'),
+        });
+        for (let elapsed = 0; elapsed < PROCESS_EXIT_TIMEOUT_MS && alive(); elapsed += 50)
+          await delay(50);
+      }
+      if (alive()) throw new Error('ACP process cleanup failed');
+    }
+  } finally {
+    connection.close();
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
   }
-  if (alive()) throw new Error('ACP process cleanup failed');
 }
 
 function pluginStateStore(
@@ -672,8 +813,6 @@ function validateConfiguredAgent(value: AcpConfiguredAgent): AcpConfiguredAgent 
     !Array.isArray(value.launch.requiredExecutables)
   )
     throw new TypeError('ACP required executables are invalid');
-  if (value.supportsAttachments !== undefined && typeof value.supportsAttachments !== 'boolean')
-    throw new TypeError('ACP attachment capability is invalid');
   const executable = absolutePath(value.launch.executable, 'executable');
   const args = value.launch.args?.map((argument) => {
     if (typeof argument !== 'string' || /[\0\r\n]/u.test(argument))
@@ -695,9 +834,6 @@ function validateConfiguredAgent(value: AcpConfiguredAgent): AcpConfiguredAgent 
       ...(value.launch.env ? { env: Object.freeze({ ...value.launch.env }) } : {}),
       ...(initialConfig ? { initialConfig } : {}),
     }),
-    ...(value.supportsAttachments === undefined
-      ? {}
-      : { supportsAttachments: value.supportsAttachments === true }),
   });
 }
 
@@ -792,7 +928,7 @@ function projectToolResult(
       : [],
   );
   const combinedDiff = diffs.map(({ diff }) => diff).join('\n');
-  if (diffs.length && combinedDiff.length <= MAX_TOOL_RESULT_DIFF)
+  if (diffs.length && diffs.length <= 64 && combinedDiff.length <= MAX_TOOL_RESULT_DIFF)
     return {
       kind: 'file_diff',
       paths: diffs.map(({ path }) => path),

@@ -40,7 +40,7 @@ export {
   type TaskReadinessNotice,
 } from './model/task-readiness-notice.js';
 export * from './model/session-ui-state.js';
-export type { ConversationServices } from './ports.js';
+export type { ConversationServices, ConversationNewTaskTarget } from './ports.js';
 export { ConversationServicesProvider } from './services.js';
 export { SessionLocalMessages } from './controller/session-local-messages.js';
 export { createConversationDisplayFrameScheduler } from './controller/display-frame-scheduler.js';
@@ -73,3 +73,12 @@ export { activeHostTurn, chatTurnActivity } from '../../application/contracts/se
 export { selectLiveTurns, sessionUiSelectors } from './model/session-ui-selectors.js';
 export { LiveTurnReconciler } from './controller/live-turn-reconciler.js';
 export { sessionIdSetsEqual, type LiveTurnSnapshot } from './model/live-turn-snapshot.js';
+
+export { useExecutorSelection } from './controller/use-executor-selection.js';
+export * from './model/shell-chat-model-selection.js';
+export * from './model/session-health-notice.js';
+export * from './model/new-task-reload-intent.js';
+export * from './controller/use-new-task-choice.js';
+export * from './controller/use-shell-chat-model.js';
+export * from './model/executor-submission.js';
+export * from './model/executor-composer.js';

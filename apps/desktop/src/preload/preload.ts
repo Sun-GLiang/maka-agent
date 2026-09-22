@@ -1896,6 +1896,9 @@ const makaBridge = {
     },
   },
   newTasks: {
+    async getExecutors(target, cwd) {
+      return ipcRenderer.invoke('sessions:executorCatalog', await runtimeHostScope(target), cwd);
+    },
     getCatalog(): Promise<DesktopNewTaskCatalog> {
       return loadNewTaskCatalog();
     },
@@ -2204,6 +2207,8 @@ const makaBridge = {
     },
   } satisfies import('../shared/session-local-contract.js').DesktopSessionLocalBridge,
   sessions: {
+    setExecutorModelConfiguration(sessionId, config) { return invokeSessionUpdate('sessions:setExecutorModelConfiguration', sessionId, config); },
+    getExecutorState(sessionId) { return invokeSessionRuntimeHost('sessions:executorState', sessionId); },
     list(filter?: SessionListFilter): Promise<DesktopSessionSummary[]> {
       return listDesktopSessions(filter);
     },

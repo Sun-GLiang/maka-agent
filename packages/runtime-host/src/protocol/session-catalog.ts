@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { isExecutorConfiguration, type ExecutorConfiguration } from '@maka/core/executor-catalog';
 import { isCollaborationMode, type CollaborationMode } from '@maka/core/collaboration';
 import { isOrchestrationMode, type OrchestrationMode } from '@maka/core/orchestration';
 import { isPermissionMode, type PermissionMode } from '@maka/core/permission';
@@ -126,6 +127,7 @@ const PROJECTION_FIELDS = [
   'revisionIndex',
   'revisionState',
   'executorId',
+  'executorConfig',
   'thinkingLevel',
   'lastReadMessageId',
   'liveRunState',
@@ -168,6 +170,7 @@ export interface SessionCreateInput {
   readonly executorId?: string;
   /** Optional executor-specific model. Only valid with executorId. */
   readonly executorModel?: string;
+  readonly executorConfig?: ExecutorConfiguration;
   /** Omitted applies the model preference; null explicitly uses the provider default. */
   readonly thinkingLevel?: ThinkingLevel | null;
   readonly toolProfile?: SessionToolProfile;
@@ -189,6 +192,7 @@ export interface SessionMetadataUpdateInput {
 }
 
 export interface SessionConfigurationPatch {
+  readonly executorConfig?: ExecutorConfiguration;
   readonly modelTarget?: Extract<SessionModelTarget, { readonly kind: 'explicit' }>;
   readonly executorTarget?: SessionExecutorTarget;
   readonly thinkingLevel?: ThinkingLevel | null;
@@ -252,6 +256,7 @@ export interface SessionCatalogProjection {
   readonly revisionState?: 'preparing' | 'committed';
   readonly backend: PersistedBackendKind;
   readonly executorId?: string;
+  readonly executorConfig?: ExecutorConfiguration;
   readonly llmConnectionId: string | null;
   readonly llmConnectionSlug: string;
   readonly connectionLocked: boolean;
@@ -537,6 +542,7 @@ export function decodeSessionCreateInput(value: unknown): SessionCreateInput {
       'modelTarget',
       'executorId',
       'executorModel',
+      'executorConfig',
       'thinkingLevel',
       'toolProfile',
       'permissionMode',
@@ -547,6 +553,11 @@ export function decodeSessionCreateInput(value: unknown): SessionCreateInput {
   const executorId = Object.hasOwn(input, 'executorId')
     ? executorIdValue(input.executorId)
     : undefined;
+  if (
+    input.executorConfig !== undefined &&
+    (!executorId || !isExecutorConfiguration(input.executorConfig))
+  )
+    throw invalidProtocolFrame('Invalid executor configuration');
   const target = Object.hasOwn(input, 'modelTarget') ? modelTarget(input.modelTarget) : undefined;
   const executorModel = Object.hasOwn(input, 'executorModel')
     ? requireUtf8String(input.executorModel, 'Executor model', SESSION_CATALOG_MODEL_MAX_BYTES)
@@ -566,6 +577,14 @@ export function decodeSessionCreateInput(value: unknown): SessionCreateInput {
     ...(target ? { modelTarget: target } : {}),
     ...(executorId ? { executorId } : {}),
     ...(executorModel ? { executorModel } : {}),
+    ...(executorId
+      ? {
+          executorId,
+          ...(input.executorConfig
+            ? { executorConfig: input.executorConfig as ExecutorConfiguration }
+            : {}),
+        }
+      : {}),
     ...(Object.hasOwn(input, 'thinkingLevel')
       ? { thinkingLevel: input.thinkingLevel === null ? null : thinkingLevel(input.thinkingLevel) }
       : {}),
@@ -635,6 +654,7 @@ export function decodeSessionConfigurationUpdateInput(
     'Session configuration patch',
     [],
     [
+      'executorConfig',
       'modelTarget',
       'executorTarget',
       'thinkingLevel',
@@ -643,6 +663,11 @@ export function decodeSessionConfigurationUpdateInput(
       'orchestrationMode',
     ],
   );
+  if (
+    patch.executorConfig !== undefined &&
+    (!isExecutorConfiguration(patch.executorConfig) || patch.modelTarget !== undefined)
+  )
+    throw invalidProtocolFrame('Invalid executor configuration');
   if (Object.keys(patch).length === 0) {
     throw invalidProtocolFrame('Session configuration patch is empty');
   }
@@ -653,6 +678,9 @@ export function decodeSessionConfigurationUpdateInput(
     sessionId: requireEntityId(input.sessionId, 'sessionId'),
     expectedRevision: positiveRevision(input.expectedRevision, 'expected Session revision'),
     patch: {
+      ...(patch.executorConfig
+        ? { executorConfig: patch.executorConfig as ExecutorConfiguration }
+        : {}),
       ...(Object.hasOwn(patch, 'modelTarget')
         ? { modelTarget: explicitModelTarget(patch.modelTarget) }
         : {}),
@@ -1076,9 +1104,20 @@ function executorTarget(value: unknown): SessionExecutorTarget {
 
 function optionalExecutorId(
   record: Record<string, unknown>,
-): Pick<SessionCatalogProjection, 'executorId'> | Record<string, never> {
-  if (record.executorId === undefined) return {};
-  return { executorId: executorIdValue(record.executorId) };
+): Pick<SessionCatalogProjection, 'executorId' | 'executorConfig'> | Record<string, never> {
+  if (record.executorId === undefined) {
+    if (record.executorConfig !== undefined)
+      throw invalidProtocolFrame('Executor configuration requires an executor');
+    return {};
+  }
+  if (record.executorConfig !== undefined && !isExecutorConfiguration(record.executorConfig))
+    throw invalidProtocolFrame('Invalid executor configuration');
+  return {
+    executorId: executorIdValue(record.executorId),
+    ...(record.executorConfig
+      ? { executorConfig: record.executorConfig as ExecutorConfiguration }
+      : {}),
+  };
 }
 
 function thinkingLevel(value: unknown): ThinkingLevel {

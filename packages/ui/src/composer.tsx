@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { executorCopy, ExecutorModelPicker, type ExecutorModelPickerProps } from './executor-model-picker.js';
 import {
   forwardRef,
   useEffect,
@@ -393,6 +394,7 @@ export const Composer = forwardRef<
     activeModelLabel?: string;
     activeProviderType?: ProviderType;
     modelChoices?: ChatModelChoice[];
+    executorPicker?: Omit<ExecutorModelPickerProps, 'choices' | 'nativeLabel' | 'onNative'>;
     /** Model-picker surface; 'wheel' is the collapsed WorkHub's inline picker, and any non-popover surface drops the thinking picker to a bottom sheet. */
     pickerPresentation?: 'popover' | 'bottom-sheet' | 'wheel';
     /** Distinguishes the active Session model from defaults applied only to newly created WorkHub Sessions. */
@@ -894,6 +896,7 @@ export const Composer = forwardRef<
   });
   // PR-UI-15: locale-aware copy for placeholder + toolbar states.
   const locale = useUiLocale();
+  const executorNativeDisabledReason = props.executorPicker?.selection ? executorCopy(locale).nativeOperations : undefined;
   const copy = getConversationCopy(locale).composer;
   const mentionCopy = getConversationCopy(locale).mentions;
 
@@ -1699,7 +1702,7 @@ export const Composer = forwardRef<
     },
   ];
   /** A host that passes no handler cannot be in a mode this control can leave. */
-  const planModeActive = props.onPlanModeChange !== undefined && props.planModeActive === true;
+  const planModeActive = !executorNativeDisabledReason && props.onPlanModeChange !== undefined && props.planModeActive === true;
   // Deliberately NOT disabled while the host commits a toggle. The host
   // already drops re-entrant toggles itself, so a disable during its short
   // IPC round trip carries no protection — it only dims the row (and the
@@ -1707,12 +1710,12 @@ export const Composer = forwardRef<
   // in the very menu the user is looking at.
   const planModeDisabled =
     props.disabled === true
-    || Boolean(props.planModeDisabledReason);
+    || Boolean((executorNativeDisabledReason ?? props.planModeDisabledReason));
   const orchestrationMode: OrchestrationMode =
-    props.onOrchestrationModeChange ? props.orchestrationMode ?? 'default' : 'default';
+    !executorNativeDisabledReason && props.onOrchestrationModeChange ? props.orchestrationMode ?? 'default' : 'default';
   const orchestrationModeDisabled =
     props.disabled === true
-    || Boolean(props.orchestrationModeDisabledReason);
+    || Boolean((executorNativeDisabledReason ?? props.orchestrationModeDisabledReason));
   /**
    * The marks at the tail of the footer's left controls are the resting
    * readout for whatever is on, plus one nearby way out each; the menu stays
@@ -1741,7 +1744,7 @@ export const Composer = forwardRef<
         id: 'plan',
         icon: <ListTodo size={ICON_SIZE.control} aria-hidden="true" />,
         label: copy.planModeLabel,
-        tooltip: props.planModeDisabledReason ?? copy.planModeOnTitle,
+        tooltip: (executorNativeDisabledReason ?? props.planModeDisabledReason) ?? copy.planModeOnTitle,
         isDisabled: planModeDisabled,
         onDeactivate: () => { void props.onPlanModeChange?.(false); },
       }]
@@ -1752,7 +1755,7 @@ export const Composer = forwardRef<
         id: option.id,
         icon: option.icon,
         label: option.label,
-        tooltip: props.orchestrationModeDisabledReason ?? option.onTitle,
+        tooltip: (executorNativeDisabledReason ?? props.orchestrationModeDisabledReason) ?? option.onTitle,
         isDisabled: orchestrationModeDisabled,
         onDeactivate: () => { void props.onOrchestrationModeChange?.('default'); },
       })),
@@ -2203,12 +2206,12 @@ export const Composer = forwardRef<
                         isDisabled={
                           props.disabled
                           || props.goalActive === true
-                          || Boolean(props.goalDisabledReason)
+                          || Boolean((executorNativeDisabledReason ?? props.goalDisabledReason))
                         }
                         description={
                           props.goalActive === true
                             ? copy.goalAlreadySet
-                            : props.goalDisabledReason
+                            : (executorNativeDisabledReason ?? props.goalDisabledReason)
                         }
                         onClick={() => {
                           void props.onSetGoal?.();
@@ -2223,6 +2226,7 @@ export const Composer = forwardRef<
                             label={copy.planModeLabel}
                             icon={<ListTodo size={ICON_SIZE.control} aria-hidden="true" />}
                             value={planModeActive}
+                            description={executorNativeDisabledReason}
                             isDisabled={planModeDisabled}
                             onChange={(next) => {
                               void props.onPlanModeChange?.(next);
@@ -2231,7 +2235,7 @@ export const Composer = forwardRef<
                               <SelectionMark state="checked" size="sm" />
                             ) : undefined}
                             aria-description={
-                              props.planModeDisabledReason
+                              (executorNativeDisabledReason ?? props.planModeDisabledReason)
                               ?? (planModeActive ? copy.disablePlanMode : copy.enablePlanMode)
                             }
                           />
@@ -2266,10 +2270,11 @@ export const Composer = forwardRef<
                                 label={option.label}
                                 icon={option.icon}
                                 isDisabled={orchestrationModeDisabled}
+                                description={executorNativeDisabledReason}
                                 endContent={orchestrationMode === option.id ? (
                                   <SelectionMark state="checked" size="sm" />
                                 ) : undefined}
-                                aria-description={props.orchestrationModeDisabledReason}
+                                aria-description={(executorNativeDisabledReason ?? props.orchestrationModeDisabledReason)}
                               />
                             ))}
                           </DropdownMenuRadioGroup>
@@ -2288,9 +2293,9 @@ export const Composer = forwardRef<
                   }}
                   disabled={
                     props.disabled
-                    || Boolean(props.permissionModeDisabledReason)
+                    || Boolean((executorNativeDisabledReason ?? props.permissionModeDisabledReason))
                   }
-                  disabledReason={props.permissionModeDisabledReason}
+                  disabledReason={(executorNativeDisabledReason ?? props.permissionModeDisabledReason)}
                 />
               ) : null}
               {/* Model + thinking sit left after permission (adjacent pair), not
@@ -2328,7 +2333,10 @@ export const Composer = forwardRef<
                     options={{
                       fallback: (
                         <>
-                {props.activeSession ? (
+                {props.executorPicker ? (
+                  <ExecutorModelPicker {...props.executorPicker} renderProviderMark={props.renderProviderMark} nativeLabel={modelChipLabel} choices={props.modelChoices ?? []} onNative={props.activeSession ? (props.onModelChange ?? (() => undefined)) : (props.onPickNewChatModel ?? (() => undefined))} />
+                ) : props.activeSession ? (
+
                   <ChatModelSwitcher
                     presentation={props.pickerPresentation}
                     isReadOnly={props.pickersReadOnly}
@@ -2373,7 +2381,7 @@ export const Composer = forwardRef<
                     showUnavailableStatus={props.showStaticModelUnavailableStatus}
                   />
                 )}
-                {renderNativeThinkingControl()}
+                {props.executorPicker?.selection ? null : renderNativeThinkingControl()}
                         </>
                       ),
                     }}

@@ -85,3 +85,27 @@ test('adapter validates configuration and preserves proxy bypass', () => {
   assert.equal(env.NO_PROXY, 'example.test,localhost,127.0.0.1,::1');
   assert.equal(env.no_proxy, env.NO_PROXY);
 });
+
+test('official interaction requests are questions; ordinary tool permissions stay permissions', () => {
+  const classify = antigravityAcpAdapter.permissionKind!;
+  const request = {
+    sessionId: 'test',
+    toolCall: {
+      toolCallId: 'interaction_fixture',
+      title: 'Alpha or beta?',
+      status: 'pending' as const,
+    },
+    options: [
+      { optionId: '1', name: 'Alpha', kind: 'allow_once' as const },
+      { optionId: '2', name: 'Beta', kind: 'allow_once' as const },
+    ],
+  };
+  assert.equal(classify(request), 'question');
+  assert.equal(
+    classify({
+      ...request,
+      toolCall: { ...request.toolCall, toolCallId: 'tool-edit', kind: 'edit' },
+    }),
+    'permission',
+  );
+});

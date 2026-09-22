@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import type { ExecutorConfiguration } from '@maka/core/executor-catalog';
 import { randomUUID } from 'node:crypto';
 import type { SessionEvent } from '@maka/core/events';
 import type {
@@ -45,6 +46,7 @@ interface ActiveExecution {
 export interface PluginExecutorBackendInput {
   readonly sessionId: string;
   readonly cwd: string;
+  readonly configuration?: ExecutorConfiguration;
   readonly instructions?: string;
   readonly model?: string;
   readonly thinkingLevel?: ThinkingLevel;
@@ -58,6 +60,7 @@ export class PluginExecutorBackend implements AgentBackend {
   readonly kind = 'plugin-executor' as const;
   readonly sessionId: string;
   readonly #cwd: string;
+  readonly #configuration?: ExecutorConfiguration;
   readonly #instructions?: string;
   readonly #model?: string;
   readonly #thinkingLevel?: ThinkingLevel;
@@ -70,6 +73,7 @@ export class PluginExecutorBackend implements AgentBackend {
   constructor(input: PluginExecutorBackendInput) {
     this.sessionId = input.sessionId;
     this.#cwd = input.cwd;
+    this.#configuration = input.configuration;
     this.#instructions = input.instructions;
     this.#model = input.model;
     this.#thinkingLevel = input.thinkingLevel;
@@ -145,6 +149,7 @@ export class PluginExecutorBackend implements AgentBackend {
           cwd: this.#cwd,
           ...(this.#model ? { model: this.#model } : {}),
           reasoningEffort: this.#thinkingLevel ?? null,
+          ...(this.#configuration ? { configuration: this.#configuration } : {}),
           ...(this.#instructions ? { instructions: this.#instructions } : {}),
           ...(input.attachments ? { attachments: input.attachments } : {}),
           ...(input.directoryReferences ? { directoryReferences: input.directoryReferences } : {}),
@@ -218,7 +223,7 @@ export class PluginExecutorBackend implements AgentBackend {
         {
           kind: 'single_select',
           name: 'optionId',
-          label: 'Permission',
+          label: request.kind === 'question' ? 'Question' : 'Permission',
           required: true,
           options: request.options.map((option) => ({
             value: option.optionId,

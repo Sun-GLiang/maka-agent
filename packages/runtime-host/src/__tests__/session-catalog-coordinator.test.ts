@@ -884,6 +884,7 @@ test('plugin executor creation bypasses model resolution and persists the execut
       ...base,
       backend: 'plugin-executor',
       executorId: 'codex',
+      executorConfig: { model: 'account-model' },
       llmConnectionSlug: 'executor:codex',
       model: 'gpt-codex',
     };
@@ -911,12 +912,14 @@ test('plugin executor creation bypasses model resolution and persists the execut
       executorId: 'codex',
       executorModel: 'gpt-codex',
       thinkingLevel: 'high',
+      executorConfig: { model: 'gpt-codex' },
     },
     context,
   );
 
   assert.equal(outcome.ok, true, JSON.stringify(outcome));
   assert.equal(persistedInput?.executorId, 'codex');
+  assert.deepEqual(persistedInput?.executorConfig, { model: 'gpt-codex' });
   assert.equal(persistedInput?.llmConnectionId, undefined);
   assert.equal(persistedInput?.llmConnectionSlug, 'executor:codex');
   assert.equal(persistedInput?.model, 'gpt-codex');
@@ -924,6 +927,7 @@ test('plugin executor creation bypasses model resolution and persists the execut
   if (outcome.ok && !('kind' in outcome.result)) {
     assert.equal(outcome.result.backend, 'plugin-executor');
     assert.equal(outcome.result.executorId, 'codex');
+    assert.deepEqual(outcome.result.executorConfig, { model: 'account-model' });
   }
 });
 
@@ -2070,7 +2074,8 @@ function createFixture(
     readonly onProjectChanged?: () => void;
     readonly legacyConnectionIdentity?: boolean;
     readonly header?: Partial<SessionHeader>;
-    readonly assertExecutorAvailable?: (sessionId: string, executorId: string) => void;
+    readonly assertExecutorAvailable?: HostSessionCatalogCoordinatorOptions['assertExecutorAvailable'];
+    readonly configureExecutor?: HostSessionCatalogCoordinatorOptions['configureExecutor'];
   } = {},
 ) {
   const sessionId = 'session-1';
@@ -2160,6 +2165,7 @@ function createFixture(
     requestDrain: () => {
       drains += 1;
     },
+    ...(options.configureExecutor ? { configureExecutor: options.configureExecutor } : {}),
     ...(options.assertExecutorAvailable
       ? { assertExecutorAvailable: options.assertExecutorAvailable }
       : {}),
@@ -2362,3 +2368,86 @@ function catalogRecord(header: SessionHeader, revision: number): SessionCatalogR
     summary: headerToSummary(header),
   };
 }
+
+test('executor model changes commit only after idle agent confirmation', async () => {
+  const order: string[] = [];
+  const fixture = createFixture({
+    header: {
+      backend: 'plugin-executor',
+      executorId: 'remote',
+      executorConfig: { model: 'before' },
+    },
+    configureExecutor: async (_header, config) => {
+      assert.equal(fixture.header().executorConfig?.model, 'before');
+      assert.equal(config.model, 'after');
+      order.push('confirmed');
+    },
+  });
+  const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+    {
+      sessionId: fixture.sessionId,
+      expectedRevision: fixture.revision(),
+      patch: { executorConfig: { model: 'after' } },
+    },
+    context,
+  );
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  assert.deepEqual(order, ['confirmed']);
+  assert.equal(fixture.header().executorConfig?.model, 'after');
+  assert.equal(fixture.drainRequests(), 0);
+});
+
+test('rejected or busy executor model changes preserve durable configuration without draining Host', async () => {
+  for (const busy of [false, true]) {
+    let called = false;
+    const fixture = createFixture({
+      header: {
+        backend: 'plugin-executor',
+        executorId: 'remote',
+        executorConfig: { model: 'before' },
+      },
+      manager: { runningTurnIds: () => (busy ? ['turn'] : []) },
+      configureExecutor: async () => {
+        called = true;
+        throw new Error('unconfirmed');
+      },
+    });
+    const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+      {
+        sessionId: fixture.sessionId,
+        expectedRevision: fixture.revision(),
+        patch: { executorConfig: { model: 'after' } },
+      },
+      context,
+    );
+    assert.equal(outcome.ok, false);
+    assert.equal(called, !busy);
+    assert.equal(fixture.header().executorConfig?.model, 'before');
+    assert.equal(fixture.drainRequests(), 0);
+  }
+});
+
+test('native execution settings cannot mutate an external task', async () => {
+  const fixture = createFixture({
+    header: {
+      backend: 'plugin-executor',
+      executorId: 'remote',
+      executorConfig: { model: 'before' },
+    },
+  });
+  for (const patch of [
+    { permissionMode: 'bypass' },
+    { thinkingLevel: 'high' },
+    { collaborationMode: 'plan' },
+    { orchestrationMode: 'swarm' },
+  ] as const) {
+    const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+      { sessionId: fixture.sessionId, expectedRevision: fixture.revision(), patch },
+      context,
+    );
+    assert.equal(outcome.ok, false);
+    if (!outcome.ok) assert.equal(outcome.error.code, 'operation_unavailable');
+    assert.equal(fixture.header().executorConfig?.model, 'before');
+    assert.equal(fixture.drainRequests(), 0);
+  }
+});

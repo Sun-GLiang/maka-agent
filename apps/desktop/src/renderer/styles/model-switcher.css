@@ -124,3 +124,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.maka-executor-picker { display: grid; grid-template-columns: minmax(100px, 0.7fr) minmax(0, 1.5fr); gap: 12px; padding: 12px; max-height: min(420px, 70vh); }
+.maka-executor-rail, .maka-executor-models { display: flex; flex-direction: column; gap: 8px; overflow: auto; min-width: 0; }
+.maka-executor-picker button { display: block; width: 100%; text-align: start; border: 0; background: transparent; color: inherit; padding: 8px; border-radius: 6px; cursor: pointer; }
+.maka-executor-picker button:hover, .maka-executor-picker button[aria-pressed="true"] { background: var(--color-background-hover, #8882); }
+.maka-executor-picker button:focus-visible, .maka-executor-picker input:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+.maka-executor-picker button:disabled { opacity: .5; cursor: default; }
+.maka-executor-picker input { width: 100%; box-sizing: border-box; padding: 8px; color: inherit; background: transparent; border: 1px solid var(--color-border, #8885); border-radius: 6px; }
+
+.maka-executor-control { min-width: 0; max-width: min(540px, 70vw); }
+.maka-executor-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; line-height: 1.5; }
+.maka-executor-notice button { text-decoration: underline; white-space: nowrap; cursor: pointer; }

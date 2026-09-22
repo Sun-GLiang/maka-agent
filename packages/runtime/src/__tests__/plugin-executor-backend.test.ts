@@ -244,6 +244,59 @@ test('executor permission requests use the hosted form authority', async () => {
   await root.fiber.dispose();
 });
 
+test('executor questions round-trip original choices through hosted forms', async () => {
+  const { root, binding } = fixture(async (_request, context) => {
+    const result = await context.requestPermission({
+      kind: 'question',
+      toolCallId: 'external-1',
+      title: 'Choose alpha or beta?',
+      options: [
+        { optionId: 'opaque:beta/2', name: 'Beta' },
+        { optionId: 'reject_once', name: 'Reject once' },
+      ],
+    });
+    assert.deepEqual(result, { outcome: 'selected', optionId: 'opaque:beta/2' });
+    return { status: 'completed', text: 'approved' };
+  });
+  const backend = new PluginExecutorBackend({
+    sessionId: 'session-a',
+    cwd: '/workspace',
+    binding,
+    newId: ids(),
+    now: () => 42,
+  });
+  let settlement: HostedFormSettlement | undefined;
+  const events: SessionEvent[] = [];
+  for await (const event of backend.send({
+    turnId: 'turn-a',
+    text: 'task',
+    hostedInteraction: {
+      sessionId: 'session-a',
+      turnId: 'turn-a',
+      runId: 'run-a',
+      admitUserQuestionRequest: async () => undefined,
+      admitSandboxBoundaryRequest: async () => undefined,
+      admitFormRequest: async (input) => {
+        settlement = input.settlement;
+      },
+      withdrawFormRequest: async () => undefined,
+    },
+  })) {
+    events.push(event);
+    if (event.type === 'form_request') {
+      assert.equal(event.requester.name, 'remote');
+      assert.equal(event.fields[0]?.kind, 'single_select');
+      assert.equal(event.fields[0]?.label, 'Question');
+      await settlement?.applyAnswer({ action: 'accept', values: { optionId: 'opaque:beta/2' } });
+    }
+  }
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ['form_request', 'text_complete', 'complete'],
+  );
+  await root.fiber.dispose();
+});
+
 function fixture(
   execute: Parameters<PluginExecutorService['register']>[0]['execute'],
   capabilities?: Parameters<PluginExecutorService['register']>[0]['capabilities'],

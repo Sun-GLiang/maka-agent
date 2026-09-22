@@ -17,6 +17,11 @@
  * under the License.
  */
 
+import {
+  isExecutorConfiguration,
+  type ExecutorConfiguration,
+  type ExecutorCatalogEntry,
+} from '@maka/core/executor-catalog';
 import { createHash } from 'node:crypto';
 import type {
   AttachmentRef,
@@ -50,6 +55,7 @@ export interface PluginExecutorRequest {
   /** Stable key a provider may use to retain its own external conversation. */
   readonly conversationKey: string;
   readonly text: string;
+  readonly configuration?: ExecutorConfiguration;
   readonly cwd: string;
   /** Executor-specific model selected for this Session. */
   readonly model?: string;
@@ -100,6 +106,8 @@ export interface PluginExecutorPermissionOption {
 }
 
 export interface PluginExecutorPermissionRequest {
+  /** Questions preserve the same provider option identities and settlement path. */
+  readonly kind?: 'permission' | 'question';
   readonly toolCallId: string;
   readonly title: string;
   readonly options: readonly PluginExecutorPermissionOption[];
@@ -134,10 +142,27 @@ export interface PluginExecutorContext {
 }
 
 /** A black-box executor contributed by one Host plugin. */
+export interface PluginExecutorDiscoveryInput {
+  readonly cwd: string;
+  readonly signal: AbortSignal;
+}
+export interface PluginExecutorConversationInput {
+  readonly conversationKey: string;
+  readonly cwd: string;
+  readonly configuration?: ExecutorConfiguration;
+}
+
 export interface PluginExecutorProvider {
   readonly id: string;
   readonly displayName?: string;
   readonly capabilities?: PluginExecutorCapabilities;
+  disposeConversation?(conversationKey: string): Promise<void>;
+  discover?(input: PluginExecutorDiscoveryInput): Promise<ExecutorCatalogEntry>;
+  configureConversation?(
+    input: PluginExecutorConversationInput,
+    signal: AbortSignal,
+  ): Promise<void>;
+  inspectConversation?(input: PluginExecutorConversationInput): Promise<ExecutorCatalogEntry>;
   execute(
     request: Readonly<PluginExecutorRequest>,
     context: PluginExecutorContext,
@@ -180,6 +205,7 @@ interface RegisteredExecutor extends MakaContributionIdentity {
 }
 
 interface ActiveExecution {
+  readonly conversationKey?: string;
   readonly abort: AbortController;
   readonly settled: Promise<void>;
 }
@@ -225,6 +251,16 @@ export class PluginExecutorService extends Service {
         ...(provider.displayName === undefined ? {} : { displayName: provider.displayName }),
         capabilities,
         execute: provider.execute.bind(provider),
+        ...(provider.disposeConversation
+          ? { disposeConversation: provider.disposeConversation.bind(provider) }
+          : {}),
+        ...(provider.configureConversation
+          ? { configureConversation: provider.configureConversation.bind(provider) }
+          : {}),
+        ...(provider.discover ? { discover: provider.discover.bind(provider) } : {}),
+        ...(provider.inspectConversation
+          ? { inspectConversation: provider.inspectConversation.bind(provider) }
+          : {}),
       });
       const entry: RegisteredExecutor = {
         ...identity,
@@ -278,6 +314,126 @@ export class PluginExecutorService extends Service {
     );
   }
 
+  /** Captures registrations before awaiting provider code; retirement cancels and drains probes. */
+  async catalog(
+    input: {
+      cwd: string;
+      sessionId?: string;
+      executorId?: string;
+      configuration?: ExecutorConfiguration;
+    },
+    signal = AbortSignal.timeout(35_000),
+  ): Promise<readonly ExecutorCatalogEntry[]> {
+    const entries = input.sessionId
+      ? [...this.registry.visible(input.sessionId).values()]
+      : [...this.registry.entries('profile')];
+    const selected = entries.filter(
+      (entry) => !entry.retired && (!input.executorId || entry.provider.id === input.executorId),
+    );
+    if (input.executorId && !selected.length)
+      return [
+        {
+          id: input.executorId,
+          displayName: input.executorId,
+          readiness: 'unavailable',
+          models: [],
+          supportsAttachments: false,
+          supportsModelChange: false,
+        },
+      ];
+    return await Promise.all(
+      selected.map(async (entry) => {
+        const abort = new AbortController();
+        const combined = AbortSignal.any([signal, abort.signal]);
+        let settle!: () => void;
+        const active = {
+          abort,
+          settled: new Promise<void>((resolve) => {
+            settle = resolve;
+          }),
+        };
+        entry.active.add(active);
+        const fallback: ExecutorCatalogEntry = {
+          id: entry.provider.id,
+          displayName: entry.provider.displayName ?? entry.provider.id,
+          readiness: 'ready',
+          models: [],
+          supportsAttachments: false,
+          supportsModelChange: false,
+        };
+        try {
+          combined.throwIfAborted();
+          const result = input.sessionId
+            ? await entry.provider.inspectConversation?.({
+                conversationKey: input.sessionId,
+                cwd: input.cwd,
+                ...(input.configuration ? { configuration: input.configuration } : {}),
+              })
+            : await entry.provider.discover?.({ cwd: input.cwd, signal: combined });
+          combined.throwIfAborted();
+          if (!result) return fallback;
+          return normalizeCatalogEntry(result, entry.provider.id);
+        } catch {
+          return { ...fallback, readiness: 'unavailable' as const };
+        } finally {
+          entry.active.delete(active);
+          settle();
+        }
+      }),
+    );
+  }
+
+  async configureConversation(
+    sessionId: string,
+    executorId: string,
+    input: PluginExecutorConversationInput,
+  ): Promise<void> {
+    const entry = this.entry(sessionId, executorId);
+    if (
+      [...entry.active].some((execution) => execution.conversationKey === input.conversationKey) ||
+      !entry.provider.configureConversation
+    )
+      throw new Error('Executor configuration is unavailable or busy');
+    if (!isExecutorConfiguration(input.configuration))
+      throw new TypeError('Invalid executor configuration');
+    const abort = new AbortController();
+    let settle!: () => void;
+    const active = {
+      abort,
+      conversationKey: input.conversationKey,
+      settled: new Promise<void>((resolve) => {
+        settle = resolve;
+      }),
+    };
+    entry.active.add(active);
+    try {
+      await entry.provider.configureConversation(
+        input,
+        AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]),
+      );
+    } finally {
+      entry.active.delete(active);
+      settle();
+    }
+  }
+
+  /** Task retirement releases retained provider resources; backend refresh must not. */
+  async retireConversation(sessionId: string): Promise<void> {
+    assertSessionId(sessionId);
+    const outcomes = await Promise.allSettled(
+      [...this.registry.visible(sessionId).values()].map(async (entry) => {
+        const running = [...entry.active].filter((active) => active.conversationKey === sessionId);
+        for (const active of running) active.abort.abort(new Error('Task retired'));
+        await Promise.allSettled(running.map((active) => active.settled));
+        await entry.provider.disposeConversation?.(sessionId);
+      }),
+    );
+    const failures = outcomes.flatMap((outcome) =>
+      outcome.status === 'rejected' ? [outcome.reason] : [],
+    );
+    if (failures.length) throw new AggregateError(failures, 'Executor conversation cleanup failed');
+  }
+
   identity(sessionId: string, executorId: string): PluginExecutorInspection {
     return this.identityForEntry(this.entry(sessionId, executorId));
   }
@@ -322,7 +478,11 @@ export class PluginExecutorService extends Service {
     const settled = new Promise<void>((resolve) => {
       settle = resolve;
     });
-    const active: ActiveExecution = { abort, settled };
+    const active: ActiveExecution = {
+      abort,
+      settled,
+      conversationKey: normalizedRequest.conversationKey,
+    };
     entry.active.add(active);
     try {
       if (entry.retired) return cancelledResult(new ExecutorRetiredAbort(entry.provider.id));
@@ -330,7 +490,7 @@ export class PluginExecutorService extends Service {
         const result = await entry.provider.execute(normalizedRequest, {
           signal,
           emit: (event) => {
-            if (signal.aborted || entry.retired) return;
+            if (entry.retired) return;
             const normalized = normalizeOutputEvent(event, entry.provider.capabilities);
             try {
               options.onEvent?.(normalized);
@@ -348,7 +508,12 @@ export class PluginExecutorService extends Service {
             return normalizePermissionResult(result, normalized);
           },
         });
-        if (signal.aborted) return cancelledResult(signal.reason);
+        if (signal.aborted) {
+          const cancelled = cancelledResult(signal.reason);
+          return result.status === 'cancelled' && typeof result.reason === 'string'
+            ? { ...cancelled, reason: result.reason }
+            : cancelled;
+        }
         return normalizeResult(result);
       } catch (error) {
         if (signal.aborted) return cancelledResult(signal.reason);
@@ -410,6 +575,8 @@ function normalizeRequest(request: PluginExecutorRequest): Readonly<PluginExecut
   ] as const) {
     if (!value || /[\0\r\n]/u.test(value)) throw new TypeError(`Executor ${label} is invalid`);
   }
+  if (request.configuration !== undefined && !isExecutorConfiguration(request.configuration))
+    throw new TypeError('Executor configuration is invalid');
   if (typeof request.text !== 'string') throw new TypeError('Executor request text is invalid');
   if (request.runId !== undefined && (!request.runId || /[\0\r\n]/u.test(request.runId))) {
     throw new TypeError('Executor runId is invalid');
@@ -419,6 +586,9 @@ function normalizeRequest(request: PluginExecutorRequest): Readonly<PluginExecut
   }
   return Object.freeze({
     ...request,
+    ...(request.configuration
+      ? { configuration: Object.freeze({ ...request.configuration }) }
+      : {}),
     ...(request.attachments ? { attachments: Object.freeze([...request.attachments]) } : {}),
     ...(request.directoryReferences
       ? { directoryReferences: Object.freeze([...request.directoryReferences]) }
@@ -561,6 +731,7 @@ function normalizePermissionRequest(
   if (
     !request ||
     typeof request !== 'object' ||
+    (request.kind !== undefined && request.kind !== 'permission' && request.kind !== 'question') ||
     !isSafeEventId(request.toolCallId) ||
     !isSafeEventText(request.title) ||
     !request.title.trim() ||
@@ -586,6 +757,7 @@ function normalizePermissionRequest(
     return Object.freeze({ optionId: option.optionId, name: option.name });
   });
   return Object.freeze({
+    ...(request.kind ? { kind: request.kind } : {}),
     toolCallId: request.toolCallId,
     title: request.title,
     options: Object.freeze(options),
@@ -620,7 +792,7 @@ function providerStateIdentity(identity: PluginExecutorInspection): `sha256:${st
     .digest('hex')}`;
 }
 
-function cancelledResult(reason: unknown): PluginExecutorResult {
+function cancelledResult(reason: unknown): Extract<PluginExecutorResult, { status: 'cancelled' }> {
   const source: PluginExecutorCancellationSource =
     reason instanceof ExecutorRetiredAbort ? 'executor_retired' : 'caller';
   const message =
@@ -640,4 +812,44 @@ function isSafeEventId(value: unknown): value is string {
 
 function isSafeEventText(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 8_192 && !/[\0\r]/u.test(value);
+}
+
+export function normalizeCatalogEntry(
+  value: ExecutorCatalogEntry,
+  id: string,
+): ExecutorCatalogEntry {
+  if (
+    !value ||
+    !isExecutorId(id) ||
+    value.id !== id ||
+    !isSafeEventText(value.displayName) ||
+    !['ready', 'unavailable', 'authentication_required', 'history_only'].includes(
+      value.readiness,
+    ) ||
+    !Array.isArray(value.models) ||
+    value.models.length > 256 ||
+    !Array.from(value.models).every(
+      (model) =>
+        model &&
+        isExecutorConfiguration({ model: model.id }) &&
+        typeof model.id === 'string' &&
+        isSafeEventText(model.name),
+    ) ||
+    new Set(value.models.map((model) => model.id)).size !== value.models.length ||
+    !isExecutorConfiguration({ model: value.currentModel }) ||
+    (value.message !== undefined && !isSafeEventText(value.message)) ||
+    typeof value.supportsAttachments !== 'boolean' ||
+    typeof value.supportsModelChange !== 'boolean'
+  )
+    throw new TypeError('Executor catalog is invalid');
+  return Object.freeze({
+    id,
+    displayName: value.displayName,
+    readiness: value.readiness,
+    models: Object.freeze(value.models.map(({ id, name }) => Object.freeze({ id, name }))),
+    ...(value.currentModel !== undefined ? { currentModel: value.currentModel } : {}),
+    ...(value.message !== undefined ? { message: value.message } : {}),
+    supportsAttachments: value.supportsAttachments,
+    supportsModelChange: value.supportsModelChange,
+  });
 }

@@ -19,23 +19,22 @@
 
 # Antigravity ACP Plugin rebuild
 
-## Why PR #5224 cannot be carried forward unchanged
+## Basis of the Plugin implementation
 
-PR #5224 predates the Plugin-backed Session executor architecture from #5283. It adds a dedicated
-ACP backend and then threads external-Agent identity, model catalogs, session control, protocol
-operations, Desktop bridges, and Composer state through the Host. The branch changes 139 files and
-adds roughly 7,800 lines relative to its current merge base.
+The original PR #5224 proposal predated the Plugin-backed Session executor architecture from #5283.
+It added a dedicated ACP backend and then threads external-Agent identity, model catalogs, session control, protocol
+operations, Desktop bridges, and Composer state through the Host. That original approach changed 139 files and added roughly 7,800 lines.
 
 The new architecture already owns those cross-cutting responsibilities generically:
 
-| Concern | PR #5224 implementation | Current `main` authority |
+| Concern | Original proposal | Plugin implementation |
 | --- | --- | --- |
 | Session routing | `AcpAgentBackend` registered in Host execution composition | `executorId` plus `PluginExecutorBackend` |
 | Executor lifetime | ACP-specific Host residency and backend registry logic | Plugin Entry generation, retirement, and executor binding |
 | Transcript | ACP event conversion plus new external-session fields | Generic executor events enter the canonical Session stream |
 | Process and credentials | Runtime Host ACP module | Contributing Plugin; opaque to Maka Runtime |
 | Child/Graph execution | ACP-specific guards | Generic executor propagation from #5283 |
-| Model choice | Provider catalog protocol and ACP-specific Desktop state | Plugin configuration for this rebuild; a generic executor-configuration capability can follow |
+| Model choice | Provider catalog protocol and ACP-specific Desktop state | Generic executor catalog/configuration consumed by Desktop and the Plugin backend |
 | Permission choices | ACP backend reaches `HostedInteractionBridge` directly | Generic executor permission request bridged by `PluginExecutorBackend` |
 
 Keeping both designs would create two backend authorities, two lifecycle paths, and provider-specific
@@ -60,13 +59,14 @@ The service wraps every adapter as the generic executor contribution introduced 
 not a second backend or routing authority.
 
 `@maka/antigravity-acp-plugin` now contains only executable/helper validation, Antigravity environment
-policy, and optional initial model configuration. The shared runtime owns:
+policy, initial model configuration, and Antigravity question/failure recognition. The shared runtime owns:
 
 - ACP initialize, Session creation, prompt, cancellation, and cleanup;
 - one retained ACP process/Session per Maka conversation;
 - ACP file callbacks with workspace and symlink containment;
 - ACP tool/thought/text projection into generic executor events;
-- ACP permission option identity and settlement;
+- ACP permission/question option identity and settlement;
+- bounded, cached model discovery and Agent-confirmed idle model changes;
 - generic initial ACP configuration validation/application;
 - durable history-only detection so a Host/Plugin restart cannot silently fork an existing external
   conversation into a new ACP Session.
@@ -75,7 +75,8 @@ The Antigravity adapter owns:
 
 - the official Antigravity executable and helper paths;
 - the `ANTIGRAVITY_HARNESS_PATH`, proxy-bypass, and browser environment policy;
-- the optional model value passed to the shared initial-configuration mechanism.
+- the optional model value passed to the shared initial-configuration mechanism;
+- recognition of official structured questions and provider error text.
 
 The Host owns only executor visibility and binding, Maka Session/run identity, canonical event
 persistence, hosted form admission, and Plugin retirement. No ACP process, credential, or external
@@ -101,15 +102,39 @@ available to Desktop-owned and managed/remote Hosts. The installed ACP service u
 Context label and an explicit consumer Context instead of relying on cross-bundle `Service`
 `instanceof` identity.
 
-## Remaining PR 2 work
+## PR 2 producer-to-consumer delivery
 
-PR 2 remains one pull request, organized as four reviewable producer-to-consumer sets:
+| Checklist set | Producer → consumer | Status |
+| --- | --- | --- |
+| A: setup | RuntimePolicy executable facts → built-in Plugin packages/Entry → executor inspection | Implemented; unavailable/authentication states reach the model menu and setup navigation |
+| B: selection | ACP provider discovery → generic catalog → Desktop model menu → atomic Session executor/config → first prompt | Implemented; bounded probe Sessions are temporary and never become Maka tasks |
+| C: execution | Retained ACP Session → generic events/Hosted Forms → transcript → original option identity | Implemented; includes question forms, tools/diffs, file callbacks, follow-up, cancellation and cleanup |
+| D: continuity | Plugin-owned durable continuity marker → process-free inspection → Session admission/Desktop readiness | Implemented; lost processes leave readable history and a new-task action, without replacement |
 
-1. Setup facts to active executor: implemented by the system-managed package projection above;
-   readiness projection still needs the bounded provider probe used by Desktop.
-2. Provider catalog to Desktop choice to first prompt: add a generic executor catalog/configuration
-   contract and integrate it into the existing model menu without creating preview Sessions.
-3. ACP updates/interactions to canonical conversation settlement: add generic Agent questions and
-   complete race, unsupported-input, and rendering coverage.
-4. Process continuity facts to task readiness: project history-only/process-loss into generic Session
-   and Desktop readiness and finish controlled official-provider acceptance.
+The existing Composer owns text and attachment drafts. Browsing the executor rail does not change
+the selection; selecting a model commits the executor/model pair. Native model choices remain
+available under Maka. Existing tasks keep their executor; model changes require idle state,
+confirmation from the Agent, and a successful Session configuration write. Unsupported attachments
+and native operations produce validation instead of changing or discarding the user's input.
+External task naming uses a message-derived title; native recap generation is unavailable and does
+not call an unrelated model or drain the Host.
+
+The generic contract consists of `ExecutorCatalogEntry`, `ExecutorConfiguration`, the
+`plugin.executor.query` Host operation, and provider discovery/inspection/configuration methods.
+Session storage persists only `executorId` and generic configuration. External ACP Session identity,
+process handles, credentials, and continuity markers stay inside the Plugin.
+
+The model-selection controller now lives in the existing Conversation feature so the Desktop
+architecture ownership/budget checks remain satisfied. Root exports preserve existing consumers.
+This does not introduce a new application architecture or another backend.
+
+## Scope and acceptance
+
+PR 2 covers local macOS arm64 Desktop and local Runtime Host. PR 3 alone will restore an external
+Session after process loss. PR 4 owns modes, account/directory invalidation and the expanded catalog
+lifecycle. Remote execution, OAuth forwarding, external child orchestration, steering, rollback and
+cross-Agent continuation are not added here.
+
+See [PR 2 acceptance evidence](antigravity-acp-pr2-acceptance.md) for controlled-process coverage,
+official Agent verification, Desktop verification and the remaining merge gate. The issue's PR 2
+checkbox stays unchecked until the PR is reviewed and merged.

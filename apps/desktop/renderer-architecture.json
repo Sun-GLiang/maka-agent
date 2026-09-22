@@ -1797,14 +1797,14 @@
       },
       "src/renderer/new-task-reload-intent.ts": {
         "bridgePaths": {},
-        "environmentCapabilities": {
-          "sessionStorage": 2
-        },
+        "environmentCapabilities": {},
         "hookCalls": {},
         "lifecycleMethods": {},
         "unresolvedDependencies": 0,
         "actionFactories": [],
-        "dependencyPaths": {}
+        "dependencyPaths": {
+          "./features/conversation/index.js": 1
+        }
       },
       "src/renderer/onboarding-hero-copy.ts": {
         "bridgePaths": {},
@@ -2009,17 +2009,6 @@
         "dependencyPaths": {}
       },
       "src/renderer/session-error-presentation.ts": {
-        "bridgePaths": {},
-        "environmentCapabilities": {},
-        "hookCalls": {},
-        "lifecycleMethods": {},
-        "unresolvedDependencies": 0,
-        "actionFactories": [],
-        "dependencyPaths": {
-          "./locales/conversation-copy.js": 1
-        }
-      },
-      "src/renderer/session-health-notice.ts": {
         "bridgePaths": {},
         "environmentCapabilities": {},
         "hookCalls": {},
@@ -3738,15 +3727,6 @@
         "actionFactories": [],
         "dependencyPaths": {}
       },
-      "src/renderer/shell-chat-model-selection.ts": {
-        "bridgePaths": {},
-        "environmentCapabilities": {},
-        "hookCalls": {},
-        "lifecycleMethods": {},
-        "unresolvedDependencies": 0,
-        "actionFactories": [],
-        "dependencyPaths": {}
-      },
       "src/renderer/shell-run-update-state.ts": {
         "bridgePaths": {},
         "environmentCapabilities": {},
@@ -3870,16 +3850,12 @@
       "src/renderer/use-new-task-choice.ts": {
         "bridgePaths": {},
         "environmentCapabilities": {},
-        "hookCalls": {
-          "useEffect": 1,
-          "useState": 1
-        },
+        "hookCalls": {},
         "lifecycleMethods": {},
         "unresolvedDependencies": 0,
         "actionFactories": [],
         "dependencyPaths": {
-          "./new-task-reload-intent.js": 1,
-          "react": 1
+          "./features/conversation/index.js": 1
         }
       },
       "src/renderer/use-onboarding-snapshot.ts": {
@@ -3956,18 +3932,12 @@
       "src/renderer/use-shell-chat-model.ts": {
         "bridgePaths": {},
         "environmentCapabilities": {},
-        "hookCalls": {
-          "useNewTaskChoice": 2
-        },
+        "hookCalls": {},
         "lifecycleMethods": {},
         "unresolvedDependencies": 0,
         "actionFactories": [],
         "dependencyPaths": {
-          "./locales/conversation-copy.js": 1,
-          "./session-health-notice.js": 1,
-          "./shell-chat-model-selection.js": 1,
-          "./use-new-task-choice.js": 1,
-          "react": 1
+          "./features/conversation/index.js": 1
         }
       },
       "src/renderer/use-shell-connections.ts": {

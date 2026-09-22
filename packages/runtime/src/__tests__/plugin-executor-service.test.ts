@@ -268,3 +268,99 @@ async function executeText(service: PluginExecutorService): Promise<string> {
   assert.equal(result.status, 'completed');
   return result.text;
 }
+
+test('cancellation drains final updates and preserves timeout interruption', async () => {
+  const root = new Context();
+  const service = new PluginExecutorService(root);
+  const owner = plugin(root, 'profile', 'provider', 1);
+  const abort = new AbortController();
+  owner.executors.register({
+    id: 'remote',
+    execute: async (_request, context) => {
+      context.emit({ type: 'output_delta', text: 'before' });
+      abort.abort(new Error('user_stop'));
+      context.emit({ type: 'output_delta', text: 'after cancel' });
+      return { status: 'cancelled', reason: 'timeout' };
+    },
+  });
+  const events: string[] = [];
+  const result = await service.execute('remote', request('session-a'), {
+    signal: abort.signal,
+    onEvent: (event) => {
+      if (event.type === 'output_delta') events.push(event.text);
+    },
+  });
+  assert.deepEqual(events, ['before', 'after cancel']);
+  assert.deepEqual(result, { status: 'cancelled', source: 'caller', reason: 'timeout' });
+  await root.fiber.dispose();
+});
+
+test('catalog inspection stays process-free and model configuration is isolated per conversation', async () => {
+  const root = new Context();
+  const service = new PluginExecutorService(root);
+  let discoveries = 0,
+    inspections = 0,
+    configured = 0,
+    retired = '';
+  let release!: () => void;
+  const catalog = {
+    id: 'remote',
+    displayName: 'Remote',
+    readiness: 'ready' as const,
+    models: [{ id: 'm', name: 'M' }],
+    supportsAttachments: false,
+    supportsModelChange: true,
+  };
+  plugin(root, 'profile', 'provider', 1).executors.register({
+    id: 'remote',
+    discover: async () => {
+      discoveries++;
+      return catalog;
+    },
+    inspectConversation: async () => {
+      inspections++;
+      return { ...catalog, readiness: 'history_only' };
+    },
+    configureConversation: async () => {
+      configured++;
+    },
+    disposeConversation: async (key) => {
+      retired = key;
+    },
+    execute: async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { status: 'completed', text: '' };
+    },
+  });
+  await service.catalog({ cwd: '/workspace' });
+  const [state] = await service.catalog({
+    cwd: '/workspace',
+    sessionId: 'session-a',
+    executorId: 'remote',
+  });
+  assert.equal(state?.readiness, 'history_only');
+  assert.equal(discoveries, 1);
+  assert.equal(inspections, 1);
+  const execution = service.execute('remote', request('session-a'));
+  await service.configureConversation('session-b', 'remote', {
+    conversationKey: 'session-b',
+    cwd: '/workspace',
+    configuration: { model: 'm' },
+  });
+  assert.equal(configured, 1);
+  await assert.rejects(
+    service.configureConversation('session-a', 'remote', {
+      conversationKey: 'session-a',
+      cwd: '/workspace',
+      configuration: { model: 'm' },
+    }),
+    /busy/,
+  );
+  release();
+  await execution;
+  await service.retireConversation('session-a');
+  assert.equal(retired, 'session-a');
+  await root.fiber.dispose();
+});
