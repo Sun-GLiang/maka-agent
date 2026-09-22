@@ -46,7 +46,7 @@ import {
 import {
   buildModelPickerOptions,
   providerMarkIcon,
-  renderModelPickerOption,
+  renderChatModelPickerOption,
   renderModelPickerValue,
 } from './model-picker-internals.js';
 import { type ProviderType } from '@maka/core/llm-connections';
@@ -238,7 +238,7 @@ export function ChatModelSwitcher(props: {
     option.value === SWITCH_WARNING_VALUE
       ? (
         <SelectorOption
-          className="modelPickerOption modelPickerSwitchNotice"
+          className="modelPickerOption modelPickerChatOption modelPickerSwitchNotice"
           icon={<AlertTriangle className="modelPickerSwitchNoticeGlyph" size={ICON_SIZE.control} aria-hidden="true" />}
           // A node, not a string: Item ellipsizes string labels to one line,
           // and this is a sentence to read, not an id to recognise.
@@ -247,7 +247,7 @@ export function ChatModelSwitcher(props: {
           endContent={<X size={ICON_SIZE.control} aria-hidden="true" />}
         />
       )
-      : renderModelPickerOption(option)
+      : renderChatModelPickerOption(option)
   ), []);
 
   // Selecting any option closes the Selector, the notice included, and the
@@ -339,6 +339,8 @@ export function ChatModelSwitcher(props: {
       options={options}
       value={selection.value}
       hasSearch
+      emptyText={<span className="modelPickerChatOption">{getSharedUiCopy(locale).modelPicker.empty}</span>}
+      emptySearchText={<span className="modelPickerChatOption">{getSharedUiCopy(locale).modelPicker.noResults}</span>}
       searchPlaceholder={searchPlaceholder}
       variant="ghost"
       size="sm"
@@ -441,6 +443,8 @@ export function NewChatModelPicker(props: {
       options={options}
       value={currentValue}
       hasSearch
+      emptyText={<span className="modelPickerChatOption">{getSharedUiCopy(locale).modelPicker.empty}</span>}
+      emptySearchText={<span className="modelPickerChatOption">{getSharedUiCopy(locale).modelPicker.noResults}</span>}
       searchPlaceholder={searchPlaceholder}
       variant="ghost"
       size="sm"
@@ -450,7 +454,7 @@ export function NewChatModelPicker(props: {
       placeholder={props.label}
       className="maka-new-chat-model-selector"
       onChange={pick}
-      renderOption={renderModelPickerOption}
+      renderOption={renderChatModelPickerOption}
       renderValue={renderModelPickerValue}
     />
   );

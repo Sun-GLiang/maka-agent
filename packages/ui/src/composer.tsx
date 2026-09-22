@@ -394,7 +394,7 @@ export const Composer = forwardRef<
     activeModelLabel?: string;
     activeProviderType?: ProviderType;
     modelChoices?: ChatModelChoice[];
-    executorPicker?: Omit<ExecutorModelPickerProps, 'choices' | 'nativeLabel' | 'onNative'>;
+    executorPicker?: Omit<ExecutorModelPickerProps, 'children' | 'presentation' | 'isReadOnly'>;
     /** Model-picker surface; 'wheel' is the collapsed WorkHub's inline picker, and any non-popover surface drops the thinking picker to a bottom sheet. */
     pickerPresentation?: 'popover' | 'bottom-sheet' | 'wheel';
     /** Distinguishes the active Session model from defaults applied only to newly created WorkHub Sessions. */
@@ -2333,54 +2333,57 @@ export const Composer = forwardRef<
                     options={{
                       fallback: (
                         <>
-                {props.executorPicker ? (
-                  <ExecutorModelPicker {...props.executorPicker} renderProviderMark={props.renderProviderMark} nativeLabel={modelChipLabel} choices={props.modelChoices ?? []} onNative={props.activeSession ? (props.onModelChange ?? (() => undefined)) : (props.onPickNewChatModel ?? (() => undefined))} />
-                ) : props.activeSession ? (
-
-                  <ChatModelSwitcher
-                    presentation={props.pickerPresentation}
-                    isReadOnly={props.pickersReadOnly}
-                    activeSession={props.activeSession}
-                    activeModelConnectionId={props.activeModelConnectionId}
-                    activeModelConnectionSlug={props.activeModelConnectionSlug}
-                    activeModel={props.activeModel}
-                    activeModelLabel={props.activeModelLabel}
-                    currentProviderType={props.activeProviderType}
-                    choices={props.modelChoices ?? []}
-                    hasConversationHistory={props.modelSwitchHasHistory}
-                    availability={modelSwitchAvailability}
-                    disabledReason={modelSwitcherDisabledReason}
-                    openNonce={modelPickerNonce}
-                    hideUnavailableCurrentOption={props.hideUnavailableCurrentModel}
-                    renderProviderMark={props.renderProviderMark}
-                    onChange={props.onModelChange}
-                  />
-                ) : props.onPickNewChatModel && (props.modelChoices?.length ?? 0) > 0 ? (
-                  <NewChatModelPicker
-                    label={modelChipLabel}
-                    presentation={props.pickerPresentation}
-                    isReadOnly={props.pickersReadOnly}
-                    choices={props.modelChoices ?? []}
-                    currentValue={
-                      props.newChatModel
-                        ? exactModelChoiceValue(
-                            props.newChatModel.llmConnectionId,
-                            props.newChatModel.llmConnectionSlug,
-                            props.newChatModel.model,
-                          )
-                        : undefined
-                    }
-                    currentProviderType={props.newChatProviderType}
-                    renderProviderMark={props.renderProviderMark}
-                    onPick={props.onPickNewChatModel}
-                  />
-                ) : (
-                  <ModelChipStatic
-                    label={modelChipLabel}
-                    onOpenSettings={props.onOpenModelSettings}
-                    showUnavailableStatus={props.showStaticModelUnavailableStatus}
-                  />
-                )}
+                <ExecutorModelPickerBoundary
+                  picker={props.executorPicker}
+                  presentation={props.pickerPresentation}
+                  isReadOnly={props.pickersReadOnly}
+                >
+                  {props.activeSession ? (
+                    <ChatModelSwitcher
+                      presentation={props.pickerPresentation}
+                      isReadOnly={props.pickersReadOnly}
+                      activeSession={props.activeSession}
+                      activeModelConnectionId={props.activeModelConnectionId}
+                      activeModelConnectionSlug={props.activeModelConnectionSlug}
+                      activeModel={props.activeModel}
+                      activeModelLabel={props.activeModelLabel}
+                      currentProviderType={props.activeProviderType}
+                      choices={props.modelChoices ?? []}
+                      hasConversationHistory={props.modelSwitchHasHistory}
+                      availability={modelSwitchAvailability}
+                      disabledReason={modelSwitcherDisabledReason}
+                      openNonce={modelPickerNonce}
+                      hideUnavailableCurrentOption={props.hideUnavailableCurrentModel}
+                      renderProviderMark={props.renderProviderMark}
+                      onChange={props.onModelChange}
+                    />
+                  ) : props.onPickNewChatModel && (props.modelChoices?.length ?? 0) > 0 ? (
+                    <NewChatModelPicker
+                      label={modelChipLabel}
+                      presentation={props.pickerPresentation}
+                      isReadOnly={props.pickersReadOnly}
+                      choices={props.modelChoices ?? []}
+                      currentValue={
+                        props.newChatModel
+                          ? exactModelChoiceValue(
+                              props.newChatModel.llmConnectionId,
+                              props.newChatModel.llmConnectionSlug,
+                              props.newChatModel.model,
+                            )
+                          : undefined
+                      }
+                      currentProviderType={props.newChatProviderType}
+                      renderProviderMark={props.renderProviderMark}
+                      onPick={props.onPickNewChatModel}
+                    />
+                  ) : (
+                    <ModelChipStatic
+                      label={modelChipLabel}
+                      onOpenSettings={props.onOpenModelSettings}
+                      showUnavailableStatus={props.showStaticModelUnavailableStatus}
+                    />
+                  )}
+                </ExecutorModelPickerBoundary>
                 {props.executorPicker?.selection ? null : renderNativeThinkingControl()}
                         </>
                       ),
@@ -2542,3 +2545,16 @@ function ContextUsageAction(props: {
 }
 
 export type ComposerProps = ComponentProps<typeof Composer>;
+
+function ExecutorModelPickerBoundary(props: {
+  picker?: ComposerProps['executorPicker'];
+  presentation?: ExecutorModelPickerProps['presentation'];
+  isReadOnly?: boolean;
+  children: ReactNode;
+}) {
+  return props.picker ? (
+    <ExecutorModelPicker {...props.picker} presentation={props.presentation} isReadOnly={props.isReadOnly}>
+      {props.children}
+    </ExecutorModelPicker>
+  ) : props.children;
+}
