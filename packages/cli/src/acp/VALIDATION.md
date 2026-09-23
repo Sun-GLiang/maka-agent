@@ -46,10 +46,15 @@ the final registry suite passed 89 tests. The production workspace build and
 workspace typecheck passed, as did lint, format, ASF headers, CLI notices,
 Desktop/UI knip, and `git diff --check`. Runtime Host source and protocol did not
 change, so no compatibility epoch update was required.
-Zed was launched with an isolated disposable project and user-data directory,
-but its native window stopped accepting UI automation input. No third-party
-client smoke result is claimed from that attempt; the official SDK real-process
-test provides protocol boundary coverage.
+
+Desktop Electron E2E passed all 34 tests. Zed 1.20.2 passed a third-party smoke
+with a disposable project and user-data directory, an isolated Runtime Host,
+and a local deterministic model fixture. In Zed, the custom ACP agent created
+a Session and answered a prompt. Reloading the agent opened a new ACP process;
+its logs showed `session/load`, historical `session/update` replay, and a
+successful load response. Zed kept the prior exchange visible, and a second
+prompt on the restored Session completed with `stopReason: "end_turn"`. The
+temporary Zed settings were restored after the smoke run.
 
 # PR5 validation record
 
