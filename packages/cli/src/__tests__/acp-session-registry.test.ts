@@ -581,7 +581,9 @@ describe('ACP Session registry', () => {
     );
     subscription.seedBootstrap(initial);
     const pageGate = deferred<void>();
+    const pageRead = deferred<void>();
     subscription.transcriptPageGate = pageGate.promise;
+    subscription.onTranscriptPageRead = () => pageRead.resolve();
     const notifications: SessionNotification[] = [];
     const registry = new AcpSessionRegistry({
       connect: async () =>
@@ -599,7 +601,8 @@ describe('ACP Session registry', () => {
         { sessionId, cwd: '/workspace', mcpServers: [] },
         promptContext(notifications),
       );
-      await waitFor(() => subscription.transcriptPageReads === 1);
+      await pageRead.promise;
+      assert.equal(subscription.transcriptPageReads, 1);
       subscription.publishTranscript([
         initial[0],
         {
@@ -1365,8 +1368,10 @@ describe('ACP Session registry', () => {
       const turn = runningTurn(sessionId, 'turn-tool');
       const subscription = new FakeSubscription(continuitySnapshot(sessionId));
       const pageGate = deferred<void>();
+      const pageRead = deferred<void>();
       const deliveryGate = deferred<void>();
       subscription.transcriptPageGate = pageGate.promise;
+      subscription.onTranscriptPageRead = () => pageRead.resolve();
       let subscriptionOpens = 0;
       let stopped = 0;
       let terminalDeliveryStarted = false;
@@ -1480,7 +1485,7 @@ describe('ACP Session registry', () => {
           settled = true;
         },
       );
-      await waitFor(() => subscription.transcriptPageReads > 0);
+      await pageRead.promise;
       assert.equal(settled, false);
       if (scenario === 'cancel') {
         await registry.cancel({ sessionId });
@@ -4387,6 +4392,7 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
   closeCalls = 0;
   nextCalls = 0;
   transcriptPageReads = 0;
+  onTranscriptPageRead?: () => void;
   transcriptPageSize = Number.POSITIVE_INFINITY;
   transcriptEmptyFirstPage = false;
   transcriptPageGate?: Promise<void>;
@@ -4591,6 +4597,7 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
     input: Omit<SessionTranscriptPageInput, 'subscriptionId'>,
   ): Promise<SessionTranscriptPage> {
     this.transcriptPageReads += 1;
+    this.onTranscriptPageRead?.();
     await this.transcriptPageGate;
     if (this.transcriptEmptyFirstPage && input.cursor === null) {
       const empty: SessionTranscriptPage = {

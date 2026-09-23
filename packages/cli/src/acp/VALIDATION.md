@@ -56,6 +56,11 @@ successful load response. Zed kept the prior exchange visible, and a second
 prompt on the restored Session completed with `stopReason: "end_turn"`. The
 temporary Zed settings were restored after the smoke run.
 
+The first GitHub CI rerun exposed a test-only scheduling race: a replay-overlap
+test exhausted 100 event-loop checks before its fake transcript page read began.
+The fake subscription now signals page-read entry directly. The focused test
+and the complete CLI dist suite passed after this correction.
+
 # PR5 validation record
 
 ## Follow-up main refresh
