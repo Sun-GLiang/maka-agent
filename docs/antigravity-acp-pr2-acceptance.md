@@ -50,6 +50,31 @@ The official Agent performed these checks:
 7. After closing/recreating the platform with the same Plugin data, inspection returned
    `history_only`; execution refused to create a replacement external Session.
 
+## Cross-process resume/load feasibility probe
+
+An earlier prerequisite probe on 2026-09-12 used the official macOS arm64 ACP 1.1.1
+server/helper, ACP SDK 1.4.0, cached authentication, and a temporary toy project. The
+Agent created a Session, edited two fixture files, and the independent fixture test exited 0.
+`initialize` advertised `agentCapabilities.loadSession: true` and
+`agentCapabilities.sessionCapabilities.resume`.
+
+The probe then terminated the original process tree. It started a **separate fresh process**
+for each request, initialized and authenticated it using the cached login, and sent the
+original Session ID and the same fixture directory to `session/resume` and `session/load`:
+
+| Request          | Observed result                                                                                                                                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session/resume` | Succeeded and returned the Session's model/configuration; one `available_commands_update` notification arrived, with no transcript replay observed.                                                                 |
+| `session/load`   | Succeeded and returned the Session's model/configuration; 27 replay notifications arrived: one user message chunk, one agent message chunk, 12 tool calls, 12 tool-call updates, and one available-commands update. |
+
+All three owned process groups were gone after cleanup. This summary omits the
+Session ID, credentials, and fixture content. The probe establishes that both methods accepted
+the previously created Session across process restarts and shows that `load` replays
+history. It does **not** establish that a subsequent prompt retains full context, how to
+deduplicate replay against Maka's durable events, or how to reconcile a crash between an
+Agent update and Maka's persistence. PR 3 must verify those behaviors before enabling
+restoration; PR 2 continues to show such tasks as `history_only`.
+
 ## Desktop acceptance
 
 Launched the built Electron app against an isolated temporary profile and a fixture project.
