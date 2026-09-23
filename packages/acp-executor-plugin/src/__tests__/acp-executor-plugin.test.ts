@@ -128,6 +128,50 @@ test('runtime rejects a historical conversation after process continuity was los
   }
 });
 
+test('a failed first model change cannot replace an established ACP Session after restart', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.configurationFailure = 'once';
+  const marked = new Set<string>();
+  const state: AcpConversationStateStore = {
+    has: async (key) => marked.has(key),
+    mark: async (key) => {
+      marked.add(key);
+    },
+  };
+  const createExecutor = () =>
+    new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      {
+        createConnection: protocol.factory,
+        state,
+      },
+    );
+  const first = createExecutor();
+  try {
+    const input = { ...request('first'), configuration: { model: 'fast' } };
+    assert.equal((await first.execute(input, executorContext([]))).status, 'failed');
+    assert.equal(protocol.sessions, 1);
+    assert.equal(protocol.prompts, 0);
+    assert.equal(marked.has(input.conversationKey), true);
+    await first.dispose();
+
+    const restarted = createExecutor();
+    try {
+      const result = await restarted.execute(input, executorContext([]));
+      assert.equal(result.status, 'failed');
+      if (result.status === 'failed') assert.equal(result.code, 'acp_history_only');
+      assert.equal(protocol.sessions, 1, 'the established ACP Session was not replaced');
+    } finally {
+      await restarted.dispose();
+    }
+  } finally {
+    await first.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 for (const startupFailure of ['request', 'crash', 'abort'] as const) {
   test(`a pre-session ${startupFailure} failure is cleaned up and can be retried`, async () => {
     const fixture = await executableFixture();

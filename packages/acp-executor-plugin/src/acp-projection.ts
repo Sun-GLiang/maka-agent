@@ -77,7 +77,7 @@ export function projectToolResult(
         ]
       : [],
   );
-  const combinedDiff = diffs.map(({ diff }) => diff).join('\n');
+  const combinedDiff = diffs.map(({ diff }) => diff).join('');
   if (diffs.length && diffs.length <= 64 && combinedDiff.length <= MAX_TOOL_RESULT_DIFF)
     return {
       kind: 'file_diff',
@@ -95,15 +95,35 @@ export function projectToolResult(
 }
 
 function createWholeFileDiff(path: string, oldText: string, newText: string): string {
-  const oldLines = oldText.replaceAll('\r', '').split('\n');
-  const newLines = newText.replaceAll('\r', '').split('\n');
-  return [
-    `--- a/${path}`,
-    `+++ b/${path}`,
-    `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
-    ...oldLines.map((line) => `-${line}`),
-    ...newLines.map((line) => `+${line}`),
-  ].join('\n');
+  const oldFile = diffLines(oldText);
+  const newFile = diffLines(newText);
+  const oldLines = oldFile.lines;
+  const newLines = newFile.lines;
+  return (
+    [
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      `@@ -${oldLines.length ? 1 : 0},${oldLines.length} +${newLines.length ? 1 : 0},${newLines.length} @@`,
+      ...diffSide(oldLines, '-', oldFile.endsWithNewline),
+      ...diffSide(newLines, '+', newFile.endsWithNewline),
+    ].join('\n') + '\n'
+  );
+}
+
+function diffLines(text: string): { lines: string[]; endsWithNewline: boolean } {
+  const normalized = text.replaceAll('\r', '');
+  if (!normalized) return { lines: [], endsWithNewline: true };
+  const endsWithNewline = normalized.endsWith('\n');
+  const lines = normalized.split('\n');
+  if (endsWithNewline) lines.pop();
+  return { lines, endsWithNewline };
+}
+
+function diffSide(lines: readonly string[], prefix: '-' | '+', endsWithNewline: boolean): string[] {
+  return lines.flatMap((line, index) => [
+    `${prefix}${line}`,
+    ...(index === lines.length - 1 && !endsWithNewline ? ['\\ No newline at end of file'] : []),
+  ]);
 }
 
 export function summarizeToolContent(content: readonly ToolCallContent[]): string {

@@ -456,6 +456,9 @@ export class AcpExecutor implements PluginExecutorProvider {
     session.acpSessionId = created.sessionId;
     session.configOptions = created.configOptions ?? [];
     if (!probe) {
+      // Once session/new succeeds, a later configuration failure must not let a
+      // Host restart silently replace this external conversation.
+      await this.#state?.mark(session.conversationKey, session.cwd);
       await this.#applyInitialConfig(
         session,
         session.configuration?.model
@@ -463,7 +466,6 @@ export class AcpExecutor implements PluginExecutorProvider {
           : (launch.initialConfig ?? {}),
         startupSignal,
       );
-      await this.#state?.mark(session.conversationKey, session.cwd);
     }
   }
 

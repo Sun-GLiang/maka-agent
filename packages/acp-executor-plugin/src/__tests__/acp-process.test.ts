@@ -299,7 +299,7 @@ for (const newline of ['\n', '\r\n']) {
       assert.deepEqual(result.content, {
         kind: 'file_diff',
         paths: ['edited.txt'],
-        diff: '--- a/edited.txt\n+++ b/edited.txt\n@@ -1,2 +1,2 @@\n-old\n-\n+new\n+',
+        diff: '--- a/edited.txt\n+++ b/edited.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n',
       });
       assert.equal(events.at(-1)?.type, 'complete');
       assert.equal(await readFile(join(f.root, 'edited.txt'), 'utf8'), `new${newline}`);
