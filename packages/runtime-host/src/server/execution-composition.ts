@@ -215,7 +215,10 @@ import {
 } from './project-directory-authority.js';
 import { HostProjectCatalogCoordinator } from './project-catalog-coordinator.js';
 import { HostProjectMembershipGate } from './project-membership-gate.js';
-import { HostBuiltinExternalAgentPluginCoordinator } from './builtin-external-agent-plugins.js';
+import {
+  HostBuiltinExternalAgentPluginCoordinator,
+  withBuiltinExternalAgentCatalog,
+} from './builtin-external-agent-plugins.js';
 import { HostPluginPlatformCoordinator } from './plugin-platform-coordinator.js';
 import { HostPluginPlatform } from './plugin-platform.js';
 import { RootAdmissionOwner } from './root-admission-owner.js';
@@ -410,19 +413,7 @@ export async function createExecutionRuntimeHostComposition(
           });
         }
         const catalog = await pluginExecutors.catalog({ cwd: input.cwd });
-        return catalog.some((entry) => entry.id === 'antigravity-acp')
-          ? catalog
-          : [
-              ...catalog,
-              {
-                id: 'antigravity-acp',
-                displayName: 'Antigravity',
-                readiness: 'unavailable' as const,
-                models: [],
-                supportsAttachments: false,
-                supportsModelChange: false,
-              },
-            ];
+        return withBuiltinExternalAgentCatalog(catalog);
       },
     );
     const openedProjectCatalog = storage.projectCatalog;

@@ -76,16 +76,14 @@ const choices: ChatModelChoice[] = [
   },
 ];
 
-test('Antigravity stays visible while its first model catalog loads', async () => {
+test('the picker shows a generic loading state until the executor catalog arrives', async () => {
   const dom = installTranscriptDom();
   const selections: unknown[] = [];
-  const loadingEntry = { id: 'antigravity-acp', displayName: 'Antigravity' };
   const render = (loading: boolean) => dom.render(
     <LocaleProvider locale="zh-CN">
       <ExecutorModelPicker
-        catalog={loading ? [] : [{ ...catalog[0]!, id: loadingEntry.id }]}
+        catalog={loading ? [] : [{ ...catalog[0]!, id: 'antigravity-acp' }]}
         loading={loading}
-        loadingEntry={loadingEntry}
         onSelect={(selection) => { selections.push(selection); }}
         onSetup={() => {}}
         onRetry={() => {}}
@@ -102,17 +100,17 @@ test('Antigravity stays visible while its first model catalog loads', async () =
   try {
     await render(true);
     await click(dom.document.querySelector('.maka-executor-selector'));
-    const antigravity = [...dom.document.querySelectorAll<HTMLButtonElement>('.maka-executor-picker-rail button')]
-      .find((button) => button.textContent?.includes('Antigravity'));
-    assert.ok(antigravity?.textContent?.includes('正在读取模型'));
-    await click(antigravity);
+    assert.ok(dom.document.querySelector('.maka-executor-picker-entry-status[role="status"]')?.textContent?.includes('正在读取执行者与模型'));
+    assert.ok(![...dom.document.querySelectorAll<HTMLButtonElement>('.maka-executor-picker-rail button')]
+      .some((button) => button.textContent?.includes('Antigravity')));
     assert.equal(dom.document.querySelectorAll('.maka-executor-picker-model').length, 0);
-    assert.ok(dom.document.querySelector('.maka-executor-picker-models [role="status"]')?.textContent?.includes('正在读取模型'));
     assert.deepEqual(selections, []);
 
     await render(false);
     assert.equal([...dom.document.querySelectorAll('.maka-executor-picker-rail button')]
       .filter((button) => button.textContent?.includes('Antigravity')).length, 1);
+    await click([...dom.document.querySelectorAll<HTMLButtonElement>('.maka-executor-picker-rail button')]
+      .find((button) => button.textContent?.includes('Antigravity')));
     await click([...dom.document.querySelectorAll('.maka-executor-picker-model')]
       .find((model) => model.textContent?.includes('Gemini 3.8 Flash')));
     assert.deepEqual(selections, [{ executorId: 'antigravity-acp', configuration: { model: 'model-0' } }]);
@@ -123,21 +121,19 @@ test('Antigravity stays visible while its first model catalog loads', async () =
 
 test('failed Antigravity discovery closes the picker before opening external-agent settings', async () => {
   const dom = installTranscriptDom();
-  const loadingEntry = { id: 'antigravity-acp', displayName: 'Antigravity' };
   let setupOpened = false;
   const render = (loading: boolean) => dom.render(
     <LocaleProvider locale="zh-CN">
       <ExecutorModelPicker
         catalog={loading ? [] : [{
-          id: loadingEntry.id,
-          displayName: loadingEntry.displayName,
+          id: 'antigravity-acp',
+          displayName: 'Antigravity',
           readiness: 'unavailable',
           models: [],
           supportsAttachments: false,
           supportsModelChange: false,
         }]}
         loading={loading}
-        loadingEntry={loadingEntry}
         onSelect={() => assert.fail('An unavailable executor cannot be selected')}
         onSetup={() => { setupOpened = true; }}
         onRetry={() => {}}
@@ -152,9 +148,9 @@ test('failed Antigravity discovery closes the picker before opening external-age
   try {
     await render(true);
     await click(dom.document.querySelector('.maka-executor-selector'));
+    await render(false);
     await click([...dom.document.querySelectorAll<HTMLButtonElement>('.maka-executor-picker-rail button')]
       .find((button) => button.textContent?.includes('Antigravity')));
-    await render(false);
     assert.ok(dom.document.querySelector('.maka-executor-picker-models')?.textContent?.includes('当前不可用'));
     await click(dom.document.querySelector('.maka-executor-picker-readiness button'));
     assert.equal(setupOpened, true);

@@ -36,8 +36,6 @@ import { useUiLocale } from './locale-context.js';
 
 export interface ExecutorModelPickerProps {
   catalog: readonly ExecutorCatalogEntry[];
-  /** Stable rail entry while the Host discovers its first live catalog. */
-  loadingEntry?: { readonly id: string; readonly displayName: string };
   selection?: ExecutorSelection;
   nativeLabel?: string;
   nativeThinkingControl?: ReactNode;
@@ -81,7 +79,7 @@ const EXECUTOR_COPY = {
     search: 'Search models',
     manage: 'Manage external agents',
     default: 'Agent default',
-    loading: 'Loading models…',
+    loading: 'Loading agents and models…',
     unavailable: 'Unavailable. Check setup and retry.',
     authentication_required: 'Sign in from External Agents settings.',
     history_only:
@@ -99,7 +97,7 @@ const EXECUTOR_COPY = {
     search: '搜索模型',
     manage: '管理外部 Agent',
     default: 'Agent 默认',
-    loading: '正在读取模型…',
+    loading: '正在读取执行者与模型…',
     unavailable: '当前不可用，请检查设置后重试。',
     authentication_required: '需要登录，请前往外部 Agent 设置。',
     history_only: '外部进程已丢失。历史仍可阅读，请新建任务继续。',
@@ -115,7 +113,7 @@ const EXECUTOR_COPY = {
     search: '搜尋模型',
     manage: '管理外部 Agent',
     default: 'Agent 預設',
-    loading: '正在讀取模型…',
+    loading: '正在讀取執行者與模型…',
     unavailable: '目前無法使用，請檢查設定後重試。',
     authentication_required: '需要登入，請前往外部 Agent 設定。',
     history_only: '外部程序已遺失。歷史仍可閱讀，請建立新任務繼續。',
@@ -142,10 +140,6 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
   const [selecting, setSelecting] = useState(false);
   const [selectionFailed, setSelectionFailed] = useState(false);
   const [browsedId, setBrowsedId] = useState(props.selection?.executorId ?? NATIVE);
-  const loadingEntry = props.loading && props.loadingEntry &&
-    !props.catalog.some((entry) => entry.id === props.loadingEntry?.id)
-      ? props.loadingEntry
-      : undefined;
   useEffect(() => {
     if (!open) {
       setBrowsedId(props.selection?.executorId ?? NATIVE);
@@ -238,21 +232,8 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                   </span>
                 </Button>
               ))}
-              {loadingEntry ? (
-                <Button
-                  label={loadingEntry.displayName}
-                  variant="ghost"
-                  size="sm"
-                  className="maka-executor-picker-entry"
-                  data-active={browsedId === loadingEntry.id ? 'true' : undefined}
-                  isDisabled={lockedTo !== undefined && lockedTo !== loadingEntry.id}
-                  onClick={() => browse(loadingEntry.id)}
-                >
-                  <span className="maka-executor-picker-label">
-                    <span>{loadingEntry.displayName}</span>
-                    <span className="maka-executor-picker-entry-status">{copy.loading}</span>
-                  </span>
-                </Button>
+              {props.loading ? (
+                <span className="maka-executor-picker-entry-status" role="status">{copy.loading}</span>
               ) : null}
               <Button
                 label={copy.manage}
@@ -296,7 +277,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                   />
                   {selectionFailed ? <span role="alert">{copy.selectionFailed}</span> : null}
                 </>
-              ) : loadingEntry && browsedId === loadingEntry.id ? (
+              ) : props.loading && !browsed ? (
                 <div className="maka-executor-picker-readiness" role="status">
                   <p>{copy.loading}</p>
                 </div>

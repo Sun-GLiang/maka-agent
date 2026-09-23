@@ -226,7 +226,17 @@ Release checks passed **203 tests**, plus their prerequisite metadata/notice/sta
 when run serially after the suite workload. The earlier concurrent release run hit a Node test
 worker deserialization error and a real-Host shutdown timeout; these did not recur serially.
 
-## Current UI screenshots
+## Catalog-loading extensibility follow-up
+
+The Host appends setup placeholders from its built-in external-agent catalog only when a
+registered Plugin has not supplied that executor ID. The composer no longer names Antigravity
+while loading; the shared picker displays a generic loading status until catalog data arrives.
+A live Plugin catalog replaces the placeholder without a UI-specific fallback. Targeted Host
+and picker tests cover placeholder precedence and the loading-to-ready transition. The current
+Storybook captures in the PR description show both states with the production Composer/picker
+components and fixture catalog data; they do not claim an official Agent ran in those captures.
+
+## Earlier real Electron UI screenshots
 
 Captured on 2026-09-22 from the production renderer in a real Electron Desktop window with the
 official ACP 1.1.1 catalog. Screenshots are GitHub attachments only; no binaries are committed.

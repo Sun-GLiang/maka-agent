@@ -37,7 +37,6 @@ export function executorComposerProps(
       !fixed || executor.selection
         ? {
             catalog: executor.catalog,
-            ...(!fixed ? { loadingEntry: { id: 'antigravity-acp', displayName: 'Antigravity' } } : {}),
             selection: executor.selection,
             fixed,
             disabled: executor.changing || (fixed && input.turnActive),
