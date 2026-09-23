@@ -37,12 +37,14 @@ the publication. Equivalent configuration still reuses the live process.
 Official SDK and real Host tests now also cover a live Turn's historical
 prefix followed by new output without duplicate chunks, a pending permission
 answered after a second ACP process loads the Session, and explicit execution
-of a ready interrupted Turn. Repeated load replays history while repeated
-resume does not. A revision target remains usable after prompt and returns
-`retained` when abandoned; an unused target returns `abandoned`. A failed
+of a ready interrupted Turn. A required MCP tool missing from the replacement
+provider leaves the interrupted Turn `parked/safety_check_failed`; restoring
+the matching server makes explicit resume start. Repeated load replays history
+while repeated resume does not. A revision target remains usable after prompt
+and returns `retained` when abandoned; an unused target returns `abandoned`. A failed
 historical page read releases the newly opened subscription.
 
-On this follow-up, the complete CLI dist suite passed 1184 tests with 3
+On this follow-up, the complete CLI dist suite passed 1185 tests with 3
 skipped and no failures. CLI build and typecheck, repository lint and format,
 and `git diff --check` passed. The earlier Desktop E2E and Zed smoke results
 below were not repeated because this follow-up changes only CLI code, tests,

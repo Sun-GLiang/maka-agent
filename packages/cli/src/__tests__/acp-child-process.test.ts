@@ -28,6 +28,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
 import { methods, type SessionNotification } from '@agentclientprotocol/sdk';
 import { waitFor } from '@maka/core/test-only/async-primitives';
+import { mcpProxyToolName } from '@maka/runtime/mcp-tools';
 import { seedInvocation } from '@maka/runtime/test-only/invocation-fixture';
 import {
   buildRecoveredTerminalRuntimeEvent,
@@ -955,11 +956,73 @@ describe('Maka ACP child process', () => {
       await model.close();
     }
   });
+
+  test('keeps an interrupted Turn parked until the required MCP contract is restored', {
+    timeout: 45_000,
+  }, async () => {
+    const model = await startAcpModelFixture();
+    const mcpFixture = fileURLToPath(import.meta.resolve('@maka/mcp/test-only/stdio-server'));
+    let sessionId = '';
+    try {
+      await withAcpChildProcessHarness(
+        async (harness) => {
+          await harness.withClient(async ({ context }) => {
+            await context.request(methods.agent.initialize, { protocolVersion: 1 });
+            await context.request(methods.agent.session.load, {
+              sessionId,
+              cwd: harness.workspaceRoot,
+              mcpServers: [
+                { name: 'wrong', command: process.execPath, args: [mcpFixture], env: [] },
+              ],
+            });
+            const incompatible = (await context.request('_maka/turn/resume', { sessionId })) as {
+              kind: string;
+              plan?: { disposition: string; reason?: string };
+            };
+            assert.equal(incompatible.kind, 'parked');
+            assert.equal(incompatible.plan?.disposition, 'parked');
+            assert.equal(incompatible.plan.reason, 'safety_check_failed');
+            await context.request(methods.agent.session.load, {
+              sessionId,
+              cwd: harness.workspaceRoot,
+              mcpServers: [
+                { name: 'fixture', command: process.execPath, args: [mcpFixture], env: [] },
+              ],
+            });
+            const compatible = (await context.request('_maka/turn/resume', { sessionId })) as {
+              kind: string;
+              turn?: { turnId: string };
+            };
+            assert.equal(compatible.kind, 'started', JSON.stringify(compatible));
+            assert.ok(compatible.turn?.turnId);
+            await context.request(methods.agent.session.close, { sessionId });
+          });
+        },
+        {
+          startRuntimeHost: true,
+          safeBoundaryResume: true,
+          model: { id: 'acp-stream-fixture', thinkingLevels: ['low'], baseUrl: model.baseUrl },
+          beforeHostStart: async ({ workspaceRoot, modelConnectionId }) => {
+            assert.ok(modelConnectionId);
+            sessionId = await seedReadyAcpContinuation(
+              workspaceRoot,
+              modelConnectionId,
+              mcpProxyToolName('fixture', 'echo'),
+            );
+          },
+          timeoutMs: 35_000,
+        },
+      );
+    } finally {
+      await model.close();
+    }
+  });
 });
 
 async function seedReadyAcpContinuation(
   workspaceRoot: string,
   modelConnectionId: string,
+  requiredToolName?: string,
 ): Promise<string> {
   const cwd = await realpath(workspaceRoot);
   const capability = await resolveStorageRoot({ path: workspaceRoot, kind: 'interactive' });
@@ -1016,7 +1079,42 @@ async function seedReadyAcpContinuation(
       author: 'user',
       content: { kind: 'text', text: 'Continue this interrupted request.' },
     });
-    const terminalAt = openedAt + 1;
+    if (requiredToolName) {
+      const toolCallId = randomUUID();
+      await stores.runtimeEventStore.appendRuntimeEvent(session.id, runId, {
+        id: randomUUID(),
+        sessionId: session.id,
+        invocationId,
+        runId,
+        turnId,
+        ts: openedAt + 1,
+        partial: false,
+        role: 'model',
+        author: 'agent',
+        content: { kind: 'function_call', id: toolCallId, name: requiredToolName, args: {} },
+        refs: { toolCallId },
+      });
+      await stores.runtimeEventStore.appendRuntimeEvent(session.id, runId, {
+        id: randomUUID(),
+        sessionId: session.id,
+        invocationId,
+        runId,
+        turnId,
+        ts: openedAt + 2,
+        partial: false,
+        role: 'tool',
+        author: 'tool',
+        content: {
+          kind: 'function_response',
+          id: toolCallId,
+          name: requiredToolName,
+          result: { kind: 'json', value: { ok: true } },
+          isError: false,
+        },
+        refs: { toolCallId },
+      });
+    }
+    const terminalAt = openedAt + (requiredToolName ? 3 : 1);
     await commitTerminalRunWithRuntimeFact({
       runtimeEventStore: stores.runtimeEventStore,
       newId: randomUUID,
