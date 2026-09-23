@@ -21,11 +21,12 @@ import {
   agent,
   methods,
   RequestError,
+  type AgentContext,
   type AgentApp,
   type ClientCapabilities,
 } from '@agentclientprotocol/sdk';
 import { HOST_OPERATION_SPECS } from '@maka/runtime-host/protocol';
-import type { AcpSessionRegistry } from './session-registry.js';
+import type { AcpLoadContext, AcpSessionRegistry } from './session-registry.js';
 
 export interface MakaAcpAgentOptions {
   readonly version: string;
@@ -65,42 +66,16 @@ export function createMakaAcpAgent(options: MakaAcpAgentOptions): AgentApp {
       options.sessionRegistry.create(params, signal),
     )
     .onRequest(methods.agent.session.load, ({ params, signal, client }) =>
-      options.sessionRegistry.load(params, {
-        signal,
-        notify: (notification) => client.notify(methods.client.session.update, notification),
-        interactions: {
-          capabilities: clientCapabilities,
-          requestPermission: (request, cancellationSignal) =>
-            client.request(methods.client.session.requestPermission, request, {
-              cancellationSignal,
-            }),
-          createElicitation: (request, cancellationSignal) =>
-            client.request(methods.client.elicitation.create, request, {
-              cancellationSignal,
-            }),
-        },
-        ...(clientCapabilities._meta?.['_maka/turnStatus'] === true
-          ? { notifyTurnStatus: (status) => client.notify('_maka/turn/status', status) }
-          : {}),
-      }),
+      options.sessionRegistry.load(
+        params,
+        sessionContext(client, signal, clientCapabilities, true),
+      ),
     )
     .onRequest(methods.agent.session.resume, ({ params, signal, client }) =>
-      options.sessionRegistry.resume(params, {
-        signal,
-        notify: (notification) => client.notify(methods.client.session.update, notification),
-        interactions: {
-          capabilities: clientCapabilities,
-          requestPermission: (request, cancellationSignal) =>
-            client.request(methods.client.session.requestPermission, request, {
-              cancellationSignal,
-            }),
-          createElicitation: (request, cancellationSignal) =>
-            client.request(methods.client.elicitation.create, request, { cancellationSignal }),
-        },
-        ...(clientCapabilities._meta?.['_maka/turnStatus'] === true
-          ? { notifyTurnStatus: (status) => client.notify('_maka/turn/status', status) }
-          : {}),
-      }),
+      options.sessionRegistry.resume(
+        params,
+        sessionContext(client, signal, clientCapabilities, true),
+      ),
     )
     .onRequest(
       '_maka/turn/resume',
@@ -115,22 +90,10 @@ export function createMakaAcpAgent(options: MakaAcpAgentOptions): AgentApp {
         }
       },
       ({ params, signal, client }) =>
-        options.sessionRegistry.resumeTurn(params, {
-          signal,
-          notify: (notification) => client.notify(methods.client.session.update, notification),
-          interactions: {
-            capabilities: clientCapabilities,
-            requestPermission: (request, cancellationSignal) =>
-              client.request(methods.client.session.requestPermission, request, {
-                cancellationSignal,
-              }),
-            createElicitation: (request, cancellationSignal) =>
-              client.request(methods.client.elicitation.create, request, { cancellationSignal }),
-          },
-          ...(clientCapabilities._meta?.['_maka/turnStatus'] === true
-            ? { notifyTurnStatus: (status) => client.notify('_maka/turn/status', status) }
-            : {}),
-        }),
+        options.sessionRegistry.resumeTurn(
+          params,
+          sessionContext(client, signal, clientCapabilities, true),
+        ),
     )
     .onRequest(
       '_maka/session/branch/create',
@@ -185,22 +148,36 @@ export function createMakaAcpAgent(options: MakaAcpAgentOptions): AgentApp {
       options.sessionRegistry.setConfigOption(params),
     )
     .onRequest(methods.agent.session.prompt, ({ params, signal, client }) =>
-      options.sessionRegistry.prompt(params, {
-        signal,
-        notify: (notification) => client.notify(methods.client.session.update, notification),
-        interactions: {
-          capabilities: clientCapabilities,
-          requestPermission: (params, cancellationSignal) =>
-            client.request(methods.client.session.requestPermission, params, {
-              cancellationSignal,
-            }),
-          createElicitation: (params, cancellationSignal) =>
-            client.request(methods.client.elicitation.create, params, { cancellationSignal }),
-        },
-      }),
+      options.sessionRegistry.prompt(params, sessionContext(client, signal, clientCapabilities)),
     )
     .onNotification(methods.agent.session.cancel, ({ params }) =>
       options.sessionRegistry.cancel(params),
     )
     .onRequest(methods.agent.session.close, ({ params }) => options.sessionRegistry.close(params));
+}
+
+function sessionContext(
+  client: AgentContext,
+  signal: AbortSignal,
+  capabilities: ClientCapabilities,
+  turnStatus = false,
+): AcpLoadContext {
+  return {
+    signal,
+    notify: (notification) => client.notify(methods.client.session.update, notification),
+    interactions: {
+      capabilities,
+      requestPermission: (request, cancellationSignal) =>
+        client.request(methods.client.session.requestPermission, request, { cancellationSignal }),
+      createElicitation: (request, cancellationSignal) =>
+        client.request(methods.client.elicitation.create, request, { cancellationSignal }),
+    },
+    ...(turnStatus && capabilities._meta?.['_maka/turnStatus'] === true
+      ? {
+          notifyTurnStatus: (
+            status: Parameters<NonNullable<AcpLoadContext['notifyTurnStatus']>>[0],
+          ) => client.notify('_maka/turn/status', status),
+        }
+      : {}),
+  };
 }

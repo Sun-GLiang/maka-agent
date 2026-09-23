@@ -668,6 +668,8 @@ describe('ACP Session registry', () => {
     subscription.onTranscriptPageRead = () => {
       throw new Error('transcript page unavailable');
     };
+    const retrySubscription = new FakeSubscription(continuitySnapshot(sessionId));
+    let opens = 0;
     const registry = new AcpSessionRegistry({
       connect: async () =>
         fakeConnection({
@@ -676,7 +678,8 @@ describe('ACP Session registry', () => {
               return { kind: 'session', session: catalogSession(sessionId) };
             throw new Error(`Unexpected operation ${operation}`);
           },
-          openSessionSubscriptionOnce: async () => subscription,
+          openSessionSubscriptionOnce: async () =>
+            ++opens === 1 ? subscription : retrySubscription,
         }),
     });
     try {
@@ -685,7 +688,347 @@ describe('ACP Session registry', () => {
         (error: unknown) => error instanceof RequestError,
       );
       assert.equal(subscription.closeCalls, 1);
+      await registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([]));
+      assert.equal(opens, 2);
+      assert.equal(retrySubscription.closeCalls, 0);
     } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('failed load of an owned unattached Session releases only its new subscription', async () => {
+    const sessionId = 'owned-load-failure';
+    const subscription = new FakeSubscription(continuitySnapshot(sessionId));
+    subscription.seedBootstrap([{ type: 'user', id: 'u', turnId: 't', ts: 1, text: 'hello' }]);
+    subscription.onTranscriptPageRead = () => {
+      throw new Error('transcript page unavailable');
+    };
+    const retrySubscription = new FakeSubscription(continuitySnapshot(sessionId));
+    let opens = 0;
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => sessionId,
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession(sessionId);
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () =>
+            ++opens === 1 ? subscription : retrySubscription,
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await assert.rejects(
+        registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([])),
+      );
+      assert.equal(subscription.closeCalls, 1);
+      await registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([]));
+      assert.equal(opens, 2);
+      assert.equal(retrySubscription.closeCalls, 0);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('unsupported restored interaction stops its exact Host Turn', async () => {
+    const sessionId = 'unsupported-restored',
+      turnId = 'restored-turn';
+    const turn = runningTurn(sessionId, turnId);
+    const pending: InteractionPendingSnapshot = {
+      schemaVersion: 1,
+      interactionId: 'restored-question',
+      sessionId,
+      turnId,
+      runId: turn.runId,
+      revision: 1,
+      status: 'pending',
+      outcome: null,
+      request: {
+        kind: 'question',
+        toolUseId: 'tool',
+        questions: [{ question: 'Continue?', options: [{ label: 'Yes' }] }],
+      },
+    };
+    const subscription = new FakeSubscription(
+      continuitySnapshot(sessionId, { rootTurn: turn, interactions: { pending: [pending] } }),
+    );
+    const statuses: string[] = [];
+    const stops: Array<{ sessionId: string; turnId: string; runId: string }> = [];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            if (operation === 'interaction.query') return pending;
+            if (operation === 'turn.stop') {
+              stops.push(input as (typeof stops)[number]);
+              subscription.setRoot(completedTurn(sessionId, turnId));
+              return completedTurn(sessionId, turnId);
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      await registry.resume(
+        { sessionId, cwd: '/workspace' },
+        {
+          ...promptContext([]),
+          notifyTurnStatus: async (status) => {
+            statuses.push(status.status);
+          },
+        },
+      );
+      await waitFor(() => statuses.includes('observation_failed'));
+      await waitFor(() => stops.length === 1);
+      assert.deepEqual(stops, [{ sessionId, turnId, runId: turn.runId }]);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  for (const failure of ['unsupported-method', 'invalid-answer', 'output-failure'] as const) {
+    test(`restored ${failure} stops the adopted Host Turn without answering`, async () => {
+      const sessionId = `restored-${failure}`;
+      const turnId = `turn-${failure}`;
+      const turn = runningTurn(sessionId, turnId);
+      const pending: InteractionPendingSnapshot = {
+        schemaVersion: 1,
+        interactionId: `question-${failure}`,
+        sessionId,
+        turnId,
+        runId: turn.runId,
+        revision: 1,
+        status: 'pending',
+        outcome: null,
+        request: {
+          kind: 'question',
+          toolUseId: 'tool',
+          questions: [{ question: 'Continue?', options: [{ label: 'Yes' }] }],
+        },
+      };
+      const subscription = new FakeSubscription(
+        continuitySnapshot(sessionId, { rootTurn: turn, interactions: { pending: [pending] } }),
+      );
+      let stops = 0,
+        answers = 0;
+      const statuses: string[] = [];
+      const registry = new AcpSessionRegistry({
+        connect: async () =>
+          fakeConnection({
+            request: async (operation) => {
+              if (operation === 'session.catalog.query')
+                return { kind: 'session', session: catalogSession(sessionId) };
+              if (operation === 'interaction.query') return pending;
+              if (operation === 'interaction.answer') {
+                answers += 1;
+                return pending;
+              }
+              if (operation === 'turn.stop') {
+                stops += 1;
+                subscription.setRoot(completedTurn(sessionId, turnId));
+                return completedTurn(sessionId, turnId);
+              }
+              throw new Error(`Unexpected operation ${operation}`);
+            },
+            openSessionSubscriptionOnce: async () => subscription,
+          }),
+      });
+      try {
+        await registry.resume(
+          { sessionId, cwd: '/workspace' },
+          {
+            ...promptContext([]),
+            notify: async () => {
+              if (failure === 'output-failure') throw new Error('Output failed');
+            },
+            notifyTurnStatus: async (status) => {
+              statuses.push(status.status);
+            },
+            interactions: {
+              capabilities: { elicitation: { form: {} } },
+              createElicitation: async () => {
+                if (failure === 'unsupported-method')
+                  throw RequestError.methodNotFound('elicitation/create');
+                return { action: 'accept' as const, content: { unexpected: 'answer' } };
+              },
+              requestPermission: async () => assert.fail('Unexpected permission'),
+            },
+          },
+        );
+        await waitFor(() => statuses.includes('observation_failed'));
+        await waitFor(() => stops === 1);
+        assert.equal(answers, 0);
+      } finally {
+        await registry.dispose();
+      }
+    });
+  }
+
+  test('cancelling a restored Turn fences a late answer after Stop fails', async () => {
+    const sessionId = 'cancel-restored',
+      turnId = 'cancel-restored-turn';
+    const turn = runningTurn(sessionId, turnId);
+    const pending: InteractionPendingSnapshot = {
+      schemaVersion: 1,
+      interactionId: 'cancel-question',
+      sessionId,
+      turnId,
+      runId: turn.runId,
+      revision: 1,
+      status: 'pending',
+      outcome: null,
+      request: {
+        kind: 'question',
+        toolUseId: 'tool',
+        questions: [{ question: 'Continue?', options: [{ label: 'Yes' }] }],
+      },
+    };
+    const subscription = new FakeSubscription(
+      continuitySnapshot(sessionId, { rootTurn: turn, interactions: { pending: [pending] } }),
+    );
+    const dialog = deferred<{ action: 'accept'; content: { q0: string } }>();
+    const opened = deferred<void>();
+    let stops = 0,
+      answers = 0;
+    const queriedInteractions: string[] = [];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            if (operation === 'interaction.query') {
+              queriedInteractions.push((input as { interactionId: string }).interactionId);
+              return pending;
+            }
+            if (operation === 'interaction.answer') {
+              answers += 1;
+              return pending;
+            }
+            if (operation === 'turn.stop') {
+              stops += 1;
+              throw new Error('Stop failed');
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      await registry.resume(
+        { sessionId, cwd: '/workspace' },
+        {
+          ...promptContext([]),
+          interactions: {
+            capabilities: { elicitation: { form: {} } },
+            createElicitation: async () => {
+              opened.resolve();
+              return dialog.promise;
+            },
+            requestPermission: async () => assert.fail('Unexpected permission'),
+          },
+        },
+      );
+      await opened.promise;
+      await registry.cancel({ sessionId });
+      assert.equal(stops, 1);
+      dialog.resolve({ action: 'accept', content: { q0: 'Yes' } });
+      subscription.project({
+        interactions: { pending: [{ ...pending, interactionId: 'later-question' }] },
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(answers, 0);
+      assert.equal(queriedInteractions.includes('later-question'), false);
+    } finally {
+      dialog.resolve({ action: 'accept', content: { q0: 'Yes' } });
+      await registry.dispose();
+    }
+  });
+
+  test('cancelling a restored permission fences its late selection', async () => {
+    const sessionId = 'cancel-restored-permission';
+    const turnId = 'permission-turn';
+    const turn = runningTurn(sessionId, turnId);
+    const pending: InteractionPendingSnapshot = {
+      schemaVersion: 1,
+      interactionId: 'permission',
+      sessionId,
+      turnId,
+      runId: turn.runId,
+      revision: 1,
+      status: 'pending',
+      outcome: null,
+      request: {
+        kind: 'permission',
+        toolUseId: 'tool',
+        prompt: {
+          kind: 'tool_permission',
+          toolName: 'fixture',
+          category: 'read',
+          reason: 'custom',
+          review: { kind: 'path', operation: 'read', path: '/workspace/file' },
+          rememberForTurnAllowed: false,
+        },
+      },
+    };
+    const subscription = new FakeSubscription(
+      continuitySnapshot(sessionId, { rootTurn: turn, interactions: { pending: [pending] } }),
+    );
+    const selection = deferred<{ outcome: { outcome: 'selected'; optionId: string } }>();
+    const opened = deferred<void>();
+    let optionId = '',
+      answers = 0,
+      stops = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            if (operation === 'interaction.query') return pending;
+            if (operation === 'interaction.answer') {
+              answers += 1;
+              return pending;
+            }
+            if (operation === 'turn.stop') {
+              stops += 1;
+              throw new Error('Stop failed');
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      await registry.resume(
+        { sessionId, cwd: '/workspace' },
+        {
+          ...promptContext([]),
+          interactions: {
+            capabilities: {},
+            createElicitation: async () => assert.fail('Unexpected elicitation'),
+            requestPermission: async (request) => {
+              optionId = request.options[0]!.optionId;
+              opened.resolve();
+              return selection.promise;
+            },
+          },
+        },
+      );
+      await opened.promise;
+      await registry.cancel({ sessionId });
+      assert.equal(stops, 1);
+      selection.resolve({ outcome: { outcome: 'selected', optionId } });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(answers, 0);
+    } finally {
+      selection.resolve({ outcome: { outcome: 'selected', optionId } });
       await registry.dispose();
     }
   });

@@ -20,13 +20,15 @@
 import { isAbsolute } from 'node:path';
 import { RequestError, type McpServer } from '@agentclientprotocol/sdk';
 import { MCP_CONFIG_VERSION, type McpConfigFile } from '@maka/core/mcp';
+import { stableJsonStringify } from '@maka/core/canonical-json';
 import { McpClientManager } from '@maka/mcp';
 import { normalizeMcpConfig } from '@maka/storage/mcp-config-store';
-import type {
-  RuntimeHostConnectionAvailability,
-  RuntimeHostReconnectingConnection,
+import {
+  RuntimeHostOperationError,
+  abortable,
+  type RuntimeHostConnectionAvailability,
+  type RuntimeHostReconnectingConnection,
 } from '@maka/runtime-host/client';
-import { abortable } from '@maka/runtime-host/client';
 import { createMcpCapabilityProvider } from '../mcp-capability-provider.js';
 import { McpCapabilityPublication } from '../mcp-capability-publication.js';
 
@@ -101,13 +103,16 @@ export class AcpSessionMcp {
   readonly #sessionId: string;
   #config: McpConfigFile;
   #configurationTail: Promise<unknown> = Promise.resolve();
-  readonly #manager = new McpClientManager({
+  #manager = new McpClientManager({
     clientName: 'maka-acp',
     excludedStdioEnvironmentKeys: ['MAKA_RUNTIME_HOST_ACCESS_CREDENTIAL'],
   });
   readonly #publication: McpCapabilityPublication;
-  readonly #unsubscribeManager: () => void;
+  #unsubscribeManager: () => void;
   readonly #unsubscribeConnection: () => void;
+  #pendingManager: McpClientManager | undefined;
+  #publicationRevision = 0;
+  #requireIdlePublication = false;
   #availability: RuntimeHostConnectionAvailability | undefined;
   #prepared = false;
   #closed = false;
@@ -122,7 +127,7 @@ export class AcpSessionMcp {
         this.#availability?.kind === 'connected'
           ? this.#availability.hostEpoch + '\0' + this.#availability.connectionId
           : undefined,
-      revision: () => this.#manager.toolSnapshot().revision,
+      revision: () => this.#publicationRevision,
       createProvider: () =>
         createMcpCapabilityProvider(this.#manager, {
           admission: 'mcp',
@@ -134,13 +139,15 @@ export class AcpSessionMcp {
           offers: () => [],
           currentRegistrationRetired: () => this.#retire(),
         },
-      replace: (provider) => connection.replaceClientCapabilities(provider, { sessionId }),
+      replace: (provider) =>
+        connection.replaceClientCapabilities(provider, {
+          sessionId,
+          ...(this.#requireIdlePublication ? { requireIdleSession: true } : {}),
+        }),
       unregister: () => connection.unregisterClientCapabilities({ sessionId }),
       onState: () => undefined,
     });
-    this.#unsubscribeManager = this.#manager.onChange(() => {
-      if (this.#prepared && !this.#closed) this.#publication.request();
-    });
+    this.#unsubscribeManager = this.#observeManager(this.#manager);
     this.#unsubscribeConnection = connection.subscribeConnectionAvailability((availability) => {
       this.#availability = availability;
       if (availability.kind !== 'connected') this.#publication.invalidate();
@@ -187,20 +194,50 @@ export class AcpSessionMcp {
         if (sameMcpConfig(this.#config, config)) return this.#settlePublication(signal);
         await assertCanChange?.();
         signal?.throwIfAborted();
-        const previous = this.#config;
+        const previous = this.#manager;
+        const staged = new McpClientManager({
+          clientName: 'maka-acp',
+          excludedStdioEnvironmentKeys: ['MAKA_RUNTIME_HOST_ACCESS_CREDENTIAL'],
+        });
+        this.#pendingManager = staged;
+        let swapped = false;
+        let previousRevision = this.#publicationRevision;
         try {
-          await this.#manager.sync(config);
+          await staged.sync(config);
           signal?.throwIfAborted();
-          this.#assertConnected(config);
+          this.#assertConnected(config, staged);
+          previousRevision = this.#publicationRevision;
+          this.#unsubscribeManager();
+          this.#manager = staged;
+          this.#unsubscribeManager = this.#observeManager(staged);
+          swapped = true;
+          this.#requireIdlePublication = true;
+          this.#publicationRevision += 1;
           this.#publication.request();
           await this.#settlePublication(signal);
           this.#config = config;
+          this.#requireIdlePublication = false;
+          this.#pendingManager = undefined;
+          await previous.close().catch((error: unknown) => {
+            console.error('[acp] Previous Session MCP cleanup failed:', error);
+          });
         } catch (error) {
-          if (!this.#closed) {
-            await this.#manager.sync(previous).catch(() => undefined);
+          this.#requireIdlePublication = false;
+          if (swapped && !this.#closed) {
+            this.#unsubscribeManager();
+            this.#manager = previous;
+            this.#unsubscribeManager = this.#observeManager(previous);
+            // If the staged snapshot never committed, restore the revision so
+            // publication reuses the still-current provider without a Host write.
+            this.#publicationRevision =
+              this.#publication.publishedRevision === previousRevision
+                ? previousRevision
+                : this.#publicationRevision + 1;
             this.#publication.request();
             await this.#publication.settle().catch(() => undefined);
           }
+          this.#pendingManager = undefined;
+          await staged.close().catch(() => undefined);
           if (error instanceof RequestError) throw error;
           throw mcpUnavailable(this.#sessionId, 'mcp.prepare', 'mcp_reconfiguration_failed');
         }
@@ -221,6 +258,21 @@ export class AcpSessionMcp {
     signal?.throwIfAborted();
     this.#assertOpen('mcp.ready');
     if (state !== 'published' && state !== 'not_published') {
+      if (
+        this.#requireIdlePublication &&
+        this.#publication.lastError instanceof RuntimeHostOperationError &&
+        this.#publication.lastError.code === 'session_busy'
+      ) {
+        throw RequestError.internalError(
+          {
+            source: 'runtime_host',
+            operation: 'mcp.prepare',
+            sessionId: this.#sessionId,
+            code: 'session_busy',
+          },
+          'Cannot replace Session MCP configuration during an active Turn',
+        );
+      }
       throw mcpUnavailable(this.#sessionId, 'mcp.ready', 'mcp_publication_failed');
     }
   }
@@ -239,7 +291,7 @@ export class AcpSessionMcp {
     this.#closed = true;
     this.#unsubscribeManager();
     this.#unsubscribeConnection();
-    const managerClose = this.#manager.close();
+    const managerClose = Promise.allSettled([this.#manager.close(), this.#pendingManager?.close()]);
     this.#closeTask = (async () => {
       try {
         try {
@@ -257,11 +309,18 @@ export class AcpSessionMcp {
     return this.#closeTask;
   }
 
-  #assertConnected(config = this.#config): void {
+  #observeManager(manager: McpClientManager): () => void {
+    return manager.onChange(() => {
+      this.#publicationRevision += 1;
+      if (this.#prepared && !this.#closed) this.#publication.request();
+    });
+  }
+
+  #assertConnected(config = this.#config, manager = this.#manager): void {
     this.#assertOpen('mcp.prepare');
     if (
       Object.keys(config.mcpServers).some(
-        (serverId) => this.#manager.status(serverId)?.state !== 'connected',
+        (serverId) => manager.status(serverId)?.state !== 'connected',
       )
     ) {
       throw mcpUnavailable(this.#sessionId, 'mcp.prepare', 'mcp_not_ready');
@@ -274,16 +333,7 @@ export class AcpSessionMcp {
 }
 
 function sameMcpConfig(left: McpConfigFile, right: McpConfigFile): boolean {
-  return stableConfigString(left) === stableConfigString(right);
-}
-
-function stableConfigString(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableConfigString).join(',')}]`;
-  if (value && typeof value === 'object') {
-    const entries = Object.entries(value).sort(([a], [b]) => a.localeCompare(b));
-    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableConfigString(entry)}`).join(',')}}`;
-  }
-  return JSON.stringify(value);
+  return stableJsonStringify(left) === stableJsonStringify(right);
 }
 
 function invalidMcpInput(reason: string): RequestError {

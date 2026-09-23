@@ -27,10 +27,37 @@ import {
   CLIENT_CAPABILITY_RESULT_CHUNK_MAX_BYTES,
   decodeClientCapabilityResult,
   decodeClientFrame,
+  decodeClientCapabilityReplaceInput,
   decodeHostFrame,
 } from '../protocol/index.js';
 
 describe('Client Capability protocol', () => {
+  test('decodes the opt-in idle Session replacement fence', () => {
+    assert.deepEqual(
+      decodeClientCapabilityReplaceInput({
+        registrationId: 'registration',
+        sessionId: 'session',
+        requireIdleSession: true,
+        offers: [],
+      }),
+      {
+        registrationId: 'registration',
+        sessionId: 'session',
+        requireIdleSession: true,
+        offers: [],
+      },
+    );
+    assert.throws(
+      () =>
+        decodeClientCapabilityReplaceInput({
+          registrationId: 'registration',
+          requireIdleSession: true,
+          offers: [],
+        }),
+      RuntimeHostProtocolError,
+    );
+  });
+
   test('preserves opaque tool-call IDs while retaining identity bounds', () => {
     const frame = {
       kind: 'client.capability.call',

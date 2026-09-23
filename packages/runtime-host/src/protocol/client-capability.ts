@@ -103,6 +103,7 @@ const CLIENT_CAPABILITY_ERRORS = [
   'host_draining',
   'operation_unavailable',
   'invalid_request',
+  'session_busy',
   'internal_failure',
 ] as const;
 
@@ -127,6 +128,8 @@ export interface ClientCapabilityReplaceInput {
   readonly registrationId: string;
   /** Restrict publication to this Session; omission keeps the connection-wide slot. */
   readonly sessionId?: string;
+  /** Require the target Session to have no active or admitting root Turn at replacement. */
+  readonly requireIdleSession?: boolean;
   readonly offers: readonly ClientCapabilityOffer[];
   readonly services?: readonly ClientCapabilityServiceOffer[];
 }
@@ -305,7 +308,7 @@ export function decodeClientCapabilityReplaceInput(value: unknown): ClientCapabi
     record,
     'Client Capability replacement',
     ['registrationId', 'offers'],
-    ['services', 'sessionId'],
+    ['services', 'sessionId', 'requireIdleSession'],
   );
   if (!Array.isArray(record.offers) || record.offers.length > CLIENT_CAPABILITY_MAX_OFFERS) {
     throw invalidProtocolFrame('Invalid Client Capability offers');
@@ -324,6 +327,12 @@ export function decodeClientCapabilityReplaceInput(value: unknown): ClientCapabi
   const services = serviceValues.map((service) => decodeClientCapabilityServiceOffer(service));
   const sessionId =
     record.sessionId === undefined ? undefined : requireEntityId(record.sessionId, 'sessionId');
+  if (record.requireIdleSession !== undefined && typeof record.requireIdleSession !== 'boolean') {
+    throw invalidProtocolFrame('Invalid Client Capability idle requirement');
+  }
+  if (record.requireIdleSession === true && sessionId === undefined) {
+    throw invalidProtocolFrame('Client Capability idle requirement needs a target Session');
+  }
   if (
     sessionId !== undefined &&
     (services.length > 0 ||
@@ -365,6 +374,7 @@ export function decodeClientCapabilityReplaceInput(value: unknown): ClientCapabi
   const decoded = {
     registrationId: requireEntityId(record.registrationId, 'registrationId'),
     ...(sessionId === undefined ? {} : { sessionId }),
+    ...(record.requireIdleSession === true ? { requireIdleSession: true } : {}),
     offers,
     ...(record.services === undefined ? {} : { services }),
   };

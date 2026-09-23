@@ -19,6 +19,62 @@
 
 # ACP validation record
 
+## PR6 review repair — September 23, 2026
+
+This follow-up starts at PR #5621 head `fd2e6a68` in a separate worktree. The
+older PR6 results below describe that original head; the results in this
+section describe the repaired tree.
+
+Four regressions were demonstrated before repair. Three added registry tests
+failed on the original head: an owned but unattached Session leaked a newly
+opened subscription after historical replay failed; unsupported restored
+elicitation left the Host Turn waiting; and a cancelled restored question
+submitted its late answer when Stop failed. An MCP test held the idle check,
+admitted another client's Turn, then showed that replacement was still
+accepted. After repair, those regressions pass. The cancellation suite also
+checks restored permission selections and a newly arriving interaction ID.
+
+The adapter now fences an adopted Turn's interaction broker before Stop, using
+the observed Session, Turn, and run identity. An adopted observation failure
+stops that exact active Host Turn and reports `observation_failed` without
+inventing an interaction answer. The restored interaction regressions cover
+unsupported elicitation capability and method, invalid answers, and output
+delivery failure. Load failure closes only the attachment it opened,
+independently of prior Session ownership; retry succeeds. MCP config
+changes stage a new manager while the old process remains callable, then use
+an opt-in Host capability replacement that checks active and pending root
+admission at its commit point. Normal dynamic tool-list publication remains
+unchanged. This wire contract advances the Runtime Host compatibility epoch
+from 178 to 179. Shared context construction and canonical JSON reuse remove
+the two review-noted duplications.
+
+Validation after repair on macOS and Node 24.19.0:
+
+| Check | Result |
+| --- | --- |
+| Full CLI dist suite | 1194 passed, 3 skipped, 0 failed; includes official SDK and real Host multi-client ACP child-process flows, prompt/load/resume, branch/revision, MCP, TUI and close/EOF tests. A second Host client starts a live Turn after the idle read and the Host rejects the staged MCP replacement. |
+| Full Runtime Host dist suite | 2054 passed, 12 skipped, 0 failed. |
+| Full Runtime dist suite | 3516 passed, 14 skipped, 0 failed. |
+| Full Desktop main dist suite | 2815 passed, 0 failed. |
+| Full Eval dist suite | 114 passed, 1 skipped, 0 failed; its 87 Python tests also passed. |
+| `npm run lint`, `npm run format:check`, `npm run build`, `npm run typecheck` | Passed across the workspaces. |
+| Desktop/UI knip, ASF headers, CLI notices, protocol epoch guard, `git diff --check` | Passed. |
+
+The first repository-wide `npm test` ran workspaces concurrently and had
+unrelated fixed-deadline failures in Runtime, Desktop, and Eval. Every failing
+test passed when rerun in isolation; their complete workspace suites then
+passed serially as recorded above. The existing Zed third-party smoke below
+was performed on the original PR6 head. A new isolated Zed 1.20.2 smoke was
+attempted, but UI automation could not operate its project window, so no
+post-repair Zed result is claimed. The temporary Host and model fixture were
+closed and removed.
+
+The Desktop Electron E2E run passed 30 tests and failed 4 in Side Chat and
+WorkHub UI flows. An isolated retry passed the reconstruction case but still
+failed 3: two screenshot timeouts and a missing WorkHub dock backdrop. This
+follow-up does not change Desktop UI files; these failures remain unverified
+against the original PR head.
+
 ## PR6 local implementation — September 23, 2026
 
 Base: Apache `main` at `b004473ed`, on isolated branch

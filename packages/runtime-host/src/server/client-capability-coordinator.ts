@@ -183,6 +183,7 @@ type ClientCapabilityToolBinding = ClientCapabilityBoundTool['binding'];
 export interface HostClientCapabilityCoordinatorOptions {
   readonly activation: RuntimePolicyActivationGate;
   readonly isSessionRetired: (sessionId: string) => Promise<boolean>;
+  readonly isSessionTurnBusy?: (sessionId: string) => boolean;
   readonly onModelToolsChanged: () => void;
   readonly interactions: Pick<HostInteractionCoordinator, 'requestClientCapabilityApproval'>;
   readonly grants: Pick<
@@ -218,6 +219,9 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
 
   readonly #activation: RuntimePolicyActivationGate;
   readonly #isSessionRetired: HostClientCapabilityCoordinatorOptions['isSessionRetired'];
+  readonly #isSessionTurnBusy: NonNullable<
+    HostClientCapabilityCoordinatorOptions['isSessionTurnBusy']
+  >;
   readonly #onModelToolsChanged: () => void;
   readonly #interactions: HostClientCapabilityCoordinatorOptions['interactions'];
   readonly #grants: HostClientCapabilityCoordinatorOptions['grants'];
@@ -234,6 +238,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
   constructor(options: HostClientCapabilityCoordinatorOptions) {
     this.#activation = options.activation;
     this.#isSessionRetired = options.isSessionRetired;
+    this.#isSessionTurnBusy = options.isSessionTurnBusy ?? (() => false);
     this.#onModelToolsChanged = options.onModelToolsChanged;
     this.#interactions = options.interactions;
     this.#grants = options.grants;
@@ -967,6 +972,17 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
           error: {
             code: 'invalid_request',
             message: 'Client Capability target Session is retired',
+          },
+        };
+      }
+      // This check and the registration commit below run in one synchronous
+      // activation continuation. A new root reservation cannot interleave them.
+      if (input.requireIdleSession && input.sessionId && this.#isSessionTurnBusy(input.sessionId)) {
+        return {
+          ok: false,
+          error: {
+            code: 'session_busy',
+            message: 'Session has an active or admitting root Turn',
           },
         };
       }

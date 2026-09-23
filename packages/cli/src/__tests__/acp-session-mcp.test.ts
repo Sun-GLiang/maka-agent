@@ -107,6 +107,7 @@ test('Session MCP reconfiguration reuses equivalent processes and applies replac
   );
   await mcp.reconfigure(createAcpMcpConfig({ cwd: root, mcpServers: [] }));
   assert.deepEqual(host.replacements.at(-1)?.provider.offers(), []);
+  assert.deepEqual(host.replacements.at(-1)?.options, { sessionId, requireIdleSession: true });
   await assertFixtureExited(root, 'fixture');
 });
 
@@ -173,6 +174,64 @@ test('an active Turn conflict leaves the existing MCP process and publication in
   );
   assert.ok(host.replacements[0]!.provider.offers().length > 0);
   await mcp.ready();
+});
+
+test('a Turn admitted after the idle query cannot lose its previous MCP provider', {
+  timeout: 20_000,
+}, async (t) => {
+  const root = await temporaryRoot();
+  const host = fakeHost();
+  const first = createAcpMcpConfig({
+    cwd: root,
+    mcpServers: [stdioServer(root, 'fixture', '--environment')],
+  });
+  const mcp = new AcpSessionMcp(sessionId, first, host.connection);
+  t.after(async () => {
+    await mcp.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await mcp.prepare();
+  const previousProvider = host.replacements.at(-1)!.provider;
+  const idleQueried = deferred<void>();
+  const turnAdmitted = deferred<void>();
+  const changed = stdioServer(root, 'fixture', '--environment');
+  changed.env.push({ name: 'MAKA_MCP_STDIO_FIXTURE_VALUE', value: 'replacement' });
+  let active = false;
+  host.replace = async () => {
+    const options = host.replacements.at(-1)!.options;
+    if (active && typeof options === 'object' && options?.requireIdleSession) {
+      throw new RuntimeHostOperationError(
+        'client.capability.replace',
+        'session_busy',
+        'Active Turn',
+      );
+    }
+  };
+  const replacing = mcp.reconfigure(
+    createAcpMcpConfig({ cwd: root, mcpServers: [changed] }),
+    undefined,
+    async () => {
+      idleQueried.resolve();
+      await turnAdmitted.promise;
+    },
+  );
+  await idleQueried.promise;
+  active = true;
+  turnAdmitted.resolve();
+  await assert.rejects(replacing, isMcpError('session_busy', 'mcp.prepare'));
+  assert.deepEqual(mcp.config, first);
+  assert.ok(host.replacements.length > 1);
+  assert.ok(
+    host.replacements
+      .slice(1)
+      .every(
+        (entry) => typeof entry.options === 'object' && entry.options?.requireIdleSession === true,
+      ),
+  );
+  assert.deepEqual(await invokeEnvironment(previousProvider), {
+    MAKA_MCP_STDIO_FIXTURE_VALUE: null,
+    MAKA_RUNTIME_HOST_ACCESS_CREDENTIAL: null,
+  });
 });
 
 test('Session MCP readiness waits for an in-flight replacement publication', {

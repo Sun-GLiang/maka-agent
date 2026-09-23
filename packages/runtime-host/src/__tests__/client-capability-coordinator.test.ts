@@ -41,6 +41,83 @@ import {
 } from './fixtures/client-capability.js';
 
 describe('Host Client Capability coordinator', () => {
+  test('guards an opt-in Session replacement at the Host admission cut', async () => {
+    let busy = false;
+    const coordinator = new HostClientCapabilityCoordinator({
+      ...clientCapabilityCoordinatorTestAdmission(),
+      activation: new RuntimePolicyActivationGate(),
+      isSessionRetired: async () => false,
+      isSessionTurnBusy: () => busy,
+      onModelToolsChanged: () => undefined,
+    });
+    const connection = coordinator.attachConnection(
+      clientCapabilityConnectionIdentity('connection-a'),
+      { send: async () => {} },
+    );
+    const context = { connectionId: 'connection-a' } as Parameters<
+      (typeof coordinator.handlers)['client.capability.replace']
+    >[1];
+    try {
+      assert.equal(
+        (
+          await coordinator.handlers['client.capability.replace'](
+            {
+              registrationId: 'registration-a',
+              sessionId: 'session-a',
+              offers: [],
+            },
+            context,
+          )
+        ).ok,
+        true,
+      );
+      busy = true;
+      const blocked = await coordinator.handlers['client.capability.replace'](
+        {
+          registrationId: 'registration-b',
+          sessionId: 'session-a',
+          requireIdleSession: true,
+          offers: [],
+        },
+        context,
+      );
+      assert.equal(blocked.ok, false);
+      if (!blocked.ok) assert.equal(blocked.error.code, 'session_busy');
+      // Ordinary dynamic capability refreshes retain their existing behavior.
+      assert.equal(
+        (
+          await coordinator.handlers['client.capability.replace'](
+            {
+              registrationId: 'registration-c',
+              sessionId: 'session-a',
+              offers: [],
+            },
+            context,
+          )
+        ).ok,
+        true,
+      );
+      busy = false;
+      assert.equal(
+        (
+          await coordinator.handlers['client.capability.replace'](
+            {
+              registrationId: 'registration-d',
+              sessionId: 'session-a',
+              requireIdleSession: true,
+              offers: [],
+            },
+            context,
+          )
+        ).ok,
+        true,
+      );
+    } finally {
+      connection.close();
+      await coordinator.close();
+    }
+  });
+
   test('freezes active snapshots across replacement and releases stale registrations', async () => {
     const sent: unknown[] = [];
     const coordinator = createCoordinator();

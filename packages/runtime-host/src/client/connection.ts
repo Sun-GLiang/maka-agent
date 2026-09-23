@@ -705,9 +705,12 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     provider: ClientCapabilityProvider,
     options?: number | ClientCapabilityRegistrationOptions,
   ): Promise<ClientCapabilityReplaceResult> {
-    const { timeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS, sessionId } =
-      typeof options === 'number' ? { timeoutMs: options } : (options ?? {});
-    return this.#clientCapabilities.replace(provider, timeoutMs, sessionId);
+    const {
+      timeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS,
+      sessionId,
+      requireIdleSession,
+    } = typeof options === 'number' ? { timeoutMs: options } : (options ?? {});
+    return this.#clientCapabilities.replace(provider, timeoutMs, sessionId, requireIdleSession);
   }
 
   async unregisterClientCapabilities(

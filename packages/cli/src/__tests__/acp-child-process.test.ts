@@ -26,7 +26,7 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
-import { methods, type SessionNotification } from '@agentclientprotocol/sdk';
+import { methods, RequestError, type SessionNotification } from '@agentclientprotocol/sdk';
 import { waitFor } from '@maka/core/test-only/async-primitives';
 import { mcpProxyToolName } from '@maka/runtime/mcp-tools';
 import { seedInvocation } from '@maka/runtime/test-only/invocation-fixture';
@@ -41,6 +41,7 @@ import {
   SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES,
 } from '@maka/runtime-host/protocol';
 import { getRuntimeHostSession } from '../runtime-host-session-update.js';
+import { AcpSessionMcp, createAcpMcpConfig } from '../acp/session-mcp.js';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import { resolveWorkspaceIdentity } from '@maka/storage/workspace-identity';
@@ -887,6 +888,98 @@ describe('Maka ACP child process', () => {
                 firstUpdates.push(params);
               }),
           );
+        },
+        {
+          startRuntimeHost: true,
+          model: { id: 'acp-stream-fixture', thinkingLevels: ['low'], baseUrl: model.baseUrl },
+          timeoutMs: 35_000,
+        },
+      );
+    } finally {
+      model.releaseLive();
+      await model.close();
+    }
+  });
+
+  test('a second Host client admitting a Turn after the idle read blocks MCP replacement', {
+    timeout: 45_000,
+  }, async () => {
+    const model = await startAcpModelFixture();
+    const mcpFixture = fileURLToPath(import.meta.resolve('@maka/mcp/test-only/stdio-server'));
+    try {
+      await withAcpChildProcessHarness(
+        async (harness) => {
+          await harness.withClient(async ({ context }) => {
+            await context.request(methods.agent.initialize, { protocolVersion: 1 });
+            const created = await context.request(methods.agent.session.new, {
+              cwd: harness.workspaceRoot,
+              mcpServers: [],
+            });
+            const connected = await connectRuntimeHost({
+              rootPath: harness.workspaceRoot,
+              protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+            });
+            if (connected.kind !== 'connected') assert.fail('Host connection unavailable');
+            const host = connected.connection;
+            const first = createAcpMcpConfig({
+              cwd: harness.workspaceRoot,
+              mcpServers: [
+                { name: 'fixture', command: process.execPath, args: [mcpFixture], env: [] },
+              ],
+            });
+            const changed = createAcpMcpConfig({
+              cwd: harness.workspaceRoot,
+              mcpServers: [
+                {
+                  name: 'fixture',
+                  command: process.execPath,
+                  args: [mcpFixture],
+                  env: [{ name: 'MAKA_MCP_STDIO_FIXTURE_VALUE', value: 'changed' }],
+                },
+              ],
+            });
+            const mcp = new AcpSessionMcp(created.sessionId, first, {
+              replaceClientCapabilities: host.replaceClientCapabilities.bind(host),
+              unregisterClientCapabilities: host.unregisterClientCapabilities.bind(host),
+              subscribeConnectionAvailability: (listener) => {
+                listener({
+                  kind: 'connected',
+                  hostEpoch: host.hostEpoch,
+                  connectionId: host.connectionId,
+                });
+                return () => undefined;
+              },
+            });
+            let prompt: Promise<unknown> | undefined;
+            try {
+              await mcp.prepare();
+              await assert.rejects(
+                mcp.reconfigure(changed, undefined, async () => {
+                  const idle = await getRuntimeHostSession(host, created.sessionId);
+                  assert.ok(
+                    idle && idle.status !== 'running' && idle.status !== 'waiting_for_user',
+                  );
+                  prompt = context.request(methods.agent.session.prompt, {
+                    sessionId: created.sessionId,
+                    prompt: [{ type: 'text', text: 'LIVE_ME' }],
+                  });
+                  await model.liveStarted;
+                }),
+                (error: unknown) =>
+                  error instanceof RequestError &&
+                  (error.data as { code?: string })?.code === 'session_busy',
+              );
+              assert.deepEqual(mcp.config, first);
+              await mcp.ready();
+              model.releaseLive();
+              assert.deepEqual(await prompt, { stopReason: 'end_turn' });
+            } finally {
+              model.releaseLive();
+              await Promise.allSettled([mcp.close(), prompt]);
+              await host.close();
+              await context.request(methods.agent.session.close, { sessionId: created.sessionId });
+            }
+          });
         },
         {
           startRuntimeHost: true,

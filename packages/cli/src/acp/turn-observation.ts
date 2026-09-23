@@ -27,6 +27,7 @@ import { AcpSessionEventMapper } from './session-event-mapper.js';
 export class AcpTurnObservation {
   readonly sessionId: string;
   readonly turnId: string;
+  readonly runId?: string;
   readonly mapper: AcpSessionEventMapper;
   readonly projectionAbort = new AbortController();
   readonly reconciliationAbort = new AbortController();
@@ -41,10 +42,12 @@ export class AcpTurnObservation {
   constructor(options: {
     sessionId: string;
     turnId: string;
+    runId?: string;
     notify: ConstructorParameters<typeof AcpSessionEventMapper>[0]['notify'];
   }) {
     this.sessionId = options.sessionId;
     this.turnId = options.turnId;
+    this.runId = options.runId;
     this.mapper = new AcpSessionEventMapper({
       sessionId: options.sessionId,
       notify: async (notification) => {
