@@ -129,7 +129,6 @@ import { useAppShellTurnPresentation } from './app-shell-turn-view-model';
 import { readScrollMotionBehavior } from './scroll-motion-policy';
 import { readNavigationState, selectNavigation } from './nav-selection';
 import { deriveDesktopExecutionBoundarySurface } from './desktop-execution-boundary-surface';
-import { useActiveExecutionBoundary } from './use-active-execution-boundary';
 import { modelSetupToastCopy } from './model-connection-errors';
 import type { AppShellCommandListOptions } from './app-shell-command-actions';
 import {
@@ -177,6 +176,7 @@ import { loadComposerDefaults, saveComposerDefaults } from './composer-defaults'
 import { useTurnActionRegistry } from './use-turn-action-registry';
 import {
   desktopSlashCommandPresentation,
+  useActiveExecutionBoundary,
   useComposerAttachments,
   useNewTaskChoice,
   useShellChatModel,
