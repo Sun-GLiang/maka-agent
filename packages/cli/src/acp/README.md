@@ -61,7 +61,7 @@ or reconnection without waiting for the Host to become available.
 | Load/resume | `session/load` replays durable user, assistant, thinking and tool rows before returning; `session/resume` attaches without replay. Both return current configuration and leave the Session attached for prompt. Neither restarts an interrupted Turn. |
 | Explicit interrupted Turn resume | `_maka/turn/resume` queries the Host safety plan and starts only a ready plan. A parked plan is returned unchanged. A lost dispatched start returns `outcome_unknown` with the exact `turnId`; the adapter never retries that command. |
 | Branch and revision | `_maka/session/branch/create`, `_maka/session/revision/create`, and `_maka/session/revision/abandon` map to the corresponding Host commands. The source must be owned by this ACP connection. A committed target becomes immediately usable; `retained` keeps its ownership and `abandoned` releases local resources. |
-| Replacing all MCP configuration | Every load/resume applies its complete stdio list through the existing Session MCP manager and publication. An omitted `session/resume.mcpServers` means an empty list. Equivalent normalized configuration reuses the process; changing or clearing it republishes the Session scope. |
+| Replacing all MCP configuration | Every load/resume applies its complete stdio list through the existing Session MCP manager and publication. An omitted `session/resume.mcpServers` means an empty list. Equivalent normalized configuration reuses the process; changing or clearing it republishes the Session scope. An attached Session rejects a different configuration while the Host reports an active Turn; retry after that Turn settles. |
 | HTTP/SSE/OAuth MCP | Deferred. |
 
 The adapter saves the capabilities supplied during `initialize`. Missing form
@@ -89,6 +89,14 @@ additional directories are not supported. Missing and archived Sessions are
 rejected. A repeated successful load replays history again on the same retained
 attachment. Historical pages are read through that attachment's subscription,
 so they do not consume a second Host subscription slot.
+
+The Runtime Host composes the model prompt from its current policy, including
+workspace instructions when enabled. ACP clients provide user prompt content;
+`session/load` and `session/resume` do not replace the Host's system prompt or
+workspace instruction policy. The Host records model usage and context window
+facts in its runtime data, but this ACP v1 adapter does not emit a separate
+usage or context-window notification. An ACP client's own usage display should
+not infer those numbers from replayed text chunks.
 
 ## Tool output and completion
 

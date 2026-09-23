@@ -138,6 +138,43 @@ test('failed Session MCP replacement restores the previous published configurati
   assert.ok(host.replacements.at(-1)?.provider.offers().length);
 });
 
+test('an active Turn conflict leaves the existing MCP process and publication intact', {
+  timeout: 20_000,
+}, async (t) => {
+  const root = await temporaryRoot();
+  const host = fakeHost();
+  const first = createAcpMcpConfig({ cwd: root, mcpServers: [stdioServer(root, 'fixture')] });
+  const mcp = new AcpSessionMcp(sessionId, first, host.connection);
+  t.after(async () => {
+    await mcp.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await mcp.prepare();
+  const starts = (await fixtureEvents(root, 'fixture')).filter((event) => event.event === 'start');
+  const publications = host.replacements.length;
+  const changed = stdioServer(root, 'fixture');
+  changed.env.push({ name: 'MAKA_MCP_STDIO_FIXTURE_VALUE', value: 'replacement' });
+  await assert.rejects(
+    mcp.reconfigure(
+      createAcpMcpConfig({ cwd: root, mcpServers: [changed] }),
+      undefined,
+      async () => {
+        throw RequestError.internalError({ code: 'session_busy' }, 'Session has an active Turn');
+      },
+    ),
+    (error: unknown) =>
+      error instanceof RequestError && (error.data as { code?: string })?.code === 'session_busy',
+  );
+  assert.deepEqual(mcp.config, first);
+  assert.equal(host.replacements.length, publications);
+  assert.equal(
+    (await fixtureEvents(root, 'fixture')).filter((event) => event.event === 'start').length,
+    starts.length,
+  );
+  assert.ok(host.replacements[0]!.provider.offers().length > 0);
+  await mcp.ready();
+});
+
 test('Session MCP readiness waits for an in-flight replacement publication', {
   timeout: 20_000,
 }, async (t) => {

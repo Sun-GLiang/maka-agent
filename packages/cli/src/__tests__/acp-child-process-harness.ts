@@ -45,6 +45,11 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 export interface AcpChildProcessHarnessOptions {
   readonly timeoutMs?: number;
   readonly startRuntimeHost?: boolean;
+  readonly safeBoundaryResume?: boolean;
+  readonly beforeHostStart?: (input: {
+    workspaceRoot: string;
+    modelConnectionId?: string;
+  }) => Promise<void>;
   readonly model?: {
     readonly id: string;
     readonly thinkingLevels: readonly ThinkingLevel[];
@@ -325,10 +330,15 @@ export async function startAcpChildProcessHarness(
   let rootCleanupFollowsHostStartup = false;
   try {
     await mkdir(workspaceRoot, { recursive: true });
-    if (options.model) await seedModelConnection(workspaceRoot, options.model);
+    const modelConnectionId = options.model
+      ? await seedModelConnection(workspaceRoot, options.model)
+      : undefined;
+    await options.beforeHostStart?.({ workspaceRoot, modelConnectionId });
     if (options.startRuntimeHost) {
-      hostStartup = startExecutionRuntimeHostService({ rootPath: workspaceRoot });
+      const previousSafeBoundaryResume = process.env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME;
+      if (options.safeBoundaryResume) process.env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME = '1';
       try {
+        hostStartup = startExecutionRuntimeHostService({ rootPath: workspaceRoot });
         host = await withStartupTimeout(
           hostStartup,
           timeoutMs,
@@ -336,7 +346,7 @@ export async function startAcpChildProcessHarness(
           workspaceRoot,
         );
       } catch (error) {
-        if (error instanceof StartupTimeoutError) {
+        if (error instanceof StartupTimeoutError && hostStartup) {
           rootCleanupFollowsHostStartup = true;
           void hostStartup
             .then(
@@ -349,6 +359,10 @@ export async function startAcpChildProcessHarness(
             .catch(() => undefined);
         }
         throw error;
+      } finally {
+        if (previousSafeBoundaryResume === undefined)
+          delete process.env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME;
+        else process.env.MAKA_RUNTIME_SAFE_BOUNDARY_RESUME = previousSafeBoundaryResume;
       }
     }
     const child = spawn(
@@ -382,7 +396,7 @@ export async function startAcpChildProcessHarness(
 async function seedModelConnection(
   rootPath: string,
   model: NonNullable<AcpChildProcessHarnessOptions['model']>,
-): Promise<void> {
+): Promise<string> {
   const capability = await resolveStorageRoot({ path: rootPath, kind: 'interactive' });
   const owner = await tryAcquireInteractiveRootOwner(capability);
   if (!owner) throw new Error('Unable to acquire ACP model fixture root');
@@ -424,6 +438,7 @@ async function seedModelConnection(
       target: { connectionId: connection.connectionId, modelId: model.id },
     });
     if (defaulted.kind !== 'committed') throw new Error('ACP model fixture was not selected');
+    return connection.connectionId;
   } finally {
     await owner.close();
   }

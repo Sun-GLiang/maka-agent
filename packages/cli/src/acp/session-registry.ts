@@ -1391,7 +1391,21 @@ export class AcpSessionRegistry {
         throw unknownSessionError();
       }
       if (previousMcp) {
-        await previousMcp.reconfigure(mcpConfig, lifetime);
+        await previousMcp.reconfigure(mcpConfig, lifetime, async () => {
+          const latest = await getRuntimeHostSession(connection, params.sessionId);
+          if (!latest) throw unknownSessionError();
+          if (
+            latest.status === 'running' ||
+            latest.status === 'waiting_for_user' ||
+            (latest.liveRunState?.runningTurnIds.length ?? 0) > 0 ||
+            (this.#activePrompts.get(params.sessionId)?.size ?? 0) > 0
+          ) {
+            throw RequestError.internalError(
+              { source: 'adapter', operation: 'mcp.prepare', code: 'session_busy' },
+              'Cannot replace Session MCP configuration during an active Turn',
+            );
+          }
+        });
       } else {
         installedMcp = new AcpSessionMcp(params.sessionId, mcpConfig, connection);
         this.#mcps.set(params.sessionId, installedMcp);

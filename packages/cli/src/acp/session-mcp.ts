@@ -174,13 +174,19 @@ export class AcpSessionMcp {
     return structuredClone(this.#config);
   }
 
-  reconfigure(config: McpConfigFile, signal?: AbortSignal): Promise<void> {
+  reconfigure(
+    config: McpConfigFile,
+    signal?: AbortSignal,
+    assertCanChange?: () => Promise<void>,
+  ): Promise<void> {
     const task = this.#configurationTail
       .catch(() => undefined)
       .then(async () => {
         this.#assertOpen('mcp.prepare');
         signal?.throwIfAborted();
         if (sameMcpConfig(this.#config, config)) return this.#settlePublication(signal);
+        await assertCanChange?.();
+        signal?.throwIfAborted();
         const previous = this.#config;
         try {
           await this.#manager.sync(config);

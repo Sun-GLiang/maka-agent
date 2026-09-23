@@ -28,6 +28,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
 import { methods, type SessionNotification } from '@agentclientprotocol/sdk';
 import { waitFor } from '@maka/core/test-only/async-primitives';
+import { seedInvocation } from '@maka/runtime/test-only/invocation-fixture';
+import {
+  buildRecoveredTerminalRuntimeEvent,
+  commitTerminalRunWithRuntimeFact,
+} from '@maka/runtime/terminal-run-commit';
 import { connectRuntimeHost } from '@maka/runtime-host/client';
 import {
   ARTIFACT_INGEST_CHUNK_MAX_BYTES,
@@ -35,6 +40,9 @@ import {
   SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES,
 } from '@maka/runtime-host/protocol';
 import { getRuntimeHostSession } from '../runtime-host-session-update.js';
+import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
+import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
+import { resolveWorkspaceIdentity } from '@maka/storage/workspace-identity';
 import {
   pipeCapturedStdout,
   StdoutCaptureBridge,
@@ -728,11 +736,32 @@ describe('Maka ACP child process', () => {
                   expectedSourceRevision,
                 })) as { kind: string };
                 assert.equal(revision.kind, 'committed');
+                const unusedRevisionTargetId = randomUUID();
+                const unusedRevision = (await context.request('_maka/session/revision/create', {
+                  sourceSessionId: sessionId,
+                  targetSessionId: unusedRevisionTargetId,
+                  sourceTurnId,
+                  expectedSourceRevision,
+                })) as { kind: string };
+                assert.equal(unusedRevision.kind, 'committed');
+                assert.deepEqual(
+                  await context.request(methods.agent.session.prompt, {
+                    sessionId: revisionTargetId,
+                    prompt: [{ type: 'text', text: 'COMPLETE_ME' }],
+                  }),
+                  { stopReason: 'end_turn' },
+                );
                 assert.deepEqual(
                   await context.request('_maka/session/revision/abandon', {
                     targetSessionId: revisionTargetId,
                   }),
-                  { kind: 'abandoned', sessionId: revisionTargetId },
+                  { kind: 'retained', sessionId: revisionTargetId },
+                );
+                assert.deepEqual(
+                  await context.request('_maka/session/revision/abandon', {
+                    targetSessionId: unusedRevisionTargetId,
+                  }),
+                  { kind: 'abandoned', sessionId: unusedRevisionTargetId },
                 );
                 assert.deepEqual(
                   await context.request(methods.agent.session.prompt, {
@@ -742,6 +771,7 @@ describe('Maka ACP child process', () => {
                   { stopReason: 'end_turn' },
                 );
                 await context.request(methods.agent.session.close, { sessionId: targetSessionId });
+                await context.request(methods.agent.session.close, { sessionId: revisionTargetId });
                 await context.request(methods.agent.session.close, { sessionId });
               },
               (app) =>
@@ -763,16 +793,273 @@ describe('Maka ACP child process', () => {
       await model.close();
     }
   });
+
+  test('loads an already-live Turn and hands replay to later output without duplication', {
+    timeout: 45_000,
+  }, async () => {
+    const model = await startAcpModelFixture();
+    try {
+      await withAcpChildProcessHarness(
+        async (harness) => {
+          const firstUpdates: SessionNotification[] = [];
+          await harness.withClient(
+            async ({ context }) => {
+              await context.request(methods.agent.initialize, { protocolVersion: 1 });
+              const created = await context.request(methods.agent.session.new, {
+                cwd: harness.workspaceRoot,
+                mcpServers: [],
+              });
+              const prompt = context.request(methods.agent.session.prompt, {
+                sessionId: created.sessionId,
+                prompt: [{ type: 'text', text: 'LIVE_ME' }],
+              });
+              await model.liveStarted;
+              await waitFor(
+                () =>
+                  firstUpdates.some(
+                    ({ update }) =>
+                      update.sessionUpdate === 'agent_message_chunk' &&
+                      update.content.type === 'text' &&
+                      update.content.text.includes('before'),
+                  ),
+                { timeoutMs: 5_000, pollMs: 10, message: 'first live ACP chunk' },
+              );
+              const sibling = await harness.spawnSibling();
+              try {
+                const restored: SessionNotification[] = [];
+                await sibling.withClient(
+                  async ({ context: second }) => {
+                    await second.request(methods.agent.initialize, { protocolVersion: 1 });
+                    await second.request(methods.agent.session.load, {
+                      sessionId: created.sessionId,
+                      cwd: harness.workspaceRoot,
+                      mcpServers: [],
+                    });
+                    assert.ok(
+                      restored.some(
+                        ({ update }) =>
+                          update.sessionUpdate === 'agent_message_chunk' &&
+                          update.content.type === 'text' &&
+                          update.content.text.includes('before'),
+                      ),
+                    );
+                    model.releaseLive();
+                    assert.deepEqual(await prompt, { stopReason: 'end_turn' });
+                    await waitFor(
+                      () =>
+                        restored.some(
+                          ({ update }) =>
+                            update.sessionUpdate === 'agent_message_chunk' &&
+                            update.content.type === 'text' &&
+                            update.content.text.includes('after'),
+                        ),
+                      { timeoutMs: 5_000, pollMs: 10, message: 'restored live ACP chunk' },
+                    );
+                    assert.equal(
+                      restored
+                        .flatMap(({ update }) =>
+                          update.sessionUpdate === 'agent_message_chunk' &&
+                          update.content.type === 'text'
+                            ? [update.content.text]
+                            : [],
+                        )
+                        .join(''),
+                      'before after',
+                    );
+                    await second.request(methods.agent.session.close, {
+                      sessionId: created.sessionId,
+                    });
+                  },
+                  (app) =>
+                    app.onNotification(methods.client.session.update, ({ params }) => {
+                      restored.push(params);
+                    }),
+                );
+              } finally {
+                model.releaseLive();
+                await sibling.close();
+                await prompt.catch(() => undefined);
+              }
+            },
+            (app) =>
+              app.onNotification(methods.client.session.update, ({ params }) => {
+                firstUpdates.push(params);
+              }),
+          );
+        },
+        {
+          startRuntimeHost: true,
+          model: { id: 'acp-stream-fixture', thinkingLevels: ['low'], baseUrl: model.baseUrl },
+          timeoutMs: 35_000,
+        },
+      );
+    } finally {
+      model.releaseLive();
+      await model.close();
+    }
+  });
+
+  test('explicitly resumes a ready interrupted Turn through ACP and the real Host', {
+    timeout: 45_000,
+  }, async () => {
+    const model = await startAcpModelFixture();
+    let sessionId = '';
+    try {
+      await withAcpChildProcessHarness(
+        async (harness) => {
+          const updates: SessionNotification[] = [];
+          await harness.withClient(
+            async ({ context }) => {
+              await context.request(methods.agent.initialize, { protocolVersion: 1 });
+              await context.request(methods.agent.session.load, {
+                sessionId,
+                cwd: harness.workspaceRoot,
+                mcpServers: [],
+              });
+              const resumed = (await context.request('_maka/turn/resume', { sessionId })) as {
+                kind: string;
+                turn?: { turnId: string };
+              };
+              assert.equal(resumed.kind, 'started', JSON.stringify(resumed));
+              assert.ok(resumed.turn?.turnId);
+              await waitFor(
+                () =>
+                  updates.some(
+                    ({ update }) =>
+                      update.sessionUpdate === 'agent_message_chunk' &&
+                      update.content.type === 'text' &&
+                      update.content.text.includes('ACP fixture session'),
+                  ),
+                { timeoutMs: 5_000, pollMs: 10, message: 'continued ACP output' },
+              );
+              await context.request(methods.agent.session.close, { sessionId });
+            },
+            (app) =>
+              app.onNotification(methods.client.session.update, ({ params }) => {
+                updates.push(params);
+              }),
+          );
+        },
+        {
+          startRuntimeHost: true,
+          safeBoundaryResume: true,
+          model: { id: 'acp-stream-fixture', thinkingLevels: ['low'], baseUrl: model.baseUrl },
+          beforeHostStart: async ({ workspaceRoot, modelConnectionId }) => {
+            assert.ok(modelConnectionId);
+            sessionId = await seedReadyAcpContinuation(workspaceRoot, modelConnectionId);
+          },
+          timeoutMs: 35_000,
+        },
+      );
+    } finally {
+      await model.close();
+    }
+  });
 });
+
+async function seedReadyAcpContinuation(
+  workspaceRoot: string,
+  modelConnectionId: string,
+): Promise<string> {
+  const cwd = await realpath(workspaceRoot);
+  const capability = await resolveStorageRoot({ path: workspaceRoot, kind: 'interactive' });
+  const owner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(owner);
+  const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+  try {
+    const session = await stores.sessionStore.create({
+      cwd,
+      llmConnectionId: modelConnectionId,
+      llmConnectionSlug: 'acp-fixture-model',
+      model: 'acp-stream-fixture',
+      permissionMode: 'ask',
+    });
+    const invocationId = randomUUID();
+    const runId = randomUUID();
+    const turnId = randomUUID();
+    const openedAt = Date.now();
+    const workspace = await resolveWorkspaceIdentity({ path: cwd });
+    const run = await seedInvocation(stores.runtimeEventStore, {
+      sessionId: session.id,
+      invocationId,
+      runId,
+      turnId,
+      openedAt,
+      opening: {
+        route: {
+          provenance: 'runtime',
+          backendKind: 'ai-sdk',
+          llmConnectionId: modelConnectionId,
+          llmConnectionSlug: 'acp-fixture-model',
+          modelId: 'acp-stream-fixture',
+        },
+        configuration: {
+          cwd,
+          workspaceIdentity: workspace.workspaceIdentity,
+          permissionMode: 'ask',
+          collaborationMode: 'agent',
+          orchestrationMode: 'default',
+          orchestrationSource: 'session',
+          toolMode: 'direct',
+        },
+      },
+    });
+    await stores.runtimeEventStore.appendRuntimeEvent(session.id, runId, {
+      id: randomUUID(),
+      sessionId: session.id,
+      invocationId,
+      runId,
+      turnId,
+      ts: openedAt,
+      partial: false,
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text: 'Continue this interrupted request.' },
+    });
+    const terminalAt = openedAt + 1;
+    await commitTerminalRunWithRuntimeFact({
+      runtimeEventStore: stores.runtimeEventStore,
+      newId: randomUUID,
+      sessionId: session.id,
+      runId,
+      turnId,
+      status: 'failed',
+      ts: terminalAt,
+      terminalEvent: buildRecoveredTerminalRuntimeEvent({
+        id: randomUUID(),
+        run,
+        status: 'failed',
+        ts: terminalAt,
+        failureClass: 'app_restarted',
+        recoveryReason: 'test_safe_boundary_source',
+      }),
+      failureClass: 'app_restarted',
+    });
+    return session.id;
+  } finally {
+    await stores.sessionStore.close?.();
+    await owner.close();
+  }
+}
 
 async function startAcpModelFixture(): Promise<{
   readonly baseUrl: string;
   readonly cancelStarted: Promise<void>;
+  readonly liveStarted: Promise<void>;
+  releaseLive(): void;
   close(): Promise<void>;
 }> {
   let markCancelStarted!: () => void;
   const cancelStarted = new Promise<void>((resolve) => {
     markCancelStarted = resolve;
+  });
+  let markLiveStarted!: () => void;
+  const liveStarted = new Promise<void>((resolve) => {
+    markLiveStarted = resolve;
+  });
+  let releaseLive!: () => void;
+  const liveGate = new Promise<void>((resolve) => {
+    releaseLive = resolve;
   });
   const server = createServer((request, response) => {
     void readBody(request)
@@ -782,6 +1069,17 @@ async function startAcpModelFixture(): Promise<{
           response.write(`data: ${JSON.stringify(modelChunk('partial', null))}\n\n`);
           markCancelStarted();
           request.once('close', () => response.end());
+          return;
+        }
+        if (body.includes('LIVE_ME')) {
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.write(`data: ${JSON.stringify(modelChunk('before ', null))}\n\n`);
+          markLiveStarted();
+          void liveGate.then(() => {
+            response.write(`data: ${JSON.stringify(modelChunk('after', null))}\n\n`);
+            response.write(`data: ${JSON.stringify(modelChunk('', 'stop'))}\n\n`);
+            response.end('data: [DONE]\n\n');
+          });
           return;
         }
         if (body.includes('COMPLETE_ME')) {
@@ -801,6 +1099,8 @@ async function startAcpModelFixture(): Promise<{
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     cancelStarted,
+    liveStarted,
+    releaseLive,
     close: () =>
       new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),

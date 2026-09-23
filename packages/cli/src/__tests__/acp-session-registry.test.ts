@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
 import {
   RequestError,
@@ -211,6 +211,27 @@ describe('ACP Session registry', () => {
         ),
         { stopReason: 'end_turn' },
       );
+      const beforeSecondLoad = notifications.length;
+      await registry.load(
+        { sessionId, cwd: '/workspace', mcpServers: [] },
+        promptContext(notifications),
+      );
+      assert.deepEqual(
+        notifications
+          .slice(beforeSecondLoad)
+          .flatMap(({ update }) =>
+            (update.sessionUpdate === 'user_message_chunk' ||
+              update.sessionUpdate === 'agent_message_chunk') &&
+            update.content.type === 'text'
+              ? [update.content.text]
+              : [],
+          ),
+        ['earlier', 'answer'],
+      );
+      const beforeResume = notifications.length;
+      await registry.resume({ sessionId, cwd: '/workspace' }, promptContext(notifications));
+      await registry.resume({ sessionId, cwd: '/workspace' }, promptContext(notifications));
+      assert.equal(notifications.length, beforeResume);
       assert.equal(opens, 1);
       await registry.close({ sessionId });
       assert.equal(subscription.closeCalls, 1);
@@ -629,6 +650,100 @@ describe('ACP Session registry', () => {
     } finally {
       pageGate.resolve();
       await registry.dispose();
+    }
+  });
+
+  test('failed historical hydration releases the newly opened attachment', async () => {
+    const sessionId = 'session-load-page-failure';
+    const subscription = new FakeSubscription(continuitySnapshot(sessionId));
+    subscription.seedBootstrap([
+      {
+        type: 'user',
+        id: 'user-before-failure',
+        turnId: 'turn-before-failure',
+        ts: 1,
+        text: 'hello',
+      },
+    ]);
+    subscription.onTranscriptPageRead = () => {
+      throw new Error('transcript page unavailable');
+    };
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      await assert.rejects(
+        registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([])),
+        (error: unknown) => error instanceof RequestError,
+      );
+      assert.equal(subscription.closeCalls, 1);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('load refuses an MCP change while the Host reports an active Turn', {
+    timeout: 20_000,
+  }, async () => {
+    const sessionId = 'session-mcp-active-turn';
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-acp-mcp-active-')));
+    const fixture = fileURLToPath(import.meta.resolve('@maka/mcp/test-only/stdio-server'));
+    const original = {
+      name: 'fixture',
+      command: process.execPath,
+      args: [fixture],
+      env: [{ name: 'MAKA_MCP_STDIO_EVENT_LOG', value: join(root, 'fixture.jsonl') }],
+    };
+    const changed = {
+      ...original,
+      env: [...original.env, { name: 'MAKA_MCP_STDIO_FIXTURE_VALUE', value: 'changed' }],
+    };
+    let status: 'active' | 'running' = 'active';
+    let publications = 0;
+    const subscription = new FakeSubscription(continuitySnapshot(sessionId));
+    const base = fakeConnection({
+      request: async (operation) => {
+        if (operation === 'session.create') return catalogSession(sessionId, root);
+        if (operation === 'session.catalog.query')
+          return { kind: 'session', session: catalogSession(sessionId, root, { status }) };
+        throw new Error(`Unexpected operation ${operation}`);
+      },
+      openSessionSubscriptionOnce: async () => subscription,
+    });
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => sessionId,
+      connect: async () => ({
+        ...base,
+        replaceClientCapabilities: async (provider, options) => {
+          publications += 1;
+          return base.replaceClientCapabilities(provider, options);
+        },
+      }),
+    });
+    try {
+      await registry.create({ cwd: root, mcpServers: [original] });
+      assert.equal(publications, 1);
+      status = 'running';
+      await assert.rejects(
+        registry.load({ sessionId, cwd: root, mcpServers: [changed] }, promptContext([])),
+        (error: unknown) =>
+          error instanceof RequestError &&
+          (error.data as { code?: string })?.code === 'session_busy',
+      );
+      assert.equal(publications, 1);
+      await registry.load({ sessionId, cwd: root, mcpServers: [original] }, promptContext([]));
+      assert.equal(publications, 1);
+    } finally {
+      await registry.dispose();
+      await rm(root, { recursive: true, force: true });
     }
   });
 

@@ -30,11 +30,30 @@ create/abandon routes. Prompt and restored Turns now share the production
 `AcpTurnObservation` consumer and the existing Session channel, mapper,
 interaction broker, and MCP publication path.
 
+The follow-up hardens MCP replacement on an already attached Session: when
+the Host reports an active Turn, a changed stdio configuration returns
+`session_busy` before the existing MCP manager stops its processes or changes
+the publication. Equivalent configuration still reuses the live process.
+Official SDK and real Host tests now also cover a live Turn's historical
+prefix followed by new output without duplicate chunks, a pending permission
+answered after a second ACP process loads the Session, and explicit execution
+of a ready interrupted Turn. Repeated load replays history while repeated
+resume does not. A revision target remains usable after prompt and returns
+`retained` when abandoned; an unused target returns `abandoned`. A failed
+historical page read releases the newly opened subscription.
+
+On this follow-up, the complete CLI dist suite passed 1184 tests with 3
+skipped and no failures. CLI build and typecheck, repository lint and format,
+and `git diff --check` passed. The earlier Desktop E2E and Zed smoke results
+below were not repeated because this follow-up changes only CLI code, tests,
+and ACP documentation.
+
 The official ACP SDK child-process test crossed two ACP processes against one
 real Runtime Host: process A created and prompted a Session, then process B
 loaded it with changed MCP configuration, resumed it with an empty MCP list,
 prompted it, queried a parked Turn resume, branched and prompted the target,
-created a revision, and abandoned that revision. The real Host revision and
+created revision targets, prompted one, retained it on abandon, and abandoned
+the unused target. The real Host revision and
 Turn/capability suites passed 104 tests. Focused registry tests include
 multi-page replay (including a fragment-only page), live/history overlap,
 pending interaction restoration, close during load, exact lost-response Turn

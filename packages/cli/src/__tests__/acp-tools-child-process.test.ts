@@ -498,6 +498,118 @@ describe('ACP tools through the official SDK, child process and Runtime Host', (
       await model.close();
     }
   });
+
+  test('a second ACP process loads a Turn with a pending permission and answers it', {
+    timeout: 60_000,
+  }, async () => {
+    const marker = 'ACP_RESTORE_PERMISSION';
+    const sentinel = 'restored-permission-result';
+    const model = await startToolModel([{ marker, tool: 'echo', args: { value: sentinel } }]);
+    let permissionEntered!: () => void;
+    const permissionPending = new Promise<void>((resolve) => {
+      permissionEntered = resolve;
+    });
+    try {
+      await withAcpChildProcessHarness(
+        async (harness) => {
+          await harness.withClient(
+            async ({ context }) => {
+              await context.request(methods.agent.initialize, { protocolVersion: 1 });
+              const created = await context.request(methods.agent.session.new, {
+                cwd: harness.workspaceRoot,
+                mcpServers: [
+                  { name: 'fixture', command: process.execPath, args: [legacyFixture], env: [] },
+                ],
+              });
+              await context.request(methods.agent.session.setConfigOption, {
+                sessionId: created.sessionId,
+                configId: 'permission_mode',
+                value: 'ask',
+              });
+              const prompt = context.request(methods.agent.session.prompt, {
+                sessionId: created.sessionId,
+                prompt: [{ type: 'text', text: marker }],
+              });
+              await permissionPending;
+              const sibling = await harness.spawnSibling();
+              try {
+                const permissions: RequestPermissionRequest[] = [];
+                const updates: SessionNotification[] = [];
+                let restoredPermissionEntered!: () => void;
+                const restoredPermissionPending = new Promise<void>((resolve) => {
+                  restoredPermissionEntered = resolve;
+                });
+                await sibling.withClient(
+                  async ({ context: restored }) => {
+                    await restored.request(methods.agent.initialize, { protocolVersion: 1 });
+                    await restored.request(methods.agent.session.load, {
+                      sessionId: created.sessionId,
+                      cwd: harness.workspaceRoot,
+                      mcpServers: [
+                        {
+                          name: 'fixture',
+                          command: process.execPath,
+                          args: [legacyFixture],
+                          env: [],
+                        },
+                      ],
+                    });
+                    await Promise.race([
+                      restoredPermissionPending,
+                      new Promise<never>((_resolve, reject) => {
+                        setTimeout(
+                          () => reject(new Error('Restored permission was not presented')),
+                          5_000,
+                        ).unref();
+                      }),
+                    ]);
+                    assert.equal(permissions.length, 1, sibling.stdout);
+                    assert.equal(permissions[0].sessionId, created.sessionId);
+                    assert.deepEqual(await prompt, { stopReason: 'end_turn' });
+                    assertToolSettled(updates, created.sessionId, sentinel);
+                    assert.ok(model.results(marker).some((result) => result.includes(sentinel)));
+                    await restored.request(methods.agent.session.close, {
+                      sessionId: created.sessionId,
+                    });
+                  },
+                  (app) =>
+                    app
+                      .onNotification(methods.client.session.update, ({ params }) => {
+                        updates.push(params);
+                      })
+                      .onRequest(methods.client.session.requestPermission, ({ params }) => {
+                        permissions.push(params);
+                        restoredPermissionEntered();
+                        return {
+                          outcome: { outcome: 'selected', optionId: params.options[0].optionId },
+                        };
+                      }),
+                );
+              } finally {
+                await sibling.close();
+                await context.notify(methods.agent.session.cancel, {
+                  sessionId: created.sessionId,
+                });
+                await prompt.catch(() => undefined);
+              }
+            },
+            (app) =>
+              app.onRequest(methods.client.session.requestPermission, () => {
+                permissionEntered();
+                return new Promise<RequestPermissionResponse>(() => undefined);
+              }),
+          );
+        },
+        {
+          startRuntimeHost: true,
+          timeoutMs: 45_000,
+          model: { id: MODEL_ID, thinkingLevels: [], baseUrl: model.baseUrl },
+        },
+      );
+    } finally {
+      await model.close();
+    }
+  });
 });
 
 function assertToolSettled(
