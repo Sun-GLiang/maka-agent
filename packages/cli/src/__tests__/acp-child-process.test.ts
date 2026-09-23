@@ -993,6 +993,115 @@ describe('Maka ACP child process', () => {
     }
   });
 
+  test('a committed MCP replacement survives cancellation after another Host client starts a Turn', {
+    timeout: 45_000,
+  }, async () => {
+    const model = await startAcpModelFixture();
+    const mcpFixture = fileURLToPath(import.meta.resolve('@maka/mcp/test-only/stdio-server'));
+    let markCommitted!: () => void;
+    const committed = new Promise<void>((resolve) => {
+      markCommitted = resolve;
+    });
+    let releaseResponse!: () => void;
+    const responseGate = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+    try {
+      await withAcpChildProcessHarness(
+        async (harness) => {
+          await harness.withClient(async ({ context }) => {
+            await context.request(methods.agent.initialize, { protocolVersion: 1 });
+            const created = await context.request(methods.agent.session.new, {
+              cwd: harness.workspaceRoot,
+              mcpServers: [],
+            });
+            const connected = await connectRuntimeHost({
+              rootPath: harness.workspaceRoot,
+              protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+            });
+            if (connected.kind !== 'connected') assert.fail('Host connection unavailable');
+            const host = connected.connection;
+            const first = createAcpMcpConfig({
+              cwd: harness.workspaceRoot,
+              mcpServers: [
+                { name: 'fixture', command: process.execPath, args: [mcpFixture], env: [] },
+              ],
+            });
+            const changed = createAcpMcpConfig({
+              cwd: harness.workspaceRoot,
+              mcpServers: [
+                {
+                  name: 'fixture',
+                  command: process.execPath,
+                  args: [mcpFixture],
+                  env: [{ name: 'MAKA_MCP_STDIO_FIXTURE_VALUE', value: 'changed' }],
+                },
+              ],
+            });
+            const publications: Array<{ requireIdleSession?: boolean }> = [];
+            const mcp = new AcpSessionMcp(created.sessionId, first, {
+              replaceClientCapabilities: async (provider, options) => {
+                publications.push(typeof options === 'object' ? options : {});
+                const result = await host.replaceClientCapabilities(provider, options);
+                if (typeof options === 'object' && options.requireIdleSession) {
+                  markCommitted();
+                  await responseGate;
+                }
+                return result;
+              },
+              unregisterClientCapabilities: host.unregisterClientCapabilities.bind(host),
+              subscribeConnectionAvailability: (listener) => {
+                listener({
+                  kind: 'connected',
+                  hostEpoch: host.hostEpoch,
+                  connectionId: host.connectionId,
+                });
+                return () => undefined;
+              },
+            });
+            const controller = new AbortController();
+            let prompt: Promise<unknown> | undefined;
+            try {
+              await mcp.prepare();
+              const replacing = mcp.reconfigure(changed, controller.signal);
+              await committed;
+              prompt = context.request(methods.agent.session.prompt, {
+                sessionId: created.sessionId,
+                prompt: [{ type: 'text', text: 'LIVE_ME' }],
+              });
+              await model.liveStarted;
+              const running = await getRuntimeHostSession(host, created.sessionId);
+              assert.ok(running?.status === 'running' || running?.status === 'waiting_for_user');
+              controller.abort();
+              releaseResponse();
+              await assert.rejects(replacing, RequestError);
+              assert.deepEqual(mcp.config, changed);
+              assert.ok(publications.slice(1).every((options) => options.requireIdleSession));
+              await mcp.ready();
+              model.releaseLive();
+              assert.deepEqual(await prompt, { stopReason: 'end_turn' });
+            } finally {
+              releaseResponse();
+              model.releaseLive();
+              await Promise.allSettled([mcp.close(), prompt]);
+              await host.close();
+              await context.request(methods.agent.session.close, { sessionId: created.sessionId });
+            }
+          });
+        },
+        {
+          startRuntimeHost: true,
+          model: { id: 'acp-stream-fixture', thinkingLevels: ['low'], baseUrl: model.baseUrl },
+          timeoutMs: 35_000,
+        },
+      );
+    } finally {
+      releaseResponse();
+      model.releaseLive();
+      await model.close();
+    }
+  });
+
   test('explicitly resumes a ready interrupted Turn through ACP and the real Host', {
     timeout: 45_000,
   }, async () => {

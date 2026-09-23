@@ -733,6 +733,53 @@ describe('ACP Session registry', () => {
     }
   });
 
+  test('failed live history load releases its observer without stopping the existing Host Turn', async () => {
+    const sessionId = 'live-load-failure';
+    const turnId = 'existing-turn';
+    const subscription = new FakeSubscription(
+      continuitySnapshot(sessionId, { rootTurn: runningTurn(sessionId, turnId) }),
+    );
+    subscription.seedBootstrap([{ type: 'user', id: 'u', turnId, ts: 1, text: 'hello' }]);
+    subscription.onTranscriptPageRead = () => {
+      throw new Error('history unavailable');
+    };
+    const retrySubscription = new FakeSubscription(
+      continuitySnapshot(sessionId, { rootTurn: runningTurn(sessionId, turnId) }),
+    );
+    const stops: Array<{ sessionId: string; turnId: string; runId: string }> = [];
+    let opens = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            if (operation === 'turn.stop') {
+              stops.push(input as (typeof stops)[number]);
+              return completedTurn(sessionId, turnId);
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () =>
+            ++opens === 1 ? subscription : retrySubscription,
+        }),
+    });
+    try {
+      await assert.rejects(
+        registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([])),
+      );
+      for (let attempt = 0; attempt < 10; attempt += 1) await new Promise(setImmediate);
+      assert.deepEqual(stops, []);
+      assert.equal(subscription.closeCalls, 1);
+      await registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([]));
+      assert.equal(opens, 2);
+      assert.equal(retrySubscription.closeCalls, 0);
+      assert.deepEqual(stops, []);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
   test('unsupported restored interaction stops its exact Host Turn', async () => {
     const sessionId = 'unsupported-restored',
       turnId = 'restored-turn';

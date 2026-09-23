@@ -111,6 +111,8 @@ export class AcpSessionMcp {
   #unsubscribeManager: () => void;
   readonly #unsubscribeConnection: () => void;
   #pendingManager: McpClientManager | undefined;
+  readonly #retainedManagers = new Set<McpClientManager>();
+  readonly #retirementTasks = new Set<Promise<void>>();
   #publicationRevision = 0;
   #requireIdlePublication = false;
   #availability: RuntimeHostConnectionAvailability | undefined;
@@ -145,7 +147,15 @@ export class AcpSessionMcp {
           ...(this.#requireIdlePublication ? { requireIdleSession: true } : {}),
         }),
       unregister: () => connection.unregisterClientCapabilities({ sessionId }),
-      onState: () => undefined,
+      onState: (state) => {
+        if (
+          (state === 'published' || state === 'not_published') &&
+          this.#publication.publishedRevision === this.#publicationRevision
+        ) {
+          this.#requireIdlePublication = false;
+          this.#retireRetainedManagers();
+        }
+      },
     });
     this.#unsubscribeManager = this.#observeManager(this.#manager);
     this.#unsubscribeConnection = connection.subscribeConnectionAvailability((availability) => {
@@ -192,6 +202,7 @@ export class AcpSessionMcp {
         this.#assertOpen('mcp.prepare');
         signal?.throwIfAborted();
         if (sameMcpConfig(this.#config, config)) return this.#settlePublication(signal);
+        if (this.#retainedManagers.size > 0) await this.#settlePublication(signal);
         await assertCanChange?.();
         signal?.throwIfAborted();
         const previous = this.#manager;
@@ -210,6 +221,8 @@ export class AcpSessionMcp {
           this.#unsubscribeManager();
           this.#manager = staged;
           this.#unsubscribeManager = this.#observeManager(staged);
+          this.#retainedManagers.add(previous);
+          this.#pendingManager = undefined;
           swapped = true;
           this.#requireIdlePublication = true;
           this.#publicationRevision += 1;
@@ -217,27 +230,38 @@ export class AcpSessionMcp {
           await this.#settlePublication(signal);
           this.#config = config;
           this.#requireIdlePublication = false;
-          this.#pendingManager = undefined;
-          await previous.close().catch((error: unknown) => {
-            console.error('[acp] Previous Session MCP cleanup failed:', error);
-          });
+          this.#retireRetainedManagers();
+          await Promise.allSettled([...this.#retirementTasks]);
         } catch (error) {
-          this.#requireIdlePublication = false;
           if (swapped && !this.#closed) {
-            this.#unsubscribeManager();
-            this.#manager = previous;
-            this.#unsubscribeManager = this.#observeManager(previous);
-            // If the staged snapshot never committed, restore the revision so
-            // publication reuses the still-current provider without a Host write.
-            this.#publicationRevision =
-              this.#publication.publishedRevision === previousRevision
-                ? previousRevision
-                : this.#publicationRevision + 1;
-            this.#publication.request();
-            await this.#publication.settle().catch(() => undefined);
+            // Cancellation can win after the Host committed a new provider but
+            // before its response arrived. Resolve the in-flight publication
+            // before deciding which manager may be released.
+            await this.#publication.waitForPending();
+            if (
+              this.#publication.publishedRevision === previousRevision &&
+              this.#publication.lastError instanceof RuntimeHostOperationError
+            ) {
+              this.#unsubscribeManager();
+              this.#manager = previous;
+              this.#unsubscribeManager = this.#observeManager(previous);
+              this.#retainedManagers.delete(previous);
+              this.#publicationRevision = previousRevision;
+              this.#requireIdlePublication = false;
+              this.#publication.request();
+              await this.#publication.settle().catch(() => undefined);
+              await staged.close().catch(() => undefined);
+            } else {
+              // A committed or unknown outcome may already be serving a Turn.
+              // Keep that provider and its manager; the previous manager stays
+              // available until a definitive publication or Session close.
+              this.#config = config;
+              this.#retireRetainedManagers();
+            }
+          } else if (!swapped) {
+            this.#pendingManager = undefined;
+            await staged.close().catch(() => undefined);
           }
-          this.#pendingManager = undefined;
-          await staged.close().catch(() => undefined);
           if (error instanceof RequestError) throw error;
           throw mcpUnavailable(this.#sessionId, 'mcp.prepare', 'mcp_reconfiguration_failed');
         }
@@ -291,7 +315,12 @@ export class AcpSessionMcp {
     this.#closed = true;
     this.#unsubscribeManager();
     this.#unsubscribeConnection();
-    const managerClose = Promise.allSettled([this.#manager.close(), this.#pendingManager?.close()]);
+    const managerClose = Promise.allSettled([
+      this.#manager.close(),
+      this.#pendingManager?.close(),
+      ...[...this.#retainedManagers].map((manager) => manager.close()),
+      ...this.#retirementTasks,
+    ]);
     this.#closeTask = (async () => {
       try {
         try {
@@ -314,6 +343,19 @@ export class AcpSessionMcp {
       this.#publicationRevision += 1;
       if (this.#prepared && !this.#closed) this.#publication.request();
     });
+  }
+
+  #retireRetainedManagers(): void {
+    if (this.#publication.publishedRevision !== this.#publicationRevision) return;
+    for (const manager of this.#retainedManagers) {
+      this.#retainedManagers.delete(manager);
+      if (manager === this.#manager) continue;
+      const task = manager.close().catch((error: unknown) => {
+        console.error('[acp] Previous Session MCP cleanup failed:', error);
+      });
+      this.#retirementTasks.add(task);
+      void task.finally(() => this.#retirementTasks.delete(task));
+    }
   }
 
   #assertConnected(config = this.#config, manager = this.#manager): void {

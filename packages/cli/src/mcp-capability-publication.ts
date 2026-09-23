@@ -66,6 +66,11 @@ export class McpCapabilityPublication {
 
   async settle(): Promise<McpCapabilityPublicationState> {
     this.request();
+    return this.waitForPending();
+  }
+
+  /** Waits for an already requested publication without starting another attempt. */
+  async waitForPending(): Promise<McpCapabilityPublicationState> {
     while (this.#task) await this.#task;
     return this.#closed ? 'unavailable' : this.#state;
   }

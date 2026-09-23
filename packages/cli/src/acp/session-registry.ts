@@ -179,6 +179,7 @@ export class AcpSessionRegistry {
   readonly #pendingConfigSets = new Map<string, Set<Promise<unknown>>>();
   readonly #activePrompts = new Map<string, Set<ActiveAcpPrompt>>();
   readonly #turnObservations = new Map<string, Map<string, AcpTurnObservation>>();
+  readonly #discardedAttachments = new WeakSet<RuntimeHostSessionChannel>();
   readonly #externalObservationContexts = new Map<string, AcpLoadContext>();
   readonly #sessionCloseTasks = new Map<string, Promise<CloseSessionResponse>>();
   readonly #sessionCloseGenerations = new Map<string, number>();
@@ -770,6 +771,7 @@ export class AcpSessionRegistry {
       },
       onRuntimeResourceChanged: () => undefined,
       onSnapshotChanged: (snapshot) => {
+        if (attachment && this.#discardedAttachments.has(attachment)) return;
         this.#wakeSession(sessionId);
         if (snapshot.rootTurn && isRuntimeHostTerminalTurn(snapshot.rootTurn)) {
           interactions.terminalTurn(snapshot.rootTurn.turnId);
@@ -795,6 +797,7 @@ export class AcpSessionRegistry {
         });
       },
       onTranscriptReplaced: (turnId, messages) => {
+        if (attachment && this.#discardedAttachments.has(attachment)) return;
         const observation = this.#observation(sessionId, turnId);
         if (observation && !observation.cancelled) {
           void observation.replaceTranscript(messages).catch((error: unknown) => {
@@ -803,6 +806,7 @@ export class AcpSessionRegistry {
         }
       },
       onInteractionPending: (pending) => {
+        if (attachment && this.#discardedAttachments.has(attachment)) return;
         if (
           !interactions.fencesTurn(pending.turnId) &&
           !this.#observation(sessionId, pending.turnId)
@@ -814,6 +818,7 @@ export class AcpSessionRegistry {
         void interactions.pending(pending);
       },
       onInteractionResolved: (pending) => {
+        if (attachment && this.#discardedAttachments.has(attachment)) return;
         if (
           !interactions.fencesTurn(pending.turnId) &&
           !this.#observation(sessionId, pending.turnId)
@@ -822,6 +827,7 @@ export class AcpSessionRegistry {
         void interactions.resolved(pending);
       },
       onTranscriptSettlement: (turnId) => {
+        if (attachment && this.#discardedAttachments.has(attachment)) return;
         void this.#observation(sessionId, turnId)
           ?.reconcile()
           .catch(() => undefined);
@@ -974,7 +980,13 @@ export class AcpSessionRegistry {
     expectedRunId?: string,
   ): Promise<AcpTurnObservation | undefined> {
     const context = this.#externalObservationContexts.get(sessionId);
-    if (!context || this.#closing || !this.#ownedSessionIds.has(sessionId)) return;
+    if (
+      !context ||
+      this.#closing ||
+      this.#discardedAttachments.has(attachment) ||
+      !this.#ownedSessionIds.has(sessionId)
+    )
+      return;
     if (this.#observation(sessionId, turnId)) return this.#observation(sessionId, turnId);
     const runId =
       expectedRunId ??
@@ -1005,11 +1017,27 @@ export class AcpSessionRegistry {
     else this.#setTurnObservation(observation);
     try {
       await observation.seed(attachment.messages);
-      if (this.#observation(sessionId, turnId) !== observation || this.#closing) return;
+      if (
+        this.#observation(sessionId, turnId) !== observation ||
+        this.#closing ||
+        this.#discardedAttachments.has(attachment)
+      ) {
+        observation.dispose();
+        if (admission) this.#removeActivePrompt(admission);
+        else this.#removeTurnObservation(observation);
+        return;
+      }
       const task = observation.start(attachment);
+      const interactions = this.#attachmentInteractions.get(sessionId);
       void task
         .then(
           async () => {
+            if (
+              observation.finished ||
+              this.#observation(sessionId, turnId) !== observation ||
+              this.#discardedAttachments.has(attachment)
+            )
+              return;
             const root = attachment.snapshot.rootTurn;
             if (root?.turnId === turnId && isRuntimeHostTerminalTurn(root)) {
               await this.#externalObservationContexts.get(sessionId)?.notifyTurnStatus?.({
@@ -1022,7 +1050,12 @@ export class AcpSessionRegistry {
             }
           },
           async (error: unknown) => {
-            if (!this.#closing && !observation.finished) {
+            if (
+              !this.#closing &&
+              !observation.finished &&
+              this.#observation(sessionId, turnId) === observation &&
+              !this.#discardedAttachments.has(attachment)
+            ) {
               console.error('[acp] Attached Turn observation failed:', error);
               const root = attachment.snapshot.rootTurn;
               if (
@@ -1056,7 +1089,7 @@ export class AcpSessionRegistry {
             await admission.stopTask?.catch(() => undefined);
             this.#removeActivePrompt(admission);
           }
-          this.#attachmentInteractions.get(sessionId)?.settleTurn(turnId);
+          interactions?.settleTurn(turnId);
           observation.dispose();
           this.#removeTurnObservation(observation);
         });
@@ -1527,6 +1560,21 @@ export class AcpSessionRegistry {
       }
       return { configOptions };
     } catch (error) {
+      if (newAttachment && this.#attachments.get(params.sessionId) === newAttachment) {
+        const channel = await newAttachment.catch(() => undefined);
+        if (channel) {
+          this.#discardedAttachments.add(channel);
+          for (const observation of this.#turnObservations.get(params.sessionId)?.values() ?? []) {
+            if (observation.attachment !== channel) continue;
+            observation.dispose();
+            this.#removeTurnObservation(observation);
+          }
+        }
+        this.#attachmentInteractions.get(params.sessionId)?.close();
+        this.#attachmentInteractions.delete(params.sessionId);
+        this.#attachments.delete(params.sessionId);
+        await channel?.close().catch(() => undefined);
+      }
       if (installedMcp && this.#mcps.get(params.sessionId) === installedMcp) {
         this.#mcps.delete(params.sessionId);
         await installedMcp.close().catch(() => undefined);
@@ -1539,17 +1587,6 @@ export class AcpSessionRegistry {
       }
       if (previousContext) this.#externalObservationContexts.set(params.sessionId, previousContext);
       else this.#externalObservationContexts.delete(params.sessionId);
-      if (newAttachment && this.#attachments.get(params.sessionId) === newAttachment) {
-        this.#attachmentInteractions.get(params.sessionId)?.close();
-        this.#attachmentInteractions.delete(params.sessionId);
-        this.#attachments.delete(params.sessionId);
-        await newAttachment
-          ?.then(
-            (channel) => channel.close(),
-            () => undefined,
-          )
-          .catch(() => undefined);
-      }
       if (!alreadyOwned) this.#ownedSessionIds.delete(params.sessionId);
       if (error instanceof RequestError) throw error;
       throw requestErrorFromRuntimeHost(error, 'subscription.open');

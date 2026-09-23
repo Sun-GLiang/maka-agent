@@ -19,6 +19,53 @@
 
 # ACP validation record
 
+## PR6 second review follow-up — September 23, 2026
+
+This follow-up starts at pushed PR #5621 head `62eea00ef`. Three additional
+regressions were reproduced on that exact commit before editing: a failed live
+history load sent `turn.stop` for an existing Host Turn; closing during an MCP
+replacement left the old stdio child alive; and cancellation after an accepted
+replacement issued an unguarded rollback while a second client had started a
+Turn. The three independent probes and their formal regression tests failed
+before repair and pass after repair.
+
+Failed load now disposes only observations created for its new attachment
+before closing the channel. The discarded attachment is fenced from late
+callbacks, including those that could affect a replacement attachment. A
+genuine interaction or output failure after successful adoption still stops
+the exact Turn. MCP replacement retains both managers until Host publication
+has a definite outcome. Close and authoritative retirement release both. A
+known Host rejection restores the old manager without another Host write. If
+the new provider was committed when cancellation arrives, it remains the
+effective config and stays callable; a lost response retains both processes
+until a later publication confirms which can be retired. The original Host
+idle guard remains on every configuration replacement.
+
+Validation on macOS and Node 24.19.0:
+
+| Check | Result |
+| --- | --- |
+| Full CLI dist suite | 1201 passed, 3 skipped, 0 failed. Includes the new load, MCP close/retire/unknown-outcome/isolation regressions and the official SDK plus real Host two-client cancellation test. |
+| Independent pre-fix probes | All 3 failed at `62eea00ef`; all 3 passed after repair. |
+| Full Runtime Host dist suite | 2054 passed, 12 skipped, 0 failed. |
+| Full Runtime dist suite | 3516 passed, 14 skipped, 0 failed. |
+| Full Desktop main dist suite | 2815 passed, 0 failed. |
+| Full Eval dist suite | 114 passed, 1 skipped, 0 failed; 87 Python tests passed with 12 skipped. |
+| Desktop E2E same-environment comparison | On `62eea00ef`, the Side Chat case failed at `page.screenshot({ fullPage: true })` after the preceding behavior assertions passed; both WorkHub cases passed. On the repaired tree, the same Side Chat capture timed out and both WorkHub cases passed. Earlier WorkHub failures were intermittent in the focused retry. |
+| `npm run build`, workspace typecheck, lint, format, ASF headers and CLI notices | Passed. |
+| Desktop/UI knip and protocol epoch guard | Passed; Host protocol is unchanged from `62eea00ef` and remains at epoch 179. |
+
+The Side Chat screenshot timeout occurs before that test's Desktop reconnect
+portion, so this E2E case does not validate the remainder of its flow in either
+tree. The test trace and failure location match across baseline and repair.
+
+Zed 1.20.2 was attempted with a disposable project and the final ACP build.
+The existing Zed process displayed its project trust dialog, but the computer
+UI controller returned `noWindowsAvailable` for the action that would
+continue. No final-head Zed prompt/load result is claimed. The temporary
+model and Host fixture were stopped and its files removed; the user's Zed
+process was left running.
+
 ## PR6 review repair — September 23, 2026
 
 This follow-up starts at PR #5621 head `fd2e6a68` in a separate worktree. The
