@@ -233,7 +233,7 @@ export const ExecutorCatalogLoading: Story = {
   play: async () => {
     const body = within(document.body);
     await userEvent.click(await body.findByRole('button', { name: /选择模型|Select model/ }));
-    await expect(body.getByText(/正在读取执行者与模型|Loading agents and models/)).toBeVisible();
+    await waitFor(() => expect(body.getByText(/正在读取执行者与模型|Loading agents and models/)).toBeVisible());
   },
 };
 
