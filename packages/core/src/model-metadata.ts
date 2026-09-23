@@ -268,13 +268,12 @@ const GOOGLE_MODEL_OVERRIDES: Record<string, ModelMetadata> = {
 };
 
 // These models are in the live models.dev OpenAI catalog but not yet in the
-// bundled snapshot. Keep the public API's `none` effort separate from Codex
-// OAuth. The Codex model list also advertises `ultra` for Sol with automatic
-// task delegation. The OpenAI Responses SDK used by Maka's OAuth path
-// discards it for GPT-6, so do not offer it until the request path can send
-// and handle it.
+// bundled snapshot. The OpenAI Responses SDK accepts only these five GPT-6
+// efforts on both API and Codex OAuth paths. It discards `none` and the Codex
+// model list's `ultra` for Sol, so do not offer them until the request path
+// can send and handle them.
 const OPENAI_GPT6_THINKING_OPTIONS: ThinkingOptions = {
-  efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+  efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
 };
 
 const OPENAI_GPT6_MODEL_OVERRIDES: Record<string, ModelMetadata> = {
@@ -286,10 +285,6 @@ const OPENAI_GPT6_MODEL_OVERRIDES: Record<string, ModelMetadata> = {
     displayName: 'GPT-6 Luna',
     thinkingOptions: OPENAI_GPT6_THINKING_OPTIONS,
   },
-};
-
-const CODEX_GPT6_THINKING_OPTIONS: ThinkingOptions = {
-  efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
 };
 
 // The OAuth path pins its own context windows over whatever the public
@@ -312,12 +307,10 @@ function openAiOAuthModelMetadata(active: ModelsDevMetadata): Record<string, Mod
     'gpt-6-sol': {
       ...openAiOAuthBase(active, 'gpt-6-sol'),
       ...OPENAI_GPT6_MODEL_OVERRIDES['gpt-6-sol'],
-      thinkingOptions: CODEX_GPT6_THINKING_OPTIONS,
     },
     'gpt-6-luna': {
       ...openAiOAuthBase(active, 'gpt-6-luna'),
       ...OPENAI_GPT6_MODEL_OVERRIDES['gpt-6-luna'],
-      thinkingOptions: CODEX_GPT6_THINKING_OPTIONS,
     },
     'gpt-5.6-sol': {
       ...openAiOAuthBase(active, 'gpt-5.6-sol'),

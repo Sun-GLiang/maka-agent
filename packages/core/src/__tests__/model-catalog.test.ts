@@ -72,26 +72,12 @@ test('GPT-6 Sol and Luna use GPT labels and expose supported thinking levels', (
         {
           id: 'gpt-6-sol',
           displayName: 'GPT-6 Sol',
-          thinkingLevels: [
-            ...(providerType === 'openai' ? ['off'] : []),
-            'low',
-            'medium',
-            'high',
-            'xhigh',
-            'max',
-          ],
+          thinkingLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
         },
         {
           id: 'gpt-6-luna',
           displayName: 'GPT-6 Luna',
-          thinkingLevels: [
-            ...(providerType === 'openai' ? ['off'] : []),
-            'low',
-            'medium',
-            'high',
-            'xhigh',
-            'max',
-          ],
+          thinkingLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
         },
       ],
       providerType,
