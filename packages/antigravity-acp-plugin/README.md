@@ -51,7 +51,19 @@ Create a Session with `executorId: "antigravity-acp"`. The executable and its
 `localharness_external` helper remain adapter-owned. An optional `model` configuration is validated
 against the live ACP Session before the first prompt.
 
-The Plugin retains one external process per Maka conversation while the Host is running. Reloading,
-disabling, or uninstalling the Plugin cancels active work and terminates every owned process. Same-
-Session restoration after a Host restart remains intentionally unsupported until ACP resume/load
-semantics are implemented and verified.
+## Process lifetime and current limits
+
+After its first prompt, each Maka conversation retains one external ACP process, including while it
+waits for the next turn. Closing the Desktop UI does not retire the conversation. PR 2 has no idle
+timeout or process-count cap, so a long-running Host can accumulate processes as conversations are
+created. This preserves multi-turn continuity while PR 2 cannot restore an external Session after
+process loss. Retiring a task releases its process; reloading, disabling, or uninstalling the Plugin
+and shutting down the Host also terminate owned process trees. A lost process leaves readable Maka
+history, but that task cannot continue until same-Session restoration is implemented and verified
+in PR 3. Bounded retention is tracked separately in
+[#5620](https://github.com/apache/maka/issues/5620), informed by that restoration behavior.
+
+The ACP `session/new` request currently passes `mcpServers: []`, so this integration does not
+forward Maka MCP servers to Antigravity. PR 2 execution acceptance reused an existing Google login;
+it does not establish recovery from expired authentication during a task. Fresh interactive login
+was verified in the PR 1 setup flow.

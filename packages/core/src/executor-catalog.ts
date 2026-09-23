@@ -59,7 +59,6 @@ export interface ExecutorCatalogEntry {
   readonly currentModel?: string;
   readonly supportsAttachments: boolean;
   readonly supportsModelChange: boolean;
-  readonly message?: string;
 }
 
 export function isExecutorConfiguration(value: unknown): value is ExecutorConfiguration {
@@ -99,7 +98,6 @@ export function normalizeCatalogEntry(
     ) ||
     new Set(value.models.map((model) => model.id)).size !== value.models.length ||
     !isExecutorConfiguration({ model: value.currentModel }) ||
-    (value.message !== undefined && !isCatalogText(value.message)) ||
     typeof value.supportsAttachments !== 'boolean' ||
     typeof value.supportsModelChange !== 'boolean'
   )
@@ -171,7 +169,6 @@ export function normalizeCatalogEntry(
         }
       : {}),
     ...(value.currentModel !== undefined ? { currentModel: value.currentModel } : {}),
-    ...(value.message !== undefined ? { message: value.message } : {}),
     supportsAttachments: value.supportsAttachments,
     supportsModelChange: value.supportsModelChange,
   });
