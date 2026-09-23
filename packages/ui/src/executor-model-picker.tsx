@@ -36,6 +36,8 @@ import { useUiLocale } from './locale-context.js';
 
 export interface ExecutorModelPickerProps {
   catalog: readonly ExecutorCatalogEntry[];
+  /** Stable rail entry while the Host discovers its first live catalog. */
+  loadingEntry?: { readonly id: string; readonly displayName: string };
   selection?: ExecutorSelection;
   nativeLabel?: string;
   nativeThinkingControl?: ReactNode;
@@ -140,6 +142,10 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
   const [selecting, setSelecting] = useState(false);
   const [selectionFailed, setSelectionFailed] = useState(false);
   const [browsedId, setBrowsedId] = useState(props.selection?.executorId ?? NATIVE);
+  const loadingEntry = props.loading && props.loadingEntry &&
+    !props.catalog.some((entry) => entry.id === props.loadingEntry?.id)
+      ? props.loadingEntry
+      : undefined;
   useEffect(() => {
     if (!open) {
       setBrowsedId(props.selection?.executorId ?? NATIVE);
@@ -224,6 +230,22 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                   </span>
                 </Button>
               ))}
+              {loadingEntry ? (
+                <Button
+                  label={loadingEntry.displayName}
+                  variant="ghost"
+                  size="sm"
+                  className="maka-executor-picker-entry"
+                  data-active={browsedId === loadingEntry.id ? 'true' : undefined}
+                  isDisabled={lockedTo !== undefined && lockedTo !== loadingEntry.id}
+                  onClick={() => browse(loadingEntry.id)}
+                >
+                  <span className="maka-executor-picker-label">
+                    <span>{loadingEntry.displayName}</span>
+                    <span className="maka-executor-picker-entry-status">{copy.loading}</span>
+                  </span>
+                </Button>
+              ) : null}
               <Button
                 label={copy.manage}
                 variant="ghost"
@@ -269,6 +291,10 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                   />
                   {selectionFailed ? <span role="alert">{copy.selectionFailed}</span> : null}
                 </>
+              ) : loadingEntry && browsedId === loadingEntry.id ? (
+                <div className="maka-executor-picker-readiness" role="status">
+                  <p>{copy.loading}</p>
+                </div>
               ) : (
                 <div className="maka-executor-picker-readiness">
                   <p>{browsed ? copy[browsed.readiness] : copy.unavailable}</p>
