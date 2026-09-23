@@ -49,6 +49,7 @@ import {
   activityKind,
   boundedText,
   emitText,
+  emitToolOutput,
   projectToolResult,
   promptText,
   summarizeToolContent,
@@ -121,6 +122,7 @@ interface ToolSnapshot {
   content: ToolCallContent[];
   rawInput?: unknown;
   rawOutput?: unknown;
+  output: string;
   started: boolean;
   terminal: boolean;
 }
@@ -587,15 +589,16 @@ export class AcpExecutor implements PluginExecutorProvider {
       emitText(active.context, 'thinking_delta', update.content.text);
       return;
     }
-    if (update.sessionUpdate === 'tool_call') this.#acceptTool(active, update, false);
-    if (update.sessionUpdate === 'tool_call_update') this.#acceptTool(active, update, true);
+    if (update.sessionUpdate === 'tool_call') this.#acceptTool(active, update);
+    if (update.sessionUpdate === 'tool_call_update') this.#acceptTool(active, update);
   }
 
-  #acceptTool(active: ActivePrompt, update: ToolCall | ToolCallUpdate, partial: boolean): void {
+  #acceptTool(active: ActivePrompt, update: ToolCall | ToolCallUpdate): void {
     const snapshot = active.tools.get(update.toolCallId) ?? {
       id: update.toolCallId,
       title: 'External tool',
       content: [],
+      output: '',
       started: false,
       terminal: false,
     };
@@ -618,13 +621,12 @@ export class AcpExecutor implements PluginExecutorProvider {
       });
       snapshot.started = true;
     }
-    if (partial && snapshot.status !== 'completed' && snapshot.status !== 'failed') {
-      emitText(
-        active.context,
-        'tool_progress',
-        summarizeToolContent(snapshot.content),
-        snapshot.id,
-      );
+    if (snapshot.status !== 'completed' && snapshot.status !== 'failed') {
+      const output = summarizeToolContent(snapshot.content);
+      if (output.startsWith(snapshot.output) && output.length > snapshot.output.length) {
+        emitToolOutput(active.context, snapshot.id, output.slice(snapshot.output.length));
+        snapshot.output = output;
+      }
     }
     if (!snapshot.terminal && (snapshot.status === 'completed' || snapshot.status === 'failed')) {
       active.context.emit({

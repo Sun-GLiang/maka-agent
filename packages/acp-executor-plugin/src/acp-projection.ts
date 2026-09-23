@@ -38,15 +38,28 @@ export function promptText(request: Readonly<PluginExecutorRequest>): string {
 
 export function emitText(
   context: PluginExecutorContext,
-  type: 'output_delta' | 'thinking_delta' | 'tool_progress',
+  type: 'output_delta' | 'thinking_delta',
   text: string,
-  toolCallId?: string,
 ): void {
   const safeText = text.replaceAll('\r', '');
   for (let offset = 0; offset < safeText.length; offset += MAX_EVENT_TEXT) {
     const chunk = safeText.slice(offset, offset + MAX_EVENT_TEXT);
-    if (type === 'output_delta' || type === 'thinking_delta') context.emit({ type, text: chunk });
-    else context.emit({ type, toolCallId: toolCallId!, text: chunk });
+    context.emit({ type, text: chunk });
+  }
+}
+
+export function emitToolOutput(
+  context: PluginExecutorContext,
+  toolCallId: string,
+  text: string,
+): void {
+  const safeText = text.replaceAll('\r', '');
+  for (let offset = 0; offset < safeText.length; offset += MAX_EVENT_TEXT) {
+    context.emit({
+      type: 'tool_output_delta',
+      toolCallId,
+      text: safeText.slice(offset, offset + MAX_EVENT_TEXT),
+    });
   }
 }
 

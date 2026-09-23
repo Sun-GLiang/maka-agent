@@ -29,8 +29,9 @@ import type {
   DirectoryReference,
   QuoteRef,
   ToolActivityKind,
+  ToolOutputStream,
 } from '@maka/core/events';
-import { TOOL_ACTIVITY_KINDS } from '@maka/core/events';
+import { TOOL_ACTIVITY_KINDS, TOOL_OUTPUT_STREAMS } from '@maka/core/events';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import { isExecutorId } from '@maka/core/executor-id';
 import { Service, type Context, type Disposable } from './plugin-kernel.js';
@@ -85,6 +86,12 @@ export type PluginExecutorOutputEvent =
       readonly input?: unknown;
       readonly displayName?: string;
       readonly activityKind?: ToolActivityKind;
+    }
+  | {
+      readonly type: 'tool_output_delta';
+      readonly toolCallId: string;
+      readonly text: string;
+      readonly stream?: ToolOutputStream;
     }
   | { readonly type: 'tool_progress'; readonly toolCallId: string; readonly text: string }
   | {
@@ -647,6 +654,20 @@ function normalizeOutputEvent(
       ...(event.input === undefined ? {} : { input: structuredClone(event.input) }),
       ...(event.displayName === undefined ? {} : { displayName: event.displayName }),
       ...(event.activityKind === undefined ? {} : { activityKind: event.activityKind }),
+    });
+  }
+  if (
+    event.type === 'tool_output_delta' &&
+    capabilities?.toolActivity === true &&
+    isSafeEventId(event.toolCallId) &&
+    isSafeEventText(event.text) &&
+    (event.stream === undefined || TOOL_OUTPUT_STREAMS.some((stream) => stream === event.stream))
+  ) {
+    return Object.freeze({
+      type: event.type,
+      toolCallId: event.toolCallId,
+      text: event.text,
+      ...(event.stream === undefined ? {} : { stream: event.stream }),
     });
   }
   if (

@@ -26,6 +26,11 @@ export interface ExecutorConfiguration {
   readonly model?: string;
 }
 
+export interface ExecutorSelection {
+  readonly executorId: string;
+  readonly configuration: ExecutorConfiguration;
+}
+
 export type ExecutorReadiness =
   | 'ready'
   | 'unavailable'

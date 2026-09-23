@@ -40,11 +40,16 @@ test('late draft discovery cannot replace the current target; existing tasks ins
   const old = new Promise<readonly ExecutorCatalogEntry[]>(resolve => { finishOld = resolve; });
   let ready = false;
   let serverModel = 'selected';
+  let inspect = async (): Promise<readonly ExecutorCatalogEntry[]> => [{
+    ...entry,
+    currentModel: serverModel,
+    readiness: ready ? 'ready' : 'history_only',
+  }];
   let write: () => Promise<unknown> = async () => ({ ok: false, code: 'operation_unavailable' });
   const services = {
     subscribeChanges: () => () => {},
     newTasks: { subscribeChanges: () => () => {}, getExecutors: async () => { discoveryCalls++; return discoveryCalls === 1 ? old : [entry]; } },
-    sessions: { getExecutorState: async () => { inspectionCalls++; return [{ ...entry, currentModel: serverModel, readiness: ready ? 'ready' : 'history_only' }]; }, setExecutorModelConfiguration: () => write() },
+    sessions: { getExecutorState: async () => { inspectionCalls++; return inspect(); }, setExecutorModelConfiguration: () => write() },
   } as unknown as ConversationServices;
   function Probe(props: { draftKey: string; session?: SessionSummary }) {
     latest = useExecutorSelection({ key: props.draftKey, cwd: '/fixture', target: { hostId: 'host', profileId: 'profile', projectId: null }, session: props.session });
@@ -66,6 +71,29 @@ test('late draft discovery cannot replace the current target; existing tasks ins
     assert.equal(latest.entry?.readiness, 'history_only');
     assert.equal(discoveryCalls, 3);
     assert.equal(inspectionCalls, 1);
+    let finishInspection!: (value: readonly ExecutorCatalogEntry[]) => void;
+    const slowInspection = new Promise<readonly ExecutorCatalogEntry[]>((resolve) => {
+      finishInspection = resolve;
+    });
+    inspect = () => slowInspection;
+    let firstRefresh!: Promise<void>;
+    let duplicateRefresh!: Promise<void>;
+    await act(async () => {
+      firstRefresh = latest.refresh();
+      duplicateRefresh = latest.refresh();
+      await Promise.resolve();
+    });
+    assert.equal(firstRefresh, duplicateRefresh, 'concurrent inspections share one request');
+    assert.equal(inspectionCalls, 2);
+    await act(async () => {
+      finishInspection([{ ...entry, currentModel: serverModel, readiness: 'history_only' }]);
+      await firstRefresh;
+    });
+    inspect = async () => [{
+      ...entry,
+      currentModel: serverModel,
+      readiness: ready ? 'ready' : 'history_only',
+    }];
     await act(async () => { await assert.rejects(latest.select({ executorId: 'external', configuration: { model: 'rejected' } })); });
     assert.equal(latest.selection?.configuration.model, 'selected');
     assert.equal(latest.error, 'operation_unavailable');

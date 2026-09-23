@@ -459,7 +459,20 @@ test('questions retain option identity and output updates retain arrival order',
     assert.equal(result.status, 'completed');
     assert.deepEqual(
       events.map((event) => (event as { type: string }).type),
-      ['question', 'output_delta', 'tool_start', 'tool_result'],
+      [
+        'question',
+        'output_delta',
+        'tool_start',
+        'tool_output_delta',
+        'tool_output_delta',
+        'tool_result',
+      ],
+    );
+    assert.deepEqual(
+      events
+        .filter((event) => (event as { type: string }).type === 'tool_output_delta')
+        .map((event) => (event as { text: string }).text),
+      ['Running', ' tests…'],
     );
   } finally {
     await executor.dispose();
@@ -661,9 +674,28 @@ function fakeProtocol(): {
                   title: 'Edit file',
                   kind: 'edit',
                   status: 'in_progress',
+                  ...(text === 'question'
+                    ? {
+                        content: [{ type: 'content', content: { type: 'text', text: 'Running' } }],
+                      }
+                    : {}),
                 },
               } as never,
             });
+            if (text === 'question') {
+              for (const output of ['Running tests…', 'Running tests…'])
+                notifications.get(methods.client.session.update)?.({
+                  params: {
+                    sessionId: 'acp-session',
+                    update: {
+                      sessionUpdate: 'tool_call_update',
+                      toolCallId: `tool-${text}`,
+                      status: 'in_progress',
+                      content: [{ type: 'content', content: { type: 'text', text: output } }],
+                    },
+                  } as never,
+                });
+            }
             notifications.get(methods.client.session.update)?.({
               params: {
                 sessionId: 'acp-session',

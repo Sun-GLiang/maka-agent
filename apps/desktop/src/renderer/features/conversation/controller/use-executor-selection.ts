@@ -18,15 +18,10 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ExecutorCatalogEntry, ExecutorConfiguration } from '@maka/core/executor-catalog';
+import type { ExecutorCatalogEntry, ExecutorSelection } from '@maka/core/executor-catalog';
 import type { SessionSummary } from '@maka/core/session';
 import type { ConversationNewTaskTarget } from '../ports.js';
 import { useConversationServices } from '../services.js';
-
-export interface ExecutorSelection {
-  readonly executorId: string;
-  readonly configuration: ExecutorConfiguration;
-}
 
 export function useExecutorSelection(input: {
   key: string;
@@ -50,33 +45,44 @@ export function useExecutorSelection(input: {
   const current = useRef(key);
   current.current = key;
   const revision = useRef(0);
-  const refresh = useCallback(async () => {
-    const attempt = ++revision.current;
-    if (sessionId && !executorId) {
-      setSnapshot({ key, catalog: [], loading: false });
-      return;
-    }
-    if (!sessionId && (!input.target || !input.cwd)) return;
-    setSnapshot((previous) => ({
-      key,
-      catalog: previous?.key === key ? previous.catalog : [],
-      loading: true,
-    }));
-    try {
-      const catalog = sessionId
-        ? ((await services.sessions.getExecutorState?.(sessionId)) ?? [])
-        : ((await services.newTasks.getExecutors?.(input.target!, input.cwd!)) ?? []);
-      if (current.current === key && revision.current === attempt)
-        setSnapshot({ key, catalog, loading: false });
-    } catch (error) {
-      if (current.current === key && revision.current === attempt)
-        setSnapshot({
-          key,
-          catalog: [],
-          loading: false,
-          error: error instanceof Error ? error.message : 'Executor unavailable',
-        });
-    }
+  const refreshes = useRef(new Map<string, Promise<void>>());
+  const refresh = useCallback(() => {
+    const existing = refreshes.current.get(key);
+    if (existing) return existing;
+    const run = (async () => {
+      const attempt = ++revision.current;
+      if (sessionId && !executorId) {
+        setSnapshot({ key, catalog: [], loading: false });
+        return;
+      }
+      if (!sessionId && (!input.target || !input.cwd)) return;
+      setSnapshot((previous) => ({
+        key,
+        catalog: previous?.key === key ? previous.catalog : [],
+        loading: true,
+      }));
+      try {
+        const catalog = sessionId
+          ? ((await services.sessions.getExecutorState?.(sessionId)) ?? [])
+          : ((await services.newTasks.getExecutors?.(input.target!, input.cwd!)) ?? []);
+        if (current.current === key && revision.current === attempt)
+          setSnapshot({ key, catalog, loading: false });
+      } catch (error) {
+        if (current.current === key && revision.current === attempt)
+          setSnapshot({
+            key,
+            catalog: [],
+            loading: false,
+            error: error instanceof Error ? error.message : 'Executor unavailable',
+          });
+      }
+    })();
+    let tracked!: Promise<void>;
+    tracked = run.finally(() => {
+      if (refreshes.current.get(key) === tracked) refreshes.current.delete(key);
+    });
+    refreshes.current.set(key, tracked);
+    return tracked;
   }, [
     key,
     sessionId,
@@ -89,7 +95,6 @@ export function useExecutorSelection(input: {
     services,
   ]);
   useEffect(() => {
-    void refresh();
     const unsubscribe = services.newTasks.subscribeChanges(() => {
       void refresh();
     });
@@ -97,19 +102,23 @@ export function useExecutorSelection(input: {
       if (sessionId && changedSessionId === sessionId) void refresh();
     });
     // Conversation inspection is process-free, including while a retained process is idle.
-    const timer =
-      sessionId && executorId
-        ? setInterval(() => {
-            void refresh();
-          }, 3000)
-        : undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
+    const poll = async () => {
+      await refresh();
+      if (!stopped) timer = setTimeout(() => void poll(), 3000);
+    };
+    if (sessionId && executorId) void poll();
+    else void refresh();
     return () => {
+      stopped = true;
       revision.current++;
+      refreshes.current.delete(key);
       unsubscribe();
       unSession();
-      clearInterval(timer);
+      clearTimeout(timer);
     };
-  }, [refresh, services, sessionId, executorId]);
+  }, [refresh, services, sessionId, executorId, key]);
   useEffect(() => {
     if (sessionId) setDraft(undefined);
   }, [sessionId]);

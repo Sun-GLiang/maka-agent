@@ -99,7 +99,8 @@ test('executor backend projects optional thinking and external tool activity', a
         input: { query: 'maka' },
         activityKind: 'search',
       });
-      context.emit({ type: 'tool_progress', toolCallId: 'external-1', text: 'working' });
+      context.emit({ type: 'tool_output_delta', toolCallId: 'external-1', text: 'working' });
+      context.emit({ type: 'tool_progress', toolCallId: 'external-1', text: 'steps:1/2' });
       context.emit({
         type: 'tool_result',
         toolCallId: 'external-1',
@@ -123,6 +124,7 @@ test('executor backend projects optional thinking and external tool activity', a
     [
       'thinking_delta',
       'tool_start',
+      'tool_output_delta',
       'tool_progress',
       'tool_result',
       'thinking_complete',
@@ -131,15 +133,37 @@ test('executor backend projects optional thinking and external tool activity', a
     ],
   );
   assert.equal(events[1]?.type === 'tool_start' ? events[1].providerExecuted : undefined, true);
-  assert.deepEqual(events[3]?.type === 'tool_result' ? events[3].content : undefined, {
+  assert.deepEqual(
+    events[2]?.type === 'tool_output_delta'
+      ? {
+          sessionId: events[2].sessionId,
+          toolCallId: events[2].toolCallId,
+          toolUseId: events[2].toolUseId,
+          seq: events[2].seq,
+          stream: events[2].stream,
+          chunk: events[2].chunk,
+          redacted: events[2].redacted,
+        }
+      : undefined,
+    {
+      sessionId: 'session-a',
+      toolCallId: events[1]?.type === 'tool_start' ? events[1].toolUseId : undefined,
+      toolUseId: events[1]?.type === 'tool_start' ? events[1].toolUseId : undefined,
+      seq: 1,
+      stream: 'stdout',
+      chunk: 'working',
+      redacted: false,
+    },
+  );
+  assert.deepEqual(events[4]?.type === 'tool_result' ? events[4].content : undefined, {
     kind: 'file_diff',
     paths: ['README.md'],
     diff: '--- a/README.md',
   });
   const stepId = events[0]?.type === 'thinking_delta' ? events[0].messageId : undefined;
   assert.equal(events[1]?.type === 'tool_start' ? events[1].stepId : undefined, stepId);
-  assert.equal(events[4]?.type === 'thinking_complete' ? events[4].messageId : undefined, stepId);
-  assert.equal(events[5]?.type === 'text_complete' ? events[5].messageId : undefined, stepId);
+  assert.equal(events[5]?.type === 'thinking_complete' ? events[5].messageId : undefined, stepId);
+  assert.equal(events[6]?.type === 'text_complete' ? events[6].messageId : undefined, stepId);
   await root.fiber.dispose();
 });
 

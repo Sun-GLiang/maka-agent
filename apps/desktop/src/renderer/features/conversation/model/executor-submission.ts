@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import type { ExecutorConfiguration, ExecutorCatalogEntry } from '@maka/core/executor-catalog';
+import type { ExecutorCatalogEntry, ExecutorSelection } from '@maka/core/executor-catalog';
 import type { ChatDefaultPermissionMode } from '@maka/core/settings';
 import type { CollaborationMode } from '@maka/core/collaboration';
 import type { OrchestrationMode } from '@maka/core/orchestration';
@@ -26,7 +26,7 @@ import type { UiCatalog, UiLocale } from '@maka/core/ui-locale';
 import type { NewChatModel } from './shell-chat-model-selection.js';
 
 export interface ExecutorSubmission {
-  executorSelection?: { executorId: string; configuration: ExecutorConfiguration };
+  executorSelection?: ExecutorSelection;
   executorEntry?: Pick<ExecutorCatalogEntry, 'readiness' | 'supportsAttachments'>;
 }
 

@@ -19,7 +19,12 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 import { Button, Popover } from '@astryxdesign/core';
-import type { ExecutorCatalogEntry, ExecutorConfiguration } from '@maka/core/executor-catalog';
+import type {
+  ExecutorCatalogEntry,
+  ExecutorConfiguration,
+  ExecutorSelection,
+} from '@maka/core/executor-catalog';
+export type { ExecutorSelection } from '@maka/core/executor-catalog';
 import type { ProviderType } from '@maka/core/llm-connections';
 import type { UiCatalog, UiLocale } from '@maka/core/ui-locale';
 import { Settings, ICON_SIZE } from './icons.js';
@@ -29,10 +34,6 @@ import { executorModelGroup, highestExecutorModelVariant } from './executor-mode
 import { ThinkingLevelSelector } from './chat-model-switcher.js';
 import { useUiLocale } from './locale-context.js';
 
-export interface ExecutorSelection {
-  readonly executorId: string;
-  readonly configuration: ExecutorConfiguration;
-}
 export interface ExecutorModelPickerProps {
   catalog: readonly ExecutorCatalogEntry[];
   selection?: ExecutorSelection;

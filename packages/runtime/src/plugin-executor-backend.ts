@@ -20,6 +20,7 @@
 import type { ExecutorConfiguration } from '@maka/core/executor-catalog';
 import { randomUUID } from 'node:crypto';
 import type { SessionEvent } from '@maka/core/events';
+import { redactSecrets } from '@maka/core/redaction';
 import type {
   AgentBackend,
   BackendSendInput,
@@ -135,6 +136,7 @@ export class PluginExecutorBackend implements AgentBackend {
     const turnId = input.turnId;
     let thinkingText = '';
     const toolUseIds = new Map<string, string>();
+    const toolOutputSequences = new Map<string, number>();
     let result: PluginExecutorResult | undefined;
     let failure: unknown;
     let failed = false;
@@ -159,7 +161,14 @@ export class PluginExecutorBackend implements AgentBackend {
           signal,
           onEvent: (event) => {
             if (event.type === 'thinking_delta') thinkingText += event.text;
-            this.#publishOutputEvent(turnId, messageId, event, toolUseIds, queue);
+            this.#publishOutputEvent(
+              turnId,
+              messageId,
+              event,
+              toolUseIds,
+              toolOutputSequences,
+              queue,
+            );
           },
           onPermissionRequest: (request) =>
             this.#requestPermission(input, request, signal, toolUseIds, queue),
@@ -366,6 +375,7 @@ export class PluginExecutorBackend implements AgentBackend {
     messageId: string,
     event: PluginExecutorOutputEvent,
     toolUseIds: Map<string, string>,
+    toolOutputSequences: Map<string, number>,
     queue: AsyncEventQueue<SessionEvent>,
   ): void {
     if (event.type === 'output_delta') {
@@ -408,6 +418,7 @@ export class PluginExecutorBackend implements AgentBackend {
       }
       const toolUseId = this.#newId();
       toolUseIds.set(event.toolCallId, toolUseId);
+      toolOutputSequences.set(event.toolCallId, 0);
       queue.push({
         type: 'tool_start',
         id: this.#newId(),
@@ -425,6 +436,29 @@ export class PluginExecutorBackend implements AgentBackend {
     }
     const toolUseId = toolUseIds.get(event.toolCallId);
     if (!toolUseId) return;
+    if (event.type === 'tool_output_delta') {
+      if (!event.text) return;
+      const chunk = redactSecrets(event.text);
+      if (!chunk) return;
+      const now = this.#now();
+      const seq = (toolOutputSequences.get(event.toolCallId) ?? 0) + 1;
+      toolOutputSequences.set(event.toolCallId, seq);
+      queue.push({
+        type: 'tool_output_delta',
+        id: this.#newId(),
+        sessionId: this.sessionId,
+        turnId,
+        ts: now,
+        toolCallId: toolUseId,
+        toolUseId,
+        seq,
+        stream: event.stream ?? 'stdout',
+        chunk,
+        redacted: chunk !== event.text,
+        createdAt: now,
+      });
+      return;
+    }
     if (event.type === 'tool_progress') {
       if (!event.text) return;
       queue.push({
@@ -438,6 +472,7 @@ export class PluginExecutorBackend implements AgentBackend {
       return;
     }
     toolUseIds.delete(event.toolCallId);
+    toolOutputSequences.delete(event.toolCallId);
     queue.push({
       type: 'tool_result',
       id: this.#newId(),
