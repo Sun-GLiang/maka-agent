@@ -25,12 +25,14 @@ import { test } from 'node:test';
 import { createDefaultRuntimePolicy, type RuntimePolicy } from '@maka/core/runtime-policy';
 import { MakaCompositionLoader } from '@maka/runtime/plugin-composition-loader';
 import { PluginExecutorService } from '@maka/runtime/plugin-executor-service';
+import { PluginStorageService } from '@maka/runtime/plugin-data-services';
 import { Context } from '@maka/runtime/plugin-kernel';
 import {
   HostBuiltinExternalAgentPluginCoordinator,
   resolveBuiltinExternalAgentPluginEntries,
 } from '../server/builtin-external-agent-plugins.js';
 import { HostPluginPlatform } from '../server/plugin-platform.js';
+import { HostPluginDataRuntime } from '../server/plugin-data-runtime.js';
 
 test('built-in ACP packages load their production bundles and follow RuntimePolicy', async () => {
   const root = await mkdtemp(join(tmpdir(), 'maka-builtin-acp-plugins-'));
@@ -107,6 +109,8 @@ function createPlatform(controlDirectory: string): {
 } {
   const root = new Context();
   const executors = new PluginExecutorService(root);
+  const storage = new PluginStorageService(root);
+  storage.bindRuntime(new HostPluginDataRuntime(controlDirectory));
   return {
     platform: new HostPluginPlatform(controlDirectory, {
       composition: new MakaCompositionLoader({ root }),

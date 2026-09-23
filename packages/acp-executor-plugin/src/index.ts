@@ -123,6 +123,7 @@ interface ToolSnapshot {
   rawInput?: unknown;
   rawOutput?: unknown;
   output: string;
+  outputText: string;
   started: boolean;
   terminal: boolean;
 }
@@ -134,6 +135,7 @@ interface RetainedSession {
   owner?: AcpConnectionOwner;
   connection?: ClientConnection;
   acpSessionId?: string;
+  continuityReserved?: boolean;
   configOptions: readonly SessionConfigOption[];
   initialization?: Promise<void>;
   active?: ActivePrompt;
@@ -330,10 +332,12 @@ export class AcpExecutor implements PluginExecutorProvider {
       return { status: 'completed', text: active.text };
     } catch (error) {
       await this.#lose(session);
-      // Before session/new succeeds there is no external conversation to preserve.
-      // Discard only that failed startup, after cleanup; established or historical
-      // sessions must never be silently replaced by a retry.
-      const retryable = !session.acpSessionId && errorCode(error) !== 'acp_history_only';
+      // Retry only when no session/new was attempted. Once continuity is
+      // reserved, a lost response may hide an established Agent Session.
+      const retryable =
+        !session.acpSessionId &&
+        !session.continuityReserved &&
+        errorCode(error) !== 'acp_history_only';
       if (retryable && this.#sessions.get(session.conversationKey) === session)
         this.#sessions.delete(session.conversationKey);
       if (context.signal.aborted) {
@@ -445,6 +449,13 @@ export class AcpExecutor implements PluginExecutorProvider {
       owner.failed,
     ]);
     if (initialized.protocolVersion !== 1) throw new Error('Unsupported ACP protocol version');
+    if (!probe) {
+      startupSignal.throwIfAborted();
+      // Reserve continuity before asking the Agent to create a Session. A failed
+      // or interrupted session/new may still have created one remotely.
+      await this.#state?.mark(session.conversationKey, session.cwd);
+      session.continuityReserved = true;
+    }
     const created = await Promise.race([
       owner.connection.agent.request(
         methods.agent.session.new,
@@ -456,9 +467,6 @@ export class AcpExecutor implements PluginExecutorProvider {
     session.acpSessionId = created.sessionId;
     session.configOptions = created.configOptions ?? [];
     if (!probe) {
-      // Once session/new succeeds, a later configuration failure must not let a
-      // Host restart silently replace this external conversation.
-      await this.#state?.mark(session.conversationKey, session.cwd);
       await this.#applyInitialConfig(
         session,
         session.configuration?.model
@@ -601,6 +609,7 @@ export class AcpExecutor implements PluginExecutorProvider {
       title: 'External tool',
       content: [],
       output: '',
+      outputText: '',
       started: false,
       terminal: false,
     };
@@ -628,9 +637,17 @@ export class AcpExecutor implements PluginExecutorProvider {
       if (output.startsWith(snapshot.output) && output.length > snapshot.output.length) {
         emitToolOutput(active.context, snapshot.id, output.slice(snapshot.output.length));
         snapshot.output = output;
+        snapshot.outputText = toolTextContent(snapshot.content);
       }
     }
     if (!snapshot.terminal && (snapshot.status === 'completed' || snapshot.status === 'failed')) {
+      if (snapshot.content.some((item) => item.type === 'diff')) {
+        const text = toolTextContent(snapshot.content);
+        const remaining = text.startsWith(snapshot.outputText)
+          ? text.slice(snapshot.outputText.length)
+          : text;
+        if (remaining) emitToolOutput(active.context, snapshot.id, remaining);
+      }
       active.context.emit({
         type: 'tool_result',
         toolCallId: snapshot.id,
@@ -698,6 +715,14 @@ export class AcpExecutor implements PluginExecutorProvider {
   }
 }
 
+function toolTextContent(content: readonly ToolCallContent[]): string {
+  return content
+    .flatMap((item) =>
+      item.type === 'content' && item.content.type === 'text' ? [item.content.text] : [],
+    )
+    .join('\n');
+}
+
 /**
  * Shared ACP registration surface.
  *
@@ -718,8 +743,9 @@ export class AcpRuntimeService {
     config: TConfig,
   ): Disposable<Promise<void>> {
     const storage = consumer.get<PluginStorageService>('storage');
+    if (!storage) throw new Error('ACP continuity storage is unavailable');
     const provider = new AcpExecutor(adapter as AcpAgentAdapter, config, {
-      ...(storage ? { state: pluginStateStore(storage, adapter.id) } : {}),
+      state: pluginStateStore(storage, adapter.id),
     });
     consumer.effect(() => () => provider.dispose(), `acp.dispose(${JSON.stringify(adapter.id)})`);
     return consumer.executors.register(provider);

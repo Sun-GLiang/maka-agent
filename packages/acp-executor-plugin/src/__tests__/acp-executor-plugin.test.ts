@@ -82,6 +82,56 @@ test('runtime retains one ACP process and Session across prompts', async () => {
   assert.equal(protocol.disposals, 1);
 });
 
+test('a terminal ACP tool update retains both output text and its file diff', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      createConnection: protocol.factory,
+    },
+  );
+  const events: Array<{ type: string; text?: string; content?: { kind: string } }> = [];
+  try {
+    assert.equal(
+      (await executor.execute(request('mixed'), executorContext(events))).status,
+      'completed',
+    );
+    assert.equal(events.find((event) => event.type === 'tool_output_delta')?.text, '1 test failed');
+    assert.equal(events.find((event) => event.type === 'tool_result')?.content?.kind, 'file_diff');
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('a mixed terminal update emits only text not already streamed', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      createConnection: protocol.factory,
+    },
+  );
+  const events: Array<{ type: string; text?: string }> = [];
+  try {
+    assert.equal(
+      (await executor.execute(request('mixed-progress'), executorContext(events))).status,
+      'completed',
+    );
+    assert.deepEqual(
+      events.filter((event) => event.type === 'tool_output_delta').map((event) => event.text),
+      ['Running tests…', '\n1 test failed'],
+    );
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('runtime rejects a historical conversation after process continuity was lost', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
@@ -119,6 +169,84 @@ test('runtime rejects a historical conversation after process continuity was los
         recoverable: false,
       });
       assert.equal(protocol.connections, 1);
+    } finally {
+      await restarted.dispose();
+    }
+  } finally {
+    await first.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('a continuity write failure cannot start an ACP Session and remains retryable', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  let writes = 0;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      createConnection: protocol.factory,
+      state: {
+        has: async () => false,
+        mark: async () => {
+          if (++writes === 1) throw new Error('Storage unavailable');
+        },
+      },
+    },
+  );
+  try {
+    assert.equal((await executor.execute(request('first'), executorContext([]))).status, 'failed');
+    assert.equal(protocol.sessions, 0, 'no Agent Session was created before the durable write');
+    assert.equal(
+      (await executor.execute(request('retry'), executorContext([]))).status,
+      'completed',
+    );
+    assert.equal(protocol.sessions, 1);
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('an uncertain session/new response remains history-only after restart', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.sessionCreationFailure = 'once';
+  const marked = new Set<string>();
+  const state: AcpConversationStateStore = {
+    has: async (key) => marked.has(key),
+    mark: async (key) => {
+      marked.add(key);
+    },
+  };
+  const createExecutor = () =>
+    new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      {
+        createConnection: protocol.factory,
+        state,
+      },
+    );
+  const first = createExecutor();
+  try {
+    assert.equal((await first.execute(request('first'), executorContext([]))).status, 'failed');
+    assert.equal(marked.has('session-a'), true);
+    assert.equal(protocol.sessions, 1);
+    await first.dispose();
+    const restarted = createExecutor();
+    try {
+      assert.equal(
+        (await restarted.inspectConversation({ conversationKey: 'session-a', cwd: fixture.root }))
+          .readiness,
+        'history_only',
+      );
+      assert.equal(
+        (await restarted.execute(request('retry'), executorContext([]))).status,
+        'failed',
+      );
+      assert.equal(protocol.sessions, 1, 'the uncertain external Session was not replaced');
     } finally {
       await restarted.dispose();
     }
@@ -576,6 +704,7 @@ function fakeProtocol(): {
   disposals: number;
   selectedModel?: string;
   configurationFailure?: 'response_lost' | 'unconfirmed' | 'timeout' | 'once';
+  sessionCreationFailure?: 'once';
   promptModels: string[];
   notifyConfiguration(model: string): void;
 } {
@@ -591,6 +720,7 @@ function fakeProtocol(): {
       | 'timeout'
       | 'once'
       | undefined,
+    sessionCreationFailure: undefined as 'once' | undefined,
     promptModels: [] as string[],
     notifyConfiguration: (_model: string): void => {},
     factory: undefined as unknown as AcpConnectionFactory,
@@ -642,6 +772,10 @@ function fakeProtocol(): {
           if (method === methods.agent.initialize) return { protocolVersion: 1 };
           if (method === methods.agent.session.new) {
             fixture.sessions += 1;
+            if (fixture.sessionCreationFailure === 'once') {
+              fixture.sessionCreationFailure = undefined;
+              throw new Error('Session creation response was lost');
+            }
             return {
               sessionId: 'acp-session',
               configOptions: [
@@ -726,7 +860,7 @@ function fakeProtocol(): {
                 },
               } as never,
             });
-            if (text === 'question') {
+            if (text === 'question' || text === 'mixed-progress') {
               for (const output of ['Running tests…', 'Running tests…'])
                 notifications.get(methods.client.session.update)?.({
                   params: {
@@ -747,7 +881,23 @@ function fakeProtocol(): {
                   sessionUpdate: 'tool_call_update',
                   toolCallId: `tool-${text}`,
                   status: 'completed',
-                  content: [{ type: 'diff', path: 'README.md', oldText: 'old', newText: 'new' }],
+                  content: [
+                    { type: 'diff', path: 'README.md', oldText: 'old', newText: 'new' },
+                    ...(text === 'mixed' || text === 'mixed-progress'
+                      ? [
+                          {
+                            type: 'content',
+                            content: {
+                              type: 'text',
+                              text:
+                                text === 'mixed'
+                                  ? '1 test failed'
+                                  : 'Running tests…\n1 test failed',
+                            },
+                          },
+                        ]
+                      : []),
+                  ],
                 },
               } as never,
             });

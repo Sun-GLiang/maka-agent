@@ -2116,6 +2116,7 @@ export async function createExecutionRuntimeHostComposition(
           configuration,
         });
       },
+      retireExecutor: (sessionId) => pluginExecutors.retireConversation(sessionId),
       assertExecutorAvailable: async (sessionId, executorId, configuration, cwd) => {
         pluginExecutors.identity(sessionId, executorId);
         const [entry] = await pluginExecutors.catalog({

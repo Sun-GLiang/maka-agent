@@ -207,6 +207,7 @@ export interface HostSessionCatalogCoordinatorOptions {
     header: SessionHeader,
     config: import('@maka/core/executor-catalog').ExecutorConfiguration,
   ) => Promise<void>;
+  readonly retireExecutor?: (sessionId: string) => Promise<void>;
   readonly assertExecutorAvailable?: (
     sessionId: string,
     executorId: string,
@@ -329,6 +330,7 @@ export class HostSessionCatalogCoordinator {
   readonly #workspaceResolver: HostWorkspaceResolver;
   readonly #requestDrain: () => void;
   readonly #configureExecutor: HostSessionCatalogCoordinatorOptions['configureExecutor'];
+  readonly #retireExecutor: HostSessionCatalogCoordinatorOptions['retireExecutor'];
   readonly #assertExecutorAvailable: HostSessionCatalogCoordinatorOptions['assertExecutorAvailable'];
   readonly #sessionAccessAuthority:
     | Pick<RuntimeHostAccessAuthority, 'activeSessionGrantForPrincipal'>
@@ -344,6 +346,7 @@ export class HostSessionCatalogCoordinator {
     this.#workspaceResolver = options.workspaceResolver;
     this.#requestDrain = options.requestDrain;
     this.#configureExecutor = options.configureExecutor;
+    this.#retireExecutor = options.retireExecutor;
     this.#assertExecutorAvailable = options.assertExecutorAvailable;
     this.#sessionAccessAuthority = options.sessionAccessAuthority;
   }
@@ -784,6 +787,7 @@ export class HostSessionCatalogCoordinator {
     }
     return this.#admission.run(input.sessionId, async (lease) => {
       let commitAttempted = false;
+      let confirmedExecutor: SessionHeader | undefined;
       try {
         const current = await this.#stores.readHeaderRecordSnapshot(input.sessionId);
         if (
@@ -847,6 +851,7 @@ export class HostSessionCatalogCoordinator {
             );
           try {
             await this.#configureExecutor(current.header, input.patch.executorConfig);
+            confirmedExecutor = current.header;
           } catch {
             throw new SessionOperationFailure(
               'operation_unavailable',
@@ -869,6 +874,7 @@ export class HostSessionCatalogCoordinator {
           ),
         );
       } catch (error) {
+        if (confirmedExecutor) await this.#reconcileExecutorAfterFailedCommit(confirmedExecutor);
         if (
           !commitAttempted &&
           !isNotFound(error) &&
@@ -891,6 +897,28 @@ export class HostSessionCatalogCoordinator {
         );
       }
     });
+  }
+
+  async #reconcileExecutorAfterFailedCommit(previous: SessionHeader): Promise<void> {
+    try {
+      const actual = (await this.#stores.readHeaderRecordSnapshot(previous.id)).header;
+      if (
+        actual.executorId !== previous.executorId ||
+        !actual.executorConfig?.model ||
+        !this.#configureExecutor
+      )
+        throw new Error('Confirmed executor model is unavailable');
+      await this.#configureExecutor(actual, actual.executorConfig);
+    } catch {
+      // When the durable value or rollback cannot be confirmed, never leave a
+      // live external Session that might answer on a different model.
+      try {
+        if (!this.#retireExecutor) throw new Error('Executor retirement is unavailable');
+        await this.#retireExecutor(previous.id);
+      } catch {
+        this.#requestDrain();
+      }
+    }
   }
 
   async #relocateWorkspace(

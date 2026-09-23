@@ -2150,6 +2150,7 @@ function createFixture(
     readonly header?: Partial<SessionHeader>;
     readonly assertExecutorAvailable?: HostSessionCatalogCoordinatorOptions['assertExecutorAvailable'];
     readonly configureExecutor?: HostSessionCatalogCoordinatorOptions['configureExecutor'];
+    readonly retireExecutor?: HostSessionCatalogCoordinatorOptions['retireExecutor'];
   } = {},
 ) {
   const sessionId = 'session-1';
@@ -2240,6 +2241,7 @@ function createFixture(
       drains += 1;
     },
     ...(options.configureExecutor ? { configureExecutor: options.configureExecutor } : {}),
+    ...(options.retireExecutor ? { retireExecutor: options.retireExecutor } : {}),
     ...(options.assertExecutorAvailable
       ? { assertExecutorAvailable: options.assertExecutorAvailable }
       : {}),
@@ -2468,6 +2470,71 @@ test('executor model changes commit only after idle agent confirmation', async (
   assert.equal(outcome.ok, true, JSON.stringify(outcome));
   assert.deepEqual(order, ['confirmed']);
   assert.equal(fixture.header().executorConfig?.model, 'after');
+  assert.equal(fixture.drainRequests(), 0);
+});
+
+test('failed Session commit restores the confirmed executor model', async () => {
+  const confirmed: string[] = [];
+  const fixture = createFixture({
+    header: {
+      backend: 'plugin-executor',
+      executorId: 'remote',
+      executorConfig: { model: 'before' },
+    },
+    configureExecutor: async (_header, config) => {
+      confirmed.push(config.model!);
+    },
+    manager: {
+      transitionSessionConfiguration: async () => {
+        throw new SessionConfigurationTransitionError('operation_unavailable', 'Commit failed');
+      },
+    },
+  });
+  const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+    {
+      sessionId: fixture.sessionId,
+      expectedRevision: fixture.revision(),
+      patch: { executorConfig: { model: 'after' } },
+    },
+    context,
+  );
+  assert.equal(outcome.ok, false);
+  assert.deepEqual(confirmed, ['after', 'before']);
+  assert.equal(fixture.header().executorConfig?.model, 'before');
+  assert.equal(fixture.drainRequests(), 0);
+});
+
+test('failed executor rollback retires the external conversation', async () => {
+  let retired = false;
+  const fixture = createFixture({
+    header: {
+      backend: 'plugin-executor',
+      executorId: 'remote',
+      executorConfig: { model: 'before' },
+    },
+    configureExecutor: async (_header, config) => {
+      if (config.model === 'before') throw new Error('Rollback failed');
+    },
+    retireExecutor: async () => {
+      retired = true;
+    },
+    manager: {
+      transitionSessionConfiguration: async () => {
+        throw new SessionConfigurationTransitionError('operation_unavailable', 'Commit failed');
+      },
+    },
+  });
+  const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+    {
+      sessionId: fixture.sessionId,
+      expectedRevision: fixture.revision(),
+      patch: { executorConfig: { model: 'after' } },
+    },
+    context,
+  );
+  assert.equal(outcome.ok, false);
+  assert.equal(retired, true);
+  assert.equal(fixture.header().executorConfig?.model, 'before');
   assert.equal(fixture.drainRequests(), 0);
 });
 
