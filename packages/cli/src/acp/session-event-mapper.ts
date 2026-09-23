@@ -25,6 +25,7 @@ import {
 } from '@agentclientprotocol/sdk';
 import type { SessionEvent } from '@maka/core/events';
 import type { StoredMessage } from '@maka/core/session';
+import { userFacingText } from '@maka/core/session';
 import type { InteractionPendingSnapshot, InteractionSnapshot } from '@maka/runtime-host/protocol';
 import { whileActive } from './active-promise.js';
 import { AcpToolEventMapper } from './tool-event-mapper.js';
@@ -99,14 +100,51 @@ export class AcpSessionEventMapper {
   }
 
   /** Apply a bounded authoritative batch; absence from one batch never removes a tool. */
-  acceptTranscriptMessages(turnId: string, messages: readonly StoredMessage[]): Promise<void> {
+  acceptTranscriptMessages(
+    turnId: string,
+    messages: readonly StoredMessage[],
+    ignoreOlder = false,
+  ): Promise<void> {
     return this.#enqueue(async () => {
       for (const message of messages) {
         if (message.turnId !== turnId) continue;
         if (message.type === 'assistant') {
-          await this.#acceptText('thinking', message.id, message.thinking?.text ?? '');
-          await this.#acceptText('text', message.id, message.text);
+          const thinking = message.thinking?.text ?? '';
+          if (
+            !ignoreOlder ||
+            thinking.startsWith(this.#streams.get(streamKey('thinking', message.id)) ?? '')
+          )
+            await this.#acceptText('thinking', message.id, thinking);
+          if (
+            !ignoreOlder ||
+            message.text.startsWith(this.#streams.get(streamKey('text', message.id)) ?? '')
+          )
+            await this.#acceptText('text', message.id, message.text);
         } else await this.#tools.acceptMessage(message);
+      }
+    });
+  }
+
+  /** Replay one durable row in transcript order for session/load. */
+  acceptHistoricalMessage(message: StoredMessage): Promise<void> {
+    return this.#enqueue(async () => {
+      if (message.type === 'user') {
+        const text = userFacingText(message);
+        if (text) {
+          await this.#deliver({
+            sessionId: this.#sessionId,
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text },
+              messageId: message.id,
+            },
+          });
+        }
+      } else if (message.type === 'assistant') {
+        await this.#acceptText('thinking', message.id, message.thinking?.text ?? '');
+        await this.#acceptText('text', message.id, message.text);
+      } else {
+        await this.#tools.acceptMessage(message);
       }
     });
   }

@@ -27,17 +27,19 @@ import {
   type CloseSessionResponse,
   type ListSessionsRequest,
   type ListSessionsResponse,
+  type LoadSessionRequest,
+  type LoadSessionResponse,
   type NewSessionRequest,
   type NewSessionResponse,
   type PromptRequest,
   type PromptResponse,
+  type ResumeSessionRequest,
+  type ResumeSessionResponse,
   type SessionNotification,
   type SessionConfigOption,
   type SetSessionConfigOptionRequest,
   type SetSessionConfigOptionResponse,
-  type StopReason,
 } from '@agentclientprotocol/sdk';
-import type { SessionEvent } from '@maka/core/events';
 import type { McpConfigFile } from '@maka/core/mcp';
 import { isRuntimeHostTerminalTurn } from '@maka/runtime-host/adapter';
 import {
@@ -57,6 +59,11 @@ import {
   HOST_OPERATION_SPECS,
   type SessionCatalogProjection,
   type TurnSnapshot,
+  type TurnResumePlan,
+  type SessionConversationCopyInput,
+  type SessionConversationCopyResult,
+  type SessionRevisionAbandonInput,
+  type SessionRevisionAbandonResult,
 } from '@maka/runtime-host/protocol';
 import { RuntimeHostSessionChannel } from '../runtime-host-session-channel.js';
 import {
@@ -75,6 +82,7 @@ import { AcpSessionEventMapper } from './session-event-mapper.js';
 import { mapAcpPromptContent, publishAcpPromptAttachments } from './prompt-content.js';
 import { AcpSessionMcp, createAcpMcpConfig, type AcpMcpConnection } from './session-mcp.js';
 import { AcpSessionInteractions, type AcpInteractionClient } from './session-interactions.js';
+import { AcpTurnObservation } from './turn-observation.js';
 
 const ACP_SESSION_CURSOR_MAX_BYTES = 8 * 1024;
 const ADMISSION_QUERY_MAX_ATTEMPTS = 5;
@@ -89,7 +97,13 @@ type AcpSessionRegistryOperation =
   | 'artifact.ingest'
   | 'subscription.open'
   | 'turn.start'
-  | 'turn.stop';
+  | 'turn.stop'
+  | 'turn.query'
+  | 'turn.resume.query'
+  | 'turn.resume.start'
+  | 'session.branch.create'
+  | 'session.revision.create'
+  | 'session.revision.abandon';
 type AcpSessionRegistryLifecycleOperation =
   | 'connect'
   | 'session.close'
@@ -112,6 +126,18 @@ export interface AcpPromptContext {
   readonly interactions?: AcpInteractionClient;
 }
 
+export interface AcpAttachedTurnStatus {
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly runId: string;
+  readonly status: 'completed' | 'failed' | 'cancelled' | 'observation_failed';
+  readonly failureClass?: string;
+}
+
+export interface AcpLoadContext extends AcpPromptContext {
+  readonly notifyTurnStatus?: (status: AcpAttachedTurnStatus) => Promise<void>;
+}
+
 export interface AcpSessionRegistryOptions {
   readonly connect: (signal: AbortSignal) => Promise<AcpSessionRegistryConnection>;
   readonly newSessionId?: () => string;
@@ -126,26 +152,16 @@ interface AcpAttachmentConfiguration {
   delivery?: Promise<void>;
 }
 
-interface ActiveAcpPrompt {
-  readonly sessionId: string;
-  readonly turnId: string;
-  readonly mapper: AcpSessionEventMapper;
+type ActiveAcpPrompt = AcpTurnObservation & {
   readonly waiters: Set<() => void>;
-  attachment?: RuntimeHostSessionChannel;
-  transcript?: ReturnType<RuntimeHostSessionChannel['trackPromptTranscript']>;
-  readonly projectionAbort: AbortController;
-  readonly reconciliationAbort: AbortController;
-  projectionFailure?: unknown;
   dispatchStarted: boolean;
   startRequestSettled: boolean;
   admissionSettled: boolean;
   admissionQuery?: Promise<void>;
   admissionFailure?: RequestError;
   startedTurn?: TurnSnapshot;
-  cancelled: boolean;
-  finished: boolean;
   stopTask?: Promise<void>;
-}
+};
 
 /** Owns all Runtime Host resources associated with one ACP connection. */
 export class AcpSessionRegistry {
@@ -162,7 +178,13 @@ export class AcpSessionRegistry {
   readonly #attachmentConfigurations = new Map<string, AcpAttachmentConfiguration>();
   readonly #pendingConfigSets = new Map<string, Set<Promise<unknown>>>();
   readonly #activePrompts = new Map<string, Set<ActiveAcpPrompt>>();
+  readonly #turnObservations = new Map<string, Map<string, AcpTurnObservation>>();
+  readonly #externalObservationContexts = new Map<string, AcpLoadContext>();
   readonly #sessionCloseTasks = new Map<string, Promise<CloseSessionResponse>>();
+  readonly #sessionCloseGenerations = new Map<string, number>();
+  readonly #sessionLoadTails = new Map<string, Promise<unknown>>();
+  readonly #sessionLoadControllers = new Map<string, AbortController>();
+  readonly #historyReplays = new Set<string>();
   #connection: AcpSessionRegistryConnection | undefined;
   #connectTask: Promise<AcpSessionRegistryConnection> | undefined;
   #connectAbortController: AbortController | undefined;
@@ -181,6 +203,33 @@ export class AcpSessionRegistry {
     validateNewSessionParams(params);
     const mcpConfig = createAcpMcpConfig(params);
     return this.#track(this.#create(params, mcpConfig, signal));
+  }
+
+  async load(params: LoadSessionRequest, context: AcpLoadContext): Promise<LoadSessionResponse> {
+    this.#assertOpen('subscription.open');
+    validateNewSessionParams(params);
+    const mcpConfig = createAcpMcpConfig(params);
+    const generation = this.#sessionCloseGenerations.get(params.sessionId) ?? 0;
+    return this.#track(
+      this.#queueLoad(params.sessionId, () =>
+        this.#load(params, context, mcpConfig, true, generation),
+      ),
+    );
+  }
+
+  async resume(
+    params: ResumeSessionRequest,
+    context: AcpLoadContext,
+  ): Promise<ResumeSessionResponse> {
+    this.#assertOpen('subscription.open');
+    validateNewSessionParams(params);
+    const mcpConfig = createAcpMcpConfig({ ...params, mcpServers: params.mcpServers ?? [] });
+    const generation = this.#sessionCloseGenerations.get(params.sessionId) ?? 0;
+    return this.#track(
+      this.#queueLoad(params.sessionId, () =>
+        this.#load(params, context, mcpConfig, false, generation),
+      ),
+    );
   }
 
   async list(params: ListSessionsRequest): Promise<ListSessionsResponse> {
@@ -236,11 +285,57 @@ export class AcpSessionRegistry {
     await this.#cancelSession(params.sessionId);
   }
 
+  async resumeTurn(
+    params: { sessionId: string; sourceRunId?: string; expectedRuntimeEventHighWater?: number },
+    context: AcpLoadContext,
+  ): Promise<
+    | { kind: 'parked'; plan: Extract<TurnResumePlan, { disposition: 'parked' }> }
+    | {
+        kind: 'started';
+        turn: TurnSnapshot;
+        sourceRunId: string;
+        sourceRuntimeEventHighWater: number;
+      }
+  > {
+    this.#assertOpen('turn.resume.query');
+    this.#assertOwned(params.sessionId);
+    return this.#track(this.#resumeTurn(params, context));
+  }
+
+  async branch(params: SessionConversationCopyInput): Promise<SessionConversationCopyResult> {
+    return this.#track(this.#copySession('session.branch.create', params));
+  }
+
+  async createRevision(
+    params: SessionConversationCopyInput,
+  ): Promise<SessionConversationCopyResult> {
+    return this.#track(this.#copySession('session.revision.create', params));
+  }
+
+  async abandonRevision(
+    params: SessionRevisionAbandonInput,
+  ): Promise<SessionRevisionAbandonResult> {
+    this.#assertOpen('session.revision.abandon');
+    this.#assertOwned(params.targetSessionId);
+    const task = this.#track(this.#abandonRevision(params));
+    return task;
+  }
+
   async close(params: CloseSessionRequest): Promise<CloseSessionResponse> {
     this.#assertOpen('session.close');
     const existing = this.#sessionCloseTasks.get(params.sessionId);
     if (existing) return existing;
-    this.#assertOwned(params.sessionId);
+    if (
+      !this.#ownedSessionIds.has(params.sessionId) &&
+      !this.#sessionLoadTails.has(params.sessionId)
+    ) {
+      throw unknownSessionError();
+    }
+    this.#sessionCloseGenerations.set(
+      params.sessionId,
+      (this.#sessionCloseGenerations.get(params.sessionId) ?? 0) + 1,
+    );
+    this.#sessionLoadControllers.get(params.sessionId)?.abort();
     this.#ownedSessionIds.delete(params.sessionId);
     const configuration = this.#attachmentConfigurations.get(params.sessionId);
     const delivery = configuration?.delivery;
@@ -260,35 +355,31 @@ export class AcpSessionRegistry {
     this.#closing = true;
     this.#connectAbortController?.abort();
     this.#creationAbort.abort();
+    for (const controller of this.#sessionLoadControllers.values()) controller.abort();
     this.#disposeTask ??= this.#dispose();
     return this.#disposeTask;
   }
 
   async #prompt(params: PromptRequest, context: AcpPromptContext): Promise<PromptResponse> {
     const turnId = this.#newTurnId();
-    const projectionAbort = new AbortController();
-    const reconciliationAbort = new AbortController();
-    const active: ActiveAcpPrompt = {
-      sessionId: params.sessionId,
-      turnId,
-      mapper: new AcpSessionEventMapper({
+    const active: ActiveAcpPrompt = Object.assign(
+      new AcpTurnObservation({
         sessionId: params.sessionId,
+        turnId,
         notify: async (notification) => {
           if (!this.#closing && this.#ownedSessionIds.has(params.sessionId)) {
             await context.notify(notification);
           }
         },
-        signal: projectionAbort.signal,
       }),
-      waiters: new Set(),
-      projectionAbort,
-      reconciliationAbort,
-      dispatchStarted: false,
-      startRequestSettled: false,
-      admissionSettled: false,
-      cancelled: false,
-      finished: false,
-    };
+      {
+        waiters: new Set<() => void>(),
+        dispatchStarted: false,
+        startRequestSettled: false,
+        admissionSettled: false,
+      },
+    );
+    if (this.#historyReplays.has(params.sessionId)) void active.holdLive().catch(() => undefined);
     this.#addActivePrompt(active);
     const onAbort = () => {
       void this.#cancelPrompt(active).catch(() => undefined);
@@ -345,8 +436,8 @@ export class AcpSessionRegistry {
 
       await this.#mcps.get(params.sessionId)?.ready(active.projectionAbort.signal);
       if (active.cancelled) return { stopReason: await this.#cancelledStopReason(active) };
-      active.transcript = attachment.trackPromptTranscript(turnId);
-      const observation = this.#consumePromptEvents(active, attachment.eventsForTurn(turnId));
+      this.#assertOwned(params.sessionId);
+      const observation = active.start(attachment);
       // Mark the observer as handled immediately: turn.start may still be in flight
       // when the live subscription reports a failure.
       void observation.catch(() => undefined);
@@ -397,73 +488,19 @@ export class AcpSessionRegistry {
       // A terminal subscription event can precede the Stop response. Retain this
       // prompt so close/dispose cannot release its connection while Stop is in flight.
       await active.stopTask?.catch(() => undefined);
-      active.projectionAbort.abort();
-      active.reconciliationAbort.abort();
-      active.transcript?.dispose();
+      active.dispose();
       this.#attachmentInteractions.get(active.sessionId)?.settleTurn(active.turnId);
       const observed = active.attachment?.snapshot.rootTurn;
       if (observed?.turnId === active.turnId && isRuntimeHostTerminalTurn(observed)) {
         this.#attachmentInteractions.get(active.sessionId)?.terminalTurn(active.turnId);
       }
-      active.finished = true;
       this.#wake(active);
       this.#removeActivePrompt(active);
     }
   }
 
-  async #consumePromptEvents(
-    active: ActiveAcpPrompt,
-    events: AsyncIterable<SessionEvent>,
-  ): Promise<StopReason> {
-    let terminalStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
-    try {
-      for await (const event of events) {
-        if (event.type === 'abort') terminalStatus = 'cancelled';
-        else if (event.type === 'error' && !event.recoverable) terminalStatus = 'failed';
-        if (terminalStatus !== 'completed') active.reconciliationAbort.abort();
-        if (!active.cancelled) await active.mapper.accept(event);
-      }
-      if (active.cancelled) return this.#cancelledStopReason(active);
-      if (terminalStatus === 'completed') await this.#reconcilePrompt(active, true);
-      else active.reconciliationAbort.abort();
-      if (active.projectionFailure) throw active.projectionFailure;
-      await active.mapper.finishTools(active.turnId, terminalStatus);
-      await active.mapper.flush();
-      return active.cancelled ? this.#cancelledStopReason(active) : 'end_turn';
-    } catch (error) {
-      if (active.cancelled) return this.#cancelledStopReason(active);
-      throw error;
-    }
-  }
-
-  async #reconcilePrompt(active: ActiveAcpPrompt, replay = false): Promise<void> {
-    if (active.cancelled || active.finished || !active.transcript) return;
-    try {
-      await active.transcript.reconcile(
-        (messages) => active.mapper.acceptTranscriptMessages(active.turnId, messages),
-        AbortSignal.any([active.projectionAbort.signal, active.reconciliationAbort.signal]),
-        // One final replay observes revisions below the consumed cut before end_turn.
-        { replay },
-      );
-    } catch (error) {
-      if (
-        active.cancelled ||
-        active.finished ||
-        active.projectionAbort.signal.aborted ||
-        active.reconciliationAbort.signal.aborted
-      )
-        return;
-      active.projectionFailure ??= error;
-      active.attachment?.failTurn(active.turnId, error);
-      throw error;
-    }
-  }
-
   async #cancelledStopReason(active: ActiveAcpPrompt): Promise<'cancelled'> {
-    // A failed notification must not change the outcome of an explicit Host
-    // cancellation. The projection failure still fails uncancelled prompts.
-    await active.mapper.flush().catch(() => undefined);
-    return 'cancelled';
+    return active.cancelledStopReason();
   }
 
   #cancelSession(sessionId: string): Promise<PromiseSettledResult<void>[]> {
@@ -657,33 +694,35 @@ export class AcpSessionRegistry {
         },
       },
       onPending: async (pending) => {
-        for (const active of this.#activePrompts.get(sessionId) ?? []) {
-          if (active.turnId === pending.turnId && !active.cancelled) {
-            await active.mapper.pendingInteraction(pending);
-          }
+        const observation = this.#observation(sessionId, pending.turnId);
+        if (observation && !observation.cancelled) {
+          await observation.pendingInteraction(pending);
         }
       },
       onAnswered: (answered, pending) => attachment?.publishInteractionAnswer(answered, pending),
       onResolved: async (resolved, pending) => {
-        for (const active of this.#activePrompts.get(sessionId) ?? []) {
-          if (active.turnId === pending.turnId && !active.cancelled && !active.finished) {
-            await active.mapper.resolvedInteraction(resolved, pending);
-          }
+        const observation = this.#observation(sessionId, pending.turnId);
+        if (observation && !observation.cancelled && !observation.finished) {
+          await observation.resolvedInteraction(resolved, pending);
         }
       },
       onFailure: (pending, error) => {
-        const active = [...(this.#activePrompts.get(sessionId) ?? [])].find(
-          (prompt) => prompt.turnId === pending.turnId && !prompt.finished,
-        );
-        if (active?.attachment) {
-          active.projectionFailure ??= error;
-          active.attachment.failTurn(active.turnId, error);
+        const observation = this.#observation(sessionId, pending.turnId);
+        if (observation?.attachment) {
+          observation.projectionFailure ??= error;
+          observation.attachment.failTurn(observation.turnId, error);
         } else if (!attachment) failAttachment(error);
       },
       onCancelled: (pending) => {
+        let localPrompt = false;
         for (const active of this.#activePrompts.get(sessionId) ?? []) {
-          if (active.turnId === pending.turnId)
+          if (active.turnId === pending.turnId) {
+            localPrompt = true;
             void this.#cancelPrompt(active).catch(() => undefined);
+          }
+        }
+        if (!localPrompt && this.#observation(sessionId, pending.turnId)) {
+          void this.#cancelSession(sessionId).catch(() => undefined);
         }
       },
     });
@@ -694,7 +733,12 @@ export class AcpSessionRegistry {
       openInitialSessionSubscription: connection.openSessionSubscriptionOnce.bind(connection),
       sessionId,
       now: Date.now,
-      onTurnStarted: () => undefined,
+      onTurnStarted: (turn) => {
+        if (attachment)
+          void this.#adoptTurn(sessionId, turn.turnId, attachment).catch((error: unknown) => {
+            console.error('[acp] Attached Turn observation failed:', error);
+          });
+      },
       onRuntimeResourceChanged: () => undefined,
       onSnapshotChanged: (snapshot) => {
         this.#wakeSession(sessionId);
@@ -722,20 +766,17 @@ export class AcpSessionRegistry {
         });
       },
       onTranscriptReplaced: (turnId, messages) => {
-        for (const active of this.#activePrompts.get(sessionId) ?? []) {
-          if (active.turnId === turnId && !active.cancelled) {
-            void active.mapper.replaceTranscript(turnId, messages).catch((error: unknown) => {
-              active.attachment?.failTurn(turnId, error);
-            });
-          }
+        const observation = this.#observation(sessionId, turnId);
+        if (observation && !observation.cancelled) {
+          void observation.replaceTranscript(messages).catch((error: unknown) => {
+            observation.attachment?.failTurn(turnId, error);
+          });
         }
       },
       onInteractionPending: (pending) => {
         if (
           !interactions.fencesTurn(pending.turnId) &&
-          ![...(this.#activePrompts.get(sessionId) ?? [])].some(
-            (active) => active.turnId === pending.turnId && active.dispatchStarted,
-          )
+          !this.#observation(sessionId, pending.turnId)
         ) {
           // An idle attachment can observe another client's Turn; it does not
           // transfer that Turn's interaction authority to this ACP client.
@@ -746,17 +787,15 @@ export class AcpSessionRegistry {
       onInteractionResolved: (pending) => {
         if (
           !interactions.fencesTurn(pending.turnId) &&
-          ![...(this.#activePrompts.get(sessionId) ?? [])].some(
-            (active) => active.turnId === pending.turnId && active.dispatchStarted,
-          )
+          !this.#observation(sessionId, pending.turnId)
         )
           return;
         void interactions.resolved(pending);
       },
       onTranscriptSettlement: (turnId) => {
-        for (const active of this.#activePrompts.get(sessionId) ?? []) {
-          if (active.turnId === turnId) void this.#reconcilePrompt(active).catch(() => undefined);
-        }
+        void this.#observation(sessionId, turnId)
+          ?.reconcile()
+          .catch(() => undefined);
       },
       onGoalChanged: () => undefined,
       onFailed: failAttachment,
@@ -779,18 +818,22 @@ export class AcpSessionRegistry {
         }
       },
     })
-      .then(({ channel }) => {
-        channel.activate();
+      .then(async ({ channel, attachedTurnId }) => {
         attachment = channel;
         if (earlyFailure) {
           this.#retireFailedAttachment(sessionId, task, channel, earlyFailure);
           throw earlyFailure;
         }
         if (this.#closing || !this.#ownedSessionIds.has(sessionId)) {
-          return channel.close().then(() => {
-            throw this.#closing ? registryClosedError('subscription.open') : unknownSessionError();
-          });
+          await channel.close();
+          throw this.#closing ? registryClosedError('subscription.open') : unknownSessionError();
         }
+        if (attachedTurnId) await this.#adoptTurn(sessionId, attachedTurnId, channel);
+        channel.activate(
+          attachedTurnId && this.#observation(sessionId, attachedTurnId)
+            ? attachedTurnId
+            : undefined,
+        );
         return channel;
       })
       .catch((error: unknown) => {
@@ -833,11 +876,28 @@ export class AcpSessionRegistry {
       attachment.failTurn(active.turnId, error);
       this.#wake(active);
     }
+    for (const observation of this.#turnObservations.get(sessionId)?.values() ?? []) {
+      if (
+        observation.attachment !== attachment ||
+        [...(this.#activePrompts.get(sessionId) ?? [])].includes(observation as ActiveAcpPrompt)
+      )
+        continue;
+      observation.attachment.failTurn(observation.turnId, error);
+    }
     void attachment.close().catch(() => undefined);
   }
 
   async #closeSession(sessionId: string, delivery?: Promise<void>): Promise<CloseSessionResponse> {
     const cancellation = await this.#cancelSession(sessionId);
+    this.#externalObservationContexts.delete(sessionId);
+    for (const observation of this.#turnObservations.get(sessionId)?.values() ?? []) {
+      if (
+        ![...(this.#activePrompts.get(sessionId) ?? [])].includes(observation as ActiveAcpPrompt)
+      ) {
+        observation.dispose();
+        this.#removeTurnObservation(observation);
+      }
+    }
     this.#attachmentInteractions.get(sessionId)?.close();
     this.#attachmentInteractions.delete(sessionId);
     const attachmentTask = this.#attachments.get(sessionId);
@@ -868,16 +928,323 @@ export class AcpSessionRegistry {
     return {};
   }
 
+  async #adoptTurn(
+    sessionId: string,
+    turnId: string,
+    attachment: RuntimeHostSessionChannel,
+    trackAdmission = false,
+  ): Promise<AcpTurnObservation | undefined> {
+    const context = this.#externalObservationContexts.get(sessionId);
+    if (!context || this.#closing || !this.#ownedSessionIds.has(sessionId)) return;
+    if (this.#observation(sessionId, turnId)) return this.#observation(sessionId, turnId);
+    const observation = new AcpTurnObservation({
+      sessionId,
+      turnId,
+      notify: async (notification) => {
+        const current = this.#externalObservationContexts.get(sessionId);
+        if (!this.#closing && this.#ownedSessionIds.has(sessionId) && current) {
+          await current.notify(notification);
+        }
+      },
+    });
+    if (this.#historyReplays.has(sessionId)) void observation.holdLive().catch(() => undefined);
+    const admission: ActiveAcpPrompt | undefined = trackAdmission
+      ? Object.assign(observation, {
+          waiters: new Set<() => void>(),
+          dispatchStarted: false,
+          startRequestSettled: false,
+          admissionSettled: false,
+        })
+      : undefined;
+    if (admission) this.#addActivePrompt(admission);
+    else this.#setTurnObservation(observation);
+    try {
+      await observation.seed(attachment.messages);
+      if (this.#observation(sessionId, turnId) !== observation || this.#closing) return;
+      const task = observation.start(attachment);
+      void task
+        .then(
+          async () => {
+            const root = attachment.snapshot.rootTurn;
+            if (root?.turnId === turnId && isRuntimeHostTerminalTurn(root)) {
+              await this.#externalObservationContexts.get(sessionId)?.notifyTurnStatus?.({
+                sessionId,
+                turnId,
+                runId: root.runId,
+                status: root.status,
+                ...(root.status === 'failed' ? { failureClass: root.failureClass } : {}),
+              });
+            }
+          },
+          async (error: unknown) => {
+            if (!this.#closing && !observation.finished) {
+              console.error('[acp] Attached Turn observation failed:', error);
+              const root = attachment.snapshot.rootTurn;
+              await this.#externalObservationContexts.get(sessionId)?.notifyTurnStatus?.({
+                sessionId,
+                turnId,
+                runId: root?.turnId === turnId ? root.runId : '',
+                status: 'observation_failed',
+              });
+            }
+          },
+        )
+        .catch((error: unknown) => {
+          console.error('[acp] Attached Turn status delivery failed:', error);
+        })
+        .finally(async () => {
+          if (admission) {
+            while (admission.dispatchStarted && !admission.startRequestSettled && !this.#closing) {
+              await this.#waitForPromptChange(admission);
+            }
+            await admission.stopTask?.catch(() => undefined);
+            this.#removeActivePrompt(admission);
+          }
+          this.#attachmentInteractions.get(sessionId)?.settleTurn(turnId);
+          observation.dispose();
+          this.#removeTurnObservation(observation);
+        });
+      return observation;
+    } catch (error) {
+      observation.dispose();
+      if (admission) this.#removeActivePrompt(admission);
+      else this.#removeTurnObservation(observation);
+      throw error;
+    }
+  }
+
+  async #resumeTurn(
+    params: { sessionId: string; sourceRunId?: string; expectedRuntimeEventHighWater?: number },
+    context: AcpLoadContext,
+  ) {
+    context.signal.throwIfAborted();
+    const connection = await this.#getConnection('turn.resume.query');
+    let plan;
+    try {
+      plan = await connection.request('turn.resume.query', params);
+    } catch (error) {
+      throw requestErrorFromRuntimeHost(error, 'turn.resume.query');
+    }
+    if (plan.disposition === 'parked') return { kind: 'parked' as const, plan };
+    const priorContext = this.#externalObservationContexts.get(params.sessionId);
+    this.#externalObservationContexts.set(params.sessionId, context);
+    let observation: ActiveAcpPrompt | undefined;
+    let attachment: RuntimeHostSessionChannel | undefined;
+    const turnId = this.#newTurnId();
+    let dispatched = false;
+    const onAbort = () => {
+      if (observation) void this.#cancelPrompt(observation).catch(() => undefined);
+    };
+    context.signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      await this.#mcps.get(params.sessionId)?.ready(context.signal);
+      attachment = await this.#ensureAttachment(params.sessionId, connection, context);
+      context.signal.throwIfAborted();
+      this.#assertOwned(params.sessionId);
+      observation = (await this.#adoptTurn(params.sessionId, turnId, attachment, true)) as
+        | ActiveAcpPrompt
+        | undefined;
+      if (!observation) throw registryClosedError('turn.resume.start');
+      if (context.signal.aborted) onAbort();
+      if (observation.cancelled)
+        throw RequestError.internalError(
+          { source: 'adapter', operation: 'turn.resume.start', code: 'cancelled' },
+          'Turn resume was cancelled before admission',
+        );
+      dispatched = true;
+      observation.dispatchStarted = true;
+      this.#wake(observation);
+      const result = await connection.request('turn.resume.start', {
+        sessionId: params.sessionId,
+        turnId,
+        sourceRunId: plan.sourceRunId,
+        sourceRuntimeEventHighWater: plan.sourceRuntimeEventHighWater,
+      });
+      observation.startRequestSettled = true;
+      observation.admissionSettled = true;
+      this.#wake(observation);
+      if (result.kind === 'parked') {
+        observation.dispose();
+        this.#removeActivePrompt(observation);
+        attachment.failTurn(turnId, new Error(`Turn resume parked: ${result.plan.reason}`));
+        return { kind: 'parked' as const, plan: result.plan };
+      }
+      observation.startedTurn = result.turn;
+      this.#wake(observation);
+      await observation.stopTask?.catch(() => undefined);
+      return {
+        kind: 'started' as const,
+        turn: result.turn,
+        sourceRunId: plan.sourceRunId,
+        sourceRuntimeEventHighWater: plan.sourceRuntimeEventHighWater,
+      };
+    } catch (error) {
+      if (observation) {
+        observation.startRequestSettled = true;
+        observation.admissionSettled ||= !(
+          dispatched &&
+          error instanceof RuntimeHostRequestInterruptedError &&
+          error.dispatch === 'dispatched'
+        );
+        this.#wake(observation);
+      }
+      if (
+        dispatched &&
+        error instanceof RuntimeHostRequestInterruptedError &&
+        error.dispatch === 'dispatched' &&
+        observation
+      ) {
+        this.#queryPromptAdmission(observation, connection);
+        await observation.admissionQuery;
+        if (observation.startedTurn) {
+          return {
+            kind: 'started' as const,
+            turn: observation.startedTurn,
+            sourceRunId: plan.sourceRunId,
+            sourceRuntimeEventHighWater: plan.sourceRuntimeEventHighWater,
+          };
+        }
+        throw RequestError.internalError(
+          {
+            source: 'runtime_host',
+            operation: 'turn.resume.start',
+            code: 'outcome_unknown',
+            sessionId: params.sessionId,
+            turnId,
+            sourceRunId: plan.sourceRunId,
+          },
+          'Runtime Host Turn resume admission could not be established',
+        );
+      }
+      if (observation) {
+        observation.dispose();
+        this.#removeActivePrompt(observation);
+        attachment?.failTurn(turnId, error);
+      }
+      if (priorContext) this.#externalObservationContexts.set(params.sessionId, priorContext);
+      else this.#externalObservationContexts.delete(params.sessionId);
+      if (error instanceof RequestError) throw error;
+      throw requestErrorFromRuntimeHost(error, 'turn.resume.start', { turnId });
+    } finally {
+      context.signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  async #copySession(
+    operation: 'session.branch.create' | 'session.revision.create',
+    params: SessionConversationCopyInput,
+  ): Promise<SessionConversationCopyResult> {
+    this.#assertOpen(operation);
+    this.#assertOwned(params.sourceSessionId);
+    if (this.#ownedSessionIds.has(params.targetSessionId)) {
+      throw RequestError.invalidParams(
+        { field: 'targetSessionId', reason: 'already_owned' },
+        'Target Session is already owned by this ACP connection',
+      );
+    }
+    const connection = await this.#getConnection(operation);
+    this.#assertOwned(params.sourceSessionId);
+    let result: SessionConversationCopyResult;
+    try {
+      result = await connection.request(operation, params);
+    } catch (error) {
+      if (
+        error instanceof RuntimeHostRequestInterruptedError &&
+        error.dispatch === 'dispatched' &&
+        !this.#closing
+      ) {
+        this.#ownedSessionIds.add(params.targetSessionId);
+      }
+      throw requestErrorFromRuntimeHost(error, operation, {
+        targetSessionId: params.targetSessionId,
+      });
+    }
+    if (result.kind === 'committed' && !this.#closing) {
+      this.#ownedSessionIds.add(params.targetSessionId);
+    }
+    return result;
+  }
+
+  async #abandonRevision(
+    params: SessionRevisionAbandonInput,
+  ): Promise<SessionRevisionAbandonResult> {
+    const connection = await this.#getConnection('session.revision.abandon');
+    this.#assertOwned(params.targetSessionId);
+    let result: SessionRevisionAbandonResult;
+    try {
+      result = await connection.request('session.revision.abandon', params);
+    } catch (error) {
+      throw requestErrorFromRuntimeHost(error, 'session.revision.abandon');
+    }
+    if (result.kind === 'abandoned') {
+      this.#sessionCloseGenerations.set(
+        params.targetSessionId,
+        (this.#sessionCloseGenerations.get(params.targetSessionId) ?? 0) + 1,
+      );
+      this.#sessionLoadControllers.get(params.targetSessionId)?.abort();
+      this.#ownedSessionIds.delete(params.targetSessionId);
+      this.#externalObservationContexts.delete(params.targetSessionId);
+      for (const observation of this.#turnObservations.get(params.targetSessionId)?.values() ??
+        []) {
+        observation.cancelled = true;
+        observation.dispose();
+        this.#removeTurnObservation(observation);
+      }
+      for (const active of this.#activePrompts.get(params.targetSessionId) ?? []) {
+        active.cancelled = true;
+        this.#wake(active);
+      }
+      this.#attachmentInteractions.get(params.targetSessionId)?.close();
+      this.#attachmentInteractions.delete(params.targetSessionId);
+      const attachment = this.#attachments.get(params.targetSessionId);
+      this.#attachments.delete(params.targetSessionId);
+      this.#attachmentOpenControllers.get(params.targetSessionId)?.abort();
+      this.#attachmentConfigurations.delete(params.targetSessionId);
+      const mcp = this.#mcps.get(params.targetSessionId);
+      this.#mcps.delete(params.targetSessionId);
+      await Promise.allSettled([
+        attachment?.then(
+          (channel) => channel.close(),
+          () => undefined,
+        ),
+        mcp?.close(),
+      ]);
+    }
+    return result;
+  }
+
   #addActivePrompt(active: ActiveAcpPrompt): void {
+    this.#setTurnObservation(active);
     const prompts = this.#activePrompts.get(active.sessionId);
     if (prompts) prompts.add(active);
     else this.#activePrompts.set(active.sessionId, new Set([active]));
   }
 
   #removeActivePrompt(active: ActiveAcpPrompt): void {
+    this.#removeTurnObservation(active);
     const prompts = this.#activePrompts.get(active.sessionId);
     prompts?.delete(active);
     if (prompts?.size === 0) this.#activePrompts.delete(active.sessionId);
+  }
+
+  #setTurnObservation(observation: AcpTurnObservation): void {
+    let observations = this.#turnObservations.get(observation.sessionId);
+    if (!observations) {
+      observations = new Map();
+      this.#turnObservations.set(observation.sessionId, observations);
+    }
+    observations.set(observation.turnId, observation);
+  }
+
+  #removeTurnObservation(observation: AcpTurnObservation): void {
+    const observations = this.#turnObservations.get(observation.sessionId);
+    if (observations?.get(observation.turnId) !== observation) return;
+    observations.delete(observation.turnId);
+    if (observations.size === 0) this.#turnObservations.delete(observation.sessionId);
+  }
+
+  #observation(sessionId: string, turnId: string): AcpTurnObservation | undefined {
+    return this.#turnObservations.get(sessionId)?.get(turnId);
   }
 
   #wakeSession(sessionId: string): void {
@@ -963,6 +1330,186 @@ export class AcpSessionRegistry {
     // if connection shutdown raced the successful Host creation.
     if (!this.#closing) this.#ownedSessionIds.add(sessionId);
     return { sessionId, ...(configOptions ? { configOptions } : {}) };
+  }
+
+  async #load(
+    params: LoadSessionRequest | ResumeSessionRequest,
+    context: AcpLoadContext,
+    mcpConfig: McpConfigFile,
+    replayHistory: boolean,
+    requestedGeneration: number,
+  ): Promise<LoadSessionResponse> {
+    if ((this.#sessionCloseGenerations.get(params.sessionId) ?? 0) !== requestedGeneration) {
+      throw unknownSessionError();
+    }
+    const loadController = new AbortController();
+    this.#sessionLoadControllers.set(params.sessionId, loadController);
+    const lifetime = AbortSignal.any([
+      context.signal,
+      loadController.signal,
+      this.#creationAbort.signal,
+    ]);
+    const generation = this.#sessionCloseGenerations.get(params.sessionId) ?? 0;
+    const alreadyOwned = this.#ownedSessionIds.has(params.sessionId);
+    const heldObservations = new Set<AcpTurnObservation>();
+    const previousContext = this.#externalObservationContexts.get(params.sessionId);
+    const alreadyAttached = this.#attachments.has(params.sessionId);
+    const previousMcp = this.#mcps.get(params.sessionId);
+    const previousMcpConfig = previousMcp?.config;
+    let installedMcp: AcpSessionMcp | undefined;
+    try {
+      lifetime.throwIfAborted();
+      const connection = await this.#getConnection('session.catalog.query');
+      let session: SessionCatalogProjection | null;
+      try {
+        session = await getRuntimeHostSession(connection, params.sessionId);
+      } catch (error) {
+        throw requestErrorFromSessionUpdate(error, 'session.catalog.query');
+      }
+      if (!session) {
+        throw RequestError.invalidParams(
+          { source: 'runtime_host', operation: 'session.catalog.query', code: 'not_found' },
+          'Runtime Host Session was not found',
+        );
+      }
+      if (session.isArchived) {
+        throw RequestError.invalidParams(
+          { source: 'runtime_host', operation: 'session.catalog.query', code: 'archived' },
+          'Archived Runtime Host Sessions cannot be loaded',
+        );
+      }
+      const cwd = await normalizeCwd(params.cwd);
+      if (cwd !== session.workspace.hostCwd) {
+        throw RequestError.invalidParams(
+          { field: 'cwd', reason: 'session_cwd_mismatch' },
+          'cwd does not match the existing Session workspace',
+        );
+      }
+      lifetime.throwIfAborted();
+      const configOptions = await this.#projectConfigOptions(connection, session);
+      if ((this.#sessionCloseGenerations.get(params.sessionId) ?? 0) !== generation) {
+        throw unknownSessionError();
+      }
+      if (previousMcp) {
+        await previousMcp.reconfigure(mcpConfig, lifetime);
+      } else {
+        installedMcp = new AcpSessionMcp(params.sessionId, mcpConfig, connection);
+        this.#mcps.set(params.sessionId, installedMcp);
+        await installedMcp.prepare(lifetime);
+      }
+      if ((this.#sessionCloseGenerations.get(params.sessionId) ?? 0) !== generation) {
+        throw unknownSessionError();
+      }
+      this.#ownedSessionIds.add(params.sessionId);
+      if (replayHistory) {
+        this.#historyReplays.add(params.sessionId);
+        for (const observation of this.#turnObservations.get(params.sessionId)?.values() ?? []) {
+          heldObservations.add(observation);
+        }
+        await Promise.all([...heldObservations].map((observation) => observation.holdLive()));
+      }
+      this.#externalObservationContexts.set(params.sessionId, context);
+      const attachment = await this.#ensureAttachment(params.sessionId, connection, context);
+      lifetime.throwIfAborted();
+      this.#assertOpen('subscription.open');
+      this.#assertOwned(params.sessionId);
+      if ((this.#sessionCloseGenerations.get(params.sessionId) ?? 0) !== generation) {
+        throw unknownSessionError();
+      }
+      if (replayHistory) {
+        const mappers = new Map<string, AcpSessionEventMapper>();
+        await attachment.replayTranscript(async (messages) => {
+          const active = this.#turnObservations.get(params.sessionId);
+          for (const observation of active?.values() ?? []) {
+            if (!heldObservations.has(observation)) {
+              heldObservations.add(observation);
+              await observation.holdLive();
+            }
+            await observation.seed(messages);
+          }
+          for (const message of messages) {
+            lifetime.throwIfAborted();
+            if (!message.turnId) continue;
+            let mapper = mappers.get(message.turnId);
+            if (!mapper) {
+              mapper = new AcpSessionEventMapper({
+                sessionId: params.sessionId,
+                notify: context.notify,
+                signal: lifetime,
+              });
+              mappers.set(message.turnId, mapper);
+            }
+            await mapper.acceptHistoricalMessage(message);
+            if (message.type === 'turn_state' && message.status !== 'running') {
+              await mapper.finishTools(
+                message.turnId,
+                message.status === 'aborted' ? 'cancelled' : message.status,
+              );
+              await mapper.flush();
+              mappers.delete(message.turnId);
+            }
+          }
+        }, lifetime);
+        await Promise.all([...mappers.values()].map((mapper) => mapper.flush()));
+      }
+      return { configOptions };
+    } catch (error) {
+      if (installedMcp && this.#mcps.get(params.sessionId) === installedMcp) {
+        this.#mcps.delete(params.sessionId);
+        await installedMcp.close().catch(() => undefined);
+      } else if (
+        previousMcp &&
+        previousMcpConfig &&
+        this.#mcps.get(params.sessionId) === previousMcp
+      ) {
+        await previousMcp.reconfigure(previousMcpConfig).catch(() => undefined);
+      }
+      if (previousContext) this.#externalObservationContexts.set(params.sessionId, previousContext);
+      else this.#externalObservationContexts.delete(params.sessionId);
+      if (!alreadyOwned && this.#ownedSessionIds.has(params.sessionId)) {
+        this.#ownedSessionIds.delete(params.sessionId);
+        if (!alreadyAttached) {
+          this.#attachmentInteractions.get(params.sessionId)?.close();
+          this.#attachmentInteractions.delete(params.sessionId);
+          const attachment = this.#attachments.get(params.sessionId);
+          this.#attachments.delete(params.sessionId);
+          await attachment
+            ?.then(
+              (channel) => channel.close(),
+              () => undefined,
+            )
+            .catch(() => undefined);
+        }
+      }
+      if (error instanceof RequestError) throw error;
+      throw requestErrorFromRuntimeHost(error, 'subscription.open');
+    } finally {
+      if (this.#sessionLoadControllers.get(params.sessionId) === loadController) {
+        this.#sessionLoadControllers.delete(params.sessionId);
+      }
+      if (replayHistory) this.#historyReplays.delete(params.sessionId);
+      for (const observation of heldObservations) observation.releaseLive();
+      for (const observation of this.#turnObservations.get(params.sessionId)?.values() ?? []) {
+        observation.releaseLive();
+      }
+    }
+  }
+
+  #queueLoad<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.#sessionLoadTails.get(sessionId) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(operation);
+    this.#sessionLoadTails.set(sessionId, result);
+    void result.then(
+      () => {
+        if (this.#sessionLoadTails.get(sessionId) === result)
+          this.#sessionLoadTails.delete(sessionId);
+      },
+      () => {
+        if (this.#sessionLoadTails.get(sessionId) === result)
+          this.#sessionLoadTails.delete(sessionId);
+      },
+    );
+    return result;
   }
 
   async #setConfigOption(
@@ -1100,6 +1647,17 @@ export class AcpSessionRegistry {
   }
 
   async #dispose(): Promise<void> {
+    this.#externalObservationContexts.clear();
+    for (const observations of this.#turnObservations.values()) {
+      for (const observation of observations.values()) {
+        if (
+          ![...(this.#activePrompts.get(observation.sessionId) ?? [])].includes(
+            observation as ActiveAcpPrompt,
+          )
+        )
+          observation.dispose();
+      }
+    }
     const sessionIds = new Set([...this.#activePrompts.keys(), ...this.#attachments.keys()]);
     const activePrompts = [...sessionIds].flatMap((sessionId) => [
       ...(this.#activePrompts.get(sessionId) ?? []),
@@ -1234,7 +1792,9 @@ function registryClosedError(operation: AcpSessionRegistryLifecycleOperation): R
   );
 }
 
-function validateNewSessionParams(params: NewSessionRequest): void {
+function validateNewSessionParams(
+  params: Pick<NewSessionRequest, 'cwd' | 'additionalDirectories'>,
+): void {
   assertBoundedAbsoluteCwd(params.cwd);
   if ((params.additionalDirectories?.length ?? 0) > 0) {
     throw RequestError.invalidParams(

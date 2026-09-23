@@ -58,7 +58,11 @@ or reconnection without waiting for the Host to become available.
 | Sandbox boundary and client capability approval | Standard `session/request_permission`. The `allow_always` choice explicitly grants only the displayed scope for this Session; `reject_once` denies it. Permission cancellation cancels the Turn. |
 | MCP | Session-owned stdio servers supplied in `session/new.mcpServers`; discovered tools and MCP form continuation use the existing MCP manager and Host capability path. |
 | Tool `permission` | Standard `session/request_permission`. One-shot allow/deny choices are preserved; eligible tool permissions also expose an explicit allow-for-this-Turn choice. Permission cancellation cancels the Turn. |
-| Load/resume, replacing all MCP configuration, HTTP/SSE/OAuth | Deferred. |
+| Load/resume | `session/load` replays durable user, assistant, thinking and tool rows before returning; `session/resume` attaches without replay. Both return current configuration and leave the Session attached for prompt. Neither restarts an interrupted Turn. |
+| Explicit interrupted Turn resume | `_maka/turn/resume` queries the Host safety plan and starts only a ready plan. A parked plan is returned unchanged. A lost dispatched start returns `outcome_unknown` with the exact `turnId`; the adapter never retries that command. |
+| Branch and revision | `_maka/session/branch/create`, `_maka/session/revision/create`, and `_maka/session/revision/abandon` map to the corresponding Host commands. The source must be owned by this ACP connection. A committed target becomes immediately usable; `retained` keeps its ownership and `abandoned` releases local resources. |
+| Replacing all MCP configuration | Every load/resume applies its complete stdio list through the existing Session MCP manager and publication. An omitted `session/resume.mcpServers` means an empty list. Equivalent normalized configuration reuses the process; changing or clearing it republishes the Session scope. |
+| HTTP/SSE/OAuth MCP | Deferred. |
 
 The adapter saves the capabilities supplied during `initialize`. Missing form
 capability, unsupported client methods, or invalid answers explicitly fail the
@@ -68,8 +72,23 @@ requests are fenced by Session, interaction, Turn/run, and attachment lifetime;
 cancel and EOF release local waits even when the client never responds.
 After a failed Stop, a cancelled Turn stays fenced even if its ACP prompt has
 returned; only an authoritative terminal observation or attachment closure
-releases the fence. An idle attachment does not present another client's Turn
-interactions through this ACP connection.
+releases the fence. An idle attachment created only by prompt does not present
+another client's Turn interactions through this ACP connection.
+
+After load/resume, the attachment observes an already running root Turn and its
+pending interactions through the same Session channel and Turn mapper used by
+prompt. A new Turn observed on that loaded attachment also uses this path.
+Clients that advertise `initialize.clientCapabilities._meta["_maka/turnStatus"]:
+true` receive `_maka/turn/status` notifications for non-prompt Turns after their
+standard output has settled. Each notification names `sessionId`, `turnId`,
+`runId`, and a `completed`, `failed`, `cancelled`, or `observation_failed` status.
+Ordinary ACP clients can load/resume and prompt without this extension.
+
+The working directory in load/resume must resolve to the Session's Host cwd;
+additional directories are not supported. Missing and archived Sessions are
+rejected. A repeated successful load replays history again on the same retained
+attachment. Historical pages are read through that attachment's subscription,
+so they do not consume a second Host subscription slot.
 
 ## Tool output and completion
 

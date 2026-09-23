@@ -18,12 +18,13 @@
  */
 
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { realpath, writeFile } from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
 import { methods, type SessionNotification } from '@agentclientprotocol/sdk';
 import { waitFor } from '@maka/core/test-only/async-primitives';
@@ -31,6 +32,7 @@ import { connectRuntimeHost } from '@maka/runtime-host/client';
 import {
   ARTIFACT_INGEST_CHUNK_MAX_BYTES,
   RUNTIME_HOST_PROTOCOL_VERSION,
+  SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES,
 } from '@maka/runtime-host/protocol';
 import { getRuntimeHostSession } from '../runtime-host-session-update.js';
 import {
@@ -129,7 +131,10 @@ describe('Maka ACP child process', () => {
       await harness.withClient(async ({ context }) => {
         assert.deepEqual(await context.request(methods.agent.initialize, { protocolVersion: 1 }), {
           protocolVersion: 1,
-          agentCapabilities: { sessionCapabilities: { list: {}, close: {} } },
+          agentCapabilities: {
+            loadSession: true,
+            sessionCapabilities: { list: {}, resume: {}, close: {} },
+          },
           authMethods: [],
           agentInfo: { name: 'maka', title: 'Maka', version: '0.2.0' },
         });
@@ -585,6 +590,173 @@ describe('Maka ACP child process', () => {
             thinkingLevels: ['low'],
             baseUrl: model.baseUrl,
           },
+        },
+      );
+    } finally {
+      await model.close();
+    }
+  });
+
+  test('loads a durable Session from a second ACP process and continues prompting', {
+    timeout: 45_000,
+  }, async () => {
+    const model = await startAcpModelFixture();
+    try {
+      await withAcpChildProcessHarness(
+        async (harness) => {
+          const mcpFixture = fileURLToPath(import.meta.resolve('@maka/mcp/test-only/stdio-server'));
+          const sessionId = await harness.withClient(async ({ context }) => {
+            await context.request(methods.agent.initialize, { protocolVersion: 1 });
+            const created = await context.request(methods.agent.session.new, {
+              cwd: harness.workspaceRoot,
+              mcpServers: [
+                {
+                  name: 'previous-provider',
+                  command: process.execPath,
+                  args: [mcpFixture],
+                  env: [],
+                },
+              ],
+            });
+            assert.deepEqual(
+              await context.request(methods.agent.session.prompt, {
+                sessionId: created.sessionId,
+                prompt: [{ type: 'text', text: 'COMPLETE_ME' }],
+              }),
+              { stopReason: 'end_turn' },
+            );
+            return created.sessionId;
+          });
+          await harness.closeStdin();
+          assert.deepEqual(await harness.waitForExit(), { code: 0, signal: null });
+          const sibling = await harness.spawnSibling();
+          try {
+            const updates: SessionNotification[] = [];
+            await sibling.withClient(
+              async ({ context }) => {
+                await context.request(methods.agent.initialize, { protocolVersion: 1 });
+                const loaded = await context.request(methods.agent.session.load, {
+                  sessionId,
+                  cwd: harness.workspaceRoot,
+                  mcpServers: [
+                    {
+                      name: 'next-provider',
+                      command: process.execPath,
+                      args: [mcpFixture],
+                      env: [],
+                    },
+                  ],
+                });
+                assert.ok((loaded.configOptions ?? []).length > 0);
+                assert.ok(
+                  updates.some(
+                    ({ update }) =>
+                      update.sessionUpdate === 'user_message_chunk' &&
+                      update.content.type === 'text' &&
+                      update.content.text.includes('COMPLETE_ME'),
+                  ),
+                );
+                assert.ok(
+                  updates.some(
+                    ({ update }) =>
+                      update.sessionUpdate === 'agent_message_chunk' &&
+                      update.content.type === 'text' &&
+                      update.content.text.includes('ACP fixture completed'),
+                  ),
+                );
+                const beforeResume = updates.length;
+                const resumed = await context.request(methods.agent.session.resume, {
+                  sessionId,
+                  cwd: harness.workspaceRoot,
+                });
+                assert.ok((resumed.configOptions ?? []).length > 0);
+                assert.equal(updates.length, beforeResume);
+                const parked = (await context.request('_maka/turn/resume', { sessionId })) as {
+                  kind: string;
+                  plan?: { disposition: string };
+                };
+                assert.equal(parked.kind, 'parked');
+                assert.equal(parked.plan?.disposition, 'parked');
+                assert.deepEqual(
+                  await context.request(methods.agent.session.prompt, {
+                    sessionId,
+                    prompt: [{ type: 'text', text: 'COMPLETE_ME' }],
+                  }),
+                  { stopReason: 'end_turn' },
+                );
+                const host = await connectRuntimeHost({
+                  rootPath: harness.workspaceRoot,
+                  protocol: {
+                    min: RUNTIME_HOST_PROTOCOL_VERSION,
+                    max: RUNTIME_HOST_PROTOCOL_VERSION,
+                  },
+                });
+                assert.equal(host.kind, 'connected');
+                if (host.kind !== 'connected') assert.fail('Host connection unavailable');
+                let sourceTurnId: string;
+                let expectedSourceRevision: number;
+                try {
+                  const session = await getRuntimeHostSession(host.connection, sessionId);
+                  assert.ok(session);
+                  expectedSourceRevision = session.revision;
+                  const subscription = await host.connection.openSessionSubscription({
+                    sessionId,
+                    transcript: { kind: 'tail', maxBytes: SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES },
+                  });
+                  try {
+                    assert.ok(subscription.snapshot.rootTurn);
+                    sourceTurnId = subscription.snapshot.rootTurn.turnId;
+                  } finally {
+                    await subscription.close();
+                  }
+                } finally {
+                  await host.connection.close();
+                }
+                const targetSessionId = randomUUID();
+                const branched = (await context.request('_maka/session/branch/create', {
+                  sourceSessionId: sessionId,
+                  targetSessionId,
+                  sourceTurnId,
+                  expectedSourceRevision,
+                })) as { kind: string };
+                assert.equal(branched.kind, 'committed');
+                const revisionTargetId = randomUUID();
+                const revision = (await context.request('_maka/session/revision/create', {
+                  sourceSessionId: sessionId,
+                  targetSessionId: revisionTargetId,
+                  sourceTurnId,
+                  expectedSourceRevision,
+                })) as { kind: string };
+                assert.equal(revision.kind, 'committed');
+                assert.deepEqual(
+                  await context.request('_maka/session/revision/abandon', {
+                    targetSessionId: revisionTargetId,
+                  }),
+                  { kind: 'abandoned', sessionId: revisionTargetId },
+                );
+                assert.deepEqual(
+                  await context.request(methods.agent.session.prompt, {
+                    sessionId: targetSessionId,
+                    prompt: [{ type: 'text', text: 'COMPLETE_ME' }],
+                  }),
+                  { stopReason: 'end_turn' },
+                );
+                await context.request(methods.agent.session.close, { sessionId: targetSessionId });
+                await context.request(methods.agent.session.close, { sessionId });
+              },
+              (app) =>
+                app.onNotification(methods.client.session.update, ({ params }) => {
+                  updates.push(params);
+                }),
+            );
+          } finally {
+            await sibling.close();
+          }
+        },
+        {
+          startRuntimeHost: true,
+          model: { id: 'acp-stream-fixture', thinkingLevels: ['low'], baseUrl: model.baseUrl },
+          timeoutMs: 35_000,
         },
       );
     } finally {

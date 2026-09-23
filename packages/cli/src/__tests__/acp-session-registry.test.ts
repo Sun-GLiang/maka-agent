@@ -48,6 +48,7 @@ import {
   type SessionContinuitySnapshot,
   type SubscriptionFrame,
   type SessionTranscriptPage,
+  type SessionTranscriptBootstrap,
   type SessionTranscriptPageInput,
 } from '@maka/runtime-host/protocol';
 import { AcpSessionRegistry, type AcpSessionRegistryConnection } from '../acp/session-registry.js';
@@ -110,6 +111,899 @@ const DEFAULT_CONFIG_OPTIONS: Array<Extract<SessionConfigOption, { type: 'select
 ];
 
 describe('ACP Session registry', () => {
+  test('loads durable history, returns configuration, and retains attachment for prompt', async () => {
+    const sessionId = 'session-loaded';
+    const history: StoredMessage[] = [
+      { type: 'user', id: 'user-1', turnId: 'old-turn', ts: 1, text: 'earlier' },
+      {
+        type: 'assistant',
+        id: 'assistant-1',
+        turnId: 'old-turn',
+        ts: 2,
+        text: 'answer',
+        modelId: 'default',
+      },
+      {
+        type: 'tool_call',
+        id: 'tool-1',
+        turnId: 'old-turn',
+        ts: 3,
+        toolName: 'Read',
+        args: { path: 'notes.txt' },
+      },
+      {
+        type: 'tool_result',
+        id: 'result-1',
+        turnId: 'old-turn',
+        ts: 4,
+        toolUseId: 'tool-1',
+        isError: false,
+        content: { kind: 'text', text: 'historical tool result' },
+      },
+      { type: 'turn_state', id: 'state-1', turnId: 'old-turn', ts: 5, status: 'completed' },
+    ];
+    const subscription = new FakeSubscription(
+      continuitySnapshot(sessionId),
+      Promise.resolve(history),
+    );
+    subscription.seedBootstrap(history);
+    const notifications: SessionNotification[] = [];
+    let opens = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.catalog.query') {
+              return { kind: 'session', session: catalogSession(sessionId) };
+            }
+            if (operation === 'turn.start') {
+              const turnId = (input as { turnId: string }).turnId;
+              const turn = runningTurn(sessionId, turnId);
+              subscription.setRoot(turn);
+              subscription.appendText(turnId, turn.runId, 'new answer', true);
+              subscription.setRoot(completedTurn(sessionId, turnId));
+              return {
+                kind: 'started',
+                turn,
+                skillInvocation: { loaded: [], failed: [], receipts: [] },
+              };
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => {
+            opens += 1;
+            return subscription;
+          },
+        }),
+      newTurnId: () => 'new-turn',
+    });
+    try {
+      const loaded = await registry.load(
+        { sessionId, cwd: '/workspace', mcpServers: [] },
+        promptContext(notifications),
+      );
+      assert.deepEqual(loaded.configOptions, DEFAULT_CONFIG_OPTIONS);
+      assert.deepEqual(
+        notifications.flatMap(({ update }) =>
+          (update.sessionUpdate === 'user_message_chunk' ||
+            update.sessionUpdate === 'agent_message_chunk') &&
+          update.content.type === 'text'
+            ? [update.content.text]
+            : [],
+        ),
+        ['earlier', 'answer'],
+      );
+      assert.ok(
+        notifications.some(
+          ({ update }) => update.sessionUpdate === 'tool_call' && update.toolCallId === 'tool-1',
+        ),
+      );
+      assert.ok(
+        notifications.some(
+          ({ update }) =>
+            update.sessionUpdate === 'tool_call_update' && update.toolCallId === 'tool-1',
+        ),
+      );
+      assert.deepEqual(
+        await registry.prompt(
+          { sessionId, prompt: [{ type: 'text', text: 'again' }] },
+          promptContext(notifications),
+        ),
+        { stopReason: 'end_turn' },
+      );
+      assert.equal(opens, 1);
+      await registry.close({ sessionId });
+      assert.equal(subscription.closeCalls, 1);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('close wins a held load catalog read without opening an attachment', async () => {
+    const sessionId = 'session-held-load';
+    const readStarted = deferred<void>();
+    const catalog = deferred<{ kind: 'session'; session: SessionCatalogProjection }>();
+    let opens = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.catalog.query') {
+              readStarted.resolve();
+              return catalog.promise;
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => {
+            opens += 1;
+            throw new Error('Attachment must not open after close');
+          },
+        }),
+    });
+    try {
+      const loading = registry.load(
+        { sessionId, cwd: '/workspace', mcpServers: [] },
+        promptContext([]),
+      );
+      await readStarted.promise;
+      await registry.close({ sessionId });
+      catalog.resolve({ kind: 'session', session: catalogSession(sessionId) });
+      await assert.rejects(loading);
+      assert.equal(opens, 0);
+    } finally {
+      catalog.resolve({ kind: 'session', session: catalogSession(sessionId) });
+      await registry.dispose();
+    }
+  });
+
+  test('load scans every correlated transcript page in order', async () => {
+    const sessionId = 'session-paged-load';
+    const history: StoredMessage[] = [
+      { type: 'user', id: 'user-1', turnId: 'old-turn', ts: 1, text: 'first' },
+      { type: 'user', id: 'user-2', turnId: 'old-turn', ts: 2, text: 'second' },
+      { type: 'user', id: 'user-3', turnId: 'old-turn', ts: 3, text: 'third' },
+    ];
+    const subscription = new FakeSubscription(
+      continuitySnapshot(sessionId),
+      Promise.resolve(history),
+    );
+    subscription.seedBootstrap(history);
+    subscription.transcriptPageSize = 1;
+    subscription.transcriptEmptyFirstPage = true;
+    const notifications: SessionNotification[] = [];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      await registry.load(
+        { sessionId, cwd: '/workspace', mcpServers: [] },
+        promptContext(notifications),
+      );
+      assert.equal(subscription.transcriptPageReads, 4);
+      assert.deepEqual(
+        notifications.flatMap(({ update }) =>
+          update.sessionUpdate === 'user_message_chunk' && update.content.type === 'text'
+            ? [update.content.text]
+            : [],
+        ),
+        ['first', 'second', 'third'],
+      );
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('load rejects missing, archived, and mismatched Sessions before ownership or attachment', async () => {
+    for (const scenario of ['missing', 'archived', 'cwd'] as const) {
+      const sessionId = `session-invalid-${scenario}`;
+      let opens = 0;
+      const registry = new AcpSessionRegistry({
+        connect: async () =>
+          fakeConnection({
+            request: async (operation) => {
+              if (operation === 'session.catalog.query')
+                return scenario === 'missing'
+                  ? { kind: 'session', session: null }
+                  : {
+                      kind: 'session',
+                      session: catalogSession(sessionId, '/workspace', {
+                        isArchived: scenario === 'archived',
+                      }),
+                    };
+              throw new Error(`Unexpected operation ${operation}`);
+            },
+            openSessionSubscriptionOnce: async () => {
+              opens += 1;
+              throw new Error('Invalid Session must not attach');
+            },
+          }),
+      });
+      try {
+        await assert.rejects(
+          registry.load(
+            {
+              sessionId,
+              cwd: scenario === 'cwd' ? '/other' : '/workspace',
+              mcpServers: [],
+            },
+            promptContext([]),
+          ),
+        );
+        await assert.rejects(
+          registry.prompt(
+            {
+              sessionId,
+              prompt: [{ type: 'text', text: 'must fail' }],
+            },
+            promptContext([]),
+          ),
+          (error: unknown) => error instanceof RequestError && error.code === -32602,
+        );
+        assert.equal(opens, 0);
+      } finally {
+        await registry.dispose();
+      }
+    }
+  });
+
+  test('resume attaches to an existing live Turn without replaying history or starting it', async () => {
+    const sessionId = 'session-live-resume';
+    const turnId = 'turn-existing';
+    const turn = runningTurn(sessionId, turnId);
+    const history: StoredMessage[] = [
+      { type: 'user', id: 'user-1', turnId, ts: 1, text: 'earlier' },
+      {
+        type: 'assistant',
+        id: `message-${turnId}`,
+        turnId,
+        ts: 2,
+        text: 'partial',
+        modelId: 'default',
+      },
+    ];
+    const subscription = new FakeSubscription(
+      continuitySnapshot(sessionId, { rootTurn: turn }),
+      Promise.resolve(history),
+    );
+    subscription.seedBootstrap(history);
+    const notifications: SessionNotification[] = [];
+    const operations: string[] = [];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            operations.push(operation);
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      const result = await registry.resume(
+        { sessionId, cwd: '/workspace' },
+        promptContext(notifications),
+      );
+      assert.deepEqual(result.configOptions, DEFAULT_CONFIG_OPTIONS);
+      assert.equal(notifications.length, 0);
+      subscription.appendText(turnId, turn.runId, 'partial done', true);
+      await waitFor(() =>
+        notifications.some(
+          ({ update }) =>
+            update.sessionUpdate === 'agent_message_chunk' &&
+            update.content.type === 'text' &&
+            update.content.text === ' done',
+        ),
+      );
+      subscription.setRoot(completedTurn(sessionId, turnId));
+      assert.deepEqual(operations, ['session.catalog.query']);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('resume restores a pending interaction on the attached Turn', async () => {
+    const sessionId = 'session-resumed-interaction';
+    const turnId = 'turn-resumed-interaction';
+    const turn = runningTurn(sessionId, turnId);
+    const pending: InteractionPendingSnapshot = {
+      schemaVersion: 1,
+      interactionId: 'question-resumed',
+      sessionId,
+      turnId,
+      runId: turn.runId,
+      revision: 1,
+      status: 'pending',
+      outcome: null,
+      request: {
+        kind: 'question',
+        toolUseId: 'tool-resumed',
+        questions: [{ question: 'Continue?', options: [{ label: 'Yes' }] }],
+      },
+    };
+    const subscription = new FakeSubscription(
+      continuitySnapshot(sessionId, {
+        rootTurn: turn,
+        interactions: { pending: [pending] },
+      }),
+    );
+    const notifications: SessionNotification[] = [];
+    let dialogs = 0;
+    let answers = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            if (operation === 'interaction.query') return pending;
+            if (operation === 'interaction.answer') {
+              answers += 1;
+              return {
+                ...pending,
+                revision: 2,
+                status: 'answered',
+                outcome: {
+                  kind: 'question_answer',
+                  answers: ['Yes'],
+                  committedAt: 1,
+                },
+              };
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      await registry.resume(
+        { sessionId, cwd: '/workspace' },
+        {
+          ...promptContext(notifications),
+          interactions: {
+            capabilities: { elicitation: { form: {} } },
+            createElicitation: async () => {
+              dialogs += 1;
+              return { action: 'accept' as const, content: { q0: 'Yes' } };
+            },
+            requestPermission: async () => assert.fail('Unexpected permission request'),
+          },
+        },
+      );
+      await waitFor(() => answers === 1);
+      assert.equal(dialogs, 1);
+      assert.ok(
+        notifications.some(
+          ({ update }) =>
+            update.sessionUpdate === 'tool_call' && update.toolCallId === 'tool-resumed',
+        ),
+      );
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('load finishes historical delivery before releasing an existing live Turn', async () => {
+    const sessionId = 'session-live-load-order';
+    const turnId = 'turn-live-load-order';
+    const turn = runningTurn(sessionId, turnId);
+    const history: StoredMessage[] = [
+      { type: 'user', id: 'user-1', turnId, ts: 1, text: 'earlier' },
+      {
+        type: 'assistant',
+        id: `message-${turnId}`,
+        turnId,
+        ts: 2,
+        text: 'partial',
+        modelId: 'default',
+      },
+    ];
+    const subscription = new FakeSubscription(
+      continuitySnapshot(sessionId, { rootTurn: turn }),
+      Promise.resolve(history),
+    );
+    subscription.seedBootstrap(history);
+    const delivered: string[] = [];
+    const userSent = deferred<void>();
+    const releaseUser = deferred<void>();
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      const loading = registry.load(
+        { sessionId, cwd: '/workspace', mcpServers: [] },
+        {
+          signal: new AbortController().signal,
+          notify: async ({ update }) => {
+            if (
+              (update.sessionUpdate === 'user_message_chunk' ||
+                update.sessionUpdate === 'agent_message_chunk') &&
+              update.content.type === 'text'
+            ) {
+              delivered.push(update.content.text);
+              if (update.sessionUpdate === 'user_message_chunk') {
+                userSent.resolve();
+                await releaseUser.promise;
+              }
+            }
+          },
+        },
+      );
+      await userSent.promise;
+      subscription.appendText(turnId, turn.runId, 'partial live', true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(delivered, ['earlier']);
+      releaseUser.resolve();
+      await loading;
+      await waitFor(() => delivered.includes(' live'));
+      assert.deepEqual(delivered, ['earlier', 'partial', ' live']);
+    } finally {
+      releaseUser.resolve();
+      await registry.dispose();
+    }
+  });
+
+  test('load does not redeliver a live chunk already included in historical replay', async () => {
+    const sessionId = 'session-live-replay-overlap';
+    const turnId = 'turn-live-replay-overlap';
+    const turn = runningTurn(sessionId, turnId);
+    const initial: StoredMessage[] = [
+      { type: 'user', id: 'user-1', turnId, ts: 1, text: 'earlier' },
+      {
+        type: 'assistant',
+        id: `message-${turnId}`,
+        turnId,
+        ts: 2,
+        text: 'partial',
+        modelId: 'default',
+      },
+    ];
+    const subscription = new FakeSubscription(
+      continuitySnapshot(sessionId, { rootTurn: turn }),
+      Promise.resolve(initial),
+    );
+    subscription.seedBootstrap(initial);
+    const pageGate = deferred<void>();
+    subscription.transcriptPageGate = pageGate.promise;
+    const notifications: SessionNotification[] = [];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      const loading = registry.load(
+        { sessionId, cwd: '/workspace', mcpServers: [] },
+        promptContext(notifications),
+      );
+      await waitFor(() => subscription.transcriptPageReads === 1);
+      subscription.publishTranscript([
+        initial[0],
+        {
+          type: 'assistant',
+          id: `message-${turnId}`,
+          turnId,
+          ts: 2,
+          text: 'partial live',
+          modelId: 'default',
+        },
+      ]);
+      subscription.appendText(turnId, turn.runId, 'partial live', true);
+      pageGate.resolve();
+      await loading;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(
+        notifications.flatMap(({ update }) =>
+          update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text'
+            ? [update.content.text]
+            : [],
+        ),
+        ['partial live'],
+      );
+    } finally {
+      pageGate.resolve();
+      await registry.dispose();
+    }
+  });
+
+  test('explicit Turn resume observes before Host admission and reports terminal status', async () => {
+    const sessionId = 'session-explicit-resume';
+    const turnId = 'continuation-turn';
+    const subscription = new FakeSubscription(continuitySnapshot(sessionId));
+    const notifications: SessionNotification[] = [];
+    const statuses: unknown[] = [];
+    const operations: string[] = [];
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => sessionId,
+      newTurnId: () => turnId,
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            operations.push(operation);
+            if (operation === 'session.create') return catalogSession(sessionId);
+            if (operation === 'turn.resume.query')
+              return {
+                sessionId,
+                disposition: 'ready',
+                sourceRunId: 'source-run',
+                sourceTurnId: 'source-turn',
+                sourceRuntimeEventHighWater: 42,
+              };
+            if (operation === 'turn.resume.start') {
+              assert.deepEqual(input, {
+                sessionId,
+                turnId,
+                sourceRunId: 'source-run',
+                sourceRuntimeEventHighWater: 42,
+              });
+              const turn = runningTurn(sessionId, turnId);
+              subscription.setRoot(turn);
+              subscription.appendText(turnId, turn.runId, 'continued', true);
+              subscription.setRoot(completedTurn(sessionId, turnId));
+              return { kind: 'started', turn };
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      const result = await registry.resumeTurn(
+        { sessionId },
+        {
+          ...promptContext(notifications),
+          notifyTurnStatus: async (status) => {
+            statuses.push(status);
+          },
+        },
+      );
+      assert.equal(result.kind, 'started');
+      await waitFor(() => statuses.length === 1);
+      assert.deepEqual(statuses, [
+        {
+          sessionId,
+          turnId,
+          runId: `run-${turnId}`,
+          status: 'completed',
+        },
+      ]);
+      assert.ok(
+        notifications.some(
+          ({ update }) =>
+            update.sessionUpdate === 'agent_message_chunk' &&
+            update.content.type === 'text' &&
+            update.content.text === 'continued',
+        ),
+      );
+      assert.deepEqual(operations, ['session.create', 'turn.resume.query', 'turn.resume.start']);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('explicit Turn resume returns a Host parked plan without opening a subscription', async () => {
+    const sessionId = 'session-resume-parked';
+    let opens = 0;
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => sessionId,
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession(sessionId);
+            if (operation === 'turn.resume.query')
+              return {
+                sessionId,
+                disposition: 'parked',
+                reason: 'resume_candidate_missing',
+              };
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => {
+            opens += 1;
+            throw new Error('unexpected open');
+          },
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      assert.deepEqual(await registry.resumeTurn({ sessionId }, promptContext([])), {
+        kind: 'parked',
+        plan: { sessionId, disposition: 'parked', reason: 'resume_candidate_missing' },
+      });
+      assert.equal(opens, 0);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('a lost dispatched Turn resume response retains its exact target identity', async () => {
+    const sessionId = 'session-resume-unknown';
+    const turnId = 'turn-resume-unknown';
+    const subscription = new FakeSubscription(continuitySnapshot(sessionId));
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => sessionId,
+      newTurnId: () => turnId,
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession(sessionId);
+            if (operation === 'turn.resume.query')
+              return {
+                sessionId,
+                disposition: 'ready',
+                sourceRunId: 'source-run',
+                sourceTurnId: 'source-turn',
+                sourceRuntimeEventHighWater: 42,
+              };
+            if (operation === 'turn.resume.start')
+              throw new RuntimeHostRequestInterruptedError(
+                'turn.resume.start',
+                'command',
+                'dispatched',
+                'connection_lost',
+              );
+            if (operation === 'turn.query')
+              throw new RuntimeHostOperationError('turn.query', 'not_found', 'not observed');
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await assert.rejects(
+        registry.resumeTurn({ sessionId }, promptContext([])),
+        (error: unknown) => {
+          assert.ok(error instanceof RequestError);
+          assert.deepEqual(error.data, {
+            source: 'runtime_host',
+            operation: 'turn.resume.start',
+            code: 'outcome_unknown',
+            sessionId,
+            turnId,
+            sourceRunId: 'source-run',
+          });
+          return true;
+        },
+      );
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('cancel fences an in-flight explicit resume and Stops the admitted Turn', async () => {
+    const sessionId = 'session-resume-cancel';
+    const turnId = 'turn-resume-cancel';
+    const subscription = new FakeSubscription(continuitySnapshot(sessionId));
+    const started = deferred<void>();
+    const startResponse = deferred<{ kind: 'started'; turn: ReturnType<typeof runningTurn> }>();
+    const stops: unknown[] = [];
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => sessionId,
+      newTurnId: () => turnId,
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession(sessionId);
+            if (operation === 'turn.resume.query')
+              return {
+                sessionId,
+                disposition: 'ready',
+                sourceRunId: 'source-run',
+                sourceTurnId: 'source-turn',
+                sourceRuntimeEventHighWater: 42,
+              };
+            if (operation === 'turn.resume.start') {
+              started.resolve();
+              return startResponse.promise;
+            }
+            if (operation === 'turn.stop') {
+              stops.push(input);
+              subscription.setRoot({
+                sessionId,
+                turnId,
+                runId: `run-${turnId}`,
+                status: 'cancelled',
+                terminalEventId: 'terminal',
+                abortSource: 'test',
+              });
+              return {};
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      const resuming = registry.resumeTurn({ sessionId }, promptContext([]));
+      await started.promise;
+      const cancelling = registry.cancel({ sessionId });
+      const turn = runningTurn(sessionId, turnId);
+      subscription.setRoot(turn);
+      startResponse.resolve({ kind: 'started', turn });
+      await cancelling;
+      assert.equal((await resuming).kind, 'started');
+      assert.deepEqual(stops, [{ sessionId, turnId, runId: `run-${turnId}` }]);
+    } finally {
+      startResponse.resolve({ kind: 'started', turn: runningTurn(sessionId, turnId) });
+      await registry.dispose();
+    }
+  });
+
+  test('committed branch and revision targets are immediately owned; retained and abandoned remain distinct', async () => {
+    const sourceSessionId = 'source-session';
+    const targetSessionId = 'branch-target';
+    const revisionId = 'revision-target';
+    const operations: string[] = [];
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => sourceSessionId,
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            operations.push(operation);
+            if (operation === 'session.create') return catalogSession(sourceSessionId);
+            if (operation === 'session.branch.create')
+              return { kind: 'committed', session: catalogSession(targetSessionId) };
+            if (operation === 'session.revision.create')
+              return { kind: 'committed', session: catalogSession(revisionId) };
+            if (operation === 'session.revision.abandon') {
+              const id = (input as { targetSessionId: string }).targetSessionId;
+              return { kind: id === targetSessionId ? 'retained' : 'abandoned', sessionId: id };
+            }
+            if (operation === 'session.catalog.query') {
+              const id = (input as { sessionId: string }).sessionId;
+              return { kind: 'session', session: catalogSession(id) };
+            }
+            if (operation === 'session.configuration.update') {
+              const id = (input as { sessionId: string }).sessionId;
+              return { kind: 'committed', session: catalogSession(id) };
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      const copy = {
+        sourceSessionId,
+        targetSessionId,
+        sourceTurnId: 'source-turn',
+        expectedSourceRevision: 1,
+      };
+      assert.equal((await registry.branch(copy)).kind, 'committed');
+      assert.ok(
+        (
+          await registry.setConfigOption({
+            sessionId: targetSessionId,
+            configId: 'collaboration_mode',
+            value: 'plan',
+          })
+        ).configOptions.length > 0,
+      );
+      assert.equal(
+        (await registry.createRevision({ ...copy, targetSessionId: revisionId })).kind,
+        'committed',
+      );
+      assert.deepEqual(await registry.abandonRevision({ targetSessionId }), {
+        kind: 'retained',
+        sessionId: targetSessionId,
+      });
+      assert.deepEqual(await registry.abandonRevision({ targetSessionId: revisionId }), {
+        kind: 'abandoned',
+        sessionId: revisionId,
+      });
+      await assert.rejects(
+        registry.setConfigOption({
+          sessionId: revisionId,
+          configId: 'collaboration_mode',
+          value: 'plan',
+        }),
+        (error: unknown) => error instanceof RequestError && error.code === -32602,
+      );
+      assert.ok(operations.includes('session.configuration.update'));
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('copy keeps revision conflicts and unknown dispatched target identity without retrying', async () => {
+    const sourceSessionId = 'source-copy-conflict';
+    const conflictedId = 'target-copy-conflict';
+    const uncertainId = 'target-copy-uncertain';
+    const operations: string[] = [];
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => sourceSessionId,
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            operations.push(operation);
+            if (operation === 'session.create') return catalogSession(sourceSessionId);
+            if (operation === 'session.branch.create') {
+              const target = (input as { targetSessionId: string }).targetSessionId;
+              if (target === conflictedId)
+                throw new RuntimeHostOperationError(
+                  operation,
+                  'operation_conflict',
+                  'Source revision changed',
+                );
+              throw new RuntimeHostRequestInterruptedError(
+                operation,
+                'command',
+                'dispatched',
+                'connection_lost',
+              );
+            }
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(uncertainId) };
+            if (operation === 'session.configuration.update')
+              return { kind: 'committed', session: catalogSession(uncertainId) };
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      const input = {
+        sourceSessionId,
+        targetSessionId: conflictedId,
+        sourceTurnId: 'source-turn',
+        expectedSourceRevision: 1,
+      };
+      await assert.rejects(
+        registry.branch(input),
+        (error: unknown) =>
+          error instanceof RequestError &&
+          (error.data as { code?: string })?.code === 'operation_conflict',
+      );
+      await assert.rejects(
+        registry.branch({ ...input, targetSessionId: uncertainId }),
+        (error: unknown) =>
+          error instanceof RequestError &&
+          (error.data as { targetSessionId?: string })?.targetSessionId === uncertainId,
+      );
+      assert.ok(
+        (
+          await registry.setConfigOption({
+            sessionId: uncertainId,
+            configId: 'collaboration_mode',
+            value: 'plan',
+          })
+        ).configOptions.length > 0,
+      );
+      assert.equal(
+        operations.filter((operation) => operation === 'session.branch.create').length,
+        2,
+      );
+    } finally {
+      await registry.dispose();
+    }
+  });
+
   test('does not connect when disposed before a Session method is used', async () => {
     let connectCalls = 0;
     const registry = new AcpSessionRegistry({
@@ -3434,6 +4328,18 @@ function fakeConnection(
 ): AcpSessionRegistryConnection {
   return {
     reconnecting: true,
+    replaceClientCapabilities: async () => ({ registrationId: 'registration-1', revision: 1 }),
+    unregisterClientCapabilities: async () => ({ registrationId: 'registration-1', revision: 2 }),
+    subscribeConnectionAvailability: (
+      listener: (availability: {
+        kind: 'connected';
+        hostEpoch: string;
+        connectionId: string;
+      }) => void,
+    ) => {
+      listener({ kind: 'connected', hostEpoch: 'host-1', connectionId: 'connection-1' });
+      return () => undefined;
+    },
     request: async (operation: string, input: unknown) =>
       operation === 'connection.catalog.query'
         ? connectionCatalogPage(overrides.thinkingLevels ?? THINKING_LEVELS)
@@ -3463,7 +4369,7 @@ function promptContext(notifications: SessionNotification[]) {
 class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<SubscriptionFrame> {
   readonly hostEpoch = 'host-1';
   readonly activeAssistantStreams = [];
-  readonly transcriptBootstrap = null;
+  transcriptBootstrap: SessionTranscriptBootstrap | null = null;
   #transcriptWatermark: number | null = null;
   readonly #frames: SubscriptionFrame[] = [];
   readonly #waiters: Array<{
@@ -3481,6 +4387,8 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
   closeCalls = 0;
   nextCalls = 0;
   transcriptPageReads = 0;
+  transcriptPageSize = Number.POSITIVE_INFINITY;
+  transcriptEmptyFirstPage = false;
   transcriptPageGate?: Promise<void>;
   #liveTranscript: StoredMessage[] = [];
   readonly #decodedPages = new WeakMap<SessionTranscriptPage, readonly StoredMessage[]>();
@@ -3491,6 +4399,22 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
     readonly subscriptionId = 'subscription-1',
     private readonly onClose: () => void = () => undefined,
   ) {}
+
+  seedBootstrap(messages: StoredMessage[]): void {
+    this.#liveTranscript = messages;
+    this.transcriptBootstrap = {
+      durable: {
+        kind: 'page',
+        sessionId: this.snapshot.session.sessionId,
+        direction: 'older',
+        throughSequence: messages.length * 8 + 7,
+        rawBytes: 0,
+        fragments: [],
+        nextCursor: null,
+        endsAtTurnBoundary: true,
+      },
+    };
+  }
 
   get transcriptWatermark(): number | null {
     return this.#transcriptWatermark;
@@ -3668,6 +4592,22 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
   ): Promise<SessionTranscriptPage> {
     this.transcriptPageReads += 1;
     await this.transcriptPageGate;
+    if (this.transcriptEmptyFirstPage && input.cursor === null) {
+      const empty: SessionTranscriptPage = {
+        kind: 'page',
+        sessionId: this.snapshot.session.sessionId,
+        direction: input.direction,
+        throughSequence: input.throughSequence,
+        rawBytes: 0,
+        fragments: [],
+        nextCursor: '0',
+        endsAtTurnBoundary: false,
+      };
+      this.#decodedPages.set(empty, []);
+      return empty;
+    }
+    const start = input.cursor === null ? 0 : Number(input.cursor);
+    const end = Math.min(start + this.transcriptPageSize, this.#liveTranscript.length);
     const page: SessionTranscriptPage = {
       kind: 'page',
       sessionId: this.snapshot.session.sessionId,
@@ -3675,10 +4615,10 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
       throughSequence: input.throughSequence,
       rawBytes: 0,
       fragments: [],
-      nextCursor: null,
+      nextCursor: end < this.#liveTranscript.length ? String(end) : null,
       endsAtTurnBoundary: true,
     };
-    this.#decodedPages.set(page, this.#liveTranscript);
+    this.#decodedPages.set(page, this.#liveTranscript.slice(start, end));
     return page;
   }
 

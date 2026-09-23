@@ -74,6 +74,105 @@ test('ACP stdio configuration copies cwd, arguments and explicit environment int
   assert.equal(normalized.env?.MAKA_MCP_STDIO_EVENT_LOG, '/workspace/fixture.jsonl');
 });
 
+test('Session MCP reconfiguration reuses equivalent processes and applies replacement and empty scope', {
+  timeout: 20_000,
+}, async (t) => {
+  const root = await temporaryRoot();
+  const host = fakeHost();
+  const first = createAcpMcpConfig({ cwd: root, mcpServers: [stdioServer(root, 'fixture')] });
+  const mcp = new AcpSessionMcp(sessionId, first, host.connection);
+  t.after(async () => {
+    await mcp.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await mcp.prepare();
+  const starts = (await fixtureEvents(root, 'fixture')).filter((event) => event.event === 'start');
+  assert.ok(starts.length > 0);
+  await mcp.reconfigure(
+    createAcpMcpConfig({
+      cwd: root,
+      mcpServers: [stdioServer(root, 'fixture')],
+    }),
+  );
+  assert.equal(
+    (await fixtureEvents(root, 'fixture')).filter((event) => event.event === 'start').length,
+    starts.length,
+  );
+  const replacement = stdioServer(root, 'fixture');
+  replacement.env.push({ name: 'MAKA_MCP_STDIO_FIXTURE_VALUE', value: 'replacement' });
+  await mcp.reconfigure(createAcpMcpConfig({ cwd: root, mcpServers: [replacement] }));
+  assert.ok(
+    (await fixtureEvents(root, 'fixture')).filter((event) => event.event === 'start').length >
+      starts.length,
+  );
+  await mcp.reconfigure(createAcpMcpConfig({ cwd: root, mcpServers: [] }));
+  assert.deepEqual(host.replacements.at(-1)?.provider.offers(), []);
+  await assertFixtureExited(root, 'fixture');
+});
+
+test('failed Session MCP replacement restores the previous published configuration', {
+  timeout: 20_000,
+}, async (t) => {
+  const root = await temporaryRoot();
+  const host = fakeHost();
+  const first = createAcpMcpConfig({ cwd: root, mcpServers: [stdioServer(root, 'fixture')] });
+  const mcp = new AcpSessionMcp(sessionId, first, host.connection);
+  t.after(async () => {
+    await mcp.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await mcp.prepare();
+  await assert.rejects(
+    mcp.reconfigure(
+      createAcpMcpConfig({
+        cwd: root,
+        mcpServers: [
+          { name: 'broken', command: '/definitely/missing/mcp-server', args: [], env: [] },
+        ],
+      }),
+    ),
+    isMcpError('mcp_not_ready', 'mcp.prepare'),
+  );
+  assert.deepEqual(mcp.config, first);
+  await mcp.ready();
+  assert.ok(host.replacements.at(-1)?.provider.offers().length);
+});
+
+test('Session MCP readiness waits for an in-flight replacement publication', {
+  timeout: 20_000,
+}, async (t) => {
+  const root = await temporaryRoot();
+  const host = fakeHost();
+  const mcp = new AcpSessionMcp(
+    sessionId,
+    createAcpMcpConfig({ cwd: root, mcpServers: [] }),
+    host.connection,
+  );
+  const accepted = deferred();
+  t.after(async () => {
+    accepted.resolve();
+    await mcp.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await mcp.prepare();
+  const before = host.replacements.length;
+  host.replace = () => accepted.promise;
+  const replacing = mcp.reconfigure(
+    createAcpMcpConfig({ cwd: root, mcpServers: [stdioServer(root, 'fixture')] }),
+  );
+  await waitFor(() => host.replacements.length > before, { timeoutMs: 5_000, pollMs: 10 });
+  let ready = false;
+  const waiting = mcp.ready().then(() => {
+    ready = true;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(ready, false);
+  accepted.resolve();
+  await replacing;
+  await waiting;
+  assert.equal(ready, true);
+});
+
 test('invalid ACP stdio configurations fail as invalid params before resource preparation', () => {
   const valid = stdioServer('/workspace', 'fixture');
   const badServers: unknown[] = [

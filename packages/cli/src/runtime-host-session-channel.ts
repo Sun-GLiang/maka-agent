@@ -291,6 +291,91 @@ export class RuntimeHostSessionChannel {
     return this.#pendingStartedTurns.keys().next().value;
   }
 
+  /** Read a fresh, bounded page stream on the existing subscription for ACP load. */
+  async replayTranscript(
+    onMessages: (messages: readonly StoredMessage[]) => Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const subscription = this.#subscription;
+    const throughSequence = this.#transcriptThrough;
+    if (throughSequence === null) return;
+    const lifetime = AbortSignal.any([this.#lifetime.signal, ...(signal ? [signal] : [])]);
+    const result = await this.#scanTranscriptRange(
+      subscription,
+      null,
+      throughSequence,
+      onMessages,
+      lifetime,
+    );
+    if (result === 'replaced') {
+      throw new RuntimeHostSubscriptionError(
+        'correlation_changed',
+        'Session subscription changed during transcript replay',
+      );
+    }
+  }
+
+  /** The sole paged transcript scanner used by load and Turn reconciliation. */
+  async #scanTranscriptRange(
+    subscription: RuntimeHostSessionSubscription,
+    afterSequence: number | null,
+    throughSequence: number,
+    onMessages: (messages: readonly StoredMessage[]) => Promise<void>,
+    signal: AbortSignal,
+    turnId?: string,
+  ): Promise<'complete' | 'replaced'> {
+    let cursor: string | null = null;
+    do {
+      signal.throwIfAborted();
+      const page: SessionTranscriptPage = await awaitTranscript(
+        subscription.loadTranscriptPage({
+          direction: 'newer',
+          throughSequence,
+          cursor,
+          anchorSequence: cursor === null ? afterSequence : null,
+          maxBytes: SESSION_TRANSCRIPT_PAGE_MAX_BYTES,
+        }),
+        signal,
+      );
+      let assemblyBytes = 0;
+      const decoded: DecodedSessionTranscriptPage<StoredMessage> = await awaitTranscript(
+        subscription.decodeTranscriptPage(
+          page,
+          decodeStoredMessage,
+          PROMPT_TRANSCRIPT_RANGE_MAX_BYTES,
+          (delta) => {
+            assemblyBytes += delta;
+            if (assemblyBytes > PROMPT_TRANSCRIPT_RANGE_MAX_BYTES) {
+              throw new RangeError('Session transcript assembly exceeds the range byte limit');
+            }
+          },
+        ),
+        signal,
+      );
+      signal.throwIfAborted();
+      if (subscription !== this.#subscription) return 'replaced';
+      if (decoded.nextCursor !== null && decoded.nextCursor === cursor) {
+        throw new RuntimeHostSubscriptionError(
+          'correlation_changed',
+          'Session transcript cursor did not advance',
+        );
+      }
+      // A correlated cursor, not consecutive event ordinals, proves coverage.
+      const messages = decoded.messages
+        .map(({ message }) => message)
+        .filter((message) => turnId === undefined || message.turnId === turnId);
+      if (messages.length) await awaitTranscript(onMessages(messages), signal);
+      signal.throwIfAborted();
+      if (
+        turnId &&
+        messages.some((message) => message.type === 'turn_state' && message.status !== 'running')
+      )
+        return 'complete';
+      cursor = decoded.nextCursor;
+    } while (cursor !== null);
+    return 'complete';
+  }
+
   /** Call before turn.start: this deliberately does not implement historical turn lookup. */
   trackPromptTranscript(turnId: string): RuntimeHostPromptTranscript {
     if (this.#closing || this.#failure)
@@ -378,64 +463,16 @@ export class RuntimeHostSessionChannel {
         );
       }
       try {
-        let cursor: string | null = null;
-        do {
-          signal.throwIfAborted();
-          const page: SessionTranscriptPage = await awaitTranscript(
-            subscription.loadTranscriptPage({
-              direction: 'newer',
-              throughSequence,
-              cursor,
-              anchorSequence: cursor === null ? afterSequence : null,
-              maxBytes: SESSION_TRANSCRIPT_PAGE_MAX_BYTES,
-            }),
-            signal,
-          );
-          let assemblyBytes = 0;
-          const decoded: DecodedSessionTranscriptPage<StoredMessage> = await awaitTranscript(
-            subscription.decodeTranscriptPage(
-              page,
-              decodeStoredMessage,
-              PROMPT_TRANSCRIPT_RANGE_MAX_BYTES,
-              (delta) => {
-                assemblyBytes += delta;
-                if (assemblyBytes > PROMPT_TRANSCRIPT_RANGE_MAX_BYTES) {
-                  throw new RangeError(
-                    'Prompt transcript assembly exceeds the existing range byte limit',
-                  );
-                }
-              },
-            ),
-            signal,
-          );
-          signal.throwIfAborted();
-          if (subscription !== this.#subscription) break;
-          if (
-            decoded.nextCursor !== null &&
-            (decoded.nextCursor === cursor || decoded.messages.length === 0)
-          ) {
-            throw new RuntimeHostSubscriptionError(
-              'correlation_changed',
-              'Prompt transcript cursor did not advance',
-            );
-          }
-          // Durable event ordinals may be sparse. The correlated cursor, not
-          // consecutive message numbers, establishes coverage of this cut.
-          const messages = decoded.messages
-            .map((entry) => entry.message)
-            .filter((message) => message.turnId === turnId);
-          if (messages.length) await awaitTranscript(onMessages(messages), signal);
-          signal.throwIfAborted();
-          if (
-            messages.some(
-              (message) => message.type === 'turn_state' && message.status !== 'running',
-            )
-          )
-            return nextCut;
-          cursor = decoded.nextCursor;
-        } while (cursor !== null);
+        const scan = await this.#scanTranscriptRange(
+          subscription,
+          afterSequence,
+          throughSequence,
+          onMessages,
+          signal,
+          turnId,
+        );
         // Commit progress only after every page and its consumer succeed.
-        if (subscription === this.#subscription) return nextCut;
+        if (scan === 'complete' && subscription === this.#subscription) return nextCut;
       } catch (error) {
         lifetime.throwIfAborted();
         if (this.#failure) throw this.#failure;

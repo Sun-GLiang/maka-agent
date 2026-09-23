@@ -17,6 +17,40 @@
   under the License.
 -->
 
+# ACP validation record
+
+## PR6 local implementation — September 23, 2026
+
+Base: Apache `main` at `b004473ed`, on isolated branch
+`feat/acp-session-restore`. The original Antigravity checkout was not
+modified. This local implementation adds standard `session/load` and
+`session/resume`, durable replay and live Turn attachment, complete stdio MCP
+reconfiguration, explicit `_maka/turn/resume`, and Session branch/revision
+create/abandon routes. Prompt and restored Turns now share the production
+`AcpTurnObservation` consumer and the existing Session channel, mapper,
+interaction broker, and MCP publication path.
+
+The official ACP SDK child-process test crossed two ACP processes against one
+real Runtime Host: process A created and prompted a Session, then process B
+loaded it with changed MCP configuration, resumed it with an empty MCP list,
+prompted it, queried a parked Turn resume, branched and prompted the target,
+created a revision, and abandoned that revision. The real Host revision and
+Turn/capability suites passed 104 tests. Focused registry tests include
+multi-page replay (including a fragment-only page), live/history overlap,
+pending interaction restoration, close during load, exact lost-response Turn
+identity, and copy revision conflict/unknown target identity.
+
+The final full CLI dist suite passed 1178 tests with 3 skipped and no failures.
+The focused ACP suite passed 214 tests before the last two registry regressions;
+the final registry suite passed 89 tests. The production workspace build and
+workspace typecheck passed, as did lint, format, ASF headers, CLI notices,
+Desktop/UI knip, and `git diff --check`. Runtime Host source and protocol did not
+change, so no compatibility epoch update was required.
+Zed was launched with an isolated disposable project and user-data directory,
+but its native window stopped accepting UI automation input. No third-party
+client smoke result is claimed from that attempt; the official SDK real-process
+test provides protocol boundary coverage.
+
 # PR5 validation record
 
 ## Follow-up main refresh

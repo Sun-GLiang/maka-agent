@@ -18,7 +18,7 @@
  */
 
 import { isAbsolute } from 'node:path';
-import { RequestError, type NewSessionRequest } from '@agentclientprotocol/sdk';
+import { RequestError, type McpServer } from '@agentclientprotocol/sdk';
 import { MCP_CONFIG_VERSION, type McpConfigFile } from '@maka/core/mcp';
 import { McpClientManager } from '@maka/mcp';
 import { normalizeMcpConfig } from '@maka/storage/mcp-config-store';
@@ -36,7 +36,12 @@ export type AcpMcpConnection = Pick<
 >;
 
 /** Validates before any process or Host work; never writes a user MCP configuration. */
-export function createAcpMcpConfig(params: NewSessionRequest): McpConfigFile {
+export function createAcpMcpConfig<
+  T extends {
+    readonly cwd: string;
+    readonly mcpServers: readonly McpServer[];
+  },
+>(params: T): McpConfigFile {
   const servers: Record<string, unknown> = Object.create(null);
   if (!Array.isArray(params.mcpServers)) throw invalidMcpInput('invalid_servers');
   for (const server of params.mcpServers) {
@@ -55,7 +60,7 @@ export function createAcpMcpConfig(params: NewSessionRequest): McpConfigFile {
     }
     if (
       !Array.isArray(server.args) ||
-      server.args.some((arg) => typeof arg !== 'string' || arg.includes('\0'))
+      server.args.some((arg: unknown) => typeof arg !== 'string' || arg.includes('\0'))
     ) {
       throw invalidMcpInput('invalid_arguments');
     }
@@ -94,7 +99,8 @@ export function createAcpMcpConfig(params: NewSessionRequest): McpConfigFile {
 /** Owns one Session's in-memory MCP processes and publication on the shared Host connection. */
 export class AcpSessionMcp {
   readonly #sessionId: string;
-  readonly #config: McpConfigFile;
+  #config: McpConfigFile;
+  #configurationTail: Promise<unknown> = Promise.resolve();
   readonly #manager = new McpClientManager({
     clientName: 'maka-acp',
     excludedStdioEnvironmentKeys: ['MAKA_RUNTIME_HOST_ACCESS_CREDENTIAL'],
@@ -164,7 +170,45 @@ export class AcpSessionMcp {
     }
   }
 
+  get config(): McpConfigFile {
+    return structuredClone(this.#config);
+  }
+
+  reconfigure(config: McpConfigFile, signal?: AbortSignal): Promise<void> {
+    const task = this.#configurationTail
+      .catch(() => undefined)
+      .then(async () => {
+        this.#assertOpen('mcp.prepare');
+        signal?.throwIfAborted();
+        if (sameMcpConfig(this.#config, config)) return this.#settlePublication(signal);
+        const previous = this.#config;
+        try {
+          await this.#manager.sync(config);
+          signal?.throwIfAborted();
+          this.#assertConnected(config);
+          this.#publication.request();
+          await this.#settlePublication(signal);
+          this.#config = config;
+        } catch (error) {
+          if (!this.#closed) {
+            await this.#manager.sync(previous).catch(() => undefined);
+            this.#publication.request();
+            await this.#publication.settle().catch(() => undefined);
+          }
+          if (error instanceof RequestError) throw error;
+          throw mcpUnavailable(this.#sessionId, 'mcp.prepare', 'mcp_reconfiguration_failed');
+        }
+      });
+    this.#configurationTail = task;
+    return task;
+  }
+
   async ready(signal?: AbortSignal): Promise<void> {
+    await abortable(() => this.#configurationTail.catch(() => undefined), signal);
+    await this.#settlePublication(signal);
+  }
+
+  async #settlePublication(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     this.#assertOpen('mcp.ready');
     const state = await abortable(() => this.#publication.settle(), signal);
@@ -207,10 +251,10 @@ export class AcpSessionMcp {
     return this.#closeTask;
   }
 
-  #assertConnected(): void {
+  #assertConnected(config = this.#config): void {
     this.#assertOpen('mcp.prepare');
     if (
-      Object.keys(this.#config.mcpServers).some(
+      Object.keys(config.mcpServers).some(
         (serverId) => this.#manager.status(serverId)?.state !== 'connected',
       )
     ) {
@@ -221,6 +265,19 @@ export class AcpSessionMcp {
   #assertOpen(operation: 'mcp.prepare' | 'mcp.ready'): void {
     if (this.#closed) throw mcpUnavailable(this.#sessionId, operation, 'mcp_not_ready');
   }
+}
+
+function sameMcpConfig(left: McpConfigFile, right: McpConfigFile): boolean {
+  return stableConfigString(left) === stableConfigString(right);
+}
+
+function stableConfigString(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableConfigString).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value).sort(([a], [b]) => a.localeCompare(b));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableConfigString(entry)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function invalidMcpInput(reason: string): RequestError {

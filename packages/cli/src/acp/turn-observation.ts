@@ -1,0 +1,176 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+import type { SessionEvent } from '@maka/core/events';
+import type { StoredMessage } from '@maka/core/session';
+import type { StopReason } from '@agentclientprotocol/sdk';
+import { RuntimeHostSessionChannel } from '../runtime-host-session-channel.js';
+import { AcpSessionEventMapper } from './session-event-mapper.js';
+
+/** One consumer for a Host Turn, shared by prompt admission and resumed attachments. */
+export class AcpTurnObservation {
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly mapper: AcpSessionEventMapper;
+  readonly projectionAbort = new AbortController();
+  readonly reconciliationAbort = new AbortController();
+  attachment?: RuntimeHostSessionChannel;
+  transcript?: ReturnType<RuntimeHostSessionChannel['trackPromptTranscript']>;
+  projectionFailure?: unknown;
+  cancelled = false;
+  finished = false;
+  #muteDepth = 0;
+  #liveGate?: { promise: Promise<void>; release(): void };
+
+  constructor(options: {
+    sessionId: string;
+    turnId: string;
+    notify: ConstructorParameters<typeof AcpSessionEventMapper>[0]['notify'];
+  }) {
+    this.sessionId = options.sessionId;
+    this.turnId = options.turnId;
+    this.mapper = new AcpSessionEventMapper({
+      sessionId: options.sessionId,
+      notify: async (notification) => {
+        if (this.#muteDepth === 0) await options.notify(notification);
+      },
+      signal: this.projectionAbort.signal,
+    });
+  }
+
+  async seed(messages: readonly StoredMessage[]): Promise<void> {
+    this.#muteDepth += 1;
+    try {
+      await this.mapper.acceptTranscriptMessages(this.turnId, messages, true);
+      await this.mapper.flush();
+    } finally {
+      this.#muteDepth -= 1;
+    }
+  }
+
+  holdLive(): Promise<void> {
+    if (!this.#liveGate) {
+      let release!: () => void;
+      this.#liveGate = {
+        promise: new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+        release,
+      };
+    }
+    return this.mapper.flush();
+  }
+
+  releaseLive(): void {
+    const gate = this.#liveGate;
+    this.#liveGate = undefined;
+    gate?.release();
+  }
+
+  async #waitForLive(): Promise<void> {
+    while (this.#liveGate && !this.finished) await this.#liveGate.promise;
+  }
+
+  async pendingInteraction(
+    pending: Parameters<AcpSessionEventMapper['pendingInteraction']>[0],
+  ): Promise<void> {
+    await this.#waitForLive();
+    if (!this.finished) await this.mapper.pendingInteraction(pending);
+  }
+
+  async resolvedInteraction(
+    resolved: Parameters<AcpSessionEventMapper['resolvedInteraction']>[0],
+    pending: Parameters<AcpSessionEventMapper['resolvedInteraction']>[1],
+  ): Promise<void> {
+    await this.#waitForLive();
+    if (!this.finished) await this.mapper.resolvedInteraction(resolved, pending);
+  }
+
+  async replaceTranscript(messages: readonly StoredMessage[]): Promise<void> {
+    await this.#waitForLive();
+    if (!this.finished) await this.mapper.replaceTranscript(this.turnId, messages);
+  }
+
+  start(channel: RuntimeHostSessionChannel): Promise<StopReason> {
+    this.attachment = channel;
+    this.transcript = channel.trackPromptTranscript(this.turnId);
+    const task = this.consume(channel.eventsForTurn(this.turnId));
+    void task.catch(() => undefined);
+    return task;
+  }
+
+  async consume(events: AsyncIterable<SessionEvent>): Promise<StopReason> {
+    let terminalStatus: 'completed' | 'failed' | 'cancelled' = 'completed';
+    try {
+      for await (const event of events) {
+        await this.#waitForLive();
+        if (event.type === 'abort') terminalStatus = 'cancelled';
+        else if (event.type === 'error' && !event.recoverable) terminalStatus = 'failed';
+        if (terminalStatus !== 'completed') this.reconciliationAbort.abort();
+        if (!this.cancelled) await this.mapper.accept(event);
+      }
+      if (this.cancelled) return this.cancelledStopReason();
+      if (terminalStatus === 'completed') await this.reconcile(true);
+      else this.reconciliationAbort.abort();
+      if (this.projectionFailure) throw this.projectionFailure;
+      await this.mapper.finishTools(this.turnId, terminalStatus);
+      await this.mapper.flush();
+      return this.cancelled ? this.cancelledStopReason() : 'end_turn';
+    } catch (error) {
+      if (this.cancelled) return this.cancelledStopReason();
+      throw error;
+    }
+  }
+
+  async reconcile(replay = false): Promise<void> {
+    await this.#waitForLive();
+    if (this.cancelled || this.finished || !this.transcript) return;
+    try {
+      await this.transcript.reconcile(
+        (messages) => this.mapper.acceptTranscriptMessages(this.turnId, messages),
+        AbortSignal.any([this.projectionAbort.signal, this.reconciliationAbort.signal]),
+        { replay },
+      );
+    } catch (error) {
+      if (
+        this.cancelled ||
+        this.finished ||
+        this.projectionAbort.signal.aborted ||
+        this.reconciliationAbort.signal.aborted
+      )
+        return;
+      this.projectionFailure ??= error;
+      this.attachment?.failTurn(this.turnId, error);
+      throw error;
+    }
+  }
+
+  async cancelledStopReason(): Promise<'cancelled'> {
+    await this.mapper.flush().catch(() => undefined);
+    return 'cancelled';
+  }
+
+  dispose(): void {
+    this.finished = true;
+    this.releaseLive();
+    this.projectionAbort.abort();
+    this.reconciliationAbort.abort();
+    this.transcript?.dispose();
+  }
+}
