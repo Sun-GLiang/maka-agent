@@ -1909,6 +1909,7 @@ const makaBridge = {
         subscribeEveryRuntimeHostEvent('connections:event', handler),
         subscribeEveryRuntimeHostEvent('mcp:changed', handler),
         subscribeEveryRuntimeHostEvent('settings:externalChanged', handler),
+        subscribeEveryRuntimeHostEvent('external-agents:catalog-changed', handler),
       ];
       return () => {
         newTaskChangeListeners.delete(handler);

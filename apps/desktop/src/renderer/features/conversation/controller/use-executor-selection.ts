@@ -46,7 +46,8 @@ export function useExecutorSelection(input: {
   current.current = key;
   const revision = useRef(0);
   const refreshes = useRef(new Map<string, Promise<void>>());
-  const refresh = useCallback(() => {
+  const pendingInvalidations = useRef(new Set<string>());
+  const refresh = useCallback((): Promise<void> => {
     const existing = refreshes.current.get(key);
     if (existing) return existing;
     const run = (async () => {
@@ -79,7 +80,9 @@ export function useExecutorSelection(input: {
     })();
     let tracked!: Promise<void>;
     tracked = run.finally(() => {
-      if (refreshes.current.get(key) === tracked) refreshes.current.delete(key);
+      if (refreshes.current.get(key) !== tracked) return;
+      refreshes.current.delete(key);
+      if (pendingInvalidations.current.delete(key) && current.current === key) void refresh();
     });
     refreshes.current.set(key, tracked);
     return tracked;
@@ -94,12 +97,16 @@ export function useExecutorSelection(input: {
     input.cwd,
     services,
   ]);
+  const invalidate = useCallback(() => {
+    if (refreshes.current.has(key)) pendingInvalidations.current.add(key);
+    else void refresh();
+  }, [key, refresh]);
   useEffect(() => {
     const unsubscribe = services.newTasks.subscribeChanges(() => {
-      void refresh();
+      invalidate();
     });
     const unSession = services.subscribeChanges((changedSessionId) => {
-      if (sessionId && changedSessionId === sessionId) void refresh();
+      if (sessionId && changedSessionId === sessionId) invalidate();
     });
     // Conversation inspection is process-free, including while a retained process is idle.
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -114,11 +121,12 @@ export function useExecutorSelection(input: {
       stopped = true;
       revision.current++;
       refreshes.current.delete(key);
+      pendingInvalidations.current.delete(key);
       unsubscribe();
       unSession();
       clearTimeout(timer);
     };
-  }, [refresh, services, sessionId, executorId, key]);
+  }, [refresh, invalidate, services, sessionId, executorId, key]);
   useEffect(() => {
     if (sessionId) setDraft(undefined);
   }, [sessionId]);

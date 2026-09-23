@@ -121,6 +121,49 @@ test('Antigravity stays visible while its first model catalog loads', async () =
   }
 });
 
+test('failed Antigravity discovery closes the picker before opening external-agent settings', async () => {
+  const dom = installTranscriptDom();
+  const loadingEntry = { id: 'antigravity-acp', displayName: 'Antigravity' };
+  let setupOpened = false;
+  const render = (loading: boolean) => dom.render(
+    <LocaleProvider locale="zh-CN">
+      <ExecutorModelPicker
+        catalog={loading ? [] : [{
+          id: loadingEntry.id,
+          displayName: loadingEntry.displayName,
+          readiness: 'unavailable',
+          models: [],
+          supportsAttachments: false,
+          supportsModelChange: false,
+        }]}
+        loading={loading}
+        loadingEntry={loadingEntry}
+        onSelect={() => assert.fail('An unavailable executor cannot be selected')}
+        onSetup={() => { setupOpened = true; }}
+        onRetry={() => {}}
+        onNewTask={() => {}}
+      />
+    </LocaleProvider>,
+  );
+  const click = async (element: Element | null | undefined) => {
+    assert.ok(element);
+    await act(async () => { element.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
+  };
+  try {
+    await render(true);
+    await click(dom.document.querySelector('.maka-executor-selector'));
+    await click([...dom.document.querySelectorAll<HTMLButtonElement>('.maka-executor-picker-rail button')]
+      .find((button) => button.textContent?.includes('Antigravity')));
+    await render(false);
+    assert.ok(dom.document.querySelector('.maka-executor-picker-models')?.textContent?.includes('当前不可用'));
+    await click(dom.document.querySelector('.maka-executor-picker-readiness button'));
+    assert.equal(setupOpened, true);
+    assert.equal(dom.document.querySelector('.maka-executor-selector')?.getAttribute('aria-expanded'), 'false');
+  } finally {
+    await dom.cleanup();
+  }
+});
+
 for (const nativeModel of ['native-model', 'native-model-2']) {
   test(`the Composer native fallback commits Maka with ${nativeModel} after browsing an external executor`, async () => {
     const dom = installTranscriptDom();

@@ -187,6 +187,14 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
     setBrowsedId(id);
     setSelectionFailed(false);
   };
+  const openSetup = () => {
+    setOpen(false);
+    props.onSetup();
+  };
+  const openNewTask = () => {
+    setOpen(false);
+    props.onNewTask();
+  };
   const lockedTo = props.fixed ? props.selection?.executorId ?? NATIVE : undefined;
   return (
     <>
@@ -252,10 +260,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                 size="sm"
                 icon={<Settings size={ICON_SIZE.control} aria-hidden="true" />}
                 className="maka-executor-picker-entry maka-executor-picker-manage"
-                onClick={() => {
-                  setOpen(false);
-                  props.onSetup();
-                }}
+                onClick={openSetup}
               />
             </nav>
             <section className="maka-executor-picker-models" aria-live="polite">
@@ -299,9 +304,9 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                 <div className="maka-executor-picker-readiness">
                   <p>{browsed ? copy[browsed.readiness] : copy.unavailable}</p>
                   {browsed?.readiness === 'history_only' ? (
-                    <Button label={copy.newTask} variant="ghost" size="sm" onClick={props.onNewTask} />
+                    <Button label={copy.newTask} variant="ghost" size="sm" onClick={openNewTask} />
                   ) : (
-                    <Button label={copy.manage} variant="ghost" size="sm" onClick={props.onSetup} />
+                    <Button label={copy.manage} variant="ghost" size="sm" onClick={openSetup} />
                   )}
                 </div>
               )}
@@ -323,10 +328,10 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
         <span role="status" className="maka-executor-notice">
           {selected && selected.readiness !== 'ready' ? copy[selected.readiness] : copy.unavailable}
           {selected?.readiness === 'history_only' ? (
-            <Button label={copy.newTask} variant="ghost" size="sm" onClick={props.onNewTask} />
+            <Button label={copy.newTask} variant="ghost" size="sm" onClick={openNewTask} />
           ) : (
             <>
-              <Button label={copy.manage} variant="ghost" size="sm" onClick={props.onSetup} />
+              <Button label={copy.manage} variant="ghost" size="sm" onClick={openSetup} />
               <Button
                 label={copy.retry}
                 variant="ghost"

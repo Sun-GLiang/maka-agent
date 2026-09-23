@@ -28,6 +28,46 @@ import { useExecutorSelection, newTaskConfiguration, ConversationServicesProvide
 
 const entry: ExecutorCatalogEntry = { id: 'external', displayName: 'External', readiness: 'ready', models: [{ id: 'selected', name: 'Selected' }], supportsAttachments: false, supportsModelChange: true };
 
+test('a catalog change during failed discovery retries after the in-flight result settles', async () => {
+  const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
+  const values = { document, window, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true };
+  const originals = new Map(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const root = createRoot(document.getElementById('root')!);
+  let latest!: ReturnType<typeof useExecutorSelection>;
+  let notify!: () => void;
+  let finishFirst!: (value: readonly ExecutorCatalogEntry[]) => void;
+  const first = new Promise<readonly ExecutorCatalogEntry[]>(resolve => { finishFirst = resolve; });
+  let reads = 0;
+  const services = {
+    subscribeChanges: () => () => {},
+    newTasks: {
+      subscribeChanges: (handler: () => void) => { notify = handler; return () => {}; },
+      getExecutors: async () => (++reads === 1 ? first : [entry]),
+    },
+    sessions: {},
+  } as unknown as ConversationServices;
+  function Probe() {
+    latest = useExecutorSelection({ key: 'new-task', cwd: '/fixture', target: { hostId: 'host', profileId: 'profile', projectId: null } });
+    return null;
+  }
+  try {
+    await act(async () => root.render(createElement(ConversationServicesProvider, { services, children: createElement(Probe) })));
+    assert.equal(reads, 1);
+    notify();
+    await act(async () => {
+      finishFirst([{ ...entry, readiness: 'unavailable', models: [] }]);
+      await first;
+    });
+    assert.equal(reads, 2);
+    assert.equal(latest.entry, undefined);
+    assert.deepEqual(latest.catalog, [entry]);
+  } finally {
+    await act(async () => root.unmount());
+    for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); }
+  }
+});
+
 test('late draft discovery cannot replace the current target; existing tasks inspect without probing', async () => {
   const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
   const values = { document, window, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true };

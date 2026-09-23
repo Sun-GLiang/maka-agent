@@ -1631,6 +1631,7 @@ function registerHostClientIpc(
     preview: { service: managedArtifactPreview, scope: scope.targetEpoch, openExternal: (url) => shell.openExternal(url) },
   });
   registerExternalAgentSetupIpc({ ipcMain: scopedIpc, client, presentation: oauthPresentation,
+    onCatalogChanged: () => sendToRenderer('external-agents:catalog-changed'),
     selectExecutable: async () => {
       const result = await mainWindowController.showOpenDialog({ properties: ['openFile'] });
       return result.canceled ? undefined : result.filePaths[0];
