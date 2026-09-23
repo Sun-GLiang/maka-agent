@@ -257,9 +257,9 @@ The Host appends setup placeholders from its built-in external-agent catalog onl
 registered Plugin has not supplied that executor ID. The composer no longer names Antigravity
 while loading; the shared picker displays a generic loading status until catalog data arrives.
 A live Plugin catalog replaces the placeholder without a UI-specific fallback. Targeted Host
-and picker tests cover placeholder precedence and the loading-to-ready transition. The current
-Storybook captures in the PR description show both states with the production Composer/picker
-components and fixture catalog data; they do not claim an official Agent ran in those captures.
+and picker tests cover placeholder precedence and the loading-to-ready transition. Storybook
+smoke covers the loading and ready states. The PR description uses the full-window real Electron
+captures below for UI evidence; the loading state is not pictured there.
 
 ## Earlier real Electron UI screenshots
 
