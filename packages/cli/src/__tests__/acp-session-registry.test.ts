@@ -1303,6 +1303,149 @@ describe('ACP Session registry', () => {
     }
   });
 
+  test('a rejected Turn resume releases its idle Session for a changed MCP load', async () => {
+    const sessionId = 'session-resume-rejected';
+    const turnId = 'turn-resume-rejected';
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-acp-resume-rejected-')));
+    const original = {
+      name: 'fixture',
+      command: process.execPath,
+      args: [fileURLToPath(import.meta.resolve('@maka/mcp/test-only/stdio-server'))],
+      env: [{ name: 'MAKA_MCP_STDIO_EVENT_LOG', value: join(root, 'fixture.jsonl') }],
+    };
+    const changed = {
+      ...original,
+      env: [...original.env, { name: 'MAKA_MCP_STDIO_FIXTURE_VALUE', value: 'changed' }],
+    };
+    const subscription = new FakeSubscription(continuitySnapshot(sessionId));
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => sessionId,
+      newTurnId: () => turnId,
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession(sessionId, root);
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId, root) };
+            if (operation === 'turn.resume.query')
+              return {
+                sessionId,
+                disposition: 'ready',
+                sourceRunId: 'source-run',
+                sourceTurnId: 'source-turn',
+                sourceRuntimeEventHighWater: 42,
+              };
+            if (operation === 'turn.resume.start')
+              throw new RuntimeHostRequestInterruptedError(
+                'turn.resume.start',
+                'command',
+                'dispatched',
+                'connection_lost',
+              );
+            if (operation === 'turn.query')
+              throw new RuntimeHostOperationError('turn.query', 'not_found', 'not admitted');
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      await registry.create({ cwd: root, mcpServers: [original] });
+      await registry.resume({ sessionId, cwd: root, mcpServers: [original] }, promptContext([]));
+      await assert.rejects(registry.resumeTurn({ sessionId }, promptContext([])));
+      await registry.resume(
+        {
+          sessionId,
+          cwd: root,
+          mcpServers: [changed],
+        },
+        promptContext([]),
+      );
+    } finally {
+      await registry.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  for (const terminalStatus of ['completed', 'failed', 'cancelled'] as const) {
+    test(`attached Turn reports ${terminalStatus} after output when a next Turn starts`, async () => {
+      const sessionId = 'session-status-next-root';
+      const turnId = 'turn-first';
+      const turn = runningTurn(sessionId, turnId);
+      const subscription = new FakeSubscription(continuitySnapshot(sessionId, { rootTurn: turn }));
+      const outputEntered = deferred<void>();
+      const releaseOutput = deferred<void>();
+      const statuses: unknown[] = [];
+      const registry = new AcpSessionRegistry({
+        connect: async () =>
+          fakeConnection({
+            request: async (operation) => {
+              if (operation === 'session.catalog.query')
+                return { kind: 'session', session: catalogSession(sessionId) };
+              throw new Error(`Unexpected operation ${operation}`);
+            },
+            openSessionSubscriptionOnce: async () => subscription,
+          }),
+      });
+      try {
+        await registry.resume(
+          { sessionId, cwd: '/workspace' },
+          {
+            ...promptContext([]),
+            notify: async (notification) => {
+              if (notification.update.sessionUpdate === 'agent_message_chunk') {
+                outputEntered.resolve();
+                await releaseOutput.promise;
+              }
+            },
+            notifyTurnStatus: async (status) => {
+              statuses.push(status);
+            },
+          },
+        );
+        subscription.appendText(turnId, turn.runId, 'hello', true);
+        await outputEntered.promise;
+        subscription.setRoot(
+          terminalStatus === 'completed'
+            ? completedTurn(sessionId, turnId)
+            : terminalStatus === 'failed'
+              ? {
+                  sessionId,
+                  turnId,
+                  runId: turn.runId,
+                  status: 'failed',
+                  terminalEventId: `terminal-${turnId}`,
+                  failureClass: 'provider_failure',
+                }
+              : {
+                  sessionId,
+                  turnId,
+                  runId: turn.runId,
+                  status: 'cancelled',
+                  terminalEventId: `terminal-${turnId}`,
+                  abortSource: 'user',
+                },
+        );
+        subscription.setRoot(runningTurn(sessionId, 'turn-next'));
+        await waitFor(() => subscription.snapshot.rootTurn?.turnId === 'turn-next');
+        releaseOutput.resolve();
+        await waitFor(() => statuses.length === 1);
+        assert.deepEqual(statuses, [
+          {
+            sessionId,
+            turnId,
+            runId: turn.runId,
+            status: terminalStatus,
+            ...(terminalStatus === 'failed' ? { failureClass: 'provider_failure' } : {}),
+          },
+        ]);
+      } finally {
+        releaseOutput.resolve();
+        await registry.dispose();
+      }
+    });
+  }
+
   test('cancel fences an in-flight explicit resume and Stops the admitted Turn', async () => {
     const sessionId = 'session-resume-cancel';
     const turnId = 'turn-resume-cancel';

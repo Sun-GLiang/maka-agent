@@ -157,6 +157,7 @@ type ActiveAcpPrompt = AcpTurnObservation & {
   dispatchStarted: boolean;
   startRequestSettled: boolean;
   admissionSettled: boolean;
+  admissionRejected?: boolean;
   admissionQuery?: Promise<void>;
   admissionFailure?: RequestError;
   startedTurn?: TurnSnapshot;
@@ -621,8 +622,8 @@ export class AcpSessionRegistry {
 
   #queryPromptAdmission(active: ActiveAcpPrompt, connection: AcpSessionRegistryConnection): void {
     // Recovery and the lost start response can both request this read. Keep one
-    // bounded retry task; neither a healthy subscription nor a failed query
-    // establishes whether a dispatched start was admitted.
+    // bounded retry task; neither a healthy subscription nor a query failure
+    // other than not_found establishes whether a dispatched start was admitted.
     active.admissionQuery ??= this.#readPromptAdmission(active, connection);
   }
 
@@ -654,6 +655,9 @@ export class AcpSessionRegistry {
         return;
       } catch (error) {
         if (error instanceof RuntimeHostOperationError && error.code === 'not_found') {
+          const observed = active.attachment?.snapshot.rootTurn;
+          if (observed?.turnId === active.turnId) active.startedTurn = observed;
+          else if (!active.startedTurn) active.admissionRejected = true;
           active.admissionSettled = true;
           this.#wake(active);
           return;
@@ -775,6 +779,23 @@ export class AcpSessionRegistry {
         this.#wakeSession(sessionId);
         if (snapshot.rootTurn && isRuntimeHostTerminalTurn(snapshot.rootTurn)) {
           interactions.terminalTurn(snapshot.rootTurn.turnId);
+        }
+        const root = snapshot.rootTurn;
+        const observation = root && this.#observation(sessionId, root.turnId);
+        const active = this.#activePrompts.get(sessionId);
+        const prompt =
+          observation && active?.has(observation as ActiveAcpPrompt)
+            ? (observation as ActiveAcpPrompt)
+            : undefined;
+        const observedRunId =
+          observation?.runId ?? prompt?.startedTurn?.runId ?? observation?.terminalTurn?.runId;
+        if (root && observation && (observedRunId === undefined || observedRunId === root.runId)) {
+          if (isRuntimeHostTerminalTurn(root)) observation.terminalTurn = root;
+          if (prompt) {
+            prompt.startedTurn ??= root;
+            prompt.admissionSettled = true;
+            this.#wake(prompt);
+          }
         }
         if (configuration.metadataRevision === undefined) {
           configuration.metadataRevision = snapshot.session.metadataRevision;
@@ -1038,8 +1059,8 @@ export class AcpSessionRegistry {
               this.#discardedAttachments.has(attachment)
             )
               return;
-            const root = attachment.snapshot.rootTurn;
-            if (root?.turnId === turnId && isRuntimeHostTerminalTurn(root)) {
+            const root = observation.terminalTurn;
+            if (root) {
               await this.#externalObservationContexts.get(sessionId)?.notifyTurnStatus?.({
                 sessionId,
                 turnId,
@@ -1168,6 +1189,7 @@ export class AcpSessionRegistry {
         sourceRuntimeEventHighWater: plan.sourceRuntimeEventHighWater,
       };
     } catch (error) {
+      let failure = error;
       if (observation) {
         observation.startRequestSettled = true;
         observation.admissionSettled ||= !(
@@ -1193,7 +1215,7 @@ export class AcpSessionRegistry {
             sourceRuntimeEventHighWater: plan.sourceRuntimeEventHighWater,
           };
         }
-        throw RequestError.internalError(
+        const admissionError = RequestError.internalError(
           {
             source: 'runtime_host',
             operation: 'turn.resume.start',
@@ -1204,16 +1226,18 @@ export class AcpSessionRegistry {
           },
           'Runtime Host Turn resume admission could not be established',
         );
+        if (!observation.admissionRejected) throw admissionError;
+        failure = admissionError;
       }
       if (observation) {
         observation.dispose();
         this.#removeActivePrompt(observation);
-        attachment?.failTurn(turnId, error);
+        attachment?.failTurn(turnId, failure);
       }
       if (priorContext) this.#externalObservationContexts.set(params.sessionId, priorContext);
       else this.#externalObservationContexts.delete(params.sessionId);
-      if (error instanceof RequestError) throw error;
-      throw requestErrorFromRuntimeHost(error, 'turn.resume.start', { turnId });
+      if (failure instanceof RequestError) throw failure;
+      throw requestErrorFromRuntimeHost(failure, 'turn.resume.start', { turnId });
     } finally {
       context.signal.removeEventListener('abort', onAbort);
     }

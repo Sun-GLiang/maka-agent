@@ -19,6 +19,38 @@
 
 # ACP validation record
 
+## PR6 final review follow-up — September 23, 2026
+
+This follow-up starts at pushed PR #5621 head `813c9557d`. Two further
+regressions were reproduced on that head before editing. When a dispatched
+`turn.resume.start` lost its response and a subsequent `turn.query` returned
+`not_found`, the rejected attempt left a phantom active prompt and blocked an
+idle Session's MCP change. When output delivery for a completed attached Turn
+was held while the next Turn started, the prior Turn's terminal status was
+lost. The initial two formal regression tests failed before the repair and
+pass after it; the terminal-status test was then extended to all three terminal
+states.
+
+The registry now releases the rejected admission's observation and Turn queue
+while preserving its Session, Turn, and source-run identity in the error. A
+still-unknown admission remains observable. Subscription snapshots capture
+terminal status on the matching Turn and run before a newer root replaces it;
+status delivery waits for that Turn's output to finish. Discarded attachments
+and disposed observations remain fenced from late callbacks.
+
+Validation on macOS and Node 24.19.0:
+
+| Check | Result |
+| --- | --- |
+| Full CLI dist suite | 1205 passed, 3 skipped, 0 failed. Includes the rejected resume regression, all three terminal states under blocked output, and official SDK plus real Runtime Host child-process flows. |
+| `npm run build`, workspace typecheck, lint, format, ASF headers and CLI notices | Passed. |
+| Desktop/UI knip and `git diff --check` | Passed. |
+
+The independent terminal-status probe also passes. Its separate MCP probe
+uses an incomplete fixture setup and stops at `mcp_not_ready`; the repository
+regression uses the existing MCP fixture and verifies the resumed idle load.
+The Runtime Host wire protocol is unchanged by this follow-up.
+
 ## PR6 second review follow-up — September 23, 2026
 
 This follow-up starts at pushed PR #5621 head `62eea00ef`. Three additional
