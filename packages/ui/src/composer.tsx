@@ -2597,7 +2597,6 @@ function ExecutorModelPickerBoundary(props: {
       nativeLabel={props.nativeLabel}
       renderProviderMark={props.renderProviderMark}
       nativeThinkingControl={props.nativeThinkingControl}
-      scopeKey={props.scopeKey}
       onPendingChange={props.onPendingChange}
     >
       {props.children}

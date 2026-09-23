@@ -44,6 +44,8 @@ import {
 } from './plugin-runtime.js';
 import { PluginScopeRegistry } from './plugin-scope-registry.js';
 
+const MAX_EXECUTOR_COMPLETION_TEXT_BYTES = 256 * 1024;
+
 declare module './plugin-kernel.js' {
   interface Context {
     readonly executors: PluginExecutorService;
@@ -720,6 +722,8 @@ function isPluginToolResultContent(value: PluginExecutorToolResultContent): bool
 function normalizeResult(result: PluginExecutorResult): PluginExecutorResult {
   if (!result || typeof result !== 'object') throw new TypeError('Executor result is invalid');
   if (result.status === 'completed' && typeof result.text === 'string') {
+    if (Buffer.byteLength(result.text, 'utf8') > MAX_EXECUTOR_COMPLETION_TEXT_BYTES)
+      throw new TypeError('Executor completion text exceeds the size limit');
     return Object.freeze({ status: result.status, text: result.text });
   }
   if (

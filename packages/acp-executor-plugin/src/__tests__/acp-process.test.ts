@@ -23,6 +23,7 @@ import { mkdtemp, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AcpExecutor, type AcpAgentAdapter } from '../index.js';
+import { readWorkspaceTextFile } from '../acp-filesystem.js';
 import { Context } from '@maka/runtime/plugin-kernel';
 import { PluginExecutorService } from '@maka/runtime/plugin-executor-service';
 import { PluginExecutorBackend } from '@maka/runtime/plugin-executor-backend';
@@ -131,6 +132,21 @@ async function fixture() {
     },
   };
 }
+
+test('file read rejects invalid ranges and honors a zero limit', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'maka-acp-read-range-'));
+  try {
+    const path = join(cwd, 'lines.txt');
+    await writeFile(path, 'first\nsecond\nthird');
+    await assert.rejects(() => readWorkspaceTextFile(cwd, path, -3), /positive integer/u);
+    await assert.rejects(() => readWorkspaceTextFile(cwd, path, 0), /positive integer/u);
+    await assert.rejects(() => readWorkspaceTextFile(cwd, path, 1, -1), /non-negative integer/u);
+    assert.equal(await readWorkspaceTextFile(cwd, path, 2, 1), 'second');
+    assert.equal(await readWorkspaceTextFile(cwd, path, undefined, 0), '');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
 
 test('real stdio retains a conversation and returns original question option ids', async () => {
   const f = await fixture();

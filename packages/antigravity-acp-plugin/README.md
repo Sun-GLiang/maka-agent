@@ -67,3 +67,7 @@ The ACP `session/new` request currently passes `mcpServers: []`, so this integra
 forward Maka MCP servers to Antigravity. PR 2 execution acceptance reused an existing Google login;
 it does not establish recovery from expired authentication during a task. Fresh interactive login
 was verified in the PR 1 setup flow.
+
+The first successful model catalog is cached for the lifetime of the executor Entry. Server-side
+model changes without an Entry replacement are not reflected until the Plugin is reloaded. PR 4
+owns catalog invalidation and refresh reconciliation.

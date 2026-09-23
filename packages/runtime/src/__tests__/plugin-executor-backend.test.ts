@@ -56,6 +56,27 @@ test('executor backend converts plugin output and result to ordinary Session eve
   await root.fiber.dispose();
 });
 
+test('oversized executor completion fails without emitting a large text_complete event', async () => {
+  const { root, binding } = fixture(async (_request, context) => {
+    context.emit({ type: 'output_delta', text: 'streamed' });
+    return { status: 'completed', text: 'x'.repeat(256 * 1024 + 1) };
+  });
+  const backend = new PluginExecutorBackend({
+    sessionId: 'session-a',
+    cwd: '/workspace',
+    binding,
+  });
+
+  const events = await collect(backend.send({ turnId: 'turn-a', text: 'task' }));
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ['text_delta', 'error', 'complete'],
+  );
+  assert.match(events[1]?.type === 'error' ? events[1].message : '', /completion text exceeds/u);
+  assert.equal(events[2]?.type === 'complete' ? events[2].stopReason : undefined, 'error');
+  await root.fiber.dispose();
+});
+
 test('executor backend turns stop into abort and terminal events', async () => {
   let started!: () => void;
   const ready = new Promise<void>((resolve) => {

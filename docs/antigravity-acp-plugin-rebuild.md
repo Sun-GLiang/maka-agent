@@ -140,6 +140,6 @@ Session after process loss. PR 4 owns modes, account/directory invalidation and 
 lifecycle. Remote execution, OAuth forwarding, external child orchestration, steering, rollback and
 cross-Agent continuation are not added here.
 
-See [PR 2 acceptance evidence](antigravity-acp-pr2-acceptance.md) for controlled-process coverage,
+See [PR 2 acceptance evidence](archive/antigravity-acp-pr2-acceptance.md) for controlled-process coverage,
 official Agent verification, Desktop verification and the remaining merge gate. The issue's PR 2
 checkbox stays unchecked until the PR is reviewed and merged.

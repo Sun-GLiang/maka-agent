@@ -39,7 +39,6 @@ export interface ExecutorModelPickerProps {
   selection?: ExecutorSelection;
   nativeLabel?: string;
   nativeThinkingControl?: ReactNode;
-  scopeKey?: string;
   onPendingChange?(pending: boolean): void;
   renderProviderMark?(type: ProviderType): ReactNode;
   children?: ReactNode;

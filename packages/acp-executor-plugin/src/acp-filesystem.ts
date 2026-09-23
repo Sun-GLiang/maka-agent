@@ -29,16 +29,20 @@ export async function readWorkspaceTextFile(
   line?: number | null,
   limit?: number | null,
 ): Promise<string> {
+  if (line != null && (!Number.isSafeInteger(line) || line < 1))
+    throw new Error('ACP file line must be a positive integer');
+  if (limit != null && (!Number.isSafeInteger(limit) || limit < 0))
+    throw new Error('ACP file limit must be a non-negative integer');
   const file = await openWorkspaceFile(cwd, path, false);
   try {
     const info = await file.stat();
     if (info.size > MAX_TEXT_FILE_BYTES) throw new Error('ACP text file is too large');
     const text = await file.readFile('utf8');
-    const start = line ? line - 1 : 0;
-    return line || limit
+    const start = line == null ? 0 : line - 1;
+    return line != null || limit != null
       ? text
           .split('\n')
-          .slice(start, limit ? start + limit : undefined)
+          .slice(start, limit == null ? undefined : start + limit)
           .join('\n')
       : text;
   } finally {
