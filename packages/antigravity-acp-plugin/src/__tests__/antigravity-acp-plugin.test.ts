@@ -22,6 +22,7 @@ import { test } from 'node:test';
 import acpPackage from '@maka/acp-executor-plugin';
 import { MakaCompositionLoader } from '@maka/runtime/plugin-composition-loader';
 import { PluginExecutorService } from '@maka/runtime/plugin-executor-service';
+import { PluginStorageService } from '@maka/runtime/plugin-data-services';
 import { Context } from '@maka/runtime/plugin-kernel';
 import pluginPackage, {
   ANTIGRAVITY_ACP_EXECUTOR_ID,
@@ -33,6 +34,7 @@ import pluginPackage, {
 test('adapter registers through a parent ACP Runtime Entry', async () => {
   const root = new Context();
   const executors = new PluginExecutorService(root);
+  new PluginStorageService(root);
   const loader = new MakaCompositionLoader({ root });
   await loader.install(acpPackage);
   await loader.install(pluginPackage);
