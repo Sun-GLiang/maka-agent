@@ -51,6 +51,17 @@ export function mergeTransientMessageProjection(
     ...update,
     // A Message's send time is written once; an update's `ts` must not move it.
     ts: current.ts,
+    // A normal send is painted in the transcript before Host admission. The
+    // local outbox still reports its requested `next_turn` placement while the
+    // Session is idle; that is not evidence of a queued follow-up. Do not move
+    // the already-visible prompt into the composer queue for this brief window.
+    // Explicit steering (pendingSteering) and actual Host queue snapshots are
+    // unaffected; the admission reply can still move a real follow-up there.
+    ...(current.transientPlacement === 'current_turn' && !current.pendingSteering
+      && update.transientPlacement === 'next_turn' && update.deliveryStatus !== undefined
+      && update.hostTurnId === undefined
+      ? { transientPlacement: 'current_turn' as const }
+      : {}),
     ...(update.pendingSteering === undefined && current.pendingSteering !== undefined ? { pendingSteering: current.pendingSteering } : {}),
     ...(!Object.hasOwn(update, 'deliveryStatus') && current.deliveryStatus !== undefined ? { deliveryStatus: current.deliveryStatus } : {}),
     ...(!Object.hasOwn(update, 'deliveryDetail') && current.deliveryDetail !== undefined ? { deliveryDetail: current.deliveryDetail } : {}),

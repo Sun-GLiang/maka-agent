@@ -199,6 +199,33 @@ test('keeps a Host-bound current Turn when a later IPC result has no Turn identi
   });
 });
 
+test('an idle Session first send does not flash as a queued follow-up while local admission is pending', () => {
+  const localOutbox = {
+    ...transient, ts: 9, transientPlacement: 'next_turn' as const,
+    deliveryStatus: 'Sending',
+  };
+  const pending = mergeTransientMessageProjection(transient, localOutbox);
+  assert.equal(pending.transientPlacement, 'current_turn');
+  assert.equal(pending.deliveryStatus, 'Sending');
+  assert.equal(pending.ts, transient.ts);
+  // The Host, not the outbox's requested placement, decides if this was a
+  // follow-up. A real queue update still moves it above the composer.
+  const queued = mergeTransientMessageProjection(pending, {
+    ...localOutbox, deliveryStatus: undefined, transientPlacement: 'next_turn',
+  });
+  assert.equal(queued.transientPlacement, 'next_turn');
+  assert.equal(mergeTransientMessageProjection(queued, localOutbox).transientPlacement, 'next_turn');
+});
+
+test('explicit steering stays in the composer queue during local outbox updates', () => {
+  const steering = { ...transient, pendingSteering: true };
+  const updated = mergeTransientMessageProjection(steering, {
+    ...transient, transientPlacement: 'next_turn', deliveryStatus: 'Sending',
+  });
+  assert.equal(updated.transientPlacement, 'next_turn');
+  assert.equal(updated.pendingSteering, true);
+});
+
 test('keeps a transient message send time when a later update carries a new timestamp', () => {
   const first = { ...transient, ts: 2 };
   const later = { ...transient, ts: 9, text: 'edited text' };
