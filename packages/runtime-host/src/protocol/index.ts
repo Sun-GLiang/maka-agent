@@ -103,9 +103,14 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 179 as const;
-// 179: An opt-in Session capability replacement can require an atomic idle
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 184 as const;
+// 184: An opt-in Session capability replacement can require an atomic idle
 // root check. Older Hosts would ignore that protection during MCP reconfiguration.
+// 183: Jev policy snapshots, set_jev mutation and credential locator require matching peers.
+// 182: Executor catalogs expose structured model families and thinking variant IDs.
+// 181: Canonical executor models and retained provider stop reasons after cancellation.
+// 180: Reject contradictory executor configuration and legacy model targets.
+// 179: Generic executor discovery and confirmed per-Session configuration.
 // 178: WorkHub result turns carry a Host-owned workhub_result origin. Older
 // Clients reject that origin and cannot render the result notification.
 // 177: External Session import input may carry an optional Host-resolved
