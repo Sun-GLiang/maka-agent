@@ -33,6 +33,8 @@ import {
 import type { StoredMessage } from '@maka/core/session';
 import { projectToolArgsPreview } from '@maka/core/tool-quiet-preview';
 import { toolResultActivityStatus } from '@maka/core/tool-result-status';
+import { isCanonicalArtifactEntityId } from '@maka/core/artifacts';
+import { formatAttachmentResourceRef } from '@maka/core/attachments';
 import type { InteractionPendingSnapshot, InteractionSnapshot } from '@maka/runtime-host/protocol';
 import { BoundedChunkBuffer } from '../bounded-chunk-buffer.js';
 import { formatToolResultContent } from '../pi-transcript-format.js';
@@ -95,7 +97,10 @@ interface ToolCallProjection {
 export class AcpToolEventMapper {
   readonly #tools = new Map<string, ToolState>();
   #retainedChars = 0;
-  constructor(readonly notify: (update: SessionUpdate) => Promise<void>) {}
+  constructor(
+    readonly notify: (update: SessionUpdate) => Promise<void>,
+    readonly sessionId?: string,
+  ) {}
 
   async accept(event: ToolEvent): Promise<void> {
     const tool = this.#ensure(event.turnId, event.toolUseId);
@@ -303,16 +308,22 @@ export class AcpToolEventMapper {
       await this.#publish(tool);
     } else {
       tool.authoritative = true;
+      const artifacts = artifactReferences(result, this.sessionId);
+      if (artifacts.length > 0) tool.meta.artifacts = artifacts;
+      const artifactHints = artifacts.map(
+        ({ artifactId, resourceRef }) =>
+          `Artifact ${artifactId}: ${resourceRef} (read with _maka/artifact/query)`,
+      );
       const presentation = bounded(
         formatToolResultContent(result),
-        TOOL_CHARS,
+        TOOL_CHARS - artifactHints.join('\n').length - (artifactHints.length > 0 ? 1 : 0),
         '\n[Result truncated]',
       );
       const raw = JSON.stringify(result);
       tool.meta.resultTruncated = presentation.dropped > 0;
       tool.meta.resultDroppedChars = presentation.dropped;
       await this.#publish(tool, {
-        content: textContent(presentation.text),
+        content: textContent([...artifactHints, presentation.text].join('\n')),
         ...(raw.length <= TOOL_CHARS && presentation.dropped === 0 ? { rawOutput: result } : {}),
       });
     }
@@ -449,6 +460,30 @@ export class AcpToolEventMapper {
     this.#retainedChars += chars - tool.retainedChars;
     tool.retainedChars = chars;
   }
+}
+
+function artifactReferences(
+  result: ToolResultContent,
+  sessionId: string | undefined,
+): { artifactId: string; resourceRef: string }[] {
+  if (!sessionId) return [];
+  const ids: string[] = [];
+  if (
+    result.kind === 'image' &&
+    result.ref.kind === 'session_file' &&
+    result.ref.sessionId === sessionId
+  )
+    ids.push(result.ref.relativePath);
+  if (result.kind === 'archived_tool_result' && result.artifactId) ids.push(result.artifactId);
+  const distinct = [...new Set(ids)].filter(isCanonicalArtifactEntityId);
+  return distinct.map((artifactId) => ({
+    artifactId,
+    resourceRef: formatAttachmentResourceRef({
+      kind: 'session_file',
+      sessionId,
+      relativePath: artifactId,
+    })!,
+  }));
 }
 
 function fixedStateChars(tool: ToolState): number {

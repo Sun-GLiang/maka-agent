@@ -58,7 +58,82 @@ or reconnection without waiting for the Host to become available.
 | Sandbox boundary and client capability approval | Standard `session/request_permission`. The `allow_always` choice explicitly grants only the displayed scope for this Session; `reject_once` denies it. Permission cancellation cancels the Turn. |
 | MCP | Session-owned stdio servers supplied in `session/new.mcpServers`; discovered tools and MCP form continuation use the existing MCP manager and Host capability path. |
 | Tool `permission` | Standard `session/request_permission`. One-shot allow/deny choices are preserved; eligible tool permissions also expose an explicit allow-for-this-Turn choice. Permission cancellation cancels the Turn. |
+| Artifact query, upload, delete | Five concrete private routes include `_maka/artifact/query`, `_maka/artifact/ingest`, and `_maka/artifact/delete`. |
+| Memory query and mutation | `_maka/memory/query` and `_maka/memory/mutate` expose the Host bundle contract. |
 | Load/resume, replacing all MCP configuration, HTTP/SSE/OAuth | Deferred. |
+
+## Artifact and Memory request extensions
+
+These are Maka-specific JSON-RPC requests over the existing ACP connection. The
+params and results are the Runtime Host typed shapes. They are available to
+clients that explicitly call them; ACP v1 does not define standard Artifact or
+Memory capability fields. Only these five method names are registered. Unknown
+methods return `-32601`; malformed params return `-32602`. An optional ACP
+`_meta` object is accepted and omitted before strict Host input validation.
+
+| Method | Accepted `kind` values or input |
+| --- | --- |
+| `_maka/artifact/query` | `list_start`, `list_continue`, `get`, `read_text`, `read_binary`, `read_chunk` |
+| `_maka/artifact/ingest` | `begin`, `chunk`, `commit`, `abort` |
+| `_maka/artifact/delete` | `{ "sessionId": "...", "artifactId": "..." }` |
+| `_maka/memory/query` | `state`, `entries_start`, `entries_continue`, `document_start`, `document_continue` |
+| `_maka/memory/mutate` | `remember`, `propose`, `approve`, `reject`, `set_status`, `reset`, `restore_backup`, `replace_begin`, `replace_chunk`, `replace_commit`, `replace_abort` |
+
+For example, after creating an ACP Session, upload bytes in chunks and read the
+committed Artifact without any Host-local file path:
+
+```json
+{"method":"_maka/artifact/ingest","params":{"kind":"begin","sessionId":"SESSION","uploadId":"CLIENT_UUID","name":"report.bin","mimeType":"application/octet-stream","totalBytes":5,"contentSha256":"sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}
+{"method":"_maka/artifact/ingest","params":{"kind":"chunk","sessionId":"SESSION","uploadId":"CLIENT_UUID","offset":0,"chunkBase64":"aGVsbG8="}}
+{"method":"_maka/artifact/ingest","params":{"kind":"commit","sessionId":"SESSION","uploadId":"CLIENT_UUID"}}
+```
+
+The `committed.attachment.ref` is a `session_file`. Its `relativePath` is
+the canonical `artifactId`. Pass that ID and the same `sessionId` to
+`_maka/artifact/query` with `kind: "get"` or `"read_chunk"`. For a complete
+export, start at `offset: 0`, append decoded `chunkBase64` bytes, and follow
+`nextOffset` until it is `null`. `read_text` and `read_binary` are bounded
+previews and can report failure; they are not complete export methods. List
+continuations retain the returned `revision` and `nextCursor`; a changed
+revision is a domain result that asks the client to start a new scan.
+
+Artifact upload chunks are at most 48 KiB, read chunks at most 32 KiB, and one
+uploaded attachment at most 50 MiB. The Host owns byte staging, checksum and
+offset checks, upload identity, quotas and five-minute upload expiry. An open
+upload is tied to its Host connection. Session close waits for its in-flight
+Artifact requests and aborts known unfinished uploads; EOF closes the shared
+connection and releases Host staging. A completed Artifact remains durable after
+close. On reconnect, a prior upload may be gone; the client must use a new
+upload identity. The adapter never resends an uncertain command. An interrupted
+response reports `request_interrupted` with `reason` and `dispatch`; if
+`dispatch` is `dispatched`, inspect Host state before deciding what to do.
+Protected execution evidence can reject delete with `operation_conflict`.
+
+Real Read-tool image results expose a bounded `_meta.maka.artifacts` entry
+with `artifactId` and `maka://runtime/attachments/...` reference, plus a
+visible read hint. Use the Artifact query route with the card's ACP Session ID
+to fetch it. Result text and raw output remain subject to normal truncation
+and redaction rules; the Artifact bytes are not embedded in the tool card.
+
+Memory queries operate on the Host Memory bundle: `state`, one revision-bound
+page of active/archived/proposal entries, or a 32 KiB document chunk for
+`memory`/`pending`. Continue with the returned revision and cursor. Semantic
+mutations use `expectedRevision`; restore also requires
+`expectedBackupRevision`. The multipart replace route uses Host upload IDs,
+offsets and SHA-256 integrity checks. Domain results such as
+`revision_conflict`, `backup_revision_conflict`, `rejected`, `blocked`,
+`safe_mode`, `missing`, and `revision_changed` remain results, not generic
+JSON-RPC failures. Host `commit_outcome_unknown` remains an operation error;
+clients must query before deciding whether to submit another mutation. A
+session-scoped `remember` or `propose` requires a Session
+owned by this ACP connection. Entry and proposal ID mutations retain the Host's
+bundle-level authorization boundary.
+
+Host policy controls whether Memory can be read or written, including
+`enabled`, `agentReadEnabled` and incognito state. A committed, readable
+entry is added by the Host to a later applicable Turn's model input. It does not
+rewrite a model request already running. The ACP adapter does not assemble
+or inject Memory itself.
 
 The adapter saves the capabilities supplied during `initialize`. Missing form
 capability, unsupported client methods, or invalid answers explicitly fail the

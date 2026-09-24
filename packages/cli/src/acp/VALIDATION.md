@@ -17,7 +17,72 @@
   under the License.
 -->
 
-# PR5 validation record
+# ACP validation record
+
+## PR7 Artifact and Memory extensions (September 24, 2026)
+
+Based on Apache main `0a5b9dc9518089c44d183fc4a623a3681e5e8fc7`.
+The production adapter registers five concrete `_maka/` request routes and
+passes the Host protocol input decoders and typed results through the existing
+lazy ACP Runtime Host connection. No Host wire schema or compatibility epoch
+changed.
+
+The new `acp-artifact-memory-child-process.test.ts` uses the official ACP
+SDK against a real ACP stdio child and a real in-process execution Runtime Host:
+
+- Multipart upload of 102,401 binary bytes, repeated chunk/commit, conflicting
+  offset and checksum, multi-chunk export with byte-for-byte comparison, empty
+  Artifact, 129-item pagination, stale revision, missing-after-delete, and
+  invalid request handling.
+- A real model-driven `tool_search → Read` call on an uploaded image. The
+  terminal tool update includes its canonical Artifact reference; the same
+  ACP client reads back the exact image bytes through the query extension.
+- Memory `remember → state/entries/document query → subsequent prompt`.
+  The captured provider request for the owning Session contains the sentinel;
+  the other Session's request does not. The test also checks stale revision,
+  multipart replace and digest rejection, and closed-Session scope rejection.
+- Policy-disabled Memory and unknown/invalid private methods preserve their
+  explicit domain or JSON-RPC results. SDK requests with valid `_meta` are
+  accepted without leaking metadata into strict Host inputs; malformed `_meta`
+  is rejected.
+- The same ACP connection survives a real Host stop and replacement. Artifact
+  queries work after recovery; an incomplete upload from the old connection
+  returns Host `not_found` instead of continuing with stale bytes. Memory query
+  and Session close remain usable.
+
+The registry unit suite covers close racing an in-flight Artifact begin:
+close waits for its result, aborts staging and opens no subscription. It also
+checks that a dispatched, lost Memory mutation response reports
+`request_interrupted` with `dispatch: dispatched` and is not replayed.
+An Artifact begin whose dispatched response is lost is retained for close-time
+abort.
+
+Verification on this worktree:
+
+| Check | Result |
+| --- | --- |
+| CLI dependency build, CLI build and typecheck | Passed. |
+| Full CLI `test:dist` on the final implementation | 1169 passed, 3 skipped, 0 failed. |
+| Focused Runtime Host Artifact and Memory protocol/coordinator/two-client tests | 30 passed, 0 failed. |
+| Runtime Host execution-model-composition file | 37 passed, 0 failed on isolated rerun. |
+| `npm run lint`, `npm run format:check`, ASF header check | Passed after formatting the final edit. |
+| CLI third-party notices | Passed after applying the repository's dependency patches to the `npm ci --ignore-scripts` tree. |
+| Protocol epoch guard against `0a5b9dc` | Passed; no protocol change, epoch remains 183. |
+
+The first combined Host test run had one timed-out
+`production Host publishes and retires an implementation child patch` case.
+It passed alone and in the complete 37-test execution-model file on rerun.
+The initial notice check was blocked by the unpatched `run` package peer range
+in the local `--ignore-scripts` install; applying the checked-in patches made
+the check pass.
+
+The SDK/child-process tests exercise the production routes, not a mock ACP
+handler. The Runtime Host service runs in the test process, while the ACP
+server runs in a child process. A third-party editor's private-extension UI
+was not smoke-tested; the earlier PR5 Zed record below concerns standard
+tool and permission flow only.
+
+## Historical PR5 validation record
 
 ## Follow-up main refresh
 

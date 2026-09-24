@@ -110,6 +110,164 @@ const DEFAULT_CONFIG_OPTIONS: Array<Extract<SessionConfigOption, { type: 'select
 ];
 
 describe('ACP Session registry', () => {
+  test('does not replay a dispatched Memory mutation after Host connection loss', async () => {
+    let attempts = 0;
+    let connects = 0;
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => 'session-memory',
+      connect: async () => {
+        connects += 1;
+        return fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession('session-memory');
+            if (operation === 'memory.query') return { kind: 'blocked', reason: 'disabled' };
+            if (operation === 'memory.mutate') {
+              attempts += 1;
+              throw new RuntimeHostRequestInterruptedError(
+                'memory.mutate',
+                'command',
+                'dispatched',
+                'connection_lost',
+              );
+            }
+            throw new Error(`Unexpected ${operation}`);
+          },
+        });
+      },
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await assert.rejects(
+        registry.memoryMutate({
+          kind: 'remember',
+          expectedRevision: SESSION_REVISION,
+          title: 'Memory',
+          content: 'Do not replay',
+          scope: { kind: 'session', sessionId: 'session-memory' },
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof RequestError);
+          assert.deepEqual(error.data, {
+            source: 'runtime_host',
+            operation: 'memory.mutate',
+            code: 'request_interrupted',
+            reason: 'connection_lost',
+            dispatch: 'dispatched',
+          });
+          return true;
+        },
+      );
+      assert.equal(attempts, 1);
+      assert.deepEqual(await registry.memoryQuery({ kind: 'state' }), {
+        kind: 'blocked',
+        reason: 'disabled',
+      });
+      assert.equal(connects, 1);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('close aborts a possibly opened Artifact after its dispatched response is lost', async () => {
+    const requests: string[] = [];
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => 'session-lost-upload',
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession('session-lost-upload');
+            if (operation === 'artifact.ingest') {
+              const upload = input as { kind: string; uploadId: string };
+              requests.push(upload.kind);
+              if (upload.kind === 'begin') {
+                throw new RuntimeHostRequestInterruptedError(
+                  'artifact.ingest',
+                  'command',
+                  'dispatched',
+                  'connection_lost',
+                );
+              }
+              return { kind: 'upload_aborted', uploadId: upload.uploadId };
+            }
+            throw new Error(`Unexpected ${operation}`);
+          },
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await assert.rejects(
+        registry.artifactIngest({
+          kind: 'begin',
+          sessionId: 'session-lost-upload',
+          uploadId: 'lost-upload',
+          name: 'x.bin',
+          mimeType: 'application/octet-stream',
+          totalBytes: 0,
+          contentSha256: `sha256:${'0'.repeat(64)}`,
+        }),
+        (error: unknown) =>
+          error instanceof RequestError &&
+          (error.data as { dispatch?: string }).dispatch === 'dispatched',
+      );
+      await registry.close({ sessionId: 'session-lost-upload' });
+      assert.deepEqual(requests, ['begin', 'abort']);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('Session close waits for a dispatched Artifact begin and aborts its staged upload', async () => {
+    const opening = deferred<{ kind: 'upload_opened'; uploadId: string; nextOffset: number }>();
+    const requests: string[] = [];
+    let subscriptionOpens = 0;
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => 'session-artifact',
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession('session-artifact');
+            if (operation === 'artifact.ingest') {
+              const upload = input as { kind: string; uploadId: string };
+              requests.push(upload.kind);
+              if (upload.kind === 'begin') return opening.promise;
+              return { kind: 'upload_aborted', uploadId: upload.uploadId };
+            }
+            throw new Error(`Unexpected ${operation}`);
+          },
+          openSessionSubscription: async () => {
+            subscriptionOpens += 1;
+            throw new Error('Unexpected subscription');
+          },
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      const begin = registry.artifactIngest({
+        kind: 'begin',
+        sessionId: 'session-artifact',
+        uploadId: 'upload-1',
+        name: 'x.bin',
+        mimeType: 'application/octet-stream',
+        totalBytes: 1,
+        contentSha256: `sha256:${'0'.repeat(64)}`,
+      });
+      await waitFor(() => requests.includes('begin'));
+      const close = registry.close({ sessionId: 'session-artifact' });
+      await assertInvalidParams(
+        registry.artifactQuery({ kind: 'list_start', sessionId: 'session-artifact' }),
+        { reason: 'unknown_session' },
+      );
+      assert.deepEqual(requests, ['begin']);
+      opening.resolve({ kind: 'upload_opened', uploadId: 'upload-1', nextOffset: 0 });
+      await begin;
+      await close;
+      assert.deepEqual(requests, ['begin', 'abort']);
+      assert.equal(subscriptionOpens, 0);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
   test('does not connect when disposed before a Session method is used', async () => {
     let connectCalls = 0;
     const registry = new AcpSessionRegistry({
