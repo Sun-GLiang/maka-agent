@@ -96,7 +96,7 @@ describe('Host Client Capability coordinator', () => {
     }
   });
 
-  test('a frozen scoped provider requires its authenticated identity to reconnect', async () => {
+  test('a frozen scoped provider permits equivalent recovery but fences missing or changed configurations', async () => {
     const coordinator = createCoordinator();
     const first = coordinator.attachConnection(clientCapabilityConnectionIdentity('connection-a'), {
       send: async () => {},
@@ -106,6 +106,10 @@ describe('Host Client Capability coordinator', () => {
       {
         send: async () => {},
       },
+    );
+    const foreign = coordinator.attachConnection(
+      clientCapabilityConnectionIdentity('foreign', 'foreign', 'different-principal'),
+      { send: async () => {} },
     );
     const input = {
       ...replacementInput('first', 'inspect'),
@@ -129,11 +133,27 @@ describe('Host Client Capability coordinator', () => {
       assert.deepEqual(await coordinator.bindSession('session-a', 'connection-a'), { ok: true });
       await first.close();
       const rejected = await coordinator.handlers['client.capability.replace'](
-        { ...input, registrationId: 'other' },
+        {
+          ...input,
+          registrationId: 'other-config',
+          sessionConfigurationId: `sha256:${'b'.repeat(64)}`,
+        },
         connectionContext('connection-b'),
       );
       assert.equal(rejected.ok, false);
       if (!rejected.ok) assert.equal(rejected.error.code, 'session_binding_conflict');
+      const missing = await coordinator.handlers['client.capability.replace'](
+        { ...input, registrationId: 'missing-config', sessionConfigurationId: undefined },
+        connectionContext('connection-b'),
+      );
+      assert.equal(missing.ok, false);
+      if (!missing.ok) assert.equal(missing.error.code, 'session_binding_conflict');
+      const foreignAttempt = await coordinator.handlers['client.capability.replace'](
+        { ...input, registrationId: 'foreign' },
+        connectionContext('foreign'),
+      );
+      assert.equal(foreignAttempt.ok, false);
+      if (!foreignAttempt.ok) assert.equal(foreignAttempt.error.code, 'session_binding_conflict');
       const reconnected = coordinator.attachConnection(
         clientCapabilityConnectionIdentity('connection-reconnected', 'connection-a'),
         { send: async () => {} },
@@ -154,6 +174,58 @@ describe('Host Client Capability coordinator', () => {
       } finally {
         await reconnected.close();
       }
+      const equivalent = await coordinator.handlers['client.capability.replace'](
+        { ...input, registrationId: 'equivalent' },
+        connectionContext('connection-b'),
+      );
+      assert.equal(equivalent.ok, true);
+      assert.deepEqual(await coordinator.bindSession('session-a', 'connection-b'), { ok: true });
+      const snapshot = coordinator.snapshotForSession('session-a');
+      assert.deepEqual(snapshot?.registrationIds, ['equivalent']);
+      snapshot?.release();
+    } finally {
+      await first.close();
+      await second.close();
+      await foreign.close();
+      await coordinator.close();
+    }
+  });
+
+  test('a newer connection supersedes scoped publishes from the same provider identity', async () => {
+    const coordinator = createCoordinator();
+    const first = coordinator.attachConnection(
+      clientCapabilityConnectionIdentity('first-connection', 'shared-client'),
+      { send: async () => {} },
+    );
+    const second = coordinator.attachConnection(
+      clientCapabilityConnectionIdentity('second-connection', 'shared-client'),
+      { send: async () => {} },
+    );
+    const publish = (connectionId: string, registrationId: string) =>
+      coordinator.handlers['client.capability.replace'](
+        {
+          ...replacementInput(registrationId, 'inspect'),
+          sessionId: 'session-a',
+          sessionConfigurationId: `sha256:${'a'.repeat(64)}`,
+          offers: replacementInput(registrationId, 'inspect').offers.map((offer) => ({
+            ...offer,
+            hostPathAccess: 'none' as const,
+          })),
+        },
+        connectionContext(connectionId),
+      );
+    try {
+      assert.equal((await publish('first-connection', 'first')).ok, true);
+      assert.equal((await publish('second-connection', 'second')).ok, true);
+      const stale = await publish('first-connection', 'stale');
+      assert.equal(stale.ok, false);
+      if (!stale.ok) assert.equal(stale.error.code, 'invalid_request');
+      assert.deepEqual(await coordinator.bindSession('session-a', 'second-connection'), {
+        ok: true,
+      });
+      const snapshot = coordinator.snapshotForSession('session-a');
+      assert.deepEqual(snapshot?.registrationIds, ['second']);
+      snapshot?.release();
     } finally {
       await first.close();
       await second.close();

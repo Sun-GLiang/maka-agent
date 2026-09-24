@@ -129,6 +129,9 @@ export class AcpSessionEventMapper {
   acceptHistoricalMessage(message: StoredMessage): Promise<void> {
     return this.#enqueue(async () => {
       if (message.type === 'user') {
+        // ACP v1 has no mid-Turn steering update. Live projection omits these
+        // rows, so historical replay must not present them as new user turns.
+        if (message.steeringEventId) return;
         const attachments = message.attachments ?? [];
         const text = [
           userFacingText(message),
@@ -146,8 +149,17 @@ export class AcpSessionEventMapper {
               sessionUpdate: 'user_message_chunk',
               content: { type: 'text', text },
               messageId: message.id,
-              ...(attachments.length
-                ? { _meta: { '_maka/attachments': structuredClone(attachments) } }
+              ...(attachments.length || message.origin
+                ? {
+                    _meta: {
+                      ...(attachments.length
+                        ? { '_maka/attachments': structuredClone(attachments) }
+                        : {}),
+                      ...(message.origin
+                        ? { '_maka/origin': structuredClone(message.origin) }
+                        : {}),
+                    },
+                  }
                 : {}),
             },
           });

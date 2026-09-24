@@ -51,7 +51,11 @@ import {
   type SessionTranscriptBootstrap,
   type SessionTranscriptPageInput,
 } from '@maka/runtime-host/protocol';
-import { AcpSessionRegistry, type AcpSessionRegistryConnection } from '../acp/session-registry.js';
+import {
+  AcpSessionRegistry,
+  type AcpAttachedTurnStatus,
+  type AcpSessionRegistryConnection,
+} from '../acp/session-registry.js';
 
 const SESSION_REVISION = `sha256:${'a'.repeat(64)}` as const;
 const NEW_SESSION_REVISION = `sha256:${'b'.repeat(64)}` as const;
@@ -827,6 +831,61 @@ describe('ACP Session registry', () => {
     }
   });
 
+  test('load waits for an in-flight close before restoring the Session', async () => {
+    const sessionId = 'session-close-then-load';
+    const turnId = 'external-turn';
+    const first = new FakeSubscription(
+      continuitySnapshot(sessionId, { rootTurn: runningTurn(sessionId, turnId) }),
+    );
+    const second = new FakeSubscription(continuitySnapshot(sessionId));
+    const stopStarted = deferred<void>();
+    const stopRelease = deferred<void>();
+    let catalogReads = 0;
+    let opens = 0;
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => sessionId,
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.create') return catalogSession(sessionId);
+            if (operation === 'session.catalog.query') {
+              catalogReads += 1;
+              return { kind: 'session', session: catalogSession(sessionId) };
+            }
+            if (operation === 'turn.stop') {
+              stopStarted.resolve();
+              await stopRelease.promise;
+              first.setRoot(completedTurn(sessionId, turnId));
+              return {};
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => (++opens === 1 ? first : second),
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.resume({ sessionId, cwd: '/workspace' }, promptContext([]));
+      const closing = registry.close({ sessionId });
+      await stopStarted.promise;
+      const readsBeforeLoad = catalogReads;
+      const loading = registry.load(
+        { sessionId, cwd: '/workspace', mcpServers: [] },
+        promptContext([]),
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(catalogReads, readsBeforeLoad);
+      stopRelease.resolve();
+      await closing;
+      await loading;
+      assert.equal(opens, 2);
+      assert.equal(second.closeCalls, 0);
+    } finally {
+      stopRelease.resolve();
+      await registry.dispose();
+    }
+  });
+
   test('load scans every correlated transcript page in order', async () => {
     const sessionId = 'session-paged-load';
     const history: StoredMessage[] = [
@@ -868,6 +927,129 @@ describe('ACP Session registry', () => {
         ['first', 'second', 'third'],
       );
     } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('retry after a partial history delivery resumes without repeating accepted chunks', async () => {
+    const sessionId = 'session-partial-history';
+    const history: StoredMessage[] = [
+      { type: 'user', id: 'first', turnId: 'old-turn', ts: 1, text: 'first' },
+      { type: 'user', id: 'second', turnId: 'old-turn', ts: 2, text: 'second' },
+    ];
+    const subscriptions = [
+      new FakeSubscription(continuitySnapshot(sessionId), Promise.resolve(history)),
+      new FakeSubscription(continuitySnapshot(sessionId), Promise.resolve(history)),
+    ];
+    for (const subscription of subscriptions) subscription.seedBootstrap(history);
+    const delivered: string[] = [];
+    let failSecond = true;
+    let opens = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscriptions[opens++]!,
+        }),
+    });
+    const context = {
+      ...promptContext([]),
+      notify: async (notification: SessionNotification) => {
+        const update = notification.update;
+        if (update.sessionUpdate !== 'user_message_chunk' || update.content.type !== 'text') return;
+        if (update.content.text === 'second' && failSecond) {
+          failSecond = false;
+          throw new Error('Client delivery interrupted');
+        }
+        delivered.push(update.content.text);
+      },
+    };
+    try {
+      await assert.rejects(
+        registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, context),
+      );
+      await registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, context);
+      assert.deepEqual(delivered, ['first', 'second']);
+      assert.equal(opens, 2);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('history replay omits live output already delivered before its gate', async () => {
+    const sessionId = 'session-pre-gate-replay';
+    const turn = runningTurn(sessionId, 'live-turn');
+    const subscription = new FakeSubscription(continuitySnapshot(sessionId, { rootTurn: turn }));
+    const catalogHeld = deferred<void>();
+    const releaseCatalog = deferred<void>();
+    const live: SessionNotification[] = [];
+    const replay: SessionNotification[] = [];
+    let catalogReads = 0;
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.catalog.query') {
+              if (++catalogReads === 2) {
+                catalogHeld.resolve();
+                await releaseCatalog.promise;
+              }
+              return { kind: 'session', session: catalogSession(sessionId) };
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => subscription,
+        }),
+    });
+    try {
+      await registry.resume({ sessionId, cwd: '/workspace' }, promptContext(live));
+      const loading = registry.load(
+        { sessionId, cwd: '/workspace', mcpServers: [] },
+        promptContext(replay),
+      );
+      await catalogHeld.promise;
+      subscription.appendText(turn.turnId, turn.runId, 'hel');
+      await waitFor(() =>
+        live.some(
+          ({ update }) =>
+            update.sessionUpdate === 'agent_message_chunk' &&
+            update.content.type === 'text' &&
+            update.content.text === 'hel',
+        ),
+      );
+      subscription.publishTranscript([
+        {
+          type: 'assistant',
+          id: `message-${turn.turnId}`,
+          turnId: turn.turnId,
+          ts: 2,
+          text: 'hello',
+          modelId: 'test-model',
+        },
+      ]);
+      await waitFor(
+        () =>
+          live
+            .flatMap(({ update }) =>
+              update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text'
+                ? [update.content.text]
+                : [],
+            )
+            .join('') === 'hello',
+      );
+      releaseCatalog.resolve();
+      await loading;
+      assert.deepEqual(
+        replay.filter(({ update }) => update.sessionUpdate === 'agent_message_chunk'),
+        [],
+      );
+    } finally {
+      releaseCatalog.resolve();
+      subscription.setRoot(completedTurn(sessionId, turn.turnId));
       await registry.dispose();
     }
   });
@@ -1434,7 +1616,8 @@ describe('ACP Session registry', () => {
     }
   });
 
-  test('unsupported restored interaction stops its exact Host Turn', async () => {
+  test('unsupported restored interaction leaves its Host Turn pending', async (t) => {
+    t.mock.method(console, 'error', () => undefined);
     const sessionId = 'unsupported-restored',
       turnId = 'restored-turn';
     const turn = runningTurn(sessionId, turnId);
@@ -1458,13 +1641,17 @@ describe('ACP Session registry', () => {
     );
     const statuses: string[] = [];
     const stops: Array<{ sessionId: string; turnId: string; runId: string }> = [];
+    let queries = 0;
     const registry = new AcpSessionRegistry({
       connect: async () =>
         fakeConnection({
           request: async (operation, input) => {
             if (operation === 'session.catalog.query')
               return { kind: 'session', session: catalogSession(sessionId) };
-            if (operation === 'interaction.query') return pending;
+            if (operation === 'interaction.query') {
+              queries += 1;
+              return pending;
+            }
             if (operation === 'turn.stop') {
               stops.push(input as (typeof stops)[number]);
               subscription.setRoot(completedTurn(sessionId, turnId));
@@ -1485,16 +1672,19 @@ describe('ACP Session registry', () => {
           },
         },
       );
-      await waitFor(() => statuses.includes('observation_failed'));
-      await waitFor(() => stops.length === 1);
-      assert.deepEqual(stops, [{ sessionId, turnId, runId: turn.runId }]);
+      await waitFor(() => queries >= 1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(stops, []);
+      assert.deepEqual(statuses, []);
     } finally {
+      subscription.setRoot(completedTurn(sessionId, turnId));
       await registry.dispose();
     }
   });
 
   for (const failure of ['unsupported-method', 'invalid-answer', 'output-failure'] as const) {
-    test(`restored ${failure} stops the adopted Host Turn without answering`, async () => {
+    test(`restored ${failure} leaves the Host Turn pending without answering`, async (t) => {
+      t.mock.method(console, 'error', () => undefined);
       const sessionId = `restored-${failure}`;
       const turnId = `turn-${failure}`;
       const turn = runningTurn(sessionId, turnId);
@@ -1518,6 +1708,7 @@ describe('ACP Session registry', () => {
       );
       let stops = 0,
         answers = 0;
+      let presentations = 0;
       const statuses: string[] = [];
       const registry = new AcpSessionRegistry({
         connect: async () =>
@@ -1546,6 +1737,7 @@ describe('ACP Session registry', () => {
           {
             ...promptContext([]),
             notify: async () => {
+              presentations += 1;
               if (failure === 'output-failure') throw new Error('Output failed');
             },
             notifyTurnStatus: async (status) => {
@@ -1554,6 +1746,7 @@ describe('ACP Session registry', () => {
             interactions: {
               capabilities: { elicitation: { form: {} } },
               createElicitation: async () => {
+                presentations += 1;
                 if (failure === 'unsupported-method')
                   throw RequestError.methodNotFound('elicitation/create');
                 return { action: 'accept' as const, content: { unexpected: 'answer' } };
@@ -1562,10 +1755,13 @@ describe('ACP Session registry', () => {
             },
           },
         );
-        await waitFor(() => statuses.includes('observation_failed'));
-        await waitFor(() => stops === 1);
+        await waitFor(() => presentations >= (failure === 'output-failure' ? 1 : 2));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(stops, 0);
+        assert.deepEqual(statuses, []);
         assert.equal(answers, 0);
       } finally {
+        subscription.setRoot(completedTurn(sessionId, turnId));
         await registry.dispose();
       }
     });
@@ -2356,11 +2552,13 @@ describe('ACP Session registry', () => {
     }
   });
 
-  test('copy keeps revision conflicts and unknown dispatched target identity without retrying', async () => {
+  test('copy retries an unknown dispatch and does not claim an unverified target', async () => {
     const sourceSessionId = 'source-copy-conflict';
     const conflictedId = 'target-copy-conflict';
     const uncertainId = 'target-copy-uncertain';
+    const foreignId = 'target-copy-foreign';
     const operations: string[] = [];
+    let foreignAttempts = 0;
     const registry = new AcpSessionRegistry({
       newSessionId: () => sourceSessionId,
       connect: async () =>
@@ -2376,6 +2574,12 @@ describe('ACP Session registry', () => {
                   'operation_conflict',
                   'Source revision changed',
                 );
+              if (target === foreignId && ++foreignAttempts === 2)
+                throw new RuntimeHostOperationError(
+                  operation,
+                  'operation_conflict',
+                  'Target belongs to another request',
+                );
               throw new RuntimeHostRequestInterruptedError(
                 operation,
                 'command',
@@ -2383,10 +2587,6 @@ describe('ACP Session registry', () => {
                 'connection_lost',
               );
             }
-            if (operation === 'session.catalog.query')
-              return { kind: 'session', session: catalogSession(uncertainId) };
-            if (operation === 'session.configuration.update')
-              return { kind: 'committed', session: catalogSession(uncertainId) };
             throw new Error(`Unexpected operation ${operation}`);
           },
         }),
@@ -2411,18 +2611,88 @@ describe('ACP Session registry', () => {
           error instanceof RequestError &&
           (error.data as { targetSessionId?: string })?.targetSessionId === uncertainId,
       );
+      await assertInvalidParams(
+        registry.setConfigOption({
+          sessionId: uncertainId,
+          configId: 'collaboration_mode',
+          value: 'plan',
+        }),
+        { reason: 'unknown_session' },
+      );
+      await assert.rejects(
+        registry.branch({ ...input, targetSessionId: foreignId }),
+        (error: unknown) =>
+          error instanceof RequestError &&
+          (error.data as { code?: string })?.code === 'operation_conflict',
+      );
+      await assertInvalidParams(
+        registry.setConfigOption({
+          sessionId: foreignId,
+          configId: 'collaboration_mode',
+          value: 'plan',
+        }),
+        { reason: 'unknown_session' },
+      );
+      assert.equal(
+        operations.filter((operation) => operation === 'session.branch.create').length,
+        5,
+      );
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('copy claims a target only after its exact retry confirms a commit', async () => {
+    const sourceSessionId = 'source-copy-retry';
+    const targetSessionId = 'target-copy-retry';
+    let attempts = 0;
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => sourceSessionId,
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession(sourceSessionId);
+            if (operation === 'session.branch.create') {
+              assert.equal((input as { targetSessionId: string }).targetSessionId, targetSessionId);
+              if (++attempts === 1)
+                throw new RuntimeHostRequestInterruptedError(
+                  operation,
+                  'command',
+                  'dispatched',
+                  'connection_lost',
+                );
+              return { kind: 'committed', session: catalogSession(targetSessionId) };
+            }
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(targetSessionId) };
+            if (operation === 'session.configuration.update')
+              return { kind: 'committed', session: catalogSession(targetSessionId) };
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      assert.equal(
+        (
+          await registry.branch({
+            sourceSessionId,
+            targetSessionId,
+            sourceTurnId: 'source-turn',
+            expectedSourceRevision: 1,
+          })
+        ).kind,
+        'committed',
+      );
+      assert.equal(attempts, 2);
       assert.ok(
         (
           await registry.setConfigOption({
-            sessionId: uncertainId,
+            sessionId: targetSessionId,
             configId: 'collaboration_mode',
             value: 'plan',
           })
         ).configOptions.length > 0,
-      );
-      assert.equal(
-        operations.filter((operation) => operation === 'session.branch.create').length,
-        2,
       );
     } finally {
       await registry.dispose();
@@ -3049,6 +3319,58 @@ describe('ACP Session registry', () => {
       ),
     );
     await registry.dispose();
+  });
+
+  test('reports an attached Turn terminal status across a replacement with a successor root', async () => {
+    const sessionId = 'session-replaced-terminal';
+    const turn = runningTurn(sessionId, 'previous-turn');
+    const first = new FakeSubscription(continuitySnapshot(sessionId, { rootTurn: turn }));
+    const replacement = new FakeSubscription(
+      continuitySnapshot(sessionId, { rootTurn: runningTurn(sessionId, 'next-turn') }),
+      Promise.resolve([
+        {
+          type: 'turn_state',
+          id: 'stored-terminal',
+          turnId: turn.turnId,
+          ts: 2,
+          status: 'completed',
+        },
+      ]),
+      'subscription-replaced',
+    );
+    const statuses: AcpAttachedTurnStatus[] = [];
+    const registry = new AcpSessionRegistry({
+      connect: async () =>
+        fakeConnection({
+          request: async (operation) => {
+            if (operation === 'session.catalog.query')
+              return { kind: 'session', session: catalogSession(sessionId) };
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+          openSessionSubscriptionOnce: async () => first,
+          openSessionSubscription: async () => replacement,
+        }),
+    });
+    try {
+      await registry.resume(
+        { sessionId, cwd: '/workspace' },
+        { ...promptContext([]), notifyTurnStatus: async (status) => void statuses.push(status) },
+      );
+      first.fail(new RuntimeHostSubscriptionError('connection_closed', 'Connection was lost'));
+      await waitFor(() => statuses.some((status) => status.turnId === turn.turnId));
+      assert.deepEqual(
+        statuses.find((status) => status.turnId === turn.turnId),
+        {
+          sessionId,
+          turnId: turn.turnId,
+          runId: turn.runId,
+          status: 'completed',
+        },
+      );
+    } finally {
+      replacement.setRoot(completedTurn(sessionId, 'next-turn'));
+      await registry.dispose();
+    }
   });
 
   test('explicit cancellation wins after a notification transport failure', async () => {
@@ -4173,7 +4495,7 @@ describe('ACP Session registry', () => {
       const registry = new AcpSessionRegistry({
         connect: async () =>
           fakeConnection({
-            request: async (operation, input) => {
+            request: async (operation, input, timeoutMs) => {
               if (operation === 'session.create') return catalogSession(sessionId);
               if (operation === 'turn.start') {
                 subscription.setRoot(turn);
@@ -4186,6 +4508,7 @@ describe('ACP Session registry', () => {
                 };
               }
               if (operation === 'turn.stop') {
+                assert.equal(timeoutMs, 30_000);
                 stopInputs.push(input);
                 throw stopFailure;
               }
@@ -6020,7 +6343,7 @@ describe('ACP Session registry', () => {
 
 function fakeConnection(
   overrides: {
-    request?: (operation: string, input: unknown) => Promise<unknown>;
+    request?: (operation: string, input: unknown, timeoutMs?: number) => Promise<unknown>;
     close?: () => Promise<void>;
     thinkingLevels?: readonly ThinkingLevel[];
     openSessionSubscription?: AcpSessionRegistryConnection['openSessionSubscription'];
@@ -6041,10 +6364,10 @@ function fakeConnection(
       listener({ kind: 'connected', hostEpoch: 'host-1', connectionId: 'connection-1' });
       return () => undefined;
     },
-    request: async (operation: string, input: unknown) =>
+    request: async (operation: string, input: unknown, timeoutMs?: number) =>
       operation === 'connection.catalog.query'
         ? connectionCatalogPage(overrides.thinkingLevels ?? THINKING_LEVELS)
-        : (overrides.request?.(operation, input) ?? {}),
+        : (overrides.request?.(operation, input, timeoutMs) ?? {}),
     openSessionSubscription:
       overrides.openSessionSubscription ??
       (async () => {

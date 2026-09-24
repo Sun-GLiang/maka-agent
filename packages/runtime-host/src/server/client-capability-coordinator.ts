@@ -138,6 +138,7 @@ interface SessionCapabilityBinding {
   readonly kind: 'bound' | 'lost';
   readonly providerId: string;
   readonly sessionId?: string;
+  readonly sessionConfigurationId?: string;
 }
 type SessionBindingMode = 'strict' | 'degrade';
 
@@ -553,7 +554,10 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
         providerId: candidate.registration.providerId,
         ...(candidate.registration.sessionId === undefined
           ? {}
-          : { sessionId: candidate.registration.sessionId }),
+          : {
+              sessionId: candidate.registration.sessionId,
+              sessionConfigurationId: candidate.registration.sessionConfigurationId,
+            }),
       });
       selected.push(candidate);
     }
@@ -568,7 +572,10 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
               providerId: candidate.registration.providerId,
               ...(candidate.registration.sessionId === undefined
                 ? {}
-                : { sessionId: candidate.registration.sessionId }),
+                : {
+                    sessionId: candidate.registration.sessionId,
+                    sessionConfigurationId: candidate.registration.sessionConfigurationId,
+                  }),
             });
           } else {
             next.delete(candidate.offer.contractId);
@@ -998,6 +1005,15 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
         };
       }
       const { provider } = connection;
+      if (connection.superseded) {
+        return {
+          ok: false,
+          error: {
+            code: 'invalid_request',
+            message: 'Client Capability connection has been superseded',
+          },
+        };
+      }
       const sessionId = input.sessionId;
       if (sessionId !== undefined) {
         const conflicts = [...this.#providers.values()].some((other) => {
@@ -1011,21 +1027,28 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
           );
         });
         // A disconnected frozen provider cannot silently be replaced either.
-        const lostBinding =
-          input.sessionConfigurationId !== undefined &&
-          [...(this.#sessions.get(sessionId)?.sessionBindings.values() ?? [])].some(
-            (binding) =>
-              binding.sessionId === sessionId &&
-              binding.providerId !== provider.providerId &&
-              !this.#providers.get(binding.providerId)?.sessionRegistrations.has(sessionId),
-          );
+        const lostBinding = [...(this.#sessions.get(sessionId)?.sessionBindings ?? [])].some(
+          ([contractId, binding]) =>
+            binding.sessionId === sessionId &&
+            binding.providerId !== provider.providerId &&
+            !this.#providers.get(binding.providerId)?.sessionRegistrations.has(sessionId) &&
+            !(
+              binding.kind === 'lost' &&
+              provider.principalKind === 'local_owner' &&
+              this.#providers.get(binding.providerId)?.principalId === provider.principalId &&
+              this.#providers.get(binding.providerId)?.principalKind === provider.principalKind &&
+              input.sessionConfigurationId !== undefined &&
+              input.sessionConfigurationId === binding.sessionConfigurationId &&
+              input.offers.some((offer) => capabilityGroupId(offer) === contractId)
+            ),
+        );
         if (conflicts || lostBinding) {
           return {
             ok: false,
             error: {
               code: 'session_binding_conflict',
               message:
-                'Session MCP configuration conflicts with another provider; close its Session attachment before replacing it',
+                'Session MCP configuration conflicts with an active or frozen provider; restore with the same configuration or close the active attachment',
             },
           };
         }
@@ -1040,15 +1063,6 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
           error: {
             code: 'invalid_request',
             message: 'Client Capability Session registration limit reached',
-          },
-        };
-      }
-      if (connection.superseded && input.sessionId === undefined) {
-        return {
-          ok: false,
-          error: {
-            code: 'invalid_request',
-            message: 'Client Capability connection has been superseded',
           },
         };
       }
@@ -1099,7 +1113,14 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
       const previous = this.#currentRegistration(provider, registration.sessionId);
       const previousConnectionId = provider.activeConnectionId;
       if (registration.sessionId !== undefined) {
+        if (previous && previous.connectionId !== context.connectionId) {
+          const previousConnection = this.#connections.get(previous.connectionId);
+          if (previousConnection) previousConnection.superseded = true;
+        }
         provider.sessionRegistrations.set(registration.sessionId, registration);
+        if (registration.sessionConfigurationId !== undefined) {
+          this.#reclaimLostBindings(registration);
+        }
       } else {
         if (previousConnectionId && previousConnectionId !== context.connectionId) {
           const previousConnection = this.#connections.get(previousConnectionId);
@@ -1532,6 +1553,40 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
       }
       if (bindingMapsEqual(state.sessionBindings, next)) continue;
       this.#storeSessionState(sessionId, { ...state, sessionBindings: next });
+    }
+  }
+
+  #reclaimLostBindings(registration: CapabilityRegistration): void {
+    const sessionId = registration.sessionId;
+    if (sessionId === undefined) return;
+    const state = this.#sessions.get(sessionId);
+    if (!state) return;
+    const next = new Map(state.sessionBindings);
+    const previousProviderIds = new Set<string>();
+    for (const [contractId, binding] of state.sessionBindings) {
+      if (
+        binding.kind !== 'lost' ||
+        binding.sessionId !== sessionId ||
+        binding.providerId === registration.providerId ||
+        this.#providers.get(registration.providerId)?.principalKind !== 'local_owner' ||
+        this.#providers.get(binding.providerId)?.principalId !==
+          this.#providers.get(registration.providerId)?.principalId ||
+        this.#providers.get(binding.providerId)?.principalKind !==
+          this.#providers.get(registration.providerId)?.principalKind ||
+        binding.sessionConfigurationId !== registration.sessionConfigurationId ||
+        !registration.offersByContract.has(contractId) ||
+        this.#providers.get(binding.providerId)?.sessionRegistrations.has(sessionId)
+      )
+        continue;
+      previousProviderIds.add(binding.providerId);
+      next.set(contractId, { ...binding, kind: 'bound', providerId: registration.providerId });
+    }
+    if (!bindingMapsEqual(state.sessionBindings, next)) {
+      this.#storeSessionState(sessionId, { ...state, sessionBindings: next });
+      for (const providerId of previousProviderIds) {
+        const previous = this.#providers.get(providerId);
+        if (previous) this.#deleteProviderIfUnused(previous);
+      }
     }
   }
 
@@ -2057,7 +2112,8 @@ function bindingMapsEqual(
       !candidate ||
       candidate.kind !== binding.kind ||
       candidate.providerId !== binding.providerId ||
-      candidate.sessionId !== binding.sessionId
+      candidate.sessionId !== binding.sessionId ||
+      candidate.sessionConfigurationId !== binding.sessionConfigurationId
     ) {
       return false;
     }

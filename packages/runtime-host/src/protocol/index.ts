@@ -106,7 +106,8 @@ export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 185 as const;
 // 185: Session MCP configuration identities fence conflicting providers across ACP clients.
 // 184: An opt-in Session capability replacement can require an atomic idle
-// root check. Older Hosts would ignore that protection during MCP reconfiguration.
+// root check. Older Hosts reject the widened exact input; the epoch prevents
+// mixed-version peers from reaching that command.
 // 183: Jev policy snapshots, set_jev mutation and credential locator require matching peers.
 // 182: Executor catalogs expose structured model families and thinking variant IDs.
 // 181: Canonical executor models and retained provider stop reasons after cancellation.

@@ -71,6 +71,39 @@ describe('ACP Session event mapper', () => {
     });
   }
 
+  test('replay preserves non-user origin and omits unsupported steering rows', async () => {
+    const notifications: SessionNotification[] = [];
+    const mapper = eventMapper(notifications);
+    await mapper.acceptHistoricalMessage({
+      type: 'user',
+      id: 'scheduled',
+      turnId: 'turn-1',
+      ts: 1,
+      text: 'Run the report',
+      origin: { kind: 'scheduled_task', scheduledTaskId: 'schedule-1' },
+    });
+    await mapper.acceptHistoricalMessage({
+      type: 'user',
+      id: 'steering',
+      turnId: 'turn-1',
+      ts: 2,
+      text: 'Continue',
+      steeringEventId: 'steering-event',
+    });
+    await mapper.flush();
+    assert.deepEqual(
+      notifications.map(({ update }) => update),
+      [
+        {
+          sessionUpdate: 'user_message_chunk',
+          messageId: 'scheduled',
+          content: { type: 'text', text: 'Run the report' },
+          _meta: { '_maka/origin': { kind: 'scheduled_task', scheduledTaskId: 'schedule-1' } },
+        },
+      ],
+    );
+  });
+
   test('streams text and thinking while deduplicating matching completion events', async () => {
     const notifications: SessionNotification[] = [];
     const mapper = eventMapper(notifications);

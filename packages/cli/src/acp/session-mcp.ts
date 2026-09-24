@@ -296,7 +296,7 @@ export class AcpSessionMcp {
             sessionId: this.#sessionId,
             code: 'session_binding_conflict',
           },
-          'Session MCP configuration conflicts with another provider; close its Session attachment before replacing it',
+          'Session MCP configuration conflicts with an active or frozen provider; restore with the same configuration or close the active attachment',
         );
       }
       if (

@@ -94,6 +94,8 @@ const ACP_SESSION_CURSOR_MAX_BYTES = 8 * 1024;
 const ADMISSION_QUERY_MAX_ATTEMPTS = 5;
 const ADMISSION_QUERY_TIMEOUT_MS = 1_000;
 const ADMISSION_QUERY_RETRY_MS = 25;
+const TURN_STOP_TIMEOUT_MS = 30_000;
+const COPY_RECONCILIATION_TIMEOUT_MS = 30_000;
 const UNAVAILABLE_INTERACTION_CLIENT: AcpInteractionClient = {
   capabilities: {},
   requestPermission: async () => {
@@ -168,6 +170,11 @@ interface AcpAttachmentConfiguration {
   delivery?: Promise<void>;
 }
 
+interface HistoryReplayDelivery {
+  readonly textByMessage: Map<string, string>;
+  readonly otherUpdates: Set<string>;
+}
+
 interface AcpExternalContextLease {
   readonly context: AcpLoadContext;
   previous?: AcpExternalContextLease;
@@ -203,6 +210,7 @@ export class AcpSessionRegistry {
   readonly #sessionLoadTails = new Map<string, Promise<unknown>>();
   readonly #sessionLoadControllers = new Map<string, AbortController>();
   readonly #historyReplays = new Set<string>();
+  readonly #historyReplayDelivery = new Map<string, HistoryReplayDelivery>();
   #connection: AcpSessionRegistryConnection | undefined;
   #connectTask: Promise<AcpSessionRegistryConnection> | undefined;
   #connectAbortController: AbortController | undefined;
@@ -227,6 +235,8 @@ export class AcpSessionRegistry {
     this.#assertOpen('subscription.open');
     validateNewSessionParams(params);
     const mcpConfig = createAcpMcpConfig(params);
+    await this.#sessionCloseTasks.get(params.sessionId)?.catch(() => undefined);
+    this.#assertOpen('subscription.open');
     const generation = this.#sessionCloseGenerations.get(params.sessionId) ?? 0;
     return this.#track(
       this.#queueLoad(params.sessionId, () =>
@@ -242,6 +252,8 @@ export class AcpSessionRegistry {
     this.#assertOpen('subscription.open');
     validateNewSessionParams(params);
     const mcpConfig = createAcpMcpConfig({ ...params, mcpServers: params.mcpServers ?? [] });
+    await this.#sessionCloseTasks.get(params.sessionId)?.catch(() => undefined);
+    this.#assertOpen('subscription.open');
     const generation = this.#sessionCloseGenerations.get(params.sessionId) ?? 0;
     return this.#track(
       this.#queueLoad(params.sessionId, () =>
@@ -388,6 +400,7 @@ export class AcpSessionRegistry {
     );
     this.#sessionLoadControllers.get(params.sessionId)?.abort();
     this.#ownedSessionIds.delete(params.sessionId);
+    this.#historyReplayDelivery.delete(params.sessionId);
     const configuration = this.#attachmentConfigurations.get(params.sessionId);
     const delivery = configuration?.delivery;
     this.#attachmentConfigurations.delete(params.sessionId);
@@ -419,6 +432,7 @@ export class AcpSessionRegistry {
       notify: async (notification) => {
         if (!this.#closing && this.#ownedSessionIds.has(params.sessionId)) {
           await context.notify(notification);
+          this.#recordLiveHistoryDelivery(params.sessionId, notification);
         }
       },
     });
@@ -601,11 +615,11 @@ export class AcpSessionRegistry {
     this.#attachmentInteractions.get(root.sessionId)?.cancelTurn(root.turnId);
     return (
       this.#connection
-        ?.request('turn.stop', {
-          sessionId: root.sessionId,
-          turnId: root.turnId,
-          runId: root.runId,
-        })
+        ?.request(
+          'turn.stop',
+          { sessionId: root.sessionId, turnId: root.turnId, runId: root.runId },
+          TURN_STOP_TIMEOUT_MS,
+        )
         .then(() => undefined) ?? Promise.resolve()
     );
   }
@@ -640,11 +654,11 @@ export class AcpSessionRegistry {
         const connection = this.#connection;
         if (!connection) return;
         try {
-          await connection.request('turn.stop', {
-            sessionId: root.sessionId,
-            turnId: root.turnId,
-            runId: root.runId,
-          });
+          await connection.request(
+            'turn.stop',
+            { sessionId: root.sessionId, turnId: root.turnId, runId: root.runId },
+            TURN_STOP_TIMEOUT_MS,
+          );
         } catch (error) {
           console.error('[acp] Host Stop delivery failed:', error);
           throw error;
@@ -806,6 +820,10 @@ export class AcpSessionRegistry {
       onFailure: (pending, error) => {
         const observation = this.#observation(sessionId, pending.turnId);
         if (observation?.attachment) {
+          if (!(observation instanceof AcpAdmittedTurnObservation)) {
+            console.error('[acp] Attached interaction presentation failed:', error);
+            return;
+          }
           observation.projectionFailure ??= error;
           observation.attachment.failTurn(observation.turnId, error);
         } else if (!attachment) failAttachment(error);
@@ -1106,6 +1124,7 @@ export class AcpSessionRegistry {
         const current = this.#externalObservationContexts.get(sessionId);
         if (!this.#closing && this.#ownedSessionIds.has(sessionId) && current) {
           await current.notify(notification);
+          this.#recordLiveHistoryDelivery(sessionId, notification);
         }
       },
     });
@@ -1139,13 +1158,17 @@ export class AcpSessionRegistry {
             )
               return;
             const root = observation.terminalTurn;
-            if (root) {
+            const outcome = root ?? observation.terminalOutcome;
+            const runId = root?.runId ?? observation.runId;
+            if (outcome && runId) {
               await this.#externalObservationContexts.get(sessionId)?.notifyTurnStatus?.({
                 sessionId,
                 turnId,
-                runId: root.runId,
-                status: root.status,
-                ...(root.status === 'failed' ? { failureClass: root.failureClass } : {}),
+                runId,
+                status: outcome.status,
+                ...(outcome.status === 'failed'
+                  ? { failureClass: outcome.failureClass ?? 'runtime_error' }
+                  : {}),
               });
             }
           },
@@ -1364,11 +1387,21 @@ export class AcpSessionRegistry {
         error.dispatch === 'dispatched' &&
         !this.#closing
       ) {
-        this.#ownedSessionIds.add(params.targetSessionId);
+        // The target ID alone is not proof of ownership: a lost response may
+        // have been an operation_conflict with another caller's target. The
+        // Host's exact copy request is idempotent by target and fingerprint.
+        try {
+          result = await connection.request(operation, params, COPY_RECONCILIATION_TIMEOUT_MS);
+        } catch (reconciliationError) {
+          throw requestErrorFromRuntimeHost(reconciliationError, operation, {
+            targetSessionId: params.targetSessionId,
+          });
+        }
+      } else {
+        throw requestErrorFromRuntimeHost(error, operation, {
+          targetSessionId: params.targetSessionId,
+        });
       }
-      throw requestErrorFromRuntimeHost(error, operation, {
-        targetSessionId: params.targetSessionId,
-      });
     }
     if (result.kind === 'committed' && !this.#closing) {
       this.#ownedSessionIds.add(params.targetSessionId);
@@ -1394,6 +1427,7 @@ export class AcpSessionRegistry {
       );
       this.#sessionLoadControllers.get(params.targetSessionId)?.abort();
       this.#ownedSessionIds.delete(params.targetSessionId);
+      this.#historyReplayDelivery.delete(params.targetSessionId);
       this.#externalObservationContexts.delete(params.targetSessionId);
       this.#externalContextLeases.delete(params.targetSessionId);
       for (const observation of this.#turnObservations.get(params.targetSessionId)?.values() ??
@@ -1554,6 +1588,13 @@ export class AcpSessionRegistry {
     if ((this.#sessionCloseGenerations.get(params.sessionId) ?? 0) !== requestedGeneration) {
       throw unknownSessionError();
     }
+    const replayDelivery = replayHistory
+      ? (this.#historyReplayDelivery.get(params.sessionId) ?? {
+          textByMessage: new Map<string, string>(),
+          otherUpdates: new Set<string>(),
+        })
+      : undefined;
+    if (replayDelivery) this.#historyReplayDelivery.set(params.sessionId, replayDelivery);
     const loadController = new AbortController();
     this.#sessionLoadControllers.set(params.sessionId, loadController);
     const lifetime = AbortSignal.any([
@@ -1689,7 +1730,8 @@ export class AcpSessionRegistry {
             if (!mapper) {
               mapper = new AcpSessionEventMapper({
                 sessionId: params.sessionId,
-                notify: context.notify,
+                notify: (notification) =>
+                  this.#deliverHistoryNotification(notification, context.notify, replayDelivery!),
                 signal: lifetime,
               });
               mappers.set(message.turnId, mapper);
@@ -1709,6 +1751,7 @@ export class AcpSessionRegistry {
       }
       restoreContext.commit();
       restoreClient?.commit();
+      if (replayHistory) this.#historyReplayDelivery.delete(params.sessionId);
       return { configOptions };
     } catch (error) {
       const sharedAttachment =
@@ -1763,6 +1806,49 @@ export class AcpSessionRegistry {
         observation.releaseLive();
       }
     }
+  }
+
+  #recordLiveHistoryDelivery(sessionId: string, notification: SessionNotification): void {
+    const delivery = this.#historyReplayDelivery.get(sessionId);
+    if (!delivery) return;
+    const chunk = historyTextChunk(notification);
+    if (chunk) {
+      delivery.textByMessage.set(
+        chunk.key,
+        (delivery.textByMessage.get(chunk.key) ?? '') + chunk.text,
+      );
+    } else {
+      delivery.otherUpdates.add(JSON.stringify(notification.update));
+    }
+  }
+
+  async #deliverHistoryNotification(
+    notification: SessionNotification,
+    notify: AcpPromptContext['notify'],
+    delivery: HistoryReplayDelivery,
+  ): Promise<void> {
+    const chunk = historyTextChunk(notification);
+    if (chunk) {
+      const previous = delivery.textByMessage.get(chunk.key) ?? '';
+      const text = chunk.text.startsWith(previous) ? chunk.text.slice(previous.length) : chunk.text;
+      if (!text) return;
+      await notify({
+        ...notification,
+        update: {
+          ...notification.update,
+          content: { type: 'text', text },
+        },
+      } as SessionNotification);
+      delivery.textByMessage.set(
+        chunk.key,
+        chunk.text.startsWith(previous) ? chunk.text : previous + chunk.text,
+      );
+      return;
+    }
+    const key = JSON.stringify(notification.update);
+    if (delivery.otherUpdates.has(key)) return;
+    await notify(notification);
+    delivery.otherUpdates.add(key);
   }
 
   #queueLoad<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
@@ -1978,6 +2064,7 @@ export class AcpSessionRegistry {
       ...configurations.map(({ tail }) => tail),
     ]);
     this.#ownedSessionIds.clear();
+    this.#historyReplayDelivery.clear();
   }
 
   #closeOwnedConnection(): Promise<void> {
@@ -2282,4 +2369,18 @@ function assertBoundedAbsoluteCwd(cwd: string): void {
 function isoTimestamp(timestamp: number): string | undefined {
   const date = new Date(timestamp);
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function historyTextChunk(
+  notification: SessionNotification,
+): { key: string; text: string } | undefined {
+  const update = notification.update;
+  if (
+    update.sessionUpdate !== 'user_message_chunk' &&
+    update.sessionUpdate !== 'agent_message_chunk' &&
+    update.sessionUpdate !== 'agent_thought_chunk'
+  )
+    return;
+  if (update.content.type !== 'text' || !update.messageId) return;
+  return { key: `${update.sessionUpdate}:${update.messageId}`, text: update.content.text };
 }

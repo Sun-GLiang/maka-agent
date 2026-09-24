@@ -38,6 +38,7 @@ export class AcpTurnObservation {
   transcript?: ReturnType<RuntimeHostSessionChannel['trackPromptTranscript']>;
   projectionFailure?: unknown;
   terminalTurn?: RuntimeHostTerminalTurn;
+  terminalOutcome?: { status: 'completed' | 'failed' | 'cancelled'; failureClass?: string };
   /** Keep the Host transport alive until a requested Stop has settled. */
   stopTask?: Promise<void>;
   cancelled = false;
@@ -129,8 +130,15 @@ export class AcpTurnObservation {
     try {
       for await (const event of events) {
         await this.#waitForLive();
-        if (event.type === 'abort') terminalStatus = 'cancelled';
-        else if (event.type === 'error' && !event.recoverable) terminalStatus = 'failed';
+        if (event.type === 'abort') {
+          terminalStatus = 'cancelled';
+          this.terminalOutcome = { status: 'cancelled' };
+        } else if (event.type === 'error' && !event.recoverable) {
+          terminalStatus = 'failed';
+          this.terminalOutcome = { status: 'failed', failureClass: event.reason };
+        } else if (event.type === 'complete') {
+          this.terminalOutcome = { status: 'completed' };
+        }
         if (terminalStatus !== 'completed') this.reconciliationAbort.abort();
         if (!this.cancelled) await this.mapper.accept(event);
       }

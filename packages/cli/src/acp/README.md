@@ -69,8 +69,10 @@ or reconnection without waiting for the Host to become available.
 | HTTP/SSE/OAuth MCP | Deferred. |
 
 The adapter saves the capabilities supplied during `initialize`. Missing form
-capability, unsupported client methods, or invalid answers explicitly fail the
-affected prompt and stop its exact Host Turn. Host owns interaction closure and
+capability, unsupported client methods, or invalid answers explicitly fail a
+locally admitted prompt and stop its exact Host Turn. For an attached Turn,
+presentation failure leaves the Host interaction pending for a capable client.
+Host owns interaction closure and
 the canonical answer, including externally answered or replayed requests. Client
 requests are fenced by Session, interaction, Turn/run, and attachment lifetime;
 cancel and EOF release local waits even when the client never responds.
@@ -194,12 +196,12 @@ Different Sessions can use the same server/tool names with different processes.
 For the same Session, ACP publishes a SHA-256 identity of the complete normalized
 MCP configuration. Host atomically rejects a second provider with a different
 identity, including an empty configuration, before changing registration state.
-Load/resume reports `error.data.code: session_binding_conflict`; close the other
-client's Session attachment before retrying the replacement. Equivalent
-configurations remain attachable, including live permission restoration; Host
-retains its existing provider binding. A disconnected frozen provider must
-reconnect under the same authenticated identity rather than being silently
-replaced by another client. This optional wire field and its typed conflict use
+Load/resume reports `error.data.code: session_binding_conflict` for incompatible
+configurations; restore with the same configuration or close an active conflicting
+attachment. Equivalent configurations remain attachable, including live permission
+restoration. A disconnected frozen Session binding can be reclaimed by another
+local-owner connection of the same authenticated principal with the same complete configuration
+and contract set. This optional wire field and its typed conflict use
 Host compatibility epoch 185.
 Registration replacement, unregister, disconnection and invocation routing respect
 the target Session and owning connection. A default registration and its target
