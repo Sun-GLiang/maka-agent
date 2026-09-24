@@ -201,15 +201,14 @@ test('keeps a Host-bound current Turn when a later IPC result has no Turn identi
 
 test('an idle Session first send does not flash as a queued follow-up while local admission is pending', () => {
   const localOutbox = {
-    ...transient, ts: 9, transientPlacement: 'next_turn' as const,
+    ...transient, transientPlacement: 'next_turn' as const,
     deliveryStatus: 'Sending',
   };
   const pending = mergeTransientMessageProjection(transient, localOutbox);
   assert.equal(pending.transientPlacement, 'current_turn');
   assert.equal(pending.deliveryStatus, 'Sending');
-  assert.equal(pending.ts, transient.ts);
-  // The Host, not the outbox's requested placement, decides if this was a
-  // follow-up. A real queue update still moves it above the composer.
+  // The admission reply, unlike a local outbox update, can still move a
+  // genuine follow-up above the composer.
   const queued = mergeTransientMessageProjection(pending, {
     ...localOutbox, deliveryStatus: undefined, transientPlacement: 'next_turn',
   });

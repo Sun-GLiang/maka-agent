@@ -132,7 +132,7 @@ test('first-send outbox updates keep the prompt in ChatView without mounting a p
       'the first prompt remains in the transcript');
   }
 
-  // A Host-confirmed follow-up must still mount the same real Composer plate.
+  // A follow-up admitted without a local delivery status still mounts the plate.
   const queued = mergeTransientMessageProjection(sending, {
     ...localOutbox, deliveryStatus: undefined,
   });
