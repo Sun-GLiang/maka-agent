@@ -21,7 +21,7 @@
 
 ## PR6 main integration and admission cleanup — September 24, 2026
 
-Merged Apache `main` at `fef5b937a` into PR #5621. The only textual conflict was
+Merged Apache `main` at `fb9df6c3d` into PR #5621. The only textual conflict was
 the Runtime Host compatibility epoch: `main` had reached 183 and had assigned
 179 to a different change. The merged protocol uses 184 for the ACP Session
 capability replacement guard. The two compatible-change declarations introduced
@@ -36,18 +36,19 @@ Validation on macOS and Node 24.19.0 after the merge and initializer change:
 | `npm ci`, `npm run build`, `npm run typecheck`, `npm run lint`, `npm run format:check` | Passed. |
 | Full CLI dist suite | 1208 passed, 3 skipped, 0 failed; includes official ACP SDK child-process tests with a real Runtime Host. |
 | Full Runtime Host dist suite | 2090 passed, 12 skipped, 0 failed. |
-| Full Desktop dist suite | 2824 passed, 0 failed. |
-| Protocol epoch guard against `fef5b937a` and guard tests | Passed: 183 to 184; 17 tests passed. |
+| Full Desktop dist suite | 2841 passed, 0 failed. |
+| Protocol epoch guard against `fb9df6c3d` and guard tests | Passed: 183 to 184; 17 tests passed. |
 | Desktop/UI knip, ASF headers, CLI third-party notices, `git diff --check` | Passed. |
-| Full Desktop Electron E2E | 33 passed, 1 failed: Side Chat `page.screenshot({ fullPage: true })` timed out after its preceding behavior assertions passed. |
-| Focused Side Chat E2E retry | Passed on the merged PR tree; the same focused test also passed on `fef5b937a`. |
+| Full Desktop Electron E2E | 34 passed, 0 failed. |
 
-The full Desktop E2E run is not claimed as passing. The screenshot timeout did
-not reproduce in the focused retry, so these runs do not establish an ACP
-regression or a clean full E2E result. The earlier Zed smoke below was on an
-older PR6 head; no Zed result is claimed for this merged head. Current-head
-ACP create/load/resume and interrupted-Turn coverage comes from the official
-SDK tests against a real Host in the CLI suite.
+An earlier full E2E run on an intermediate merge at `fef5b937a` passed 33/34:
+Side Chat `page.screenshot({ fullPage: true })` timed out after its preceding
+behavior assertions passed. The focused retry passed on that tree, and the
+same focused test passed on the `fef5b937a` baseline. The later full run on
+`fb9df6c3d` passed 34/34. The earlier Zed smoke below was on an older PR6
+head; no Zed result is claimed for this merged head. Current-head ACP
+create/load/resume and interrupted-Turn coverage comes from the official SDK
+tests against a real Host in the CLI suite.
 
 ## PR6 final review follow-up — September 23, 2026
 
