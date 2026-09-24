@@ -132,9 +132,10 @@ test('first-send outbox updates keep the prompt in ChatView without mounting a p
       'the first prompt remains in the transcript');
   }
 
-  // A follow-up admitted without a local delivery status still mounts the plate.
+  // The admission reply omits deliveryStatus; the inherited local status must
+  // not keep a genuine follow-up in the transcript.
   const queued = mergeTransientMessageProjection(sending, {
-    ...localOutbox, deliveryStatus: undefined,
+    ...OPTIMISTIC_BUBBLE, transientPlacement: 'next_turn', pendingSteering: false,
   });
   assert.ok(render(queued).querySelector('.maka-composer-queue')?.textContent
     ?.includes(OPTIMISTIC_BUBBLE.text));

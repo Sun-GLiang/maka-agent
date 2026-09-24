@@ -210,9 +210,10 @@ test('an idle Session first send does not flash as a queued follow-up while loca
   // The admission reply, unlike a local outbox update, can still move a
   // genuine follow-up above the composer.
   const queued = mergeTransientMessageProjection(pending, {
-    ...localOutbox, deliveryStatus: undefined, transientPlacement: 'next_turn',
+    ...transient, transientPlacement: 'next_turn', pendingSteering: false,
   });
   assert.equal(queued.transientPlacement, 'next_turn');
+  assert.equal(queued.deliveryStatus, 'Sending');
   assert.equal(mergeTransientMessageProjection(queued, localOutbox).transientPlacement, 'next_turn');
 });
 
