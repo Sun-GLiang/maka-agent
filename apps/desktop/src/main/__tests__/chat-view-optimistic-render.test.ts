@@ -19,15 +19,18 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { type ComponentProps, createElement } from 'react';
+import { type ComponentProps, type ReactNode, createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { parseHTML } from 'linkedom';
 import {
   AstryxLocaleProvider,
   ChatSurfaceLayout,
   ChatView,
+  Composer,
   LocaleProvider,
   type TransientUserMessageProjection,
 } from '@maka/ui';
+import { mergeTransientMessageProjection } from '../../renderer/application/contracts/transient-message-projection.js';
 
 // A side conversation forks lazily: its first send arms the optimistic bubble
 // (and, after the delay, the running-status line) BEFORE the fork commits, so
@@ -36,8 +39,9 @@ import {
 // #4654 that the hook-only tests could not prove. The panel wires it up:
 // `activeSession={companion.companionSession}` (undefined pre-fork) and
 // `transientMessages`/`runningStatus` from the same hook.
-function renderNoSessionChatView(
+function renderChatView(
   props: Partial<ComponentProps<typeof ChatView>>,
+  composer: ReactNode = null,
 ): string {
   const view = createElement(ChatView, {
     messages: [],
@@ -53,7 +57,7 @@ function renderNoSessionChatView(
     ...props,
   } as ComponentProps<typeof ChatView>);
   const layout = createElement(ChatSurfaceLayout, {
-    composer: null,
+    composer,
     children: view,
   });
   const astryx = createElement(AstryxLocaleProvider, { children: layout });
@@ -70,7 +74,7 @@ const OPTIMISTIC_BUBBLE: TransientUserMessageProjection = {
 };
 
 test('ChatView renders the optimistic bubble and running status before a session exists', () => {
-  const markup = renderNoSessionChatView({
+  const markup = renderChatView({
     transientMessages: [OPTIMISTIC_BUBBLE],
     activeTurn: { turnId: 'turn-1' },
   });
@@ -83,7 +87,7 @@ test('ChatView renders the optimistic bubble and running status before a session
 });
 
 test('ChatView shows the empty state when there is neither a bubble nor a running turn', () => {
-  const markup = renderNoSessionChatView({
+  const markup = renderChatView({
     transientMessages: [],
     activeTurn: undefined,
   });
@@ -92,4 +96,46 @@ test('ChatView shows the empty state when there is neither a bubble nor a runnin
   // The empty state (onboarding surface / hero) must still render — the empty
   // optimistic fragments must not suppress it.
   assert.match(markup, /empty-state-marker/);
+});
+
+test('first-send outbox updates keep the prompt in ChatView without mounting a pending plate', () => {
+  const localOutbox: TransientUserMessageProjection = {
+    ...OPTIMISTIC_BUBBLE,
+    transientPlacement: 'next_turn',
+    deliveryStatus: 'Sending',
+  };
+  const sending = mergeTransientMessageProjection(OPTIMISTIC_BUBBLE, localOutbox);
+  const admitted = mergeTransientMessageProjection(sending, {
+    ...localOutbox,
+    transientPlacement: 'current_turn',
+    hostTurnId: 'host-turn',
+    deliveryStatus: 'Accepted',
+  });
+  const render = (message: TransientUserMessageProjection) => parseHTML(renderChatView({
+    activeSession: {
+      id: 'session-1', name: 'pending', status: 'active', backend: 'ai-sdk',
+      labels: [], isFlagged: false, isArchived: false, hasUnread: false,
+      llmConnectionSlug: 'conn', connectionLocked: false, model: 'model', permissionMode: 'ask',
+    },
+    transientMessages: [message],
+  }, createElement(Composer, {
+    pendingMessages: [message], onSend() {}, onStop() {},
+  }))).document;
+
+  // Render every admission phase independently: a settled-only assertion
+  // would miss the provisional outbox update that used to mount the plate.
+  for (const message of [OPTIMISTIC_BUBBLE, sending, admitted]) {
+    const document = render(message);
+    assert.equal(Boolean(document.querySelector('.maka-composer-queue')), false,
+      `no pending plate during ${message.deliveryStatus ?? 'optimistic send'}`);
+    assert.ok(document.querySelector('.maka-user-message')?.textContent?.includes(OPTIMISTIC_BUBBLE.text),
+      'the first prompt remains in the transcript');
+  }
+
+  // A Host-confirmed follow-up must still mount the same real Composer plate.
+  const queued = mergeTransientMessageProjection(sending, {
+    ...localOutbox, deliveryStatus: undefined,
+  });
+  assert.ok(render(queued).querySelector('.maka-composer-queue')?.textContent
+    ?.includes(OPTIMISTIC_BUBBLE.text));
 });

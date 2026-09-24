@@ -85,11 +85,11 @@ test('right workbar visibility belongs to each Session and survives reload', asy
   await expect(panel).toBeHidden();
 });
 
-test('the first send flashes neither the collapsed workbar nor the pending message plate', async ({
+test('a collapsed workbar never flashes during the first send', async ({
   window: page,
 }) => {
   await page.evaluate(() => {
-    const watch = { visibleRightWorkbar: false, pendingPlateText: [] as string[] };
+    const watch = { visibleRightWorkbar: false };
     const inspect = () => {
       const panel = document.querySelector<HTMLElement>(
         '.maka-session-workbar[data-placement="right"]',
@@ -100,11 +100,6 @@ test('the first send flashes neither the collapsed workbar nor the pending messa
         panel.getBoundingClientRect().width > 0
       ) {
         watch.visibleRightWorkbar = true;
-      }
-      for (const plate of document.querySelectorAll<HTMLElement>('.maka-composer-queue')) {
-        if (getComputedStyle(plate).display !== 'none' && plate.getBoundingClientRect().height > 0) {
-          watch.pendingPlateText.push(plate.textContent ?? '');
-        }
       }
     };
     const observer = new MutationObserver(inspect);
@@ -130,25 +125,22 @@ test('the first send flashes neither the collapsed workbar nor the pending messa
   });
 
   const composer = page.locator(COMPOSER_INPUT);
-  const prompt = 'create a session without opening the workbar';
-  await composer.fill(prompt);
+  await composer.fill('create a session without opening the workbar');
   await page.getByRole('button', { name: '发送' }).click();
   const expandWorkbar = page.getByRole('button', { name: '展开任务工作栏' });
-  await expect(expandWorkbar).toBeVisible({ timeout: 20_000 });
-  // Wait for Host admission: checking only after the session becomes visible
-  // would miss the outbox's short-lived pending plate.
-  await expect(page.getByText(`Fake backend received: ${prompt}`)).toBeVisible({ timeout: 20_000 });
+  await expect(expandWorkbar).toBeVisible({
+    timeout: 20_000,
+  });
 
   const watch = await page.evaluate(() => {
     const target = window as typeof window & {
-      __makaFirstSendWorkbarWatch?: { visibleRightWorkbar: boolean; pendingPlateText: string[] };
+      __makaFirstSendWorkbarWatch?: { visibleRightWorkbar: boolean };
       __makaFirstSendWorkbarWatchStop?: () => void;
     };
     target.__makaFirstSendWorkbarWatchStop?.();
     return target.__makaFirstSendWorkbarWatch;
   });
   expect(watch?.visibleRightWorkbar, 'the collapsed right workbar stayed hidden').toBe(false);
-  expect(watch?.pendingPlateText, 'the first message never appeared above the composer').toEqual([]);
 
   await expandWorkbar.evaluate((button) => button.click());
   await expect(
