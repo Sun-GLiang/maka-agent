@@ -51,16 +51,10 @@ export function mergeTransientMessageProjection(
     ...update,
     // A Message's send time is written once; an update's `ts` must not move it.
     ts: current.ts,
-    // The first prompt of a newly created Session is visible before admission.
-    // Its local outbox placement is provisional; ordinary sends into an
-    // existing Session can be real follow-ups and must enter the composer queue.
-    ...(current.provisionalFirstSend && current.transientPlacement === 'current_turn'
-      && update.transientPlacement === 'next_turn' && update.deliveryStatus !== undefined
-      && update.hostTurnId === undefined
-      ? { transientPlacement: 'current_turn' as const }
-      : {}),
-    ...(current.provisionalFirstSend && update.deliveryStatus !== undefined
-      && update.hostTurnId === undefined ? { provisionalFirstSend: true } : {}),
+    // A local delivery update repeats the requested placement, not the Host's
+    // decision. Keep the position already shown until Host evidence arrives.
+    ...(update.deliveryStatus !== undefined && update.hostTurnId === undefined
+      ? { transientPlacement: current.transientPlacement } : {}),
     ...(update.pendingSteering === undefined && current.pendingSteering !== undefined ? { pendingSteering: current.pendingSteering } : {}),
     ...(!Object.hasOwn(update, 'deliveryStatus') && current.deliveryStatus !== undefined ? { deliveryStatus: current.deliveryStatus } : {}),
     ...(!Object.hasOwn(update, 'deliveryDetail') && current.deliveryDetail !== undefined ? { deliveryDetail: current.deliveryDetail } : {}),

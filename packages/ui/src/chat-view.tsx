@@ -145,8 +145,6 @@ export interface ChatViewGoalIndicatorProps {
 export interface TransientUserMessageProjection {
   /** Held above the composer until Runtime emits steering_message. */
   pendingSteering?: boolean;
-  /** A new Session's first prompt stays in the transcript until Host admission. */
-  provisionalFirstSend?: boolean;
   deliveryStatus?: string;
   deliveryDetail?: string;
   deliveryActions?: readonly { label: string; onClick(): void }[];

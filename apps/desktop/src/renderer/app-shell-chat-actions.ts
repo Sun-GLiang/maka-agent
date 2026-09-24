@@ -342,6 +342,7 @@ export function createAppShellChatActions(deps: {
       async function submitIntoSession(sessionId: string, messageId: string) {
         const sendCommand = {
           text,
+          localDisplayPlacement: 'current_turn' as const,
           ...(options.displayText ? { displayText: options.displayText } : {}),
           ...copiedArray(
             'attachmentItems',
@@ -389,9 +390,8 @@ export function createAppShellChatActions(deps: {
         // session-owned transient in the same state transition that replaces
         // the new-chat surface, so the empty-session Maka hero cannot paint
         // between observation settling and the submitted content appearing.
-        void publishTransientUserMessage(session.id, {
+        publishTransientUserMessage(session.id, {
           id: messageId, text: options.displayText ?? text, transientPlacement: 'current_turn',
-          provisionalFirstSend: true,
           ...copiedArray('directoryReferences', directoryReferences),
           ...copiedArray('quotes', quotes),
         });
@@ -426,7 +426,6 @@ export function createAppShellChatActions(deps: {
         id: messageId, text: options.displayText ?? text, transientPlacement: 'current_turn',
         ...copiedArray('directoryReferences', directoryReferences),
         ...copiedArray('quotes', quotes),
-        inlineReferences: [],
       });
       const submitted = await submitIntoSession(initialSessionId, messageId);
       // An existing-Session send never reports a resolved Session.

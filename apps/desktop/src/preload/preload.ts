@@ -2349,6 +2349,7 @@ const makaBridge = {
     },
     async submitMessage(sessionId, placement, command, options) {
       const session = await runtimeHostSessionRef(sessionId);
+      const { localDisplayPlacement, ...submitCommand } = command;
       if (command.directoryReferences?.some((ref) => ref.hostId !== session.scope.hostId)) {
         throw new Error('Directory references belong to a different Runtime Host. Select the folder on the target Host.');
       }
@@ -2369,10 +2370,11 @@ const makaBridge = {
         session.sessionId,
         placement,
         {
-          ...command,
+          ...submitCommand,
           ...(command.retainedAttachments ? { retainedAttachments: hostAttachmentRefs(session, command.retainedAttachments) } : {}),
           ...(attachmentItems ? { attachmentItems } : {}),
         },
+        localDisplayPlacement,
       )) as Awaited<ReturnType<MakaBridge['sessions']['submitMessage']>>;
       return result.ok
         ? { ...result, attachments: projectDesktopAttachmentRefs(session.scope, result.attachments) }

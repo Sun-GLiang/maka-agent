@@ -199,33 +199,37 @@ test('keeps a Host-bound current Turn when a later IPC result has no Turn identi
   });
 });
 
-test('an idle Session first send does not flash as a queued follow-up while local admission is pending', () => {
-  const firstSend = { ...transient, provisionalFirstSend: true };
+test('ordinary sends stay in the transcript through local delivery, including failed delivery', () => {
   const localOutbox = {
     ...transient, transientPlacement: 'next_turn' as const,
     deliveryStatus: 'Sending',
   };
-  const pending = mergeTransientMessageProjection(firstSend, localOutbox);
+  const pending = mergeTransientMessageProjection(transient, localOutbox);
   assert.equal(pending.transientPlacement, 'current_turn');
-  assert.equal(pending.provisionalFirstSend, true);
   assert.equal(pending.deliveryStatus, 'Sending');
+  const failed = mergeTransientMessageProjection(pending, {
+    ...localOutbox, deliveryStatus: 'Failed',
+  });
+  assert.equal(failed.transientPlacement, 'current_turn');
+  assert.equal(failed.deliveryStatus, 'Failed');
   // The admission reply, unlike a local outbox update, can still move a
   // genuine follow-up above the composer.
   const queued = mergeTransientMessageProjection(pending, {
     ...transient, transientPlacement: 'next_turn', pendingSteering: false,
   });
   assert.equal(queued.transientPlacement, 'next_turn');
-  assert.equal(queued.provisionalFirstSend, undefined);
   assert.equal(queued.deliveryStatus, 'Sending');
   assert.equal(mergeTransientMessageProjection(queued, localOutbox).transientPlacement, 'next_turn');
 });
 
-test('an ordinary mid-turn send moves into the pending plate when the outbox reports next-turn placement', () => {
+test('an explicit follow-up stays in the pending plate during local delivery', () => {
   const localOutbox = {
     ...transient, transientPlacement: 'next_turn' as const,
     deliveryStatus: 'Sending',
   };
-  const pending = mergeTransientMessageProjection(transient, localOutbox);
+  const pending = mergeTransientMessageProjection({
+    ...transient, transientPlacement: 'next_turn',
+  }, localOutbox);
   assert.equal(pending.transientPlacement, 'next_turn');
   assert.equal(pending.deliveryStatus, 'Sending');
 });
@@ -235,7 +239,7 @@ test('explicit steering stays in the composer queue during local outbox updates'
   const updated = mergeTransientMessageProjection(steering, {
     ...transient, transientPlacement: 'next_turn', deliveryStatus: 'Sending',
   });
-  assert.equal(updated.transientPlacement, 'next_turn');
+  assert.equal(updated.transientPlacement, 'current_turn');
   assert.equal(updated.pendingSteering, true);
 });
 

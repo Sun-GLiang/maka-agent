@@ -30,6 +30,7 @@ import { describe, it } from 'node:test';
 
 import type { TransientUserMessageProjection } from '@maka/ui';
 import { createAppShellChatActions } from '../../renderer/app-shell-chat-actions.js';
+import { mergeTransientMessageProjection } from '../../renderer/application/contracts/transient-message-projection.js';
 import { getShellCopy } from '../../renderer/locales/shell-copy.js';
 
 import {
@@ -53,6 +54,34 @@ describe('busy-raced send settlement', () => {
         getRunningTurnId: () => { throw new Error('Message intent must not depend on observation'); },
       });
       assert.equal(await actions.send('do this after the current answer'), true);
+    } finally { restoreWindow(); }
+  });
+
+  it('keeps an existing idle Session send in the transcript during local delivery', async () => {
+    const transient = new Map<string, TransientUserMessageProjection>();
+    const restoreWindow = installWindow({ sessions: {
+      submitMessage: async (
+        _sessionId: string,
+        placement: string,
+        command: { messageId: string; localDisplayPlacement?: string },
+      ) => {
+        assert.equal(placement, 'next_turn');
+        assert.equal(command.localDisplayPlacement, 'current_turn');
+        const current = transient.get(command.messageId)!;
+        transient.set(command.messageId, mergeTransientMessageProjection(current, {
+          ...current, transientPlacement: 'next_turn', deliveryStatus: 'Sending',
+        }));
+        assert.equal(transient.get(command.messageId)?.transientPlacement, 'current_turn');
+        return { ok: true, disposition: 'locally_saved', attachments: [], inlineReferences: [], skillInvocation: EMPTY_SKILL_INVOCATION };
+      },
+    } });
+    try {
+      const actions = createAppShellChatActions({
+        ...createActionsDeps(), activeIdRef: { current: 'session-a' },
+        addTransientMessage: (_sessionId, message) => transient.set(message.id, message),
+      });
+      assert.equal(await actions.send('hi'), true);
+      assert.equal([...transient.values()][0]?.transientPlacement, 'current_turn');
     } finally { restoreWindow(); }
   });
 
@@ -377,7 +406,7 @@ describe('busy-raced send settlement', () => {
 
       assert.ok(submittedMessageId);
       assert.equal(transient.get(submittedMessageId)?.text, 'also check the tests');
-      assert.equal(transient.get(submittedMessageId)?.provisionalFirstSend, undefined);
+      assert.equal(transient.get(submittedMessageId)?.transientPlacement, 'current_turn');
 
       releaseAdmission();
       assert.equal(await sending, true);
@@ -434,7 +463,7 @@ describe('busy-raced send settlement', () => {
           removed.push(sessionId);
         },
         submitMessage: async (_sessionId: string, _placement: string, command: { messageId: string }) => {
-          assert.equal(transientState.rows.get(command.messageId)?.provisionalFirstSend, true);
+          assert.equal(transientState.rows.get(command.messageId)?.transientPlacement, 'current_turn');
           return {
             ok: true,
             disposition: 'followup',

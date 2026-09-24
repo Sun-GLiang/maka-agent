@@ -1254,6 +1254,8 @@ export interface MakaBridge {
       command: {
         messageId: string;
         text: string;
+        /** Local presentation before the Host assigns a Turn or queue entry. */
+        localDisplayPlacement?: 'current_turn' | 'next_turn';
         displayText?: string;
         skillIds?: string[];
         turnOrchestration?: TurnOrchestration;

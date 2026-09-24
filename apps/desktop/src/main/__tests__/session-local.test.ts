@@ -151,6 +151,26 @@ test('local acceptance survives restart with attachment bytes and an immutable d
   assert.throws(() => db.store.cancel('authority-1', record.messageId), /Host may already own/);
 });
 
+test('ordinary send presentation survives local outbox restart', async (t) => {
+  const db = await database(t);
+  db.store.enqueue('authority-1', {
+    ...intent(),
+    command: { ...intent().command, placement: 'next_turn' },
+    localDisplayPlacement: 'current_turn',
+  });
+  db.reopen();
+  const service = new DesktopSessionLocalService(db.store, {
+    targets: () => [], changed() {}, onError: (error) => assert.fail(String(error)),
+  });
+  t.after(() => service.close());
+  const [restored] = service.listMessages({
+    partition: 'authority-1', profileId: 'profile',
+    scope: { hostId: 'root', targetEpoch: 'target' },
+  }, 'session-1');
+  assert.equal(restored?.placement, 'next_turn');
+  assert.equal(restored.localDisplayPlacement, 'current_turn');
+});
+
 test('local IDs bind content, retries are idempotent, and admission stays bounded', async (t) => {
   const { store } = await database(t);
   const first = store.enqueue('authority-1', intent());
@@ -923,13 +943,16 @@ test('local submit preserves picked-file approvals until durable admission succe
       { sender: { id: 7 } } as IpcMainInvokeEvent,
       target.scope,
       'session-1',
-      'current_turn',
+      'next_turn',
       draft,
+      'current_turn',
     );
   await assert.rejects(send, /Local message storage is full/);
   store.cancel('authority', 'full-0');
   await send();
   assert.equal(store.get('authority', 'picked-message')?.state, 'saved');
+  assert.equal(store.get('authority', 'picked-message')?.intent.command.placement, 'next_turn');
+  assert.equal(store.get('authority', 'picked-message')?.intent.localDisplayPlacement, 'current_turn');
   assert.equal(
     Buffer.from(store.stagedAttachments('authority', 'picked-message')[0]!.content).toString(),
     'x',
