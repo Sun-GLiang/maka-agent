@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { RequestError, type McpServer } from '@agentclientprotocol/sdk';
 import { MCP_CONFIG_VERSION, type McpConfigFile } from '@maka/core/mcp';
@@ -144,6 +145,7 @@ export class AcpSessionMcp {
       replace: (provider) =>
         connection.replaceClientCapabilities(provider, {
           sessionId,
+          sessionConfigurationId: `sha256:${createHash('sha256').update(stableJsonStringify(this.#config)).digest('hex')}`,
           ...(this.#requireIdlePublication ? { requireIdleSession: true } : {}),
         }),
       unregister: () => connection.unregisterClientCapabilities({ sessionId }),
@@ -206,6 +208,7 @@ export class AcpSessionMcp {
         await assertCanChange?.();
         signal?.throwIfAborted();
         const previous = this.#manager;
+        const previousConfig = this.#config;
         const staged = new McpClientManager({
           clientName: 'maka-acp',
           excludedStdioEnvironmentKeys: ['MAKA_RUNTIME_HOST_ACCESS_CREDENTIAL'],
@@ -220,6 +223,7 @@ export class AcpSessionMcp {
           previousRevision = this.#publicationRevision;
           this.#unsubscribeManager();
           this.#manager = staged;
+          this.#config = config;
           this.#unsubscribeManager = this.#observeManager(staged);
           this.#retainedManagers.add(previous);
           this.#pendingManager = undefined;
@@ -228,7 +232,6 @@ export class AcpSessionMcp {
           this.#publicationRevision += 1;
           this.#publication.request();
           await this.#settlePublication(signal);
-          this.#config = config;
           this.#requireIdlePublication = false;
           this.#retireRetainedManagers();
           await Promise.allSettled([...this.#retirementTasks]);
@@ -244,6 +247,7 @@ export class AcpSessionMcp {
             ) {
               this.#unsubscribeManager();
               this.#manager = previous;
+              this.#config = previousConfig;
               this.#unsubscribeManager = this.#observeManager(previous);
               this.#retainedManagers.delete(previous);
               this.#publicationRevision = previousRevision;
@@ -255,7 +259,6 @@ export class AcpSessionMcp {
               // A committed or unknown outcome may already be serving a Turn.
               // Keep that provider and its manager; the previous manager stays
               // available until a definitive publication or Session close.
-              this.#config = config;
               this.#retireRetainedManagers();
             }
           } else if (!swapped) {
@@ -282,6 +285,20 @@ export class AcpSessionMcp {
     signal?.throwIfAborted();
     this.#assertOpen('mcp.ready');
     if (state !== 'published' && state !== 'not_published') {
+      if (
+        this.#publication.lastError instanceof RuntimeHostOperationError &&
+        this.#publication.lastError.code === 'session_binding_conflict'
+      ) {
+        throw RequestError.internalError(
+          {
+            source: 'runtime_host',
+            operation: 'mcp.prepare',
+            sessionId: this.#sessionId,
+            code: 'session_binding_conflict',
+          },
+          'Session MCP configuration conflicts with another provider; close its Session attachment before replacing it',
+        );
+      }
       if (
         this.#requireIdlePublication &&
         this.#publication.lastError instanceof RuntimeHostOperationError &&

@@ -25,6 +25,52 @@ import type { InteractionPendingSnapshot } from '@maka/runtime-host/protocol';
 import { AcpSessionEventMapper } from '../acp/session-event-mapper.js';
 
 describe('ACP Session event mapper', () => {
+  for (const text of ['', 'Read this report']) {
+    test(`replays attachments with user text ${JSON.stringify(text)}`, async () => {
+      const notifications: SessionNotification[] = [];
+      const mapper = eventMapper(notifications);
+      const attachments = [
+        {
+          kind: 'other' as const,
+          name: 'report.txt',
+          mimeType: 'text/plain',
+          bytes: 12,
+          ref: {
+            kind: 'session_file' as const,
+            sessionId: 'session-1',
+            relativePath: 'artifacts/report.txt',
+          },
+        },
+      ];
+      await mapper.acceptHistoricalMessage({
+        type: 'user',
+        id: 'user-1',
+        turnId: 'turn-1',
+        ts: 1,
+        text: `${text} file:///workspace/report.txt`,
+        displayText: text,
+        attachments,
+      });
+      await mapper.flush();
+      assert.deepEqual(
+        notifications.map(({ update }) => update),
+        [
+          {
+            sessionUpdate: 'user_message_chunk',
+            messageId: 'user-1',
+            content: {
+              type: 'text',
+              text: [text, '[Attachment: report.txt (text/plain, 12 bytes)]']
+                .filter(Boolean)
+                .join('\n\n'),
+            },
+            _meta: { '_maka/attachments': attachments },
+          },
+        ],
+      );
+    });
+  }
+
   test('streams text and thinking while deduplicating matching completion events', async () => {
     const notifications: SessionNotification[] = [];
     const mapper = eventMapper(notifications);

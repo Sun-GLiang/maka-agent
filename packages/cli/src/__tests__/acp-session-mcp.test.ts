@@ -18,6 +18,8 @@
  */
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { stableJsonStringify } from '@maka/core/canonical-json';
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -107,7 +109,11 @@ test('Session MCP reconfiguration reuses equivalent processes and applies replac
   );
   await mcp.reconfigure(createAcpMcpConfig({ cwd: root, mcpServers: [] }));
   assert.deepEqual(host.replacements.at(-1)?.provider.offers(), []);
-  assert.deepEqual(host.replacements.at(-1)?.options, { sessionId, requireIdleSession: true });
+  assert.deepEqual(host.replacements.at(-1)?.options, {
+    sessionId,
+    requireIdleSession: true,
+    sessionConfigurationId: `sha256:${createHash('sha256').update(stableJsonStringify(mcp.config)).digest('hex')}`,
+  });
   await assertFixtureExited(root, 'fixture');
 });
 
@@ -567,7 +573,10 @@ test('Session preparation waits for scoped publication and reconnect reuses its 
   });
   await waitFor(() => host.replacements.length === 1, { timeoutMs: 5_000, pollMs: 10 });
   assert.equal(prepared, false);
-  assert.deepEqual(host.replacements[0]?.options, { sessionId });
+  assert.deepEqual(host.replacements[0]?.options, {
+    sessionId,
+    sessionConfigurationId: `sha256:${createHash('sha256').update(stableJsonStringify(mcp.config)).digest('hex')}`,
+  });
   const provider = host.replacements[0]!.provider;
   assert.ok(provider.offers().length > 0);
   for (const offer of provider.offers()) {
@@ -597,7 +606,7 @@ test('Session preparation waits for scoped publication and reconnect reuses its 
   assert.equal(host.replacements.length, 2);
   assert.deepEqual(
     host.replacements.map((replacement) => replacement.options),
-    [{ sessionId }, { sessionId }],
+    [host.replacements[0]?.options, host.replacements[0]?.options],
   );
   assert.deepEqual(
     (await fixtureEvents(root, 'fixture')).filter((event) => event.event === 'start'),

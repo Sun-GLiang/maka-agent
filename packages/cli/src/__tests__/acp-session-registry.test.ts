@@ -432,6 +432,84 @@ describe('ACP Session registry', () => {
     }
   });
 
+  for (const status of ['completed', 'failed', 'cancelled'] as const) {
+    for (const nextTurn of [false, true]) {
+      test(`restore reports ${status} during readiness with next Turn ${nextTurn}`, {
+        timeout: 10_000,
+      }, async () => {
+        const sessionId = 'initial-terminal';
+        const turnId = 'initial-turn';
+        const turn = runningTurn(sessionId, turnId);
+        const subscription = new FakeSubscription(
+          continuitySnapshot(sessionId, { rootTurn: turn }),
+        );
+        subscription.seedBootstrap([]);
+        const ready = subscription.ready.bind(subscription);
+        subscription.ready = async () => {
+          await ready();
+          subscription.appendText(turnId, turn.runId, 'final output', true);
+          subscription.setRoot(
+            status === 'completed'
+              ? completedTurn(sessionId, turnId)
+              : {
+                  ...turn,
+                  terminalEventId: 'terminal',
+                  ...(status === 'failed'
+                    ? { status: 'failed' as const, failureClass: 'provider_failure' }
+                    : { status: 'cancelled' as const, abortSource: 'user' }),
+                },
+          );
+          if (nextTurn) subscription.setRoot(runningTurn(sessionId, 'next-turn'));
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        };
+        const delivered: string[] = [];
+        const terminal = deferred<void>();
+        const registry = new AcpSessionRegistry({
+          connect: async () =>
+            fakeConnection({
+              request: async (operation) => {
+                if (operation === 'session.catalog.query')
+                  return { kind: 'session', session: catalogSession(sessionId) };
+                if (operation === 'turn.stop') return {};
+                throw new Error(`Unexpected operation ${operation}`);
+              },
+              openSessionSubscriptionOnce: async () => subscription,
+            }),
+        });
+        try {
+          await registry.resume(
+            { sessionId, cwd: '/workspace', mcpServers: [] },
+            {
+              signal: new AbortController().signal,
+              notify: async ({ update }) => {
+                if (
+                  update.sessionUpdate === 'agent_message_chunk' &&
+                  update.content.type === 'text'
+                )
+                  delivered.push(update.content.text);
+              },
+              notifyTurnStatus: async (value) => {
+                assert.deepEqual(value, {
+                  sessionId,
+                  turnId,
+                  runId: turn.runId,
+                  status,
+                  ...(status === 'failed' ? { failureClass: 'provider_failure' } : {}),
+                });
+                delivered.push(status);
+                terminal.resolve();
+              },
+            },
+          );
+          await terminal.promise;
+          assert.deepEqual(delivered, ['final output', status]);
+        } finally {
+          await registry.dispose();
+        }
+      });
+    }
+  }
+
   test('resume restores a pending interaction on the attached Turn', async () => {
     const sessionId = 'session-resumed-interaction';
     const turnId = 'turn-resumed-interaction';

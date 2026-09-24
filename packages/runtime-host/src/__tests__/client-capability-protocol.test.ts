@@ -32,6 +32,32 @@ import {
 } from '../protocol/index.js';
 
 describe('Client Capability protocol', () => {
+  test('validates complete Session configuration identities', () => {
+    const input = {
+      registrationId: 'registration',
+      sessionId: 'session',
+      offers: [],
+      sessionConfigurationId: `sha256:${'a'.repeat(64)}`,
+    };
+    assert.deepEqual(decodeClientCapabilityReplaceInput(input), input);
+    for (const sessionConfigurationId of [
+      null,
+      1,
+      '',
+      'a'.repeat(64),
+      `sha256:${'z'.repeat(64)}`,
+    ]) {
+      assert.throws(
+        () => decodeClientCapabilityReplaceInput({ ...input, sessionConfigurationId }),
+        RuntimeHostProtocolError,
+      );
+    }
+    assert.throws(
+      () => decodeClientCapabilityReplaceInput({ ...input, sessionId: undefined }),
+      RuntimeHostProtocolError,
+    );
+  });
+
   test('decodes the opt-in idle Session replacement fence', () => {
     assert.deepEqual(
       decodeClientCapabilityReplaceInput({

@@ -41,6 +41,126 @@ import {
 } from './fixtures/client-capability.js';
 
 describe('Host Client Capability coordinator', () => {
+  test('fences complete Session configurations before binding and retains the original on conflict', async () => {
+    const coordinator = createCoordinator();
+    const first = coordinator.attachConnection(clientCapabilityConnectionIdentity('connection-a'), {
+      send: async () => {},
+    });
+    const second = coordinator.attachConnection(
+      clientCapabilityConnectionIdentity('connection-b'),
+      { send: async () => {} },
+    );
+    const alpha = `sha256:${'a'.repeat(64)}`;
+    const beta = `sha256:${'b'.repeat(64)}`;
+    const publish = (
+      connectionId: string,
+      registrationId: string,
+      sessionId: string,
+      sessionConfigurationId?: string,
+    ) =>
+      coordinator.handlers['client.capability.replace'](
+        {
+          ...replacementInput(registrationId, 'inspect'),
+          sessionId,
+          sessionConfigurationId,
+          offers: replacementInput(registrationId, 'inspect').offers.map((offer) => ({
+            ...offer,
+            hostPathAccess: 'none' as const,
+          })),
+        },
+        connectionContext(connectionId),
+      );
+    try {
+      assert.equal((await publish('connection-a', 'first', 'session-a', alpha)).ok, true);
+      // Fence even before the first Turn binds the Session; do not rely on a prior prompt.
+      const conflict = await publish('connection-b', 'conflict', 'session-a', beta);
+      assert.equal(conflict.ok, false);
+      if (!conflict.ok) assert.equal(conflict.error.code, 'session_binding_conflict');
+      assert.equal((await publish('connection-b', 'legacy-conflict', 'session-a')).ok, false);
+      assert.equal((await publish('connection-b', 'other-session', 'session-b', beta)).ok, true);
+      assert.equal((await publish('connection-b', 'equivalent', 'session-a', alpha)).ok, true);
+      assert.deepEqual(await coordinator.bindSession('session-a', 'connection-a'), { ok: true });
+      assert.equal((await publish('connection-a', 'cannot-change', 'session-a', beta)).ok, false);
+      const snapshot = coordinator.snapshotForSession('session-a');
+      assert.deepEqual(snapshot?.registrationIds, ['first']);
+      snapshot?.release();
+      await coordinator.handlers['client.capability.unregister'](
+        { registrationId: 'first' },
+        connectionContext('connection-a'),
+      );
+      assert.equal((await publish('connection-b', 'replacement', 'session-a', beta)).ok, true);
+    } finally {
+      first.close();
+      second.close();
+      await coordinator.close();
+    }
+  });
+
+  test('a frozen scoped provider requires its authenticated identity to reconnect', async () => {
+    const coordinator = createCoordinator();
+    const first = coordinator.attachConnection(clientCapabilityConnectionIdentity('connection-a'), {
+      send: async () => {},
+    });
+    const second = coordinator.attachConnection(
+      clientCapabilityConnectionIdentity('connection-b'),
+      {
+        send: async () => {},
+      },
+    );
+    const input = {
+      ...replacementInput('first', 'inspect'),
+      sessionId: 'session-a',
+      sessionConfigurationId: `sha256:${'a'.repeat(64)}`,
+      offers: replacementInput('first', 'inspect').offers.map((offer) => ({
+        ...offer,
+        hostPathAccess: 'none' as const,
+      })),
+    };
+    try {
+      assert.equal(
+        (
+          await coordinator.handlers['client.capability.replace'](
+            input,
+            connectionContext('connection-a'),
+          )
+        ).ok,
+        true,
+      );
+      assert.deepEqual(await coordinator.bindSession('session-a', 'connection-a'), { ok: true });
+      await first.close();
+      const rejected = await coordinator.handlers['client.capability.replace'](
+        { ...input, registrationId: 'other' },
+        connectionContext('connection-b'),
+      );
+      assert.equal(rejected.ok, false);
+      if (!rejected.ok) assert.equal(rejected.error.code, 'session_binding_conflict');
+      const reconnected = coordinator.attachConnection(
+        clientCapabilityConnectionIdentity('connection-reconnected', 'connection-a'),
+        { send: async () => {} },
+      );
+      try {
+        assert.equal(
+          (
+            await coordinator.handlers['client.capability.replace'](
+              { ...input, registrationId: 'reconnected' },
+              connectionContext('connection-reconnected'),
+            )
+          ).ok,
+          true,
+        );
+        assert.deepEqual(await coordinator.bindSession('session-a', 'connection-reconnected'), {
+          ok: true,
+        });
+      } finally {
+        await reconnected.close();
+      }
+    } finally {
+      await first.close();
+      await second.close();
+      await coordinator.close();
+    }
+  });
+
   test('guards an opt-in Session replacement at the Host admission cut', async () => {
     let busy = false;
     const coordinator = new HostClientCapabilityCoordinator({

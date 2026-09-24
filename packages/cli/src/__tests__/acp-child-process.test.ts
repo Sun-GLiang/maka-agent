@@ -364,50 +364,78 @@ describe('Maka ACP child process', () => {
     try {
       await withAcpChildProcessHarness(
         async (harness) => {
-          const path = join(harness.workspaceRoot, 'notes.txt');
+          const path = join(harness.workspaceRoot, 'COMPLETE_ME-notes.txt');
           const contents = 'x'.repeat(ARTIFACT_INGEST_CHUNK_MAX_BYTES + 7);
           await writeFile(path, contents);
-          await harness.withClient(async ({ context }) => {
-            await context.request(methods.agent.initialize, { protocolVersion: 1 });
-            const { sessionId } = await context.request(methods.agent.session.new, {
-              cwd: harness.workspaceRoot,
-              mcpServers: [],
-            });
-            assert.deepEqual(
-              await context.request(methods.agent.session.prompt, {
-                sessionId,
-                prompt: [
-                  { type: 'text', text: 'COMPLETE_ME' },
-                  {
-                    type: 'resource_link',
-                    uri: pathToFileURL(path).href,
-                    name: 'notes.txt',
-                    mimeType: 'text/plain',
-                  },
-                ],
-              }),
-              { stopReason: 'end_turn' },
-            );
-            const connected = await connectRuntimeHost({
-              rootPath: harness.workspaceRoot,
-              protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
-            });
-            if (connected.kind !== 'connected') assert.fail('Host connection unavailable');
-            try {
-              const listed = await connected.connection.request('artifact.query', {
-                kind: 'list_start',
-                sessionId,
+          const history: SessionNotification[] = [];
+          await harness.withClient(
+            async ({ context }) => {
+              await context.request(methods.agent.initialize, { protocolVersion: 1 });
+              const { sessionId } = await context.request(methods.agent.session.new, {
+                cwd: harness.workspaceRoot,
+                mcpServers: [],
               });
-              assert.equal(listed.kind, 'page');
-              if (listed.kind !== 'page') assert.fail('Expected Artifact page');
-              assert.equal(listed.artifacts.length, 1);
-              assert.equal(listed.artifacts[0]!.name, 'notes.txt');
-              assert.equal(listed.artifacts[0]!.sizeBytes, contents.length);
-            } finally {
-              await connected.connection.close();
-            }
-            await context.request(methods.agent.session.close, { sessionId });
-          });
+              assert.deepEqual(
+                await context.request(methods.agent.session.prompt, {
+                  sessionId,
+                  prompt: [
+                    {
+                      type: 'resource_link',
+                      uri: pathToFileURL(path).href,
+                      name: 'notes.txt',
+                      mimeType: 'text/plain',
+                    },
+                  ],
+                }),
+                { stopReason: 'end_turn' },
+              );
+              const connected = await connectRuntimeHost({
+                rootPath: harness.workspaceRoot,
+                protocol: {
+                  min: RUNTIME_HOST_PROTOCOL_VERSION,
+                  max: RUNTIME_HOST_PROTOCOL_VERSION,
+                },
+              });
+              if (connected.kind !== 'connected') assert.fail('Host connection unavailable');
+              try {
+                const listed = await connected.connection.request('artifact.query', {
+                  kind: 'list_start',
+                  sessionId,
+                });
+                assert.equal(listed.kind, 'page');
+                if (listed.kind !== 'page') assert.fail('Expected Artifact page');
+                assert.equal(listed.artifacts.length, 1);
+                assert.equal(listed.artifacts[0]!.name, 'notes.txt');
+                assert.equal(listed.artifacts[0]!.sizeBytes, contents.length);
+              } finally {
+                await connected.connection.close();
+              }
+              history.length = 0;
+              await context.request(methods.agent.session.load, {
+                sessionId,
+                cwd: harness.workspaceRoot,
+                mcpServers: [],
+              });
+              const users = history.filter(
+                ({ update }) => update.sessionUpdate === 'user_message_chunk',
+              );
+              assert.equal(users.length, 1);
+              const row = users[0]!.update;
+              if (row.sessionUpdate !== 'user_message_chunk' || row.content.type !== 'text')
+                assert.fail('Expected a visible attachment-only user message');
+              assert.equal(
+                row.content.text,
+                `[Attachment: notes.txt (text/plain, ${contents.length} bytes)]`,
+              );
+              assert.equal((row._meta?.['_maka/attachments'] as unknown[])?.length, 1);
+              await context.request(methods.agent.session.close, { sessionId });
+            },
+            (app) => {
+              return app.onNotification(methods.client.session.update, ({ params }) => {
+                history.push(params);
+              });
+            },
+          );
         },
         {
           startRuntimeHost: true,

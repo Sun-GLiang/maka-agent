@@ -25,12 +25,16 @@ import {
   methods,
   RequestError,
   type CreateElicitationRequest,
+  type NewSessionRequest,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionNotification,
 } from '@agentclientprotocol/sdk';
 import { mcpProxyToolName } from '@maka/runtime/mcp-tools';
-import { withAcpChildProcessHarness } from './acp-child-process-harness.js';
+import {
+  withAcpChildProcessHarness,
+  type ConfigureAcpClient,
+} from './acp-child-process-harness.js';
 
 const MODEL_ID = 'acp-tools-fixture';
 const CAPACITY_FILLER = 'ACP_CAPACITY_FILLER';
@@ -43,6 +47,106 @@ const formFixture = fileURLToPath(
 );
 
 describe('ACP tools through the official SDK, child process and Runtime Host', () => {
+  test('rejects conflicting live-client MCP takeover and applies it after the original owner closes', {
+    timeout: 60_000,
+  }, async () => {
+    const model = await startToolModel(
+      ['ACP_FIRST_OWNER', 'ACP_EQUIVALENT_OWNER', 'ACP_NEW_OWNER'].map((marker) => ({
+        marker,
+        tool: 'environment',
+        args: { names: ['ACP_SESSION_FINGERPRINT'] },
+      })),
+    );
+    const configure: ConfigureAcpClient = (app) =>
+      app.onRequest(methods.client.session.requestPermission, ({ params }) => ({
+        outcome: { outcome: 'selected', optionId: params.options[0]!.optionId },
+      }));
+    const servers = (value: string): NewSessionRequest['mcpServers'] => [
+      {
+        name: 'fixture',
+        command: process.execPath,
+        args: [environmentFixture, '--environment'],
+        env: [{ name: 'ACP_SESSION_SENTINEL', value }],
+      },
+    ];
+    const alpha = '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8';
+    const beta = 'f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753';
+    try {
+      await withAcpChildProcessHarness(
+        async (harness) => {
+          await harness.withClient(async ({ context: first }) => {
+            await first.request(methods.agent.initialize, { protocolVersion: 1 });
+            const created = await first.request(methods.agent.session.new, {
+              cwd: harness.workspaceRoot,
+              mcpServers: servers('alpha'),
+            });
+            const sessionId = created.sessionId;
+            await first.request(methods.agent.session.prompt, {
+              sessionId,
+              prompt: [{ type: 'text', text: 'ACP_FIRST_OWNER' }],
+            });
+            const sibling = await harness.spawnSibling();
+            try {
+              await sibling.withClient(async ({ context: second }) => {
+                await second.request(methods.agent.initialize, { protocolVersion: 1 });
+                for (const method of [methods.agent.session.load, methods.agent.session.resume]) {
+                  for (const mcpServers of [servers('beta'), []]) {
+                    await assert.rejects(
+                      second.request(method, { sessionId, cwd: harness.workspaceRoot, mcpServers }),
+                      (error: unknown) =>
+                        error instanceof RequestError &&
+                        (error.data as { code?: string })?.code === 'session_binding_conflict',
+                    );
+                  }
+                }
+                // Equivalent configurations remain usable for live interaction recovery.
+                await second.request(methods.agent.session.load, {
+                  sessionId,
+                  cwd: harness.workspaceRoot,
+                  mcpServers: servers('alpha'),
+                });
+                await second.request(methods.agent.session.prompt, {
+                  sessionId,
+                  prompt: [{ type: 'text', text: 'ACP_EQUIVALENT_OWNER' }],
+                });
+                assert.ok(
+                  model.results('ACP_EQUIVALENT_OWNER').at(-1)?.includes(alpha),
+                  model.diagnostics(),
+                );
+                await first.request(methods.agent.session.close, { sessionId });
+                await second.request(methods.agent.session.load, {
+                  sessionId,
+                  cwd: harness.workspaceRoot,
+                  mcpServers: servers('beta'),
+                });
+                assert.deepEqual(
+                  await second.request(methods.agent.session.prompt, {
+                    sessionId,
+                    prompt: [{ type: 'text', text: 'ACP_NEW_OWNER' }],
+                  }),
+                  { stopReason: 'end_turn' },
+                );
+                assert.ok(
+                  model.results('ACP_NEW_OWNER').at(-1)?.includes(beta),
+                  model.diagnostics(),
+                );
+              }, configure);
+            } finally {
+              await sibling.close();
+            }
+          }, configure);
+        },
+        {
+          startRuntimeHost: true,
+          timeoutMs: 45_000,
+          model: { id: MODEL_ID, thinkingLevels: [], baseUrl: model.baseUrl },
+        },
+      );
+    } finally {
+      await model.close();
+    }
+  });
+
   test('ask authorizes the exact MCP Session scope and settles the authoritative result before end_turn', {
     timeout: 60_000,
   }, async () => {

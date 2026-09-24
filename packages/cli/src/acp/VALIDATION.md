@@ -19,6 +19,57 @@
 
 # ACP validation record
 
+## PR6 CI and remaining review fixes — September 24, 2026
+
+This follow-up starts from `876dffea3` and resolves the three remaining P2
+findings plus duplicated admission transitions. Restore-cancellation tests now
+wait for subscription-open, transcript-read and close lifecycle events. Other
+asynchronous assertions use a real elapsed-time deadline and `setImmediate`,
+which continues to work in tests that mock `setTimeout`; a fixed count of event
+loop turns did not allow filesystem work to finish reliably on CI.
+
+Host now compares the complete normalized Session MCP configuration identity
+atomically before accepting another scoped provider. A differing or empty list
+fails with `session_binding_conflict` while the other provider remains attached.
+Equivalent configurations still support live interaction restoration. After the
+original owner closes its Session attachment, the new configuration becomes
+callable. A frozen disconnected provider can reconnect using its authenticated
+identity; another client cannot silently take over that binding. The optional
+configuration identity and typed conflict advance the Host compatibility epoch
+to 185; both compatible-change declarations were re-pinned and reviewed.
+
+Initial subscription snapshots retain terminal facts by Turn and run until the
+observer is adopted, including when the next root has already started. Completed,
+failed and cancelled status is delivered after the exact Turn's output. History
+replay preserves attachment-only user rows, displaying attachment name, media
+type and size, with canonical references in `_meta["_maka/attachments"]`. Prompt
+and explicit resume now share the admitted observation's dispatch, settlement,
+failure and waiter transitions.
+
+Four focused regressions were run against an isolated copy of `876dffea3`'s
+production modules: two attachment-history assertions, the initial-readiness
+terminal case, and the official SDK two-live-client MCP conflict case. All four
+fail on that baseline and pass with the fix. The repaired suite additionally
+covers all three terminal outcomes with and without a successor Turn, both
+load/resume with changed/empty MCP lists, equivalent configuration restoration,
+replacement after close, frozen-provider reconnect, and real Host replay of a
+resource-link-only prompt.
+
+Validation on macOS and Node 24.19.0:
+
+| Check | Result |
+| --- | --- |
+| Root build and typecheck | Passed. |
+| Full CLI dist suite, concurrency 4 | 1229 passed, 3 skipped, 0 failed. |
+| Full Runtime Host dist suite, concurrency 2 | 2093 passed, 12 skipped, 0 failed. |
+| Root lint/format, Desktop/UI knip, ASF headers, CLI notices, Windows inventory and `git diff --check` | Passed. |
+| Protocol epoch guard and its tests | Passed: epoch 185; 17 guard tests passed. |
+
+The four baseline regression failures are expected and recorded separately from
+the repaired full-suite results.
+Desktop Electron E2E and Zed were not rerun; their earlier evidence remains
+version-bound as documented below.
+
 ## PR6 review fixes — September 24, 2026
 
 These changes start from PR head `561b5a304`. Branch/revision source discovery

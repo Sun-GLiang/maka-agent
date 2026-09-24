@@ -129,7 +129,16 @@ export class AcpSessionEventMapper {
   acceptHistoricalMessage(message: StoredMessage): Promise<void> {
     return this.#enqueue(async () => {
       if (message.type === 'user') {
-        const text = userFacingText(message);
+        const attachments = message.attachments ?? [];
+        const text = [
+          userFacingText(message),
+          ...attachments.map(
+            (attachment) =>
+              `[Attachment: ${attachment.name} (${attachment.mimeType}, ${attachment.bytes} bytes)]`,
+          ),
+        ]
+          .filter(Boolean)
+          .join('\n\n');
         if (text) {
           await this.#deliver({
             sessionId: this.#sessionId,
@@ -137,6 +146,9 @@ export class AcpSessionEventMapper {
               sessionUpdate: 'user_message_chunk',
               content: { type: 'text', text },
               messageId: message.id,
+              ...(attachments.length
+                ? { _meta: { '_maka/attachments': structuredClone(attachments) } }
+                : {}),
             },
           });
         }

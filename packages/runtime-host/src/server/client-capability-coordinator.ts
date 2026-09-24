@@ -110,6 +110,7 @@ interface ClientProviderConnection {
 }
 
 interface CapabilityRegistration {
+  readonly sessionConfigurationId?: string;
   readonly providerId: string;
   readonly connectionId: string;
   readonly registrationId: string;
@@ -997,6 +998,38 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
         };
       }
       const { provider } = connection;
+      const sessionId = input.sessionId;
+      if (sessionId !== undefined) {
+        const conflicts = [...this.#providers.values()].some((other) => {
+          if (other.providerId === provider.providerId) return false;
+          const current = other.sessionRegistrations.get(sessionId);
+          return (
+            current &&
+            (input.sessionConfigurationId !== undefined ||
+              current.sessionConfigurationId !== undefined) &&
+            input.sessionConfigurationId !== current.sessionConfigurationId
+          );
+        });
+        // A disconnected frozen provider cannot silently be replaced either.
+        const lostBinding =
+          input.sessionConfigurationId !== undefined &&
+          [...(this.#sessions.get(sessionId)?.sessionBindings.values() ?? [])].some(
+            (binding) =>
+              binding.sessionId === sessionId &&
+              binding.providerId !== provider.providerId &&
+              !this.#providers.get(binding.providerId)?.sessionRegistrations.has(sessionId),
+          );
+        if (conflicts || lostBinding) {
+          return {
+            ok: false,
+            error: {
+              code: 'session_binding_conflict',
+              message:
+                'Session MCP configuration conflicts with another provider; close its Session attachment before replacing it',
+            },
+          };
+        }
+      }
       if (
         input.sessionId !== undefined &&
         !provider.sessionRegistrations.has(input.sessionId) &&
@@ -1752,6 +1785,9 @@ function freezeRegistration(
     providerId,
     connectionId,
     registrationId: input.registrationId,
+    ...(input.sessionConfigurationId === undefined
+      ? {}
+      : { sessionConfigurationId: input.sessionConfigurationId }),
     ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
     trustedProvider,
     offersByContract,

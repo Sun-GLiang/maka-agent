@@ -38,7 +38,10 @@ non-regular files, including POSIX FIFOs, before reading their content.
 After live attachment succeeds, the adapter uploads each linked file through the
 Host's existing Session Artifact protocol and uses its canonical attachment
 reference for Turn admission. Cancellation or close during an upload aborts staged
-content and prevents that prompt from starting a Turn.
+content and prevents that prompt from starting a Turn. Loaded history renders each
+stored attachment as a text placeholder with its name, media type and byte count,
+including attachment-only user messages. The chunk preserves the canonical
+references in `_meta["_maka/attachments"]`; it does not load attachment bytes.
 
 When a dispatched start loses its response, the adapter retries admission queries
 with bounded deadlines instead of replaying the start. Only a matching Turn or
@@ -83,6 +86,8 @@ Clients that advertise `initialize.clientCapabilities._meta["_maka/turnStatus"]:
 true` receive `_maka/turn/status` notifications for non-prompt Turns after their
 standard output has settled. Each notification names `sessionId`, `turnId`,
 `runId`, and a `completed`, `failed`, `cancelled`, or `observation_failed` status.
+Terminal snapshots received during initial subscription readiness are retained for
+their exact Turn and run, even if a new root starts before observation is adopted.
 Ordinary ACP clients can load/resume and prompt without this extension.
 
 The working directory in load/resume must resolve to the Session's Host cwd;
@@ -185,6 +190,16 @@ adapter retains the connection-local reservation and MCP resources. The client c
 continue with that ID or close it; creation is never silently retried.
 
 Different Sessions can use the same server/tool names with different processes.
+For the same Session, ACP publishes a SHA-256 identity of the complete normalized
+MCP configuration. Host atomically rejects a second provider with a different
+identity, including an empty configuration, before changing registration state.
+Load/resume reports `error.data.code: session_binding_conflict`; close the other
+client's Session attachment before retrying the replacement. Equivalent
+configurations remain attachable, including live permission restoration; Host
+retains its existing provider binding. A disconnected frozen provider must
+reconnect under the same authenticated identity rather than being silently
+replaced by another client. This optional wire field and its typed conflict use
+Host compatibility epoch 185.
 Registration replacement, unregister, disconnection and invocation routing respect
 the target Session and owning connection. A default registration and its target
 Session registration may not expose the same tool identity. Another Session cannot

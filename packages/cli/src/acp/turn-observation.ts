@@ -21,6 +21,7 @@ import type { SessionEvent } from '@maka/core/events';
 import type { StoredMessage } from '@maka/core/session';
 import type { TurnSnapshot } from '@maka/runtime-host/protocol';
 import type { RequestError, StopReason } from '@agentclientprotocol/sdk';
+import { RuntimeHostRequestInterruptedError } from '@maka/runtime-host/client';
 import type { RuntimeHostTerminalTurn } from '@maka/runtime-host/adapter';
 import { RuntimeHostSessionChannel } from '../runtime-host-session-channel.js';
 import { AcpSessionEventMapper } from './session-event-mapper.js';
@@ -199,4 +200,44 @@ export class AcpAdmittedTurnObservation extends AcpTurnObservation {
     startRequestSettled: false,
     settled: false,
   };
+
+  markDispatched(): void {
+    this.admission.dispatchStarted = true;
+    this.wake();
+  }
+
+  settleStartRequest(turn?: TurnSnapshot): void {
+    this.admission.startRequestSettled = true;
+    this.admission.settled = true;
+    if (turn) this.admission.startedTurn = turn;
+    this.wake();
+  }
+
+  failStartRequest(error: unknown): void {
+    this.admission.startRequestSettled = true;
+    this.admission.settled ||= !(
+      this.admission.dispatchStarted &&
+      error instanceof RuntimeHostRequestInterruptedError &&
+      error.dispatch === 'dispatched'
+    );
+    this.wake();
+  }
+
+  wake(): void {
+    for (const resolve of this.admission.waiters) resolve();
+    this.admission.waiters.clear();
+  }
+
+  waitForChange(timeoutMs?: number): Promise<void> {
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const wake = () => {
+        if (timer !== undefined) clearTimeout(timer);
+        this.admission.waiters.delete(wake);
+        resolve();
+      };
+      this.admission.waiters.add(wake);
+      if (timeoutMs !== undefined) timer = setTimeout(wake, timeoutMs);
+    });
+  }
 }
