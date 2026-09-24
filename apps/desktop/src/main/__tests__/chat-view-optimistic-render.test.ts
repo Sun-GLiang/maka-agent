@@ -99,12 +99,16 @@ test('ChatView shows the empty state when there is neither a bubble nor a runnin
 });
 
 test('first-send outbox updates keep the prompt in ChatView without mounting a pending plate', () => {
+  const firstSend: TransientUserMessageProjection = {
+    ...OPTIMISTIC_BUBBLE,
+    provisionalFirstSend: true,
+  };
   const localOutbox: TransientUserMessageProjection = {
     ...OPTIMISTIC_BUBBLE,
     transientPlacement: 'next_turn',
     deliveryStatus: 'Sending',
   };
-  const sending = mergeTransientMessageProjection(OPTIMISTIC_BUBBLE, localOutbox);
+  const sending = mergeTransientMessageProjection(firstSend, localOutbox);
   const admitted = mergeTransientMessageProjection(sending, {
     ...localOutbox,
     transientPlacement: 'current_turn',
@@ -124,13 +128,21 @@ test('first-send outbox updates keep the prompt in ChatView without mounting a p
 
   // Render every admission phase independently: a settled-only assertion
   // would miss the provisional outbox update that used to mount the plate.
-  for (const message of [OPTIMISTIC_BUBBLE, sending, admitted]) {
+  for (const message of [firstSend, sending, admitted]) {
     const document = render(message);
     assert.equal(Boolean(document.querySelector('.maka-composer-queue')), false,
       `no pending plate during ${message.deliveryStatus ?? 'optimistic send'}`);
     assert.ok(document.querySelector('.maka-user-message')?.textContent?.includes(OPTIMISTIC_BUBBLE.text),
       'the first prompt remains in the transcript');
   }
+
+  // The same outbox update represents a real follow-up for an ordinary send
+  // during an existing Turn; it must mount the pending plate immediately.
+  const ordinaryFollowUp = mergeTransientMessageProjection(OPTIMISTIC_BUBBLE, localOutbox);
+  const pendingDocument = render(ordinaryFollowUp);
+  assert.ok(pendingDocument.querySelector('.maka-composer-queue')?.textContent
+    ?.includes(OPTIMISTIC_BUBBLE.text));
+  assert.equal(pendingDocument.querySelector('.maka-user-message'), null);
 
   // The admission reply omits deliveryStatus; the inherited local status must
   // not keep a genuine follow-up in the transcript.

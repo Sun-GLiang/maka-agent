@@ -377,6 +377,7 @@ describe('busy-raced send settlement', () => {
 
       assert.ok(submittedMessageId);
       assert.equal(transient.get(submittedMessageId)?.text, 'also check the tests');
+      assert.equal(transient.get(submittedMessageId)?.provisionalFirstSend, undefined);
 
       releaseAdmission();
       assert.equal(await sending, true);
@@ -432,14 +433,17 @@ describe('busy-raced send settlement', () => {
         remove: async (sessionId: string) => {
           removed.push(sessionId);
         },
-        submitMessage: async (_sessionId: string, _placement: string, command: { messageId: string }) => ({
-          ok: true,
-          disposition: 'followup',
-          messageId: command.messageId,
-          attachments: [],
-          inlineReferences: [],
-          skillInvocation: EMPTY_SKILL_INVOCATION,
-        }),
+        submitMessage: async (_sessionId: string, _placement: string, command: { messageId: string }) => {
+          assert.equal(transientState.rows.get(command.messageId)?.provisionalFirstSend, true);
+          return {
+            ok: true,
+            disposition: 'followup',
+            messageId: command.messageId,
+            attachments: [],
+            inlineReferences: [],
+            skillInvocation: EMPTY_SKILL_INVOCATION,
+          };
+        },
       },
     });
     try {

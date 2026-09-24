@@ -391,6 +391,7 @@ export function createAppShellChatActions(deps: {
         // between observation settling and the submitted content appearing.
         publishTransientUserMessage(session.id, {
           id: messageId, text: options.displayText ?? text, transientPlacement: 'current_turn',
+          provisionalFirstSend: true,
           ...copiedArray('directoryReferences', directoryReferences),
           ...copiedArray('quotes', quotes),
           inlineReferences: [],
