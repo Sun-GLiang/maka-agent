@@ -389,12 +389,11 @@ export function createAppShellChatActions(deps: {
         // session-owned transient in the same state transition that replaces
         // the new-chat surface, so the empty-session Maka hero cannot paint
         // between observation settling and the submitted content appearing.
-        publishTransientUserMessage(session.id, {
+        void publishTransientUserMessage(session.id, {
           id: messageId, text: options.displayText ?? text, transientPlacement: 'current_turn',
           provisionalFirstSend: true,
           ...copiedArray('directoryReferences', directoryReferences),
           ...copiedArray('quotes', quotes),
-          inlineReferences: [],
         });
         // Main owns observation-before-dispatch. This only selects the local
         // surface; saving a draft never waits for the Host's event stream.
