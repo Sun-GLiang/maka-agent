@@ -19,6 +19,36 @@
 
 # ACP validation record
 
+## PR6 main integration and admission cleanup — September 24, 2026
+
+Merged Apache `main` at `fef5b937a` into PR #5621. The only textual conflict was
+the Runtime Host compatibility epoch: `main` had reached 183 and had assigned
+179 to a different change. The merged protocol uses 184 for the ACP Session
+capability replacement guard. The two compatible-change declarations introduced
+by `main` were re-pinned to 184 after checking that their wire-neutral reasons
+still hold. The prompt and restored-Turn admission paths now use one initializer
+for their identical local state; no admission behavior was changed.
+
+Validation on macOS and Node 24.19.0 after the merge and initializer change:
+
+| Check | Result |
+| --- | --- |
+| `npm ci`, `npm run build`, `npm run typecheck`, `npm run lint`, `npm run format:check` | Passed. |
+| Full CLI dist suite | 1208 passed, 3 skipped, 0 failed; includes official ACP SDK child-process tests with a real Runtime Host. |
+| Full Runtime Host dist suite | 2090 passed, 12 skipped, 0 failed. |
+| Full Desktop dist suite | 2824 passed, 0 failed. |
+| Protocol epoch guard against `fef5b937a` and guard tests | Passed: 183 to 184; 17 tests passed. |
+| Desktop/UI knip, ASF headers, CLI third-party notices, `git diff --check` | Passed. |
+| Full Desktop Electron E2E | 33 passed, 1 failed: Side Chat `page.screenshot({ fullPage: true })` timed out after its preceding behavior assertions passed. |
+| Focused Side Chat E2E retry | Passed on the merged PR tree; the same focused test also passed on `fef5b937a`. |
+
+The full Desktop E2E run is not claimed as passing. The screenshot timeout did
+not reproduce in the focused retry, so these runs do not establish an ACP
+regression or a clean full E2E result. The earlier Zed smoke below was on an
+older PR6 head; no Zed result is claimed for this merged head. Current-head
+ACP create/load/resume and interrupted-Turn coverage comes from the official
+SDK tests against a real Host in the CLI suite.
+
 ## PR6 final review follow-up — September 23, 2026
 
 This follow-up starts at pushed PR #5621 head `813c9557d`. Two further

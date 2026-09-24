@@ -164,6 +164,15 @@ type ActiveAcpPrompt = AcpTurnObservation & {
   stopTask?: Promise<void>;
 };
 
+function withPromptAdmission(observation: AcpTurnObservation): ActiveAcpPrompt {
+  return Object.assign(observation, {
+    waiters: new Set<() => void>(),
+    dispatchStarted: false,
+    startRequestSettled: false,
+    admissionSettled: false,
+  });
+}
+
 /** Owns all Runtime Host resources associated with one ACP connection. */
 export class AcpSessionRegistry {
   readonly #connect: (signal: AbortSignal) => Promise<AcpSessionRegistryConnection>;
@@ -364,7 +373,7 @@ export class AcpSessionRegistry {
 
   async #prompt(params: PromptRequest, context: AcpPromptContext): Promise<PromptResponse> {
     const turnId = this.#newTurnId();
-    const active: ActiveAcpPrompt = Object.assign(
+    const active = withPromptAdmission(
       new AcpTurnObservation({
         sessionId: params.sessionId,
         turnId,
@@ -374,12 +383,6 @@ export class AcpSessionRegistry {
           }
         },
       }),
-      {
-        waiters: new Set<() => void>(),
-        dispatchStarted: false,
-        startRequestSettled: false,
-        admissionSettled: false,
-      },
     );
     if (this.#historyReplays.has(params.sessionId)) void active.holdLive().catch(() => undefined);
     this.#addActivePrompt(active);
@@ -1027,12 +1030,7 @@ export class AcpSessionRegistry {
     });
     if (this.#historyReplays.has(sessionId)) void observation.holdLive().catch(() => undefined);
     const admission: ActiveAcpPrompt | undefined = trackAdmission
-      ? Object.assign(observation, {
-          waiters: new Set<() => void>(),
-          dispatchStarted: false,
-          startRequestSettled: false,
-          admissionSettled: false,
-        })
+      ? withPromptAdmission(observation)
       : undefined;
     if (admission) this.#addActivePrompt(admission);
     else this.#setTurnObservation(observation);
