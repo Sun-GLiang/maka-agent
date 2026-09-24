@@ -98,6 +98,37 @@ describe('Maka ACP agent', () => {
     );
   });
 
+  test('routes bounded copy-source queries and rejects invalid input through the SDK', async () => {
+    await client({ name: 'test-client' }).connectWith(
+      createMakaAcpAgent({ version: '0.2.0', sessionRegistry: fakeSessionRegistry() }),
+      async (agent) => {
+        const query = {
+          sessionId: 'session-1',
+          throughSequence: null,
+          position: 0,
+          maxContributions: 1,
+        };
+        assert.deepEqual(await agent.request('_maka/session/copy-source/query', query), {
+          sessionId: 'session-1',
+          expectedSourceRevision: 1,
+          throughSequence: 8,
+          contributions: [],
+          nextPosition: null,
+        });
+        for (const invalid of [
+          { ...query, sessionId: '' },
+          { ...query, maxContributions: 129 },
+          { ...query, position: -1 },
+        ]) {
+          await assert.rejects(
+            agent.request('_maka/session/copy-source/query', invalid),
+            (error: unknown) => error instanceof RequestError && error.code === -32602,
+          );
+        }
+      },
+    );
+  });
+
   test('routes branch, revision, and abandon extensions through the SDK', async () => {
     await client({ name: 'test-client' }).connectWith(
       createMakaAcpAgent({ version: '0.2.0', sessionRegistry: fakeSessionRegistry() }),
@@ -268,6 +299,13 @@ function fakeSessionRegistry(
         disposition: 'parked' as const,
         reason: 'resume_candidate_missing' as const,
       },
+    }),
+    queryCopySource: async () => ({
+      sessionId: 'session-1',
+      expectedSourceRevision: 1,
+      throughSequence: 8,
+      contributions: [],
+      nextPosition: null,
     }),
     branch: async () => ({
       kind: 'source_revision_conflict' as const,

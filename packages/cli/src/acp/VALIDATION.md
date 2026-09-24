@@ -19,6 +19,49 @@
 
 # ACP validation record
 
+## PR6 review fixes — September 24, 2026
+
+These changes start from PR head `561b5a304`. Branch/revision source discovery
+now has a concrete `_maka/session/copy-source/query` route backed by the existing
+bounded Host Turn query and Session revision. The official SDK child-process
+flow obtains historical Turn IDs and revisions entirely over ACP, verifies a
+stale revision conflict, then creates and prompts branch/revision targets and
+checks abandon/retained outcomes. No internal Host connection supplies the copy
+parameters.
+
+Initial attachment waits now honor request cancellation for load, resume, and
+explicit Turn resume. The last consumer aborts initialization; a late subscription
+is closed without affecting a replacement. Concurrent prompts retain the shared
+attachment even before they reach its wait. Admission state lives in a typed
+observation, indexed only once; close, abandon, rollback and failed attachments
+share identity-checked resource detachment while retaining their distinct
+execution and ownership rules.
+
+Eight focused regression tests were run against an isolated copy of the original
+head's production modules: all eight failed. The six cancellation cases cover
+subscription open and transcript hydration for all three restore methods; the
+other two cover the absent ACP query and ownership/paging contract. They pass
+with the repair. Four shared-consumer cases additionally cover cancelling load
+or prompt both before and during the other consumer's attachment wait. The
+earlier load-cancellation interleaving first failed during development and passes
+after preserving pending admission consumers.
+
+Validation on macOS and Node 24.19.0:
+
+| Check | Result |
+| --- | --- |
+| Root build and typecheck; final CLI rebuild and typecheck | Passed. |
+| Final full CLI suite (`node --test --test-concurrency=4 'packages/cli/dist/**/*.test.js'`) | 1220 passed, 3 skipped, 0 failed. Includes the pure ACP copy workflow and all cancellation regressions. |
+| Full Runtime Host dist suite | 2087 passed, 12 skipped, 3 failures waiting for the execution Host to become ready. CLI, Host and Desktop suites ran concurrently. No Host source was changed by this follow-up. |
+| Serial rerun of the three affected Host test files | All 28 passed, including the three startup-timeout cases. Files: `execution-host-continuation`, `execution-host-message`, and `execution-host-queue`. |
+| Full Desktop dist suite | 2841 passed, 0 failed. |
+| Root lint/format, Desktop/UI knip, ASF headers, CLI notices, `git diff --check` | Passed. |
+| Protocol epoch guard against `fb9df6c3d` and its tests | Passed; 17 tests passed. This follow-up does not change the Host wire protocol. |
+
+The first Host run's failures are retained rather than presenting its result as a
+clean full-suite pass. Desktop Electron E2E and Zed were not rerun for this
+follow-up; their earlier evidence and version boundaries remain below.
+
 ## PR6 main integration and admission cleanup — September 24, 2026
 
 Merged Apache `main` at `fb9df6c3d` into PR #5621. The only textual conflict was

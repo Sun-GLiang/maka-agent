@@ -36,6 +36,7 @@ export interface MakaAcpAgentOptions {
     | 'load'
     | 'resume'
     | 'resumeTurn'
+    | 'queryCopySource'
     | 'branch'
     | 'createRevision'
     | 'abandonRevision'
@@ -94,6 +95,22 @@ export function createMakaAcpAgent(options: MakaAcpAgentOptions): AgentApp {
           params,
           sessionContext(client, signal, clientCapabilities, true),
         ),
+    )
+    .onRequest(
+      '_maka/session/copy-source/query',
+      {
+        parse: (value: unknown) => {
+          try {
+            return HOST_OPERATION_SPECS['session.turns.query'].decodeInput(value);
+          } catch {
+            throw RequestError.invalidParams(
+              { reason: 'invalid_copy_source_query' },
+              'Invalid Session copy source query',
+            );
+          }
+        },
+      },
+      ({ params }) => options.sessionRegistry.queryCopySource(params),
     )
     .onRequest(
       '_maka/session/branch/create',

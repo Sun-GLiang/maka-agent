@@ -1506,6 +1506,51 @@ describe('ACP Session registry', () => {
     }
   });
 
+  test('copy-source query requires ownership, forwards bounded paging, and captures revision before reading Turns', async () => {
+    const sessionId = 'copy-source';
+    const queries: unknown[] = [];
+    let revision = 3;
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => sessionId,
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession(sessionId);
+            if (operation === 'session.catalog.query')
+              return {
+                kind: 'session',
+                session: catalogSession(sessionId, '/workspace', { revision }),
+              };
+            if (operation === 'session.turns.query') {
+              queries.push(input);
+              revision += 1;
+              return { sessionId, throughSequence: 20, contributions: [], nextPosition: 2 };
+            }
+            throw new Error(`Unexpected operation ${operation}`);
+          },
+        }),
+    });
+    const query = { sessionId, throughSequence: 20, position: 1, maxContributions: 1 };
+    try {
+      await assert.rejects(registry.queryCopySource(query), RequestError);
+      assert.deepEqual(queries, []);
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      assert.deepEqual(await registry.queryCopySource(query), {
+        sessionId,
+        throughSequence: 20,
+        contributions: [],
+        nextPosition: 2,
+        expectedSourceRevision: 3,
+      });
+      assert.deepEqual(queries, [query]);
+      await registry.close({ sessionId });
+      await assert.rejects(registry.queryCopySource(query), RequestError);
+      assert.equal(queries.length, 1);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
   test('committed branch and revision targets are immediately owned; retained and abandoned remain distinct', async () => {
     const sourceSessionId = 'source-session';
     const targetSessionId = 'branch-target';
@@ -2370,6 +2415,156 @@ describe('ACP Session registry', () => {
     assert.equal(subscription.closeCalls, 1);
   });
 
+  for (const method of ['load', 'resume', 'resumeTurn'] as const) {
+    for (const phase of ['open', 'hydrate'] as const) {
+      test(`aborting ${method} during ${phase} releases its attachment and allows retry`, async () => {
+        const sessionId = `cancel-${method}-${phase}`;
+        const transcript = deferred<StoredMessage[]>();
+        const opening = deferred<RuntimeHostSessionSubscription>();
+        const initial = new FakeSubscription(
+          continuitySnapshot(sessionId),
+          phase === 'hydrate' ? transcript.promise : Promise.resolve([]),
+        );
+        const retry = new FakeSubscription(continuitySnapshot(sessionId));
+        const controller = new AbortController();
+        let opens = 0;
+        let starts = 0;
+        const registry = new AcpSessionRegistry({
+          newSessionId: () => sessionId,
+          connect: async () =>
+            fakeConnection({
+              request: async (operation) => {
+                if (operation === 'session.create') return catalogSession(sessionId);
+                if (operation === 'session.catalog.query')
+                  return { kind: 'session', session: catalogSession(sessionId) };
+                if (operation === 'turn.resume.query')
+                  return {
+                    sessionId,
+                    disposition: 'ready',
+                    sourceRunId: 'source-run',
+                    sourceTurnId: 'source-turn',
+                    sourceRuntimeEventHighWater: 42,
+                  };
+                if (operation === 'turn.start' || operation === 'turn.resume.start') starts += 1;
+                throw new Error(`Unexpected operation ${operation}`);
+              },
+              openSessionSubscriptionOnce: async () => {
+                opens += 1;
+                return opens > 1 ? retry : phase === 'open' ? opening.promise : initial;
+              },
+            }),
+        });
+        await registry.create({ cwd: '/workspace', mcpServers: [] });
+        let settled = false;
+        const request = registry[method](
+          { sessionId, cwd: '/workspace', mcpServers: [] },
+          { ...promptContext([]), signal: controller.signal },
+        );
+        const rejected = assert.rejects(request).then(() => {
+          settled = true;
+        });
+        try {
+          await waitFor(() => (phase === 'open' ? opens === 1 : initial.nextCalls > 0));
+          controller.abort();
+          await waitFor(() => settled);
+          if (phase === 'hydrate') assert.equal(initial.closeCalls, 1);
+          // A late open is closed independently; it cannot occupy the retry slot.
+          await registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([]));
+          assert.equal(opens, 2);
+          opening.resolve(initial);
+          transcript.resolve([]);
+          await waitFor(() => initial.closeCalls === 1);
+          assert.equal(starts, 0);
+          assert.equal(retry.closeCalls, 0);
+        } finally {
+          opening.resolve(initial);
+          transcript.resolve([]);
+          await registry.dispose();
+          await rejected;
+        }
+      });
+    }
+  }
+
+  for (const cancelledMethod of ['load', 'prompt'] as const) {
+    for (const timing of ['before-wait', 'during-wait'] as const) {
+      test(`aborting ${cancelledMethod} preserves a concurrent attachment consumer ${timing}`, async () => {
+        const sessionId = `shared-load-${cancelledMethod}`;
+        const transcript = deferred<StoredMessage[]>();
+        const subscription = new FakeSubscription(
+          continuitySnapshot(sessionId),
+          transcript.promise,
+        );
+        const abort = new AbortController();
+        let opens = 0;
+        let admitted = 0;
+        const registry = new AcpSessionRegistry({
+          newSessionId: () => sessionId,
+          newTurnId: () => 'shared-turn',
+          connect: async () =>
+            fakeConnection({
+              request: async (operation, input) => {
+                if (operation === 'session.create') return catalogSession(sessionId);
+                if (operation === 'session.catalog.query')
+                  return { kind: 'session', session: catalogSession(sessionId) };
+                if (operation === 'turn.start') {
+                  admitted += 1;
+                  const turnId = (input as { turnId: string }).turnId;
+                  const turn = runningTurn(sessionId, turnId);
+                  subscription.setRoot(turn);
+                  subscription.setRoot(completedTurn(sessionId, turnId));
+                  return {
+                    kind: 'started',
+                    turn,
+                    skillInvocation: { loaded: [], failed: [], receipts: [] },
+                  };
+                }
+                throw new Error(`Unexpected operation ${operation}`);
+              },
+              openSessionSubscriptionOnce: async () => {
+                opens += 1;
+                return subscription;
+              },
+            }),
+        });
+        await registry.create({ cwd: '/workspace', mcpServers: [] });
+        const loading = registry.load(
+          { sessionId, cwd: '/workspace', mcpServers: [] },
+          {
+            ...promptContext([]),
+            ...(cancelledMethod === 'load' ? { signal: abort.signal } : {}),
+          },
+        );
+        void loading.catch(() => undefined);
+        await waitFor(() => subscription.nextCalls > 0);
+        const prompt = registry.prompt(
+          { sessionId, prompt: [{ type: 'text', text: 'continue' }] },
+          {
+            ...promptContext([]),
+            ...(cancelledMethod === 'prompt' ? { signal: abort.signal } : {}),
+          },
+        );
+        try {
+          if (timing === 'during-wait') await new Promise<void>((resolve) => setImmediate(resolve));
+          abort.abort();
+          if (cancelledMethod === 'load') await assert.rejects(loading);
+          else assert.deepEqual(await prompt, { stopReason: 'cancelled' });
+          assert.equal(subscription.closeCalls, 0);
+          transcript.resolve([]);
+          if (cancelledMethod === 'load')
+            assert.deepEqual(await prompt, { stopReason: 'end_turn' });
+          else await loading;
+          assert.equal(opens, 1);
+          assert.equal(admitted, cancelledMethod === 'load' ? 1 : 0);
+          assert.equal(subscription.closeCalls, 0);
+        } finally {
+          transcript.resolve([]);
+          await registry.dispose();
+          await Promise.allSettled([loading, prompt]);
+        }
+      });
+    }
+  }
   test('aborting a prompt signal closes its pending initial transcript hydration', async () => {
     const sessionId = 'session-aborted-hydration';
     const transcript = deferred<StoredMessage[]>();

@@ -60,6 +60,7 @@ or reconnection without waiting for the Host to become available.
 | Tool `permission` | Standard `session/request_permission`. One-shot allow/deny choices are preserved; eligible tool permissions also expose an explicit allow-for-this-Turn choice. Permission cancellation cancels the Turn. |
 | Load/resume | `session/load` replays durable user, assistant, thinking and tool rows before returning; `session/resume` attaches without replay. Both return current configuration and leave the Session attached for prompt. Neither restarts an interrupted Turn. |
 | Explicit interrupted Turn resume | `_maka/turn/resume` queries the Host safety plan and starts only a ready plan. A required MCP tool absent from the current Session binding leaves the plan parked. A parked plan is returned unchanged. A lost dispatched start returns `outcome_unknown` with the exact `turnId`; the adapter never retries that command. |
+| Copy source discovery | `_maka/session/copy-source/query` returns a bounded Host Turn page and `expectedSourceRevision` for an owned Session, so branch/revision parameters can be obtained entirely through ACP. |
 | Branch and revision | `_maka/session/branch/create`, `_maka/session/revision/create`, and `_maka/session/revision/abandon` map to the corresponding Host commands. The source must be owned by this ACP connection. A committed target becomes immediately usable; `retained` keeps its ownership and `abandoned` releases local resources. |
 | Replacing all MCP configuration | Every load/resume applies its complete stdio list through the existing Session MCP manager and publication. An omitted `session/resume.mcpServers` means an empty list. Equivalent normalized configuration reuses the process; changing or clearing it republishes the Session scope. An attached Session rejects a different configuration while the Host reports an active Turn; retry after that Turn settles. |
 | HTTP/SSE/OAuth MCP | Deferred. |
@@ -97,6 +98,44 @@ workspace instruction policy. The Host records model usage and context window
 facts in its runtime data, but this ACP v1 adapter does not emit a separate
 usage or context-window notification. An ACP client's own usage display should
 not infer those numbers from replayed text chunks.
+
+## Branch/revision source discovery
+
+After creating or loading a Session, call `_maka/session/copy-source/query` with:
+
+```json
+{
+  "sessionId": "source-session-id",
+  "throughSequence": null,
+  "position": 0,
+  "maxContributions": 64
+}
+```
+
+The response contains `sessionId`, `expectedSourceRevision`, `throughSequence`,
+`contributions`, and `nextPosition`. Each contribution contains a `turnId`,
+`firstSequence`, a bounded `userPromptPreview`, and `latestState` when available.
+To continue, carry the returned `throughSequence` and use `nextPosition` as the
+next request's `position`; `null` ends paging. The Host limits each page to 128
+contributions. A Turn can contribute to more than one page: merge by `turnId`,
+retaining the earliest `firstSequence` and the greatest `latestState.sequence`.
+Select a settled Turn after reading its state, rather than guessing a boundary
+from a text message ID. No additional subscription is opened by this query.
+
+Pass the selected `turnId` as `sourceTurnId`, the query's `sessionId` as
+`sourceSessionId`, and `expectedSourceRevision` unchanged to branch/revision
+creation, together with a new `targetSessionId`. The Host still validates the
+boundary and revision. If the source changes, `source_revision_conflict` requires
+an explicit refresh and a new client decision; the adapter does not retry copy
+commands. An empty source can be branched only with the Host's explicit
+`intent: "side_conversation"`; it cannot be used for revision creation.
+
+Cancelling a load/resume or explicit Turn-resume request while its initial
+subscription opens or hydrates releases that request's wait immediately. If no
+other request is awaiting the same attachment, initialization is aborted and a
+late subscription is closed. A concurrent prompt or restore retains its own
+wait and prepared Session resources. This does not stop an already attached
+Host Turn; use `session/cancel` for that operation.
 
 ## Tool output and completion
 

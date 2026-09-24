@@ -19,7 +19,8 @@
 
 import type { SessionEvent } from '@maka/core/events';
 import type { StoredMessage } from '@maka/core/session';
-import type { StopReason } from '@agentclientprotocol/sdk';
+import type { TurnSnapshot } from '@maka/runtime-host/protocol';
+import type { RequestError, StopReason } from '@agentclientprotocol/sdk';
 import type { RuntimeHostTerminalTurn } from '@maka/runtime-host/adapter';
 import { RuntimeHostSessionChannel } from '../runtime-host-session-channel.js';
 import { AcpSessionEventMapper } from './session-event-mapper.js';
@@ -178,4 +179,24 @@ export class AcpTurnObservation {
     this.reconciliationAbort.abort();
     this.transcript?.dispose();
   }
+}
+
+/** Admission bookkeeping exists only for Turns this connection dispatches. */
+export class AcpAdmittedTurnObservation extends AcpTurnObservation {
+  readonly admission: {
+    readonly waiters: Set<() => void>;
+    dispatchStarted: boolean;
+    startRequestSettled: boolean;
+    settled: boolean;
+    rejected?: boolean;
+    query?: Promise<void>;
+    failure?: RequestError;
+    startedTurn?: TurnSnapshot;
+    stopTask?: Promise<void>;
+  } = {
+    waiters: new Set(),
+    dispatchStarted: false,
+    startRequestSettled: false,
+    settled: false,
+  };
 }

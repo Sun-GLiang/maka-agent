@@ -36,6 +36,7 @@ import {
 } from '@maka/runtime/terminal-run-commit';
 import { connectRuntimeHost } from '@maka/runtime-host/client';
 import {
+  type SessionTurnsQueryResult,
   ARTIFACT_INGEST_CHUNK_MAX_BYTES,
   RUNTIME_HOST_PROTOCOL_VERSION,
   SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES,
@@ -694,34 +695,57 @@ describe('Maka ACP child process', () => {
                   }),
                   { stopReason: 'end_turn' },
                 );
-                const host = await connectRuntimeHost({
-                  rootPath: harness.workspaceRoot,
-                  protocol: {
-                    min: RUNTIME_HOST_PROTOCOL_VERSION,
-                    max: RUNTIME_HOST_PROTOCOL_VERSION,
-                  },
-                });
-                assert.equal(host.kind, 'connected');
-                if (host.kind !== 'connected') assert.fail('Host connection unavailable');
-                let sourceTurnId: string;
-                let expectedSourceRevision: number;
-                try {
-                  const session = await getRuntimeHostSession(host.connection, sessionId);
-                  assert.ok(session);
-                  expectedSourceRevision = session.revision;
-                  const subscription = await host.connection.openSessionSubscription({
+                // All copy parameters come from ACP, including historical Turn IDs
+                // for plain-text prompts with no tool metadata or private Host access.
+                let position = 0;
+                let throughSequence: number | null = null;
+                let expectedSourceRevision = 0;
+                const sourceTurns: string[] = [];
+                do {
+                  const page = (await context.request('_maka/session/copy-source/query', {
                     sessionId,
-                    transcript: { kind: 'tail', maxBytes: SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES },
-                  });
-                  try {
-                    assert.ok(subscription.snapshot.rootTurn);
-                    sourceTurnId = subscription.snapshot.rootTurn.turnId;
-                  } finally {
-                    await subscription.close();
+                    throughSequence,
+                    position,
+                    maxContributions: 1,
+                  })) as SessionTurnsQueryResult & { expectedSourceRevision: number };
+                  assert.equal(page.sessionId, sessionId);
+                  assert.equal(page.contributions.length, 1);
+                  expectedSourceRevision = page.expectedSourceRevision;
+                  throughSequence = page.throughSequence;
+                  for (const contribution of page.contributions) {
+                    if (contribution.latestState?.message.status === 'completed')
+                      sourceTurns.push(contribution.turnId);
                   }
-                } finally {
-                  await host.connection.close();
-                }
+                  if (page.nextPosition === null) break;
+                  assert.ok(page.nextPosition > position);
+                  position = page.nextPosition;
+                } while (true);
+                assert.ok(sourceTurns.length >= 2);
+                const sourceTurnId = sourceTurns[0]!;
+                await context.request(methods.agent.session.setConfigOption, {
+                  sessionId,
+                  configId: 'permission_mode',
+                  value:
+                    loaded.configOptions?.find((option) => option.id === 'permission_mode')
+                      ?.currentValue === 'bypass'
+                      ? 'ask'
+                      : 'bypass',
+                });
+                const staleCopy = (await context.request('_maka/session/branch/create', {
+                  sourceSessionId: sessionId,
+                  targetSessionId: randomUUID(),
+                  sourceTurnId,
+                  expectedSourceRevision,
+                })) as { kind: string };
+                assert.equal(staleCopy.kind, 'source_revision_conflict');
+                const refreshed = (await context.request('_maka/session/copy-source/query', {
+                  sessionId,
+                  throughSequence: null,
+                  position: 0,
+                  maxContributions: 1,
+                })) as SessionTurnsQueryResult & { expectedSourceRevision: number };
+                assert.ok(refreshed.expectedSourceRevision > expectedSourceRevision);
+                expectedSourceRevision = refreshed.expectedSourceRevision;
                 const targetSessionId = randomUUID();
                 const branched = (await context.request('_maka/session/branch/create', {
                   sourceSessionId: sessionId,
