@@ -103,6 +103,7 @@ interface PermissionPresentation {
 /** Connection-local presentation of Host interactions; the Host owns every answer and grant. */
 export class AcpSessionInteractions {
   readonly #options: AcpSessionInteractionsOptions;
+  #client: AcpInteractionClient;
   readonly #lifetime = new AbortController();
   readonly #pending = new Map<string, PendingInteraction>();
   readonly #resolving = new Map<string, Promise<void>>();
@@ -112,6 +113,11 @@ export class AcpSessionInteractions {
 
   constructor(options: AcpSessionInteractionsOptions) {
     this.#options = options;
+    this.#client = options.client;
+  }
+
+  setClient(client: AcpInteractionClient): void {
+    this.#client = client;
   }
 
   pending(snapshot: InteractionPendingSnapshot): Promise<void> {
@@ -233,7 +239,7 @@ export class AcpSessionInteractions {
     const request = pending.request;
     if (
       (request.kind === 'question' || request.kind === 'form') &&
-      this.#options.client.capabilities.elicitation?.form == null
+      this.#client.capabilities.elicitation?.form == null
     ) {
       throw interactionError(
         pending,
@@ -252,7 +258,7 @@ export class AcpSessionInteractions {
     let answer: InteractionAnswer;
     if (request.kind === 'question' || request.kind === 'form') {
       const response = await whileActive(
-        this.#options.client.createElicitation(elicitationRequest(pending), signal),
+        this.#client.createElicitation(elicitationRequest(pending), signal),
         signal,
       );
       if (!response.active) return;
@@ -269,7 +275,7 @@ export class AcpSessionInteractions {
     } else {
       const presentation = permissionPresentation(pending);
       const response = await whileActive(
-        this.#options.client.requestPermission(presentation.request, signal),
+        this.#client.requestPermission(presentation.request, signal),
         signal,
       );
       if (!response.active) return;

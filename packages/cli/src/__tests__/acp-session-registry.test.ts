@@ -111,6 +111,102 @@ const DEFAULT_CONFIG_OPTIONS: Array<Extract<SessionConfigOption, { type: 'select
 ];
 
 describe('ACP Session registry', () => {
+  for (const method of ['load', 'resume'] as const) {
+    test(`${method} reuses an attachment and adopts a Turn started before restore`, async () => {
+      const sessionId = `retained-${method}`;
+      const turnId = 'external-turn';
+      const subscription = new FakeSubscription(continuitySnapshot(sessionId));
+      const notifications: SessionNotification[] = [];
+      let opens = 0;
+      let pendingPresented = 0;
+      const external = runningTurn(sessionId, turnId);
+      const pending: InteractionPendingSnapshot = {
+        schemaVersion: 1,
+        interactionId: 'external-question',
+        sessionId,
+        turnId,
+        runId: external.runId,
+        revision: 1,
+        status: 'pending',
+        outcome: null,
+        request: {
+          kind: 'question',
+          toolUseId: 'tool',
+          questions: [{ question: 'Continue?', options: [{ label: 'Yes' }] }],
+        },
+      };
+      const registry = new AcpSessionRegistry({
+        newSessionId: () => sessionId,
+        newTurnId: () => 'local-turn',
+        connect: async () =>
+          fakeConnection({
+            request: async (operation) => {
+              if (operation === 'session.create') return catalogSession(sessionId);
+              if (operation === 'session.catalog.query')
+                return { kind: 'session', session: catalogSession(sessionId) };
+              if (operation === 'interaction.query') return pending;
+              if (operation === 'turn.start') {
+                const local = runningTurn(sessionId, 'local-turn');
+                subscription.setRoot(local);
+                subscription.setRoot(completedTurn(sessionId, 'local-turn'));
+                return {
+                  kind: 'started',
+                  turn: local,
+                  skillInvocation: { loaded: [], failed: [], receipts: [] },
+                };
+              }
+              if (operation === 'turn.stop') return {};
+              throw new Error(`Unexpected operation ${operation}`);
+            },
+            openSessionSubscriptionOnce: async () => {
+              opens += 1;
+              return subscription;
+            },
+          }),
+      });
+      try {
+        await registry.create({ cwd: '/workspace', mcpServers: [] });
+        await registry.prompt(
+          { sessionId, prompt: [{ type: 'text', text: 'first' }] },
+          promptContext([]),
+        );
+        const before = subscription.nextCalls;
+        subscription.setRoot(external);
+        subscription.project({ interactions: { pending: [pending] } });
+        await waitFor(() => subscription.nextCalls > before);
+        const restoreContext = {
+          ...promptContext(notifications),
+          interactions: {
+            capabilities: { elicitation: { form: {} } },
+            createElicitation: async () => {
+              pendingPresented += 1;
+              return new Promise<never>(() => undefined);
+            },
+            requestPermission: async () => assert.fail('Unexpected permission'),
+          },
+        };
+        await registry[method]({ sessionId, cwd: '/workspace', mcpServers: [] }, restoreContext);
+        assert.equal(opens, 1);
+        await waitFor(() => pendingPresented === 1);
+        subscription.appendText(turnId, external.runId, 'external live output', true);
+        await waitFor(() =>
+          notifications.some(
+            ({ update }) =>
+              update.sessionUpdate === 'agent_message_chunk' &&
+              update.content.type === 'text' &&
+              update.content.text === 'external live output',
+          ),
+        );
+        await registry.resume({ sessionId, cwd: '/workspace' }, restoreContext);
+        assert.equal(opens, 1);
+        assert.equal(pendingPresented, 1);
+      } finally {
+        subscription.setRoot(null);
+        await registry.dispose();
+      }
+    });
+  }
+
   test('loads durable history, returns configuration, and retains attachment for prompt', async () => {
     const sessionId = 'session-loaded';
     const history: StoredMessage[] = [
@@ -1316,6 +1412,81 @@ describe('ACP Session registry', () => {
       await registry.dispose();
     }
   });
+
+  for (const action of ['close', 'dispose'] as const) {
+    test(`${action} waits for an explicit resume failure Stop`, async () => {
+      const sessionId = 'resume-stop-lifetime';
+      const turnId = 'resumed-turn';
+      const subscription = new FakeSubscription(continuitySnapshot(sessionId));
+      const stop = deferred<void>();
+      let stopRequested = false;
+      let connectionClosed = false;
+      const registry = new AcpSessionRegistry({
+        newSessionId: () => sessionId,
+        newTurnId: () => turnId,
+        connect: async () =>
+          fakeConnection({
+            request: async (operation) => {
+              if (operation === 'session.create') return catalogSession(sessionId);
+              if (operation === 'turn.resume.query')
+                return {
+                  sessionId,
+                  disposition: 'ready',
+                  sourceRunId: 'source-run',
+                  sourceTurnId: 'source-turn',
+                  sourceRuntimeEventHighWater: 42,
+                };
+              if (operation === 'turn.resume.start') {
+                const turn = runningTurn(sessionId, turnId);
+                subscription.setRoot(turn);
+                return { kind: 'started', turn };
+              }
+              if (operation === 'turn.stop') {
+                stopRequested = true;
+                subscription.setRoot(completedTurn(sessionId, turnId));
+                return stop.promise;
+              }
+              throw new Error(`Unexpected operation ${operation}`);
+            },
+            openSessionSubscriptionOnce: async () => subscription,
+            close: async () => {
+              connectionClosed = true;
+            },
+          }),
+      });
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.resumeTurn(
+        { sessionId },
+        {
+          ...promptContext([]),
+          notify: async () => {
+            throw new Error('Client output failed');
+          },
+        },
+      );
+      subscription.appendText(turnId, `run-${turnId}`, 'output', true);
+      await waitFor(() => stopRequested);
+      let cleanupSettled = false;
+      const cleaning = (
+        action === 'close' ? registry.close({ sessionId }) : registry.dispose()
+      ).then(() => {
+        cleanupSettled = true;
+      });
+      try {
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(connectionClosed, false);
+        assert.equal(cleanupSettled, false);
+      } finally {
+        stop.resolve();
+        await cleaning;
+      }
+      assert.equal(connectionClosed, action === 'dispose');
+      if (action === 'close') {
+        assert.equal(subscription.closeCalls, 1);
+        await registry.dispose();
+      }
+    });
+  }
 
   test('explicit Turn resume returns a Host parked plan without opening a subscription', async () => {
     const sessionId = 'session-resume-parked';

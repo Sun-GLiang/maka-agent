@@ -38,6 +38,8 @@ export class AcpTurnObservation {
   transcript?: ReturnType<RuntimeHostSessionChannel['trackPromptTranscript']>;
   projectionFailure?: unknown;
   terminalTurn?: RuntimeHostTerminalTurn;
+  /** Keep the Host transport alive until a requested Stop has settled. */
+  stopTask?: Promise<void>;
   cancelled = false;
   finished = false;
   #muteDepth = 0;
@@ -193,7 +195,6 @@ export class AcpAdmittedTurnObservation extends AcpTurnObservation {
     query?: Promise<void>;
     failure?: RequestError;
     startedTurn?: TurnSnapshot;
-    stopTask?: Promise<void>;
   } = {
     waiters: new Set(),
     dispatchStarted: false,
@@ -220,6 +221,29 @@ export class AcpAdmittedTurnObservation extends AcpTurnObservation {
       error instanceof RuntimeHostRequestInterruptedError &&
       error.dispatch === 'dispatched'
     );
+    this.wake();
+  }
+
+  observeStartedTurn(turn: TurnSnapshot): void {
+    this.admission.startedTurn ??= turn;
+    this.admission.settled = true;
+    this.wake();
+  }
+
+  settleAbsentTurn(observed?: TurnSnapshot): void {
+    if (observed) this.admission.startedTurn ??= observed;
+    else if (!this.admission.startedTurn) this.admission.rejected = true;
+    this.admission.settled = true;
+    this.wake();
+  }
+
+  failAdmission(error: RequestError): void {
+    this.admission.failure = error;
+    this.wake();
+  }
+
+  settleOnClose(): void {
+    this.admission.settled = true;
     this.wake();
   }
 

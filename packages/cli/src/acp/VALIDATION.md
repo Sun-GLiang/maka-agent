@@ -19,6 +19,35 @@
 
 # ACP validation record
 
+## PR6 retained attachment and Stop review fixes — September 24, 2026
+
+Starting from PR head `c50987a6b`, two isolated reproductions failed when
+`session/load` or `session/resume` reused an attachment that had observed another
+client's Turn before restore. A separate reproduction failed when an explicit
+`turn.resume.start` observer requested Stop after output delivery failed and
+dispose closed the Host connection before the Stop response. These reproductions
+were kept outside the source tree; the repaired behavior is covered by formal
+registry tests.
+
+Restore now adopts the current nonterminal root on the retained channel and
+replays its pending interactions through the same interaction owner. The owner
+uses the restoring client's capabilities and callbacks, while the existing
+history/live barrier orders replay ahead of live output. Output-failure Stop is
+retained on the Turn observation and awaited before observation release and Host
+connection teardown. Admission result transitions used by snapshot and query
+callers are owned by the admitted observation.
+
+Validation on macOS and Node 24.19.0 after repair:
+
+| Check | Result |
+| --- | --- |
+| Formal ACP registry suite | 127 passed, 0 failed, including retained attachment load/resume with pending interaction and live output, plus close/dispose during a deferred Stop. |
+| Full CLI dist suite, concurrency 4 | 1236 passed, 3 skipped, 0 failed; includes official SDK child-process tests against a real Host. |
+| CLI build/typecheck, scoped lint/format, ASF headers, `git diff --check` | Passed. |
+
+Runtime Host, Desktop, Electron and Zed suites were not rerun for this follow-up;
+their earlier results below remain tied to their recorded heads.
+
 ## PR6 CI and remaining review fixes — September 24, 2026
 
 This follow-up starts from `876dffea3` and resolves the three remaining P2
