@@ -2417,14 +2417,21 @@ describe('ACP Session registry', () => {
 
   for (const method of ['load', 'resume', 'resumeTurn'] as const) {
     for (const phase of ['open', 'hydrate'] as const) {
-      test(`aborting ${method} during ${phase} releases its attachment and allows retry`, async () => {
+      test(`aborting ${method} during ${phase} releases its attachment and allows retry`, {
+        timeout: 10_000,
+      }, async () => {
         const sessionId = `cancel-${method}-${phase}`;
         const transcript = deferred<StoredMessage[]>();
         const opening = deferred<RuntimeHostSessionSubscription>();
+        const entered = deferred<void>();
+        const closed = deferred<void>();
         const initial = new FakeSubscription(
           continuitySnapshot(sessionId),
           phase === 'hydrate' ? transcript.promise : Promise.resolve([]),
+          'subscription-1',
+          () => closed.resolve(),
         );
+        initial.onTranscriptRead = () => entered.resolve();
         const retry = new FakeSubscription(continuitySnapshot(sessionId));
         const controller = new AbortController();
         let opens = 0;
@@ -2450,30 +2457,29 @@ describe('ACP Session registry', () => {
               },
               openSessionSubscriptionOnce: async () => {
                 opens += 1;
+                if (phase === 'open') entered.resolve();
                 return opens > 1 ? retry : phase === 'open' ? opening.promise : initial;
               },
             }),
         });
         await registry.create({ cwd: '/workspace', mcpServers: [] });
-        let settled = false;
         const request = registry[method](
           { sessionId, cwd: '/workspace', mcpServers: [] },
           { ...promptContext([]), signal: controller.signal },
         );
-        const rejected = assert.rejects(request).then(() => {
-          settled = true;
-        });
+        const rejected = assert.rejects(request);
         try {
-          await waitFor(() => (phase === 'open' ? opens === 1 : initial.nextCalls > 0));
+          await entered.promise;
           controller.abort();
-          await waitFor(() => settled);
+          await rejected;
           if (phase === 'hydrate') assert.equal(initial.closeCalls, 1);
           // A late open is closed independently; it cannot occupy the retry slot.
           await registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([]));
           assert.equal(opens, 2);
           opening.resolve(initial);
           transcript.resolve([]);
-          await waitFor(() => initial.closeCalls === 1);
+          await closed.promise;
+          assert.equal(initial.closeCalls, 1);
           assert.equal(starts, 0);
           assert.equal(retry.closeCalls, 0);
         } finally {
@@ -5236,6 +5242,7 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
   nextCalls = 0;
   transcriptPageReads = 0;
   onTranscriptPageRead?: () => void;
+  onTranscriptRead?: () => void;
   transcriptPageSize = Number.POSITIVE_INFINITY;
   transcriptEmptyFirstPage = false;
   transcriptPageGate?: Promise<void>;
@@ -5416,6 +5423,7 @@ class FakeSubscription implements RuntimeHostSessionSubscription, AsyncIterator<
   }
 
   async loadTranscript<T>(decodeMessage: (value: unknown) => T): Promise<T[]> {
+    this.onTranscriptRead?.();
     return (await this.transcript).map(decodeMessage);
   }
 
