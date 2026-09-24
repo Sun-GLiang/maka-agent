@@ -256,7 +256,6 @@ export function createAppShellChatActions(deps: {
   }): Promise<SubmittedMessage> {
     const { sessionId, messageId, placement } = input;
     const directoryReferences = input.command.directoryReferences;
-    const quotes = input.quotes ?? [];
     const result = await window.maka.sessions.submitMessage(sessionId, placement, {
       ...input.command,
       messageId,
@@ -287,13 +286,13 @@ export function createAppShellChatActions(deps: {
       pendingSteering: result.disposition !== 'turn_started' && input.pendingSteering,
       ...(result.turnId ? { hostTurnId: result.turnId } : {}),
       ...copiedArray('directoryReferences', directoryReferences),
-      ...copiedArray('quotes', quotes),
+      ...copiedArray('quotes', input.quotes ?? []),
       inlineReferences: [...(result.inlineReferences ?? [])],
     }, true);
     return {
       kind: 'projected',
       skillInvocation: result.skillInvocation,
-      ...(result.turnId ? { turnId: result.turnId } : {}),
+      ...(result.turnId ? { turnId: result.turnId } : {})
     };
   }
 
