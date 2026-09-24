@@ -2371,10 +2371,10 @@ const makaBridge = {
         placement,
         {
           ...submitCommand,
+          ...(!options?.waitForHostAdmission && localDisplayPlacement ? { localDisplayPlacement } : {}),
           ...(command.retainedAttachments ? { retainedAttachments: hostAttachmentRefs(session, command.retainedAttachments) } : {}),
           ...(attachmentItems ? { attachmentItems } : {}),
         },
-        localDisplayPlacement,
       )) as Awaited<ReturnType<MakaBridge['sessions']['submitMessage']>>;
       return result.ok
         ? { ...result, attachments: projectDesktopAttachmentRefs(session.scope, result.attachments) }

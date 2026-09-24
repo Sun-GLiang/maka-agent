@@ -937,7 +937,12 @@ test('local submit preserves picked-file approvals until durable admission succe
   });
   for (let index = 0; index < 256; index++)
     store.enqueue('authority', { ...intent(`full-${index}`), staged: [] });
-  const draft = { messageId: 'picked-message', text: 'hello', attachmentItems: [picked] };
+  const draft = {
+    messageId: 'picked-message',
+    text: 'hello',
+    attachmentItems: [picked],
+    localDisplayPlacement: 'current_turn',
+  };
   const send = () =>
     submit(
       { sender: { id: 7 } } as IpcMainInvokeEvent,
@@ -945,8 +950,18 @@ test('local submit preserves picked-file approvals until durable admission succe
       'session-1',
       'next_turn',
       draft,
-      'current_turn',
     );
+  await assert.rejects(
+    () => submit(
+      { sender: { id: 7 } } as IpcMainInvokeEvent,
+      target.scope,
+      'session-1',
+      'next_turn',
+      { ...draft, messageId: 'invalid-display', localDisplayPlacement: 'later' },
+    ),
+    /Invalid local display placement/,
+  );
+  assert.equal(store.get('authority', 'invalid-display'), undefined);
   await assert.rejects(send, /Local message storage is full/);
   store.cancel('authority', 'full-0');
   await send();

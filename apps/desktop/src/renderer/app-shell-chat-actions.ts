@@ -285,7 +285,7 @@ export function createAppShellChatActions(deps: {
       attachments: [...result.attachments],
       transientPlacement: result.disposition === 'turn_started' ? 'current_turn' : placement,
       pendingSteering: result.disposition !== 'turn_started' && input.pendingSteering,
-      ...(result.turnId && { hostTurnId: result.turnId }),
+      ...(result.turnId ? { hostTurnId: result.turnId } : {}),
       ...copiedArray('directoryReferences', directoryReferences),
       ...copiedArray('quotes', quotes),
       inlineReferences: [...(result.inlineReferences ?? [])],
@@ -293,7 +293,7 @@ export function createAppShellChatActions(deps: {
     return {
       kind: 'projected',
       skillInvocation: result.skillInvocation,
-      ...(result.turnId && { turnId: result.turnId }),
+      ...(result.turnId ? { turnId: result.turnId } : {}),
     };
   }
 

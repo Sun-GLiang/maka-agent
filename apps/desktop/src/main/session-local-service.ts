@@ -707,16 +707,18 @@ export function registerDesktopSessionLocalIpc(deps: {
   });
   ipcMain.handle(
     'session-local:submit',
-    async (event, scope: unknown, sessionId: string, placement: unknown, value: unknown, localDisplayPlacement: unknown) => {
+    async (event, scope: unknown, sessionId: string, placement: unknown, value: unknown) => {
       const target = service.target(scope);
       requiredId(sessionId);
       if (placement !== 'current_turn' && placement !== 'next_turn')
         throw new Error('Invalid message placement');
+      const submitted = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+      const { localDisplayPlacement } = submitted;
       if (localDisplayPlacement !== undefined && localDisplayPlacement !== 'current_turn'
         && localDisplayPlacement !== 'next_turn')
         throw new Error('Invalid local display placement');
       const command = normalizeSessionSendCommand({
-        ...(value && typeof value === 'object' ? value : {}),
+        ...submitted,
         type: 'send',
       });
       if (!command?.messageId) throw new Error('Invalid submitted message');
