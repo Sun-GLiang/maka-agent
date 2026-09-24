@@ -77,6 +77,7 @@ let latestController: WorkbarController | undefined;
 let latestTaskEntryController: TaskEntryController | undefined;
 let controllerRenderSnapshots: Array<{
   activeId: string | undefined;
+  rightCollapsed: boolean;
   terminalOwnerIds: Array<string | undefined>;
 }> = [];
 
@@ -94,6 +95,7 @@ function ControllerProbe(props: ControllerProbeInput) {
   }, [props.activeSession?.id, props.openOnActivation]);
   controllerRenderSnapshots.push({
     activeId: latestController.host.activeId,
+    rightCollapsed: latestController.host.rightCollapsed,
     terminalOwnerIds: [
       ...visiblePanels.right.tabs,
       ...visiblePanels.bottom.tabs,
@@ -320,6 +322,33 @@ describe('useWorkbarController', () => {
     controllerRenderSnapshots = [];
     cleanupFakeDom();
     delete (globalThis as { window?: unknown }).window;
+  });
+
+  it('keeps the workbar collapsed through every first-send render until explicitly expanded', async () => {
+    const { root } = installReactRenderer();
+    const services = createFakeWorkbarServices();
+    const pendingSession = session('first-send');
+    const phases: ControllerProbeInput[] = [
+      { ...input(undefined), authoritativeSessionIds: undefined },
+      { ...input(undefined), layoutSessionId: pendingSession.id, authoritativeSessionIds: undefined },
+      { ...input(pendingSession), authoritativeSessionIds: undefined },
+      input({ ...pendingSession, status: 'running' }),
+    ];
+
+    // Observe all intermediate renders, not just the final state after Host
+    // admission. Session creation and catalog hydration must not open a panel.
+    for (const phase of phases) {
+      const start = controllerRenderSnapshots.length;
+      await act(async () => renderController(root, services, phase, true));
+      const snapshots = controllerRenderSnapshots.slice(start);
+      assert.ok(snapshots.length > 0);
+      assert.ok(snapshots.every((snapshot) => snapshot.rightCollapsed),
+        'the workbar must stay collapsed throughout first-send admission');
+    }
+
+    await act(async () => controller().commands.toggleRight());
+    assert.equal(controller().host.rightCollapsed, false,
+      'explicit expansion still opens the new Session workbar');
   });
 
   it('preserves an expansion requested before the Host-backed Session arrives', async () => {
