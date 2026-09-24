@@ -168,6 +168,17 @@ interface AcpAttachmentConfiguration {
   delivery?: Promise<void>;
 }
 
+interface AcpExternalContextLease {
+  readonly context: AcpLoadContext;
+  previous?: AcpExternalContextLease;
+  valid: boolean;
+}
+
+interface AcpContextReplacement {
+  rollback(): void;
+  commit(): void;
+}
+
 /** Owns all Runtime Host resources associated with one ACP connection. */
 export class AcpSessionRegistry {
   readonly #connect: (signal: AbortSignal) => Promise<AcpSessionRegistryConnection>;
@@ -186,6 +197,7 @@ export class AcpSessionRegistry {
   readonly #turnObservations = new Map<string, Map<string, AcpTurnObservation>>();
   readonly #discardedAttachments = new WeakSet<RuntimeHostSessionChannel>();
   readonly #externalObservationContexts = new Map<string, AcpLoadContext>();
+  readonly #externalContextLeases = new Map<string, AcpExternalContextLease>();
   readonly #sessionCloseTasks = new Map<string, Promise<CloseSessionResponse>>();
   readonly #sessionCloseGenerations = new Map<string, number>();
   readonly #sessionLoadTails = new Map<string, Promise<unknown>>();
@@ -532,6 +544,11 @@ export class AcpSessionRegistry {
   #cancelSession(sessionId: string): Promise<PromiseSettledResult<void>[]> {
     const active = this.#admittedTurns(sessionId);
     const cancellations = active.map((prompt) => this.#cancelPrompt(prompt));
+    for (const observation of this.#turnObservations.get(sessionId)?.values() ?? []) {
+      if (!(observation instanceof AcpAdmittedTurnObservation) && observation.stopTask) {
+        cancellations.push(observation.stopTask);
+      }
+    }
     this.#attachmentOpenControllers.get(sessionId)?.abort();
     const attachment = this.#attachments.get(sessionId);
     if (attachment) {
@@ -546,7 +563,13 @@ export class AcpSessionRegistry {
               !isRuntimeHostTerminalTurn(root) &&
               !active.some((prompt) => prompt.turnId === root.turnId)
             ) {
-              await this.#stopAttachedTurn(opened, root);
+              const observation = this.#observation(sessionId, root.turnId);
+              if (observation && observation.attachment === opened) {
+                observation.stopTask ??= this.#stopAttachedTurn(opened, root);
+                await observation.stopTask;
+              } else {
+                await this.#stopAttachedTurn(opened, root);
+              }
             }
           },
           () => undefined,
@@ -1015,6 +1038,7 @@ export class AcpSessionRegistry {
   async #closeSession(sessionId: string, delivery?: Promise<void>): Promise<CloseSessionResponse> {
     const cancellation = await this.#cancelSession(sessionId);
     this.#externalObservationContexts.delete(sessionId);
+    this.#externalContextLeases.delete(sessionId);
     for (const observation of this.#turnObservations.get(sessionId)?.values() ?? []) {
       if (!(observation instanceof AcpAdmittedTurnObservation)) {
         observation.dispose();
@@ -1063,7 +1087,11 @@ export class AcpSessionRegistry {
       !this.#ownedSessionIds.has(sessionId)
     )
       return;
-    if (this.#observation(sessionId, turnId)) return this.#observation(sessionId, turnId);
+    const existing = this.#observation(sessionId, turnId);
+    if (existing) {
+      this.#replayPendingInteractions(sessionId, turnId, attachment, existing);
+      return existing;
+    }
     const runId =
       expectedRunId ??
       (attachment.snapshot.rootTurn?.turnId === turnId
@@ -1099,6 +1127,7 @@ export class AcpSessionRegistry {
         return;
       }
       const task = observation.start(attachment);
+      this.#replayPendingInteractions(sessionId, turnId, attachment, observation);
       const interactions = this.#attachmentInteractions.get(sessionId);
       void task
         .then(
@@ -1176,6 +1205,19 @@ export class AcpSessionRegistry {
     }
   }
 
+  #replayPendingInteractions(
+    sessionId: string,
+    turnId: string,
+    attachment: RuntimeHostSessionChannel,
+    observation: AcpTurnObservation,
+  ): void {
+    if (observation.finished || this.#discardedAttachments.has(attachment)) return;
+    const interactions = this.#attachmentInteractions.get(sessionId);
+    for (const pending of attachment.snapshot.interactions.pending) {
+      if (pending.turnId === turnId) void interactions?.pending(pending);
+    }
+  }
+
   async #resumeTurn(
     params: { sessionId: string; sourceRunId?: string; expectedRuntimeEventHighWater?: number },
     context: AcpLoadContext,
@@ -1189,9 +1231,8 @@ export class AcpSessionRegistry {
       throw requestErrorFromRuntimeHost(error, 'turn.resume.query');
     }
     if (plan.disposition === 'parked') return { kind: 'parked' as const, plan };
-    const priorContext = this.#externalObservationContexts.get(params.sessionId);
-    this.#externalObservationContexts.set(params.sessionId, context);
-    this.#attachmentInteractions
+    const restoreContext = this.#installExternalContext(params.sessionId, context);
+    const restoreClient = this.#attachmentInteractions
       .get(params.sessionId)
       ?.setClient(context.interactions ?? UNAVAILABLE_INTERACTION_CLIENT);
     let observation: AcpAdmittedTurnObservation | undefined;
@@ -1230,9 +1271,13 @@ export class AcpSessionRegistry {
         observation.dispose();
         this.#removeTurnObservation(observation);
         attachment.failTurn(turnId, new Error(`Turn resume parked: ${result.plan.reason}`));
+        restoreContext.commit();
+        restoreClient?.commit();
         return { kind: 'parked' as const, plan: result.plan };
       }
       await observation.stopTask?.catch(() => undefined);
+      restoreContext.commit();
+      restoreClient?.commit();
       return {
         kind: 'started' as const,
         turn: result.turn,
@@ -1253,6 +1298,8 @@ export class AcpSessionRegistry {
         this.#queryPromptAdmission(observation, connection);
         await observation.admission.query;
         if (observation.admission.startedTurn) {
+          restoreContext.commit();
+          restoreClient?.commit();
           return {
             kind: 'started' as const,
             turn: observation.admission.startedTurn,
@@ -1271,7 +1318,13 @@ export class AcpSessionRegistry {
           },
           'Runtime Host Turn resume admission could not be established',
         );
-        if (!observation.admission.rejected) throw admissionError;
+        if (!observation.admission.rejected) {
+          // The dispatched Turn may still be running, so its context and
+          // interaction client remain the current attachment authority.
+          restoreContext.commit();
+          restoreClient?.commit();
+          throw admissionError;
+        }
         failure = admissionError;
       }
       if (observation) {
@@ -1279,11 +1332,8 @@ export class AcpSessionRegistry {
         this.#removeTurnObservation(observation);
         attachment?.failTurn(turnId, failure);
       }
-      if (priorContext) this.#externalObservationContexts.set(params.sessionId, priorContext);
-      else this.#externalObservationContexts.delete(params.sessionId);
-      this.#attachmentInteractions
-        .get(params.sessionId)
-        ?.setClient(priorContext?.interactions ?? UNAVAILABLE_INTERACTION_CLIENT);
+      restoreContext.rollback();
+      restoreClient?.rollback();
       if (failure instanceof RequestError) throw failure;
       throw requestErrorFromRuntimeHost(failure, 'turn.resume.start', { turnId });
     } finally {
@@ -1345,6 +1395,7 @@ export class AcpSessionRegistry {
       this.#sessionLoadControllers.get(params.targetSessionId)?.abort();
       this.#ownedSessionIds.delete(params.targetSessionId);
       this.#externalObservationContexts.delete(params.targetSessionId);
+      this.#externalContextLeases.delete(params.targetSessionId);
       for (const observation of this.#turnObservations.get(params.targetSessionId)?.values() ??
         []) {
         observation.cancelled = true;
@@ -1370,6 +1421,34 @@ export class AcpSessionRegistry {
       (observation): observation is AcpAdmittedTurnObservation =>
         observation instanceof AcpAdmittedTurnObservation,
     );
+  }
+
+  #installExternalContext(sessionId: string, context: AcpLoadContext): AcpContextReplacement {
+    const lease: AcpExternalContextLease = {
+      context,
+      previous: this.#externalContextLeases.get(sessionId),
+      valid: true,
+    };
+    this.#externalContextLeases.set(sessionId, lease);
+    this.#externalObservationContexts.set(sessionId, context);
+    return {
+      rollback: () => {
+        lease.valid = false;
+        if (this.#externalContextLeases.get(sessionId) !== lease) return;
+        let previous = lease.previous;
+        while (previous && !previous.valid) previous = previous.previous;
+        if (previous) {
+          this.#externalContextLeases.set(sessionId, previous);
+          this.#externalObservationContexts.set(sessionId, previous.context);
+        } else {
+          this.#externalContextLeases.delete(sessionId);
+          this.#externalObservationContexts.delete(sessionId);
+        }
+      },
+      commit: () => {
+        lease.previous = undefined;
+      },
+    };
   }
 
   #setTurnObservation(observation: AcpTurnObservation): void {
@@ -1485,9 +1564,11 @@ export class AcpSessionRegistry {
     const generation = this.#sessionCloseGenerations.get(params.sessionId) ?? 0;
     const alreadyOwned = this.#ownedSessionIds.has(params.sessionId);
     const heldObservations = new Set<AcpTurnObservation>();
-    const previousContext = this.#externalObservationContexts.get(params.sessionId);
+    let restoreContext: AcpContextReplacement | undefined;
+    let restoreClient: ReturnType<AcpSessionInteractions['setClient']> | undefined;
     const previousMcp = this.#mcps.get(params.sessionId);
     const previousMcpConfig = previousMcp?.config;
+    let previousMcpReconfigureAttempted = false;
     let installedMcp: AcpSessionMcp | undefined;
     let newAttachment: Promise<RuntimeHostSessionChannel> | undefined;
     try {
@@ -1524,6 +1605,7 @@ export class AcpSessionRegistry {
         throw unknownSessionError();
       }
       if (previousMcp) {
+        previousMcpReconfigureAttempted = true;
         await previousMcp.reconfigure(mcpConfig, lifetime, async () => {
           const latest = await getRuntimeHostSession(connection, params.sessionId);
           if (!latest) throw unknownSessionError();
@@ -1555,8 +1637,8 @@ export class AcpSessionRegistry {
         }
         await Promise.all([...heldObservations].map((observation) => observation.holdLive()));
       }
-      this.#externalObservationContexts.set(params.sessionId, context);
-      this.#attachmentInteractions
+      restoreContext = this.#installExternalContext(params.sessionId, context);
+      restoreClient = this.#attachmentInteractions
         .get(params.sessionId)
         ?.setClient(context.interactions ?? UNAVAILABLE_INTERACTION_CLIENT);
       const creatingAttachment = !this.#attachments.has(params.sessionId);
@@ -1576,25 +1658,17 @@ export class AcpSessionRegistry {
       // installed its presentation context. Attach its existing event consumer
       // now; opening a second channel would lose the queue and interaction state.
       const root = attachment.snapshot.rootTurn;
-      if (root && !isRuntimeHostTerminalTurn(root)) {
-        const observation = await this.#adoptTurn(
-          params.sessionId,
-          root.turnId,
-          attachment,
-          false,
-          root.runId,
-        );
+      if (
+        root &&
+        !isRuntimeHostTerminalTurn(root) &&
+        !attachment.hasQueuedStartedTurn(root.turnId)
+      ) {
+        await this.#adoptTurn(params.sessionId, root.turnId, attachment, false, root.runId);
         lifetime.throwIfAborted();
         this.#assertOpen('subscription.open');
         this.#assertOwned(params.sessionId);
         if ((this.#sessionCloseGenerations.get(params.sessionId) ?? 0) !== generation) {
           throw unknownSessionError();
-        }
-        if (observation && !observation.finished && !this.#discardedAttachments.has(attachment)) {
-          const interactions = this.#attachmentInteractions.get(params.sessionId);
-          for (const pending of attachment.snapshot.interactions.pending) {
-            if (pending.turnId === root.turnId) void interactions?.pending(pending);
-          }
         }
       }
       if (replayHistory) {
@@ -1633,6 +1707,8 @@ export class AcpSessionRegistry {
         }, lifetime);
         await Promise.all([...mappers.values()].map((mapper) => mapper.flush()));
       }
+      restoreContext.commit();
+      restoreClient?.commit();
       return { configOptions };
     } catch (error) {
       const sharedAttachment =
@@ -1642,6 +1718,8 @@ export class AcpSessionRegistry {
       if (sharedAttachment) {
         // A concurrent prompt has adopted this prepared Session. Its attachment,
         // ownership and MCP provider must outlive this cancelled/failed load.
+        restoreContext?.rollback();
+        restoreClient?.rollback();
         if (error instanceof RequestError) throw error;
         throw requestErrorFromRuntimeHost(error, 'subscription.open');
       }
@@ -1664,16 +1742,14 @@ export class AcpSessionRegistry {
           .catch(() => undefined);
       } else if (
         previousMcp &&
+        previousMcpReconfigureAttempted &&
         previousMcpConfig &&
         this.#mcps.get(params.sessionId) === previousMcp
       ) {
         await previousMcp.reconfigure(previousMcpConfig).catch(() => undefined);
       }
-      if (previousContext) this.#externalObservationContexts.set(params.sessionId, previousContext);
-      else this.#externalObservationContexts.delete(params.sessionId);
-      this.#attachmentInteractions
-        .get(params.sessionId)
-        ?.setClient(previousContext?.interactions ?? UNAVAILABLE_INTERACTION_CLIENT);
+      restoreContext?.rollback();
+      restoreClient?.rollback();
       if (!alreadyOwned) this.#ownedSessionIds.delete(params.sessionId);
       if (error instanceof RequestError) throw error;
       throw requestErrorFromRuntimeHost(error, 'subscription.open');
@@ -1842,6 +1918,7 @@ export class AcpSessionRegistry {
 
   async #dispose(): Promise<void> {
     this.#externalObservationContexts.clear();
+    this.#externalContextLeases.clear();
     for (const observations of this.#turnObservations.values()) {
       for (const observation of observations.values()) {
         if (!(observation instanceof AcpAdmittedTurnObservation)) observation.dispose();

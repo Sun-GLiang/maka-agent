@@ -19,6 +19,52 @@
 
 # ACP validation record
 
+## PR6 adjacent restore and teardown review fixes — September 24, 2026
+
+Starting from PR #5621 head `d05fbb25f`, formal registry regressions were added
+before the implementation changed. Four assertions failed on that head:
+`session/load` and `session/resume` each lost a live prompt's interaction client
+after a cwd mismatch, a repeated resume invoked successor Turn output before a
+queued chunk from the prior Turn, and close followed by dispose released the
+Host connection before an adopted Turn's Stop response. The single-resume
+ordering control passed before it was extended to assert successor pending
+interaction delivery. The final nine focused tests failed against the
+`d05fbb25f` production modules and passed after repair. Additional tests cover
+cancelled history replay after client replacement, two overlapping failed
+restores, an older explicit resume failing after a newer restore reuses the same
+context object, a successor's pending interaction behind the output barrier,
+and an adopted Turn Stop that fails after its Host terminal fact.
+
+Every observation's in-flight Stop now belongs to the cancellation and close
+wait, including non-admitted Turns. A terminal snapshot cannot make close
+discard a pending Stop response; disposal keeps the connection alive until
+that response settles, including rejection. Restore rollback tracks the actual
+interaction client it replaced and invalidates failed context/client leases,
+so later operations cannot restore a stale client. A failed load before MCP
+reconfiguration no longer starts a compensating reconfiguration. Repeated
+load/resume defers a successor already queued behind the channel's consumer
+barrier. When the channel admits that successor, the shared adoption path also
+replays its pending interactions through the existing deduplicating owner.
+
+Validation on macOS and Node 24.19.0; repository scripts were rerun with the
+required npm 11.19.0:
+
+| Check | Result |
+| --- | --- |
+| Formal ACP registry suite | 136 passed, 0 failed. The final nine focused tests were 9 failed on baseline and 9 passed after repair. |
+| Full CLI dist suite, concurrency 4 | 1245 passed, 3 skipped, 0 failed; includes official SDK and real Host child-process tests. |
+| Full Runtime Host dist suite, concurrency 2 | 2093 passed, 12 skipped, 0 failed after building both bundled ACP plugins and applying repository dependency patches. |
+| Root build and workspace typecheck | Passed after building workspace dependencies. |
+| Root lint/format, ASF headers, CLI notices, `git diff --check` | Passed. |
+
+The first Host run preceded the bundled plugin builds and dependency patches:
+two tests failed for those missing setup steps, and one execution recovery
+test timed out waiting for a terminal fact. The recovery case passed in the
+serial three-file rerun; after the remaining dependency patch was applied, its
+affected profile test and the complete Host suite passed. Desktop Electron E2E
+and Zed were not rerun for this follow-up; prior evidence below remains tied to
+its recorded head. No Host protocol or compatibility epoch changed here.
+
 ## PR6 retained attachment and Stop review fixes — September 24, 2026
 
 Starting from PR head `c50987a6b`, two isolated reproductions failed when

@@ -100,10 +100,17 @@ interface PermissionPresentation {
   readonly answers: ReadonlyMap<string, InteractionAnswer>;
 }
 
+interface InteractionClientLease {
+  readonly client: AcpInteractionClient;
+  previous?: InteractionClientLease;
+  valid: boolean;
+}
+
 /** Connection-local presentation of Host interactions; the Host owns every answer and grant. */
 export class AcpSessionInteractions {
   readonly #options: AcpSessionInteractionsOptions;
   #client: AcpInteractionClient;
+  #clientLease: InteractionClientLease;
   readonly #lifetime = new AbortController();
   readonly #pending = new Map<string, PendingInteraction>();
   readonly #resolving = new Map<string, Promise<void>>();
@@ -114,10 +121,31 @@ export class AcpSessionInteractions {
   constructor(options: AcpSessionInteractionsOptions) {
     this.#options = options;
     this.#client = options.client;
+    this.#clientLease = { client: options.client, valid: true };
   }
 
-  setClient(client: AcpInteractionClient): void {
+  setClient(client: AcpInteractionClient): { rollback(): void; commit(): void } {
+    const lease: InteractionClientLease = {
+      client,
+      previous: this.#clientLease,
+      valid: true,
+    };
+    this.#clientLease = lease;
     this.#client = client;
+    return {
+      rollback: () => {
+        lease.valid = false;
+        if (this.#clientLease !== lease) return;
+        let previous = lease.previous;
+        while (previous && !previous.valid) previous = previous.previous;
+        if (!previous) return;
+        this.#clientLease = previous;
+        this.#client = previous.client;
+      },
+      commit: () => {
+        lease.previous = undefined;
+      },
+    };
   }
 
   pending(snapshot: InteractionPendingSnapshot): Promise<void> {

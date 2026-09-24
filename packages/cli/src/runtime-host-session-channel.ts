@@ -293,6 +293,11 @@ export class RuntimeHostSessionChannel {
     return this.#pendingStartedTurns.keys().next().value;
   }
 
+  /** A successor behind the active consumer must be started by the channel. */
+  hasQueuedStartedTurn(turnId: string): boolean {
+    return this.#pendingStartedTurns.has(turnId);
+  }
+
   /** The authoritative terminal fact travels with its queued events until consumption. */
   terminalTurn(turnId: string): TerminalTurnSnapshot | undefined {
     return this.#turns.get(turnId)?.terminalTurn;
