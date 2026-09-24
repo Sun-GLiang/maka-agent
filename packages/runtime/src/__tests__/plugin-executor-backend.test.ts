@@ -25,6 +25,40 @@ import { PluginExecutorBackend } from '../plugin-executor-backend.js';
 import { Context } from '../plugin-kernel.js';
 import { PluginExecutorService } from '../plugin-executor-service.js';
 
+test('Plugin acknowledgement follows consumption of the completed terminal event', async () => {
+  const root = new Context();
+  const service = new PluginExecutorService(root);
+  const acknowledgements: string[] = [];
+  root
+    .extend({
+      maka: { rootId: 'profile', packageId: 'fixture', entryId: 'provider', generation: 1 },
+    })
+    .executors.register({
+      id: 'remote',
+      execute: async () => ({ status: 'completed', text: 'done' }),
+      acknowledgeExecution: async (conversationKey, turnId) => {
+        acknowledgements.push(`${conversationKey}/${turnId}`);
+      },
+    });
+  const backend = new PluginExecutorBackend({
+    sessionId: 'session-a',
+    cwd: '/workspace',
+    binding: service.bind('session-a', 'remote'),
+  });
+  try {
+    const iterator = backend.send({ turnId: 'turn-a', text: 'task' })[Symbol.asyncIterator]();
+    assert.equal((await iterator.next()).value?.type, 'text_complete');
+    assert.deepEqual(acknowledgements, []);
+    assert.equal((await iterator.next()).value?.type, 'complete');
+    assert.deepEqual(acknowledgements, [], 'terminal delivery is not itself an acknowledgement');
+    assert.equal((await iterator.next()).done, true);
+    assert.deepEqual(acknowledgements, ['session-a/turn-a']);
+  } finally {
+    await backend.dispose();
+    await root.fiber.dispose();
+  }
+});
+
 test('executor backend converts plugin output and result to ordinary Session events', async () => {
   const { root, binding } = fixture(async (request, context) => {
     assert.equal(request.instructions, 'child instructions');

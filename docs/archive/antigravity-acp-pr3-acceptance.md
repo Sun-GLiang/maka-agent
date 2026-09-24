@@ -53,11 +53,96 @@ execution and earlier cross-process feasibility checks in
   Session creation but produced the same model 403.
 - All probe-owned Agent process groups and temporary profiles were removed.
 
-This probe **does not pass the PR 3 prerequisite gate**. It confirms
+This initial probe **did not pass the PR 3 prerequisite gate**. It confirms
 cross-process method acceptance, but cannot establish continued model context,
 successful replay shape, duplicate or reordered replay behavior, or a crash
 window where the Agent advanced beyond Maka's durable history. The 2026-09-12
 PR 2 feasibility probe observed one successful output chunk and tool replay;
 it did not send a post-resume prompt or establish reconciliation semantics.
-Production restoration remains disabled until these behaviors are verified
-with an eligible authenticated account and network route.
+The later route-change probe below supplied the missing successful turns.
+
+## Post-login recheck, 2026-09-24
+
+After the user completed login in a locally built Maka, the official 1.1.1
+Agent was probed again with the authenticated home and a new temporary toy
+project. It negotiated the same resume/load capabilities, created a Session,
+and confirmed `gemini-3.7-flash-high`. After a synthetic-token prompt, a fresh
+process resumed the same Session ID and accepted a follow-up asking for that
+token. Both prompts emitted the same location-eligibility HTTP 403 Agent error,
+so the follow-up did not recall the token. A third process loaded the Session;
+it replayed two user-message chunks and an available-commands update, with no
+successful assistant or tool output to reconcile. The configured local HTTP(S)
+proxy's observed egress region was Singapore. All probe processes and the toy
+project were removed. Successful login therefore has not cleared the real-model
+prerequisite gate.
+
+## Route-change verification, 2026-09-24
+
+After the user changed the proxy exit, a new probe used the same official
+macOS arm64 1.1.1 server and matching helper, the user's authenticated Agent
+home, and a temporary toy project. Synthetic random values were used only to
+test context; no token values, credentials, external Session IDs, or private
+project content are recorded here. Intermittent HTTP 403 responses still
+occurred between successful requests, so the probe retried affected tool turns.
+
+- `initialize` again negotiated protocol 1, `loadSession: true`, and
+  `sessionCapabilities.resume`. `session/new` returned a Session ID and
+  `gemini-3.7-flash-high`.
+- A successful prompt gave the Agent one synthetic token. A new process used
+  `session/resume` with that same ID and project path, returned the same model,
+  and a follow-up answer recalled the exact token. The Session was not
+  replaced and the prompt was not resent.
+- A successful tool turn read a second synthetic token from a toy file. The
+  file was removed, then a new process used `session/load` and replayed user,
+  Agent, and tool updates. A follow-up recalled the file-only token after the
+  file was gone, proving that tool context survived the process change.
+- Two independent `session/load` calls produced the same update counts and
+  replay tool IDs for the completed history. A failed tool turn showed that
+  live tool IDs can differ from replayed IDs. Repeated identical user prompts
+  appeared as distinct replayed user chunks. Thus neither prompt text nor
+  live tool ID alone is a safe general deduplication key.
+- The probe terminated all child process groups and removed its toy project.
+
+These observations support `session/resume` for a fully committed Maka turn.
+For an interrupted turn, Maka captures `session/load` replay separately and
+reports a history gap. It does not append unaligned replay to the canonical
+conversation or submit another prompt. This is a conservative reconciliation
+decision because the official replay did not provide stable canonical event
+identities across every observed turn. The user can read the saved history and
+start a new task; the external Session ID is never silently replaced.
+
+## Built Plugin smoke, 2026-09-24
+
+The built production ACP Runtime and Antigravity adapter bundles were loaded
+with the official 1.1.1 executable/helper and the authenticated Agent home.
+A temporary toy task completed a synthetic-token prompt. The Runtime
+acknowledged that turn, disposed its process, and a fresh `AcpExecutor`
+instance reported `restorable` from the saved Plugin-private record. The
+explicit restore changed readiness to `ready`; a follow-up prompt completed
+and recalled the synthetic token. The test removed the toy project and did
+not print the token or external Session ID. This exercises the shipped
+Plugin code path in addition to the direct protocol probe. It does not stand
+in for a full Desktop UI restart test.
+
+## Implementation checks
+
+On the branch tested at `bd8661f3a` and rebased without conflicts to
+`b62ca805e` before opening the draft PR:
+
+- `npm run build`, `npm run typecheck`, `npm run lint`, and
+  `npm run format:check` passed.
+- Renderer architecture, locale hygiene, and the protocol compatibility epoch
+  guard passed; the epoch advanced from 183 to 184 for the new readiness values.
+- Every workspace test suite passed in a final serial run using
+  `node scripts/run-workspace-tests-parallel.mjs --concurrency=1`. Controlled
+  ACP tests include a forcibly killed, durably acknowledged child process
+  restored under the same external Session in a fresh process; uncertain load
+  replay remains outside the canonical turn.
+- An earlier serial run had one intermittent Runtime Host Goal handoff timing
+  assertion. The full Host workspace passed independently, that exact test
+  passed in isolation, and the final serial run passed. The failing test does
+  not touch ACP restoration.
+
+A full Desktop UI restart with a signed-in real Agent was not executed. The
+production Plugin bundle smoke, Desktop picker/controller tests, and the real
+Agent protocol probes cover the corresponding layers separately.
