@@ -753,9 +753,6 @@ export class AcpSessionRegistry {
     let task!: Promise<RuntimeHostSessionChannel>;
     let attachment: RuntimeHostSessionChannel | undefined;
     let earlyFailure: Error | undefined;
-    // ready() can deliver a terminal snapshot and its successor before open()
-    // returns the channel. Keep the exact facts until activation adopts those Turns.
-    const initialTerminalTurns = new Map<string, RuntimeHostTerminalTurn>();
     const failAttachment = (error: Error) => {
       if (!attachment) {
         earlyFailure = error;
@@ -823,7 +820,7 @@ export class AcpSessionRegistry {
             attachment,
             false,
             turn.runId,
-            initialTerminalTurns.get(turn.turnId),
+            attachment.terminalTurn(turn.turnId),
           ).catch((error: unknown) => {
             console.error('[acp] Attached Turn observation failed:', error);
           });
@@ -836,9 +833,6 @@ export class AcpSessionRegistry {
           interactions.terminalTurn(snapshot.rootTurn.turnId);
         }
         const root = snapshot.rootTurn;
-        if (!attachment && root && isRuntimeHostTerminalTurn(root)) {
-          initialTerminalTurns.set(root.turnId, root);
-        }
         const observation = root && this.#observation(sessionId, root.turnId);
         const prompt = observation instanceof AcpAdmittedTurnObservation ? observation : undefined;
         const observedRunId =
@@ -949,8 +943,8 @@ export class AcpSessionRegistry {
             false,
             root?.turnId === attachedTurnId
               ? root.runId
-              : initialTerminalTurns.get(attachedTurnId)?.runId,
-            initialTerminalTurns.get(attachedTurnId),
+              : channel.terminalTurn(attachedTurnId)?.runId,
+            channel.terminalTurn(attachedTurnId),
           );
         }
         channel.activate(
@@ -958,7 +952,6 @@ export class AcpSessionRegistry {
             ? attachedTurnId
             : undefined,
         );
-        initialTerminalTurns.clear();
         return channel;
       })
       .catch((error: unknown) => {

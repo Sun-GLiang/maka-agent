@@ -86,8 +86,9 @@ Clients that advertise `initialize.clientCapabilities._meta["_maka/turnStatus"]:
 true` receive `_maka/turn/status` notifications for non-prompt Turns after their
 standard output has settled. Each notification names `sessionId`, `turnId`,
 `runId`, and a `completed`, `failed`, `cancelled`, or `observation_failed` status.
-Terminal snapshots received during initial subscription readiness are retained for
-their exact Turn and run, even if a new root starts before observation is adopted.
+Terminal snapshots are retained with their exact Turn's event queue until
+consumption, including when a successor finishes before an output barrier releases
+its observation.
 Ordinary ACP clients can load/resume and prompt without this extension.
 
 The working directory in load/resume must resolve to the Session's Host cwd;

@@ -433,7 +433,7 @@ describe('ACP Session registry', () => {
   });
 
   for (const status of ['completed', 'failed', 'cancelled'] as const) {
-    for (const nextTurn of [false, true]) {
+    for (const nextTurn of ['none', 'running', 'completed'] as const) {
       test(`restore reports ${status} during readiness with next Turn ${nextTurn}`, {
         timeout: 10_000,
       }, async () => {
@@ -459,7 +459,14 @@ describe('ACP Session registry', () => {
                     : { status: 'cancelled' as const, abortSource: 'user' }),
                 },
           );
-          if (nextTurn) subscription.setRoot(runningTurn(sessionId, 'next-turn'));
+          if (nextTurn !== 'none') {
+            const next = runningTurn(sessionId, 'next-turn');
+            subscription.setRoot(next);
+            if (nextTurn === 'completed') {
+              subscription.appendText(next.turnId, next.runId, 'next output', true);
+              subscription.setRoot(completedTurn(sessionId, next.turnId));
+            }
+          }
           await new Promise<void>((resolve) => setImmediate(resolve));
         };
         const delivered: string[] = [];
@@ -489,6 +496,17 @@ describe('ACP Session registry', () => {
                   delivered.push(update.content.text);
               },
               notifyTurnStatus: async (value) => {
+                if (value.turnId === 'next-turn') {
+                  assert.deepEqual(value, {
+                    sessionId,
+                    turnId: 'next-turn',
+                    runId: runningTurn(sessionId, 'next-turn').runId,
+                    status: 'completed',
+                  });
+                  delivered.push('next completed');
+                  terminal.resolve();
+                  return;
+                }
                 assert.deepEqual(value, {
                   sessionId,
                   turnId,
@@ -497,12 +515,20 @@ describe('ACP Session registry', () => {
                   ...(status === 'failed' ? { failureClass: 'provider_failure' } : {}),
                 });
                 delivered.push(status);
-                terminal.resolve();
+                if (nextTurn !== 'completed') terminal.resolve();
               },
             },
           );
           await terminal.promise;
-          assert.deepEqual(delivered, ['final output', status]);
+          assert.deepEqual(
+            delivered.filter((item) => !item.startsWith('next ')),
+            ['final output', status],
+          );
+          if (nextTurn === 'completed')
+            assert.deepEqual(
+              delivered.filter((item) => item.startsWith('next ')),
+              ['next output', 'next completed'],
+            );
         } finally {
           await registry.dispose();
         }

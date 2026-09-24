@@ -38,8 +38,9 @@ identity; another client cannot silently take over that binding. The optional
 configuration identity and typed conflict advance the Host compatibility epoch
 to 185; both compatible-change declarations were re-pinned and reviewed.
 
-Initial subscription snapshots retain terminal facts by Turn and run until the
-observer is adopted, including when the next root has already started. Completed,
+The existing Session channel event queue retains authoritative terminal facts by
+Turn and run until consumption, including when a successor has already completed
+behind the initial output barrier. No separate terminal-history map is introduced. Completed,
 failed and cancelled status is delivered after the exact Turn's output. History
 replay preserves attachment-only user rows, displaying attachment name, media
 type and size, with canonical references in `_meta["_maka/attachments"]`. Prompt
@@ -53,14 +54,16 @@ fail on that baseline and pass with the fix. The repaired suite additionally
 covers all three terminal outcomes with and without a successor Turn, both
 load/resume with changed/empty MCP lists, equivalent configuration restoration,
 replacement after close, frozen-provider reconnect, and real Host replay of a
-resource-link-only prompt.
+resource-link-only prompt. A follow-up regression with two Turns completing during
+readiness fails on `4efbae5c5` before this queue-based retention fix and passes
+after it; all three first-Turn terminal outcomes cover this successor case.
 
 Validation on macOS and Node 24.19.0:
 
 | Check | Result |
 | --- | --- |
 | Root build and typecheck | Passed. |
-| Full CLI dist suite, concurrency 4 | 1229 passed, 3 skipped, 0 failed. |
+| Full CLI dist suite, concurrency 4 | 1232 passed, 3 skipped, 0 failed. |
 | Full Runtime Host dist suite, concurrency 2 | 2093 passed, 12 skipped, 0 failed. |
 | Root lint/format, Desktop/UI knip, ASF headers, CLI notices, Windows inventory and `git diff --check` | Passed. |
 | Protocol epoch guard and its tests | Passed: epoch 185; 17 guard tests passed. |
