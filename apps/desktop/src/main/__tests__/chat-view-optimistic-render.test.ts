@@ -105,6 +105,9 @@ test('ordinary sends stay in ChatView across local delivery and Host admission',
     deliveryStatus: 'Sending',
   };
   const sending = mergeTransientMessageProjection(OPTIMISTIC_BUBBLE, localOutbox);
+  const failed = mergeTransientMessageProjection(sending, {
+    ...localOutbox, deliveryStatus: 'Failed',
+  });
   const admitted = mergeTransientMessageProjection(sending, {
     ...localOutbox,
     transientPlacement: 'current_turn',
@@ -124,7 +127,7 @@ test('ordinary sends stay in ChatView across local delivery and Host admission',
 
   // Render every admission phase independently: a settled-only assertion
   // would miss the provisional outbox update that used to mount the plate.
-  for (const message of [OPTIMISTIC_BUBBLE, sending, admitted]) {
+  for (const message of [OPTIMISTIC_BUBBLE, sending, failed, admitted]) {
     const document = render(message);
     assert.equal(Boolean(document.querySelector('.maka-composer-queue')), false,
       `no pending plate during ${message.deliveryStatus ?? 'optimistic send'}`);
