@@ -1577,10 +1577,24 @@ export class AcpSessionRegistry {
       // now; opening a second channel would lose the queue and interaction state.
       const root = attachment.snapshot.rootTurn;
       if (root && !isRuntimeHostTerminalTurn(root)) {
-        await this.#adoptTurn(params.sessionId, root.turnId, attachment, false, root.runId);
-        const interactions = this.#attachmentInteractions.get(params.sessionId);
-        for (const pending of attachment.snapshot.interactions.pending) {
-          if (pending.turnId === root.turnId) void interactions?.pending(pending);
+        const observation = await this.#adoptTurn(
+          params.sessionId,
+          root.turnId,
+          attachment,
+          false,
+          root.runId,
+        );
+        lifetime.throwIfAborted();
+        this.#assertOpen('subscription.open');
+        this.#assertOwned(params.sessionId);
+        if ((this.#sessionCloseGenerations.get(params.sessionId) ?? 0) !== generation) {
+          throw unknownSessionError();
+        }
+        if (observation && !observation.finished && !this.#discardedAttachments.has(attachment)) {
+          const interactions = this.#attachmentInteractions.get(params.sessionId);
+          for (const pending of attachment.snapshot.interactions.pending) {
+            if (pending.turnId === root.turnId) void interactions?.pending(pending);
+          }
         }
       }
       if (replayHistory) {
