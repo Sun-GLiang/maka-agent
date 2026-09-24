@@ -5643,7 +5643,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   const deadline = performance.now() + 5_000;
   while (performance.now() < deadline) {
     if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 1));
+    await new Promise((resolve) => setImmediate(resolve));
   }
   assert.fail('condition was not reached');
 }
