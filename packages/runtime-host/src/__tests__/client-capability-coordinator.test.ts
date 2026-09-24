@@ -201,11 +201,11 @@ describe('Host Client Capability coordinator', () => {
       clientCapabilityConnectionIdentity('second-connection', 'shared-client'),
       { send: async () => {} },
     );
-    const publish = (connectionId: string, registrationId: string) =>
+    const publish = (connectionId: string, registrationId: string, sessionId = 'session-a') =>
       coordinator.handlers['client.capability.replace'](
         {
           ...replacementInput(registrationId, 'inspect'),
-          sessionId: 'session-a',
+          sessionId,
           sessionConfigurationId: `sha256:${'a'.repeat(64)}`,
           offers: replacementInput(registrationId, 'inspect').offers.map((offer) => ({
             ...offer,
@@ -220,6 +220,10 @@ describe('Host Client Capability coordinator', () => {
       const stale = await publish('first-connection', 'stale');
       assert.equal(stale.ok, false);
       if (!stale.ok) assert.equal(stale.error.code, 'invalid_request');
+      assert.equal((await publish('first-connection', 'other-session', 'session-b')).ok, true);
+      assert.deepEqual(await coordinator.bindSession('session-b', 'first-connection'), {
+        ok: true,
+      });
       assert.deepEqual(await coordinator.bindSession('session-a', 'second-connection'), {
         ok: true,
       });

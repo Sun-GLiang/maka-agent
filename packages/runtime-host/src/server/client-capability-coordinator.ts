@@ -107,6 +107,7 @@ interface ClientProviderConnection {
   readonly provider: ClientProviderState;
   readonly sender: ClientCapabilityConnectionSender;
   superseded: boolean;
+  readonly supersededSessionIds: Set<string>;
 }
 
 interface CapabilityRegistration {
@@ -264,6 +265,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
       provider,
       sender,
       superseded: false,
+      supersededSessionIds: new Set(),
     });
     let closeTask: Promise<void> | undefined;
     return {
@@ -1005,7 +1007,11 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
         };
       }
       const { provider } = connection;
-      if (connection.superseded) {
+      const sessionId = input.sessionId;
+      if (
+        (sessionId === undefined && connection.superseded) ||
+        (sessionId !== undefined && connection.supersededSessionIds.has(sessionId))
+      ) {
         return {
           ok: false,
           error: {
@@ -1014,7 +1020,6 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
           },
         };
       }
-      const sessionId = input.sessionId;
       if (sessionId !== undefined) {
         const conflicts = [...this.#providers.values()].some((other) => {
           if (other.providerId === provider.providerId) return false;
@@ -1115,7 +1120,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
       if (registration.sessionId !== undefined) {
         if (previous && previous.connectionId !== context.connectionId) {
           const previousConnection = this.#connections.get(previous.connectionId);
-          if (previousConnection) previousConnection.superseded = true;
+          previousConnection?.supersededSessionIds.add(registration.sessionId);
         }
         provider.sessionRegistrations.set(registration.sessionId, registration);
         if (registration.sessionConfigurationId !== undefined) {
