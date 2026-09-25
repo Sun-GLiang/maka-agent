@@ -20,6 +20,12 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import {
+  TOOL_BOUNDARY_PROTOCOL_V1,
+  decodeRuntimeEvent,
+  type RuntimeEvent,
+} from '@maka/core/runtime-event';
+import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import type { WorkHubRoutingDecision } from '@maka/core/workhub-routing';
 import type { WorkHubAdmittedAction } from '../server/workhub-coordination-action-gate.js';
 import type { ConnectionContext } from '../server/operation-dispatcher.js';
@@ -60,6 +66,7 @@ import { fingerprintAgentGraphRunnableIntent } from '@maka/runtime/stream-graph-
 import type { AgentGraphRunnableIntent } from '@maka/runtime/stream-graph-readiness';
 import { createAgentGraphControlStore } from '@maka/storage/agent-graph-control-store';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
+import { createSqliteRuntimeStore } from '@maka/storage/sqlite-runtime-store';
 import { createSessionStore } from '@maka/storage/session-store';
 import {
   LONG_TERM_MEMORY_DATABASE_NAME,
@@ -84,6 +91,7 @@ import {
   runtimeHostFilesystemWorkerRuntime,
   stopOwnedWorkHubRoot,
   stopReplacedWorkHubRoot,
+  type ExecutionRuntimeHostCompositionDependencies,
   type ExecutionRuntimeHostComposition,
 } from '../server/execution-composition.js';
 import { RuntimeHostKernel, type RuntimeHostCompositionContext } from '../server/host-kernel.js';
@@ -115,6 +123,159 @@ const HANDOFF_TEST_COMPOSITION = createRunCompositionSnapshot({
   baseProviderOptionsHash: `sha256:${'0'.repeat(64)}`,
   toolNames: [],
   contextWindow: null,
+});
+
+test('Host bundle recovery repairs terminal tool projections without decoding opaque Session history', {
+  timeout: 20_000,
+}, async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const { composition } = await createCapturedExecutionComposition(owner);
+    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    try {
+      const session = await stores.sessionStore.create({
+        cwd: root,
+        llmConnectionId: FAKE_CONNECTION_ID,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      const invocationId = 'bundle-recovery-invocation';
+      const runId = 'bundle-recovery-run';
+      const turnId = 'bundle-recovery-turn';
+      const operationId = 'bundle-recovery-operation';
+      const providerToolCallId = 'bundle-recovery-call';
+      const args = { path: '/workspace/README.md' };
+      const canonicalArgsHash = canonicalToolArgsHash('Read', args);
+      const timestamp = Date.now();
+      await stores.runtimeEventStore.commitToolPrepared({
+        operationId,
+        journalEventId: `${operationId}_prepared`,
+        runtimeEvent: {
+          id: 'bundle-recovery-call-event',
+          invocationId,
+          runId,
+          sessionId: session.id,
+          turnId,
+          ts: timestamp,
+          partial: false,
+          role: 'model',
+          author: 'agent',
+          content: { kind: 'function_call', id: providerToolCallId, name: 'Read', args },
+        },
+        dispatchRuntimeEvent: {
+          id: 'bundle-recovery-dispatch-event',
+          invocationId,
+          runId,
+          sessionId: session.id,
+          turnId,
+          ts: timestamp + 1,
+          partial: false,
+          role: 'system',
+          author: 'system',
+          actions: {
+            toolDispatch: {
+              protocol: TOOL_BOUNDARY_PROTOCOL_V1,
+              operationId,
+              providerToolCallId,
+              toolName: 'Read',
+              canonicalArgsHash,
+              recoveryMode: 'replay_safe',
+            },
+          },
+          refs: { operationId, toolCallId: providerToolCallId },
+        },
+        providerToolCallId,
+        toolName: 'Read',
+        canonicalArgsHash,
+        recoveryMode: 'replay_safe',
+        committedAt: timestamp + 1,
+      });
+
+      // Simulate an interrupted run whose terminal RuntimeEvent survived but
+      // whose disposable tool projection did not reach its terminal state.
+      const rawStore = createSqliteRuntimeStore(join(root, 'runtime.sqlite'));
+      try {
+        await rawStore.importRuntimeEventsBatch({
+          sessionId: session.id,
+          runId,
+          events: [
+            {
+              id: 'bundle-recovery-terminal-event',
+              invocationId,
+              runId,
+              sessionId: session.id,
+              turnId,
+              ts: timestamp + 2,
+              partial: false,
+              role: 'system',
+              author: 'system',
+              status: 'failed',
+              actions: { endInvocation: true },
+            },
+          ],
+        });
+        await rawStore.importRuntimeEventsBatch({
+          sessionId: session.id,
+          runId: 'bundle-recovery-legacy-run',
+          events: [
+            {
+              id: 'bundle-recovery-opaque-legacy-event',
+              invocationId: 'bundle-recovery-legacy-invocation',
+              runId: 'bundle-recovery-legacy-run',
+              sessionId: session.id,
+              turnId: 'bundle-recovery-legacy-turn',
+              ts: timestamp + 3,
+              partial: false,
+              role: 'system',
+              author: 'system',
+              status: 'failed',
+              actions: { endInvocation: true },
+              content: { kind: 'text', text: 'preserve this legacy event' },
+            },
+          ],
+        });
+      } finally {
+        rawStore.close();
+      }
+
+      const raw = new DatabaseSync(join(root, 'runtime.sqlite'));
+      try {
+        const row = raw
+          .prepare('SELECT payload_json FROM runtime_events WHERE event_id = ?')
+          .get('bundle-recovery-opaque-legacy-event') as { payload_json: string };
+        const opaquePayload = `${row.payload_json.slice(0, -1)},"legacyBytePreserved":true}`;
+        assert.throws(
+          () => decodeRuntimeEvent(JSON.parse(opaquePayload) as unknown),
+          /Invalid RuntimeEvent schema/,
+        );
+        raw
+          .prepare('UPDATE runtime_events SET payload_json = ? WHERE event_id = ?')
+          .run(opaquePayload, 'bundle-recovery-opaque-legacy-event');
+      } finally {
+        raw.close();
+      }
+
+      const outcome = await composition.handlers['session-bundle.export'](
+        {
+          sessionId: session.id,
+          destination: join(root, 'bundle-recovery.maka-session'),
+        },
+        {
+          hostEpoch: 'execution-composition-test',
+          connectionId: 'bundle-recovery-test',
+          principal: 'local_os_user',
+          acquireResidency: () => ({ release() {} }),
+        },
+      );
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      assert.deepEqual(
+        await stores.runtimeEventStore.listUnsettledToolOperations([session.id]),
+        [],
+      );
+    } finally {
+      await composition.close();
+    }
+  });
 });
 
 test('idle schedules and armed or paused Goals allow production handoff and recover in the successor', {
@@ -968,6 +1129,84 @@ test('production composition commits automatic titles through Host-owned Session
   });
 });
 
+test('injected title generation preserves the Session retirement boundary', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const releaseTitle = deferred<void>();
+    const residencies = new HostResidencyRegistry();
+    let titleCalls = 0;
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      residencies,
+      generateSessionTitle: async ({ sourceText }) => {
+        assert.equal(sourceText, 'Archive after naming');
+        titleCalls += 1;
+        await releaseTitle.promise;
+        // Desktop E2E uses the same local fallback, not a provider request.
+        return undefined;
+      },
+    });
+    const context = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'archive-title-client',
+      principal: 'local_os_user' as const,
+      acquireResidency: () => residencies.acquire('archive-title-turn'),
+    };
+    try {
+      const session = await manager.createSession({
+        cwd: root,
+        llmConnectionId: FAKE_CONNECTION_ID,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      const started = await composition.handlers['turn.start'](
+        {
+          sessionId: session.id,
+          turnId: 'archive-title-turn',
+          content: { text: 'Archive after naming' },
+        },
+        context,
+      );
+      assert.equal(started.ok, true);
+      await waitFor(async () => titleCalls === 1);
+      // A durable terminal snapshot can precede release of the live root.
+      // Isolate the naming guard only after the Turn's residency is released.
+      await waitFor(
+        async () => !residencies.snapshot().some(({ label }) => label === 'archive-title-turn'),
+      );
+      const busy = await composition.handlers['session.lifecycle.set'](
+        {
+          sessionId: session.id,
+          state: 'archived',
+        },
+        context,
+      );
+      assert.equal(busy.ok, false);
+      if (busy.ok) assert.fail('An active naming effect must block archive');
+      assert.equal(busy.error.code, 'session_busy');
+      assert.match(busy.error.message, /live derived effect/);
+
+      releaseTitle.resolve();
+      await waitFor(
+        async () => !residencies.snapshot().some(({ label }) => label === 'session-effect'),
+      );
+      const named = (await manager.listSessions()).find(({ id }) => id === session.id);
+      assert.equal(named?.name, 'Archive after naming');
+      const archived = await composition.handlers['session.lifecycle.set'](
+        {
+          sessionId: session.id,
+          state: 'archived',
+        },
+        context,
+      );
+      assert.equal(archived.ok, true, JSON.stringify(archived));
+      assert.equal(titleCalls, 1);
+    } finally {
+      releaseTitle.resolve();
+      await composition.close();
+    }
+  });
+});
+
 test('a committed Client Capability replacement stays acknowledged when recovery drains the Host', async (t) => {
   await withCompositionRoot(async ({ owner }) => {
     let drainRequests = 0;
@@ -1626,22 +1865,9 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
     let restartedOwner: InteractiveRootOwner | undefined;
     let continuation: { turnId: string; runId: string } | undefined;
     let targetSessionId: string | undefined;
-    // A stopped delegation produces a Host result Turn. Drain that specific
-    // notification before submitting another user Turn to the same WorkHub.
-    const waitForResultCompletion = async (targetTurnId: string) => {
-      await waitFor(async () => {
-        const notification = (await manager.getMessages(WORKHUB_COORDINATION_SESSION_ID)).find(
-          (message) =>
-            message.type === 'user' &&
-            message.origin?.kind === 'workhub_result' &&
-            message.origin.targetTurnId === targetTurnId,
-        );
-        if (!notification) return false;
-        return (await manager.listTurns(WORKHUB_COORDINATION_SESSION_ID)).some(
-          ({ turnId, status }) => turnId === notification.turnId && status === 'completed',
-        );
-      }, 10_000);
-    };
+    // Stop retires the delegation from automatic result delivery, including
+    // after a resumed execution is interrupted. Assert control receipts and
+    // target Turn state below rather than waiting for a retired notification.
     const handoffAndReopen = async () => {
       const requested = deferred<void>();
       const request = manager.requestRunHandoff.bind(manager);
@@ -1718,10 +1944,27 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
       assert.equal(original.ok, true);
       if (!original.ok) return;
       await handoffAndReopen();
-      await composition.handlers['turn.stop'](
-        { sessionId: target.id, turnId: original.result.turnId, runId: original.result.runId },
+      const firstStop = await actWorkHub(
+        composition,
+        {
+          actionId: 'workhub-first-stop',
+          userText: 'Stop Payments',
+          proposal: { operation: 'stop', expects: { targetSessionId: target.id } },
+        },
         context,
       );
+      assert.equal(firstStop.ok, true, JSON.stringify(firstStop));
+      const afterStopCandidates = await composition.handlers['workhub.coordination.candidates'](
+        {},
+        context,
+      );
+      assert.equal(afterStopCandidates.ok, true);
+      if (afterStopCandidates.ok)
+        assert.equal(
+          afterStopCandidates.result.candidates.find(({ sessionId }) => sessionId === target.id)
+            ?.latestDelegationActionId,
+          'workhub-resume-stop-delegation',
+        );
 
       pauseNext = true;
       boundary = deferred<void>();
@@ -1737,7 +1980,6 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
           },
         },
         context,
-        () => waitForResultCompletion(original.result.turnId),
       );
       assert.equal(resumed.ok, true, JSON.stringify(resumed));
       if (
@@ -1754,6 +1996,25 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
       if (!resumedTurn.ok) return;
       continuation = { turnId: resumedTurn.result.turnId, runId: resumedTurn.result.runId };
       assert.equal(resumedTurn.result.status, 'running');
+      assert.deepEqual(
+        await actWorkHub(
+          composition,
+          {
+            actionId: 'workhub-first-stop',
+            userText: 'Stop Payments',
+            proposal: { operation: 'stop', expects: { targetSessionId: target.id } },
+          },
+          context,
+        ),
+        firstStop,
+        'replaying the old stop must not stop the resumed execution',
+      );
+      const stillRunning = await composition.handlers['turn.query'](
+        { sessionId: target.id, turnId: resumedTurn.result.turnId },
+        context,
+      );
+      assert.ok(stillRunning.ok && stillRunning.result.status === 'running');
+
       await handoffAndReopen();
 
       // Lose the response, interrupt the continuation, then discard all
@@ -1789,10 +2050,7 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
           expects: { targetSessionId: target.id },
         },
       };
-      const interruptedTurnId = continuation.turnId;
-      const replayed = await actWorkHub(composition, retry, context, () =>
-        waitForResultCompletion(interruptedTurnId),
-      );
+      const replayed = await actWorkHub(composition, retry, context);
       assert.deepEqual(replayed, resumed);
       const freshAction = { ...retry, actionId: 'workhub-resume-again' };
       const fresh = await actWorkHub(composition, freshAction, context);
@@ -3322,6 +3580,7 @@ async function createCapturedExecutionComposition(
     readonly defaultWorkHubRouting?: boolean;
     readonly onWorkHubResult?: (input: BackendSendInput) => void;
     readonly primaryBackendFactory?: BackendFactory;
+    readonly generateSessionTitle?: ExecutionRuntimeHostCompositionDependencies['generateSessionTitle'];
     readonly residencies?: HostResidencyRegistry;
   } = {},
 ): Promise<{
@@ -3358,6 +3617,7 @@ async function createCapturedExecutionComposition(
       },
       {},
       {
+        generateSessionTitle: options.generateSessionTitle,
         primaryBackendFactory: (context) =>
           context.sessionId === WORKHUB_COORDINATION_SESSION_ID
             ? new (class extends FakeBackend {
@@ -3576,7 +3836,6 @@ async function actWorkHub(
   composition: Awaited<ReturnType<typeof createExecutionRuntimeHostComposition>>,
   input: WorkHubAdmittedAction,
   context: ConnectionContext,
-  beforeAnswer?: () => Promise<void>,
 ) {
   const desktop = composition.clientCapabilities!.attachConnection(
     clientCapabilityConnectionIdentity(context.connectionId),
@@ -3591,9 +3850,6 @@ async function actWorkHub(
       context,
     );
     assert.ok(registered.ok, JSON.stringify(registered));
-    // Host result delivery needs these Desktop capabilities. Test barriers
-    // must run after registration, before admitting the next user Turn.
-    await beforeAnswer?.();
     const { userText, attachments, ...action } = input;
     const turnId = randomUUID();
     const decisions = workHubRoutingDecisions.get(composition);
