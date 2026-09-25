@@ -159,6 +159,17 @@ describe('Host Client Capability coordinator', () => {
         { send: async () => {} },
       );
       try {
+        for (const [registrationId, configId] of [
+          ['same-provider-changed', `sha256:${'b'.repeat(64)}`],
+          ['same-provider-missing', undefined],
+        ] as const) {
+          const rejected = await coordinator.handlers['client.capability.replace'](
+            { ...input, registrationId, sessionConfigurationId: configId },
+            connectionContext('connection-reconnected'),
+          );
+          assert.equal(rejected.ok, false);
+          if (!rejected.ok) assert.equal(rejected.error.code, 'session_binding_conflict');
+        }
         assert.equal(
           (
             await coordinator.handlers['client.capability.replace'](
@@ -230,6 +241,77 @@ describe('Host Client Capability coordinator', () => {
       const snapshot = coordinator.snapshotForSession('session-a');
       assert.deepEqual(snapshot?.registrationIds, ['second']);
       snapshot?.release();
+    } finally {
+      await first.close();
+      await second.close();
+      await coordinator.close();
+    }
+  });
+
+  test('a different connection cannot change a shared provider Session configuration', async () => {
+    const coordinator = createCoordinator();
+    const first = coordinator.attachConnection(
+      clientCapabilityConnectionIdentity('first-connection', 'shared-client'),
+      { send: async () => {} },
+    );
+    const second = coordinator.attachConnection(
+      clientCapabilityConnectionIdentity('second-connection', 'shared-client'),
+      { send: async () => {} },
+    );
+    const alpha = `sha256:${'a'.repeat(64)}`;
+    const beta = `sha256:${'b'.repeat(64)}`;
+    const publish = (
+      connectionId: string,
+      registrationId: string,
+      sessionId: string,
+      configId?: string,
+    ) =>
+      coordinator.handlers['client.capability.replace'](
+        {
+          ...replacementInput(registrationId, 'inspect'),
+          sessionId,
+          sessionConfigurationId: configId,
+          offers: replacementInput(registrationId, 'inspect').offers.map((offer) => ({
+            ...offer,
+            hostPathAccess: 'none' as const,
+          })),
+        },
+        connectionContext(connectionId),
+      );
+    try {
+      assert.equal((await publish('first-connection', 'first', 'session-a', alpha)).ok, true);
+      assert.deepEqual(await coordinator.bindSession('session-a', 'first-connection'), {
+        ok: true,
+      });
+      for (const [registrationId, configId] of [
+        ['rejected-changed', beta],
+        ['rejected-missing', undefined],
+      ] as const) {
+        const rejected = await publish('second-connection', registrationId, 'session-a', configId);
+        assert.equal(rejected.ok, false);
+        if (!rejected.ok) assert.equal(rejected.error.code, 'session_binding_conflict');
+        const snapshot = coordinator.snapshotForSession('session-a');
+        assert.deepEqual(snapshot?.registrationIds, ['first']);
+        snapshot?.release();
+      }
+      assert.equal(
+        (await publish('first-connection', 'other-session', 'session-b', beta)).ok,
+        true,
+      );
+      assert.deepEqual(await coordinator.bindSession('session-b', 'first-connection'), {
+        ok: true,
+      });
+      assert.equal((await publish('second-connection', 'equivalent', 'session-a', alpha)).ok, true);
+      assert.deepEqual(await coordinator.bindSession('session-a', 'second-connection'), {
+        ok: true,
+      });
+      const snapshot = coordinator.snapshotForSession('session-a');
+      assert.deepEqual(snapshot?.registrationIds, ['equivalent']);
+      snapshot?.release();
+      assert.equal(
+        (await publish('first-connection', 'another-session', 'session-c', beta)).ok,
+        true,
+      );
     } finally {
       await first.close();
       await second.close();

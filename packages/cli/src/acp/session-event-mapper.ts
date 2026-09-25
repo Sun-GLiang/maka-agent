@@ -198,6 +198,10 @@ export class AcpSessionEventMapper {
     });
   }
 
+  textForMessage(kind: StreamKind, messageId: string): string | undefined {
+    return this.#streams.get(streamKey(kind, messageId));
+  }
+
   async #acceptText(kind: StreamKind, hostMessageId: string, nextText: string): Promise<void> {
     const key = streamKey(kind, hostMessageId);
     const current = this.#streams.get(key) ?? '';

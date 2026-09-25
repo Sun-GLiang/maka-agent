@@ -1021,6 +1021,14 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
         };
       }
       if (sessionId !== undefined) {
+        const current = provider.sessionRegistrations.get(sessionId);
+        // Connections with the same provider identity may overlap during
+        // reconnect. Only the owning connection can deliberately reconfigure
+        // a Session; another connection must prove the same complete config.
+        const crossConnectionConflict =
+          current !== undefined &&
+          current.connectionId !== context.connectionId &&
+          input.sessionConfigurationId !== current.sessionConfigurationId;
         const conflicts = [...this.#providers.values()].some((other) => {
           if (other.providerId === provider.providerId) return false;
           const current = other.sessionRegistrations.get(sessionId);
@@ -1033,21 +1041,31 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
         });
         // A disconnected frozen provider cannot silently be replaced either.
         const lostBinding = [...(this.#sessions.get(sessionId)?.sessionBindings ?? [])].some(
-          ([contractId, binding]) =>
-            binding.sessionId === sessionId &&
-            binding.providerId !== provider.providerId &&
-            !this.#providers.get(binding.providerId)?.sessionRegistrations.has(sessionId) &&
-            !(
-              binding.kind === 'lost' &&
-              provider.principalKind === 'local_owner' &&
-              this.#providers.get(binding.providerId)?.principalId === provider.principalId &&
-              this.#providers.get(binding.providerId)?.principalKind === provider.principalKind &&
-              input.sessionConfigurationId !== undefined &&
-              input.sessionConfigurationId === binding.sessionConfigurationId &&
-              input.offers.some((offer) => capabilityGroupId(offer) === contractId)
-            ),
+          ([contractId, binding]) => {
+            if (binding.sessionId !== sessionId) return false;
+            if (binding.providerId === provider.providerId) {
+              // A remote profile retains its provider ID across connections.
+              // Keep its frozen configuration fenced after the old channel exits.
+              return (
+                binding.kind === 'lost' &&
+                input.sessionConfigurationId !== binding.sessionConfigurationId
+              );
+            }
+            return (
+              !this.#providers.get(binding.providerId)?.sessionRegistrations.has(sessionId) &&
+              !(
+                binding.kind === 'lost' &&
+                provider.principalKind === 'local_owner' &&
+                this.#providers.get(binding.providerId)?.principalId === provider.principalId &&
+                this.#providers.get(binding.providerId)?.principalKind === provider.principalKind &&
+                input.sessionConfigurationId !== undefined &&
+                input.sessionConfigurationId === binding.sessionConfigurationId &&
+                input.offers.some((offer) => capabilityGroupId(offer) === contractId)
+              )
+            );
+          },
         );
-        if (conflicts || lostBinding) {
+        if (crossConnectionConflict || conflicts || lostBinding) {
           return {
             ok: false,
             error: {

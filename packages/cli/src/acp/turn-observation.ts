@@ -20,7 +20,7 @@
 import type { SessionEvent } from '@maka/core/events';
 import type { StoredMessage } from '@maka/core/session';
 import type { TurnSnapshot } from '@maka/runtime-host/protocol';
-import type { RequestError, StopReason } from '@agentclientprotocol/sdk';
+import type { RequestError, SessionNotification, StopReason } from '@agentclientprotocol/sdk';
 import { RuntimeHostRequestInterruptedError } from '@maka/runtime-host/client';
 import type { RuntimeHostTerminalTurn } from '@maka/runtime-host/adapter';
 import { RuntimeHostSessionChannel } from '../runtime-host-session-channel.js';
@@ -32,6 +32,7 @@ export class AcpTurnObservation {
   readonly turnId: string;
   readonly runId?: string;
   readonly mapper: AcpSessionEventMapper;
+  readonly deliveredTextByMessage = new Map<string, string>();
   readonly projectionAbort = new AbortController();
   readonly reconciliationAbort = new AbortController();
   attachment?: RuntimeHostSessionChannel;
@@ -72,6 +73,25 @@ export class AcpTurnObservation {
     } finally {
       this.#muteDepth -= 1;
     }
+  }
+
+  recordDeliveredText(notification: SessionNotification): string | undefined {
+    const update = notification.update;
+    if (
+      update.sessionUpdate !== 'agent_message_chunk' &&
+      update.sessionUpdate !== 'agent_thought_chunk'
+    )
+      return;
+    if (update.content.type !== 'text' || !update.messageId) return;
+    const kind = update.sessionUpdate === 'agent_message_chunk' ? 'text' : 'thinking';
+    const prefix = this.mapper.textForMessage(kind, update.messageId);
+    const key = `${update.sessionUpdate}:${update.messageId}`;
+    const previous = this.deliveredTextByMessage.get(key) ?? '';
+    // A resumed mapper may have silently seeded older text. Only a prefix
+    // actually sent to this client can suppress historical replay.
+    if (prefix !== previous + update.content.text) return;
+    this.deliveredTextByMessage.set(key, prefix);
+    return prefix;
   }
 
   holdLive(): Promise<void> {

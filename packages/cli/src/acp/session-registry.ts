@@ -432,7 +432,7 @@ export class AcpSessionRegistry {
       notify: async (notification) => {
         if (!this.#closing && this.#ownedSessionIds.has(params.sessionId)) {
           await context.notify(notification);
-          this.#recordLiveHistoryDelivery(params.sessionId, notification);
+          this.#recordLiveHistoryDelivery(params.sessionId, notification, active);
         }
       },
     });
@@ -1124,7 +1124,7 @@ export class AcpSessionRegistry {
         const current = this.#externalObservationContexts.get(sessionId);
         if (!this.#closing && this.#ownedSessionIds.has(sessionId) && current) {
           await current.notify(notification);
-          this.#recordLiveHistoryDelivery(sessionId, notification);
+          this.#recordLiveHistoryDelivery(sessionId, notification, observation);
         }
       },
     });
@@ -1588,12 +1588,22 @@ export class AcpSessionRegistry {
     if ((this.#sessionCloseGenerations.get(params.sessionId) ?? 0) !== requestedGeneration) {
       throw unknownSessionError();
     }
+    const existingReplayDelivery = this.#historyReplayDelivery.get(params.sessionId);
     const replayDelivery = replayHistory
-      ? (this.#historyReplayDelivery.get(params.sessionId) ?? {
+      ? (existingReplayDelivery ?? {
           textByMessage: new Map<string, string>(),
           otherUpdates: new Set<string>(),
         })
       : undefined;
+    if (replayDelivery && !existingReplayDelivery) {
+      // An attached Turn may have streamed before load started. Retain its
+      // absolute message prefix so later live chunks are not mistaken for one.
+      for (const observation of this.#turnObservations.get(params.sessionId)?.values() ?? []) {
+        for (const [key, prefix] of observation.deliveredTextByMessage) {
+          replayDelivery.textByMessage.set(key, prefix);
+        }
+      }
+    }
     if (replayDelivery) this.#historyReplayDelivery.set(params.sessionId, replayDelivery);
     const loadController = new AbortController();
     this.#sessionLoadControllers.set(params.sessionId, loadController);
@@ -1808,14 +1818,20 @@ export class AcpSessionRegistry {
     }
   }
 
-  #recordLiveHistoryDelivery(sessionId: string, notification: SessionNotification): void {
+  #recordLiveHistoryDelivery(
+    sessionId: string,
+    notification: SessionNotification,
+    observation: AcpTurnObservation,
+  ): void {
+    const prefix = observation.recordDeliveredText(notification);
     const delivery = this.#historyReplayDelivery.get(sessionId);
     if (!delivery) return;
     const chunk = historyTextChunk(notification);
     if (chunk) {
+      const previous = delivery.textByMessage.get(chunk.key) ?? '';
       delivery.textByMessage.set(
         chunk.key,
-        (delivery.textByMessage.get(chunk.key) ?? '') + chunk.text,
+        prefix?.startsWith(previous) ? prefix : previous + chunk.text,
       );
     } else {
       delivery.otherUpdates.add(JSON.stringify(notification.update));

@@ -59,6 +59,7 @@ import {
 
 const SESSION_REVISION = `sha256:${'a'.repeat(64)}` as const;
 const NEW_SESSION_REVISION = `sha256:${'b'.repeat(64)}` as const;
+const TEST_CWD = await realpath(process.cwd());
 
 const DEFAULT_CONFIG_OPTIONS: Array<Extract<SessionConfigOption, { type: 'select' }>> = [
   {
@@ -168,7 +169,7 @@ describe('ACP Session registry', () => {
             openSessionSubscriptionOnce: async () => subscription,
           }),
       });
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       const context = {
         ...promptContext([]),
         interactions: {
@@ -259,7 +260,7 @@ describe('ACP Session registry', () => {
         },
       };
       try {
-        await registry.resume({ sessionId, cwd: '/workspace' }, context);
+        await registry.resume({ sessionId, cwd: TEST_CWD }, context);
         subscription.appendText(first.turnId, first.runId, 'A1');
         await blocked.promise;
         subscription.appendText(first.turnId, first.runId, 'A1A2', true);
@@ -267,7 +268,7 @@ describe('ACP Session registry', () => {
         const reads = subscription.nextCalls;
         subscription.setRoot(successor);
         await waitFor(() => subscription.nextCalls > reads);
-        if (repeatRestore) await registry.resume({ sessionId, cwd: '/workspace' }, context);
+        if (repeatRestore) await registry.resume({ sessionId, cwd: TEST_CWD }, context);
         subscription.project({ interactions: { pending: [pending] } });
         subscription.appendText('second', 'run-second', 'B', true);
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -290,7 +291,7 @@ describe('ACP Session registry', () => {
     subscription.seedBootstrap([
       { type: 'user', id: 'history', turnId: 'old', ts: 1, text: 'old' },
     ]);
-    const pageRead = deferred<void>();
+    let pageRead = false;
     const pageGate = deferred<void>();
     const abort = new AbortController();
     const pending: InteractionPendingSnapshot = {
@@ -350,7 +351,7 @@ describe('ACP Session registry', () => {
       },
       requestPermission: async () => assert.fail('Unexpected permission'),
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const prompt = registry
       .prompt(
         { sessionId, prompt: [{ type: 'text', text: 'run' }] },
@@ -360,16 +361,18 @@ describe('ACP Session registry', () => {
     try {
       await waitFor(() => started);
       subscription.transcriptPageGate = pageGate.promise;
-      subscription.onTranscriptPageRead = () => pageRead.resolve();
+      subscription.onTranscriptPageRead = () => {
+        pageRead = true;
+      };
       const loading = registry.load(
-        { sessionId, cwd: '/workspace', mcpServers: [] },
+        { sessionId, cwd: TEST_CWD, mcpServers: [] },
         {
           ...promptContext([]),
           signal: abort.signal,
           interactions: client(() => (newDialogs += 1)),
         },
       );
-      await pageRead.promise;
+      await waitFor(() => pageRead);
       abort.abort();
       pageGate.resolve();
       await assert.rejects(loading);
@@ -419,13 +422,13 @@ describe('ACP Session registry', () => {
         }),
     });
     const newerContext = promptContext(newNotifications);
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     try {
-      await registry.resume({ sessionId, cwd: '/workspace' }, promptContext(oldNotifications));
+      await registry.resume({ sessionId, cwd: TEST_CWD }, promptContext(oldNotifications));
       const resuming = registry.resumeTurn({ sessionId }, newerContext);
       void resuming.catch(() => undefined);
       await startEntered.promise;
-      await registry.resume({ sessionId, cwd: '/workspace' }, newerContext);
+      await registry.resume({ sessionId, cwd: TEST_CWD }, newerContext);
       start.reject(new Error('Resume start rejected'));
       await assert.rejects(resuming);
       const external = runningTurn(sessionId, 'external-turn');
@@ -454,9 +457,9 @@ describe('ACP Session registry', () => {
     subscription.seedBootstrap([
       { type: 'user', id: 'history', turnId: 'old', ts: 1, text: 'old' },
     ]);
-    const pageRead = deferred<void>();
+    let pageRead = false;
     const pageGate = deferred<void>();
-    const startEntered = deferred<void>();
+    let startEntered = false;
     const start = deferred<never>();
     const abort = new AbortController();
     const dialogs: string[] = [];
@@ -506,7 +509,7 @@ describe('ACP Session registry', () => {
                 sourceRuntimeEventHighWater: 42,
               };
             if (operation === 'turn.resume.start') {
-              startEntered.resolve();
+              startEntered = true;
               return start.promise;
             }
             if (operation === 'interaction.query') return pending;
@@ -528,7 +531,7 @@ describe('ACP Session registry', () => {
       },
       requestPermission: async () => assert.fail('Unexpected permission'),
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const prompt = registry
       .prompt(
         { sessionId, prompt: [{ type: 'text', text: 'run' }] },
@@ -538,19 +541,21 @@ describe('ACP Session registry', () => {
     try {
       await waitFor(() => started);
       subscription.transcriptPageGate = pageGate.promise;
-      subscription.onTranscriptPageRead = () => pageRead.resolve();
+      subscription.onTranscriptPageRead = () => {
+        pageRead = true;
+      };
       const loading = registry.load(
-        { sessionId, cwd: '/workspace', mcpServers: [] },
+        { sessionId, cwd: TEST_CWD, mcpServers: [] },
         { ...promptContext([]), signal: abort.signal, interactions: client('load') },
       );
       void loading.catch(() => undefined);
-      await pageRead.promise;
+      await waitFor(() => pageRead);
       const resuming = registry.resumeTurn(
         { sessionId },
         { ...promptContext([]), interactions: client('resumeTurn') },
       );
       void resuming.catch(() => undefined);
-      await startEntered.promise;
+      await waitFor(() => startEntered);
       abort.abort();
       pageGate.resolve();
       await assert.rejects(loading);
@@ -623,7 +628,7 @@ describe('ACP Session registry', () => {
           }),
       });
       try {
-        await registry.create({ cwd: '/workspace', mcpServers: [] });
+        await registry.create({ cwd: TEST_CWD, mcpServers: [] });
         await registry.prompt(
           { sessionId, prompt: [{ type: 'text', text: 'first' }] },
           promptContext([]),
@@ -643,7 +648,7 @@ describe('ACP Session registry', () => {
             requestPermission: async () => assert.fail('Unexpected permission'),
           },
         };
-        await registry[method]({ sessionId, cwd: '/workspace', mcpServers: [] }, restoreContext);
+        await registry[method]({ sessionId, cwd: TEST_CWD, mcpServers: [] }, restoreContext);
         assert.equal(opens, 1);
         await waitFor(() => pendingPresented === 1);
         subscription.appendText(turnId, external.runId, 'external live output', true);
@@ -655,7 +660,7 @@ describe('ACP Session registry', () => {
               update.content.text === 'external live output',
           ),
         );
-        await registry.resume({ sessionId, cwd: '/workspace' }, restoreContext);
+        await registry.resume({ sessionId, cwd: TEST_CWD }, restoreContext);
         assert.equal(opens, 1);
         assert.equal(pendingPresented, 1);
       } finally {
@@ -733,7 +738,7 @@ describe('ACP Session registry', () => {
     });
     try {
       const loaded = await registry.load(
-        { sessionId, cwd: '/workspace', mcpServers: [] },
+        { sessionId, cwd: TEST_CWD, mcpServers: [] },
         promptContext(notifications),
       );
       assert.deepEqual(loaded.configOptions, DEFAULT_CONFIG_OPTIONS);
@@ -767,7 +772,7 @@ describe('ACP Session registry', () => {
       );
       const beforeSecondLoad = notifications.length;
       await registry.load(
-        { sessionId, cwd: '/workspace', mcpServers: [] },
+        { sessionId, cwd: TEST_CWD, mcpServers: [] },
         promptContext(notifications),
       );
       assert.deepEqual(
@@ -783,8 +788,8 @@ describe('ACP Session registry', () => {
         ['earlier', 'answer'],
       );
       const beforeResume = notifications.length;
-      await registry.resume({ sessionId, cwd: '/workspace' }, promptContext(notifications));
-      await registry.resume({ sessionId, cwd: '/workspace' }, promptContext(notifications));
+      await registry.resume({ sessionId, cwd: TEST_CWD }, promptContext(notifications));
+      await registry.resume({ sessionId, cwd: TEST_CWD }, promptContext(notifications));
       assert.equal(notifications.length, beforeResume);
       assert.equal(opens, 1);
       await registry.close({ sessionId });
@@ -817,7 +822,7 @@ describe('ACP Session registry', () => {
     });
     try {
       const loading = registry.load(
-        { sessionId, cwd: '/workspace', mcpServers: [] },
+        { sessionId, cwd: TEST_CWD, mcpServers: [] },
         promptContext([]),
       );
       await readStarted.promise;
@@ -864,13 +869,13 @@ describe('ACP Session registry', () => {
         }),
     });
     try {
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
-      await registry.resume({ sessionId, cwd: '/workspace' }, promptContext([]));
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
+      await registry.resume({ sessionId, cwd: TEST_CWD }, promptContext([]));
       const closing = registry.close({ sessionId });
       await stopStarted.promise;
       const readsBeforeLoad = catalogReads;
       const loading = registry.load(
-        { sessionId, cwd: '/workspace', mcpServers: [] },
+        { sessionId, cwd: TEST_CWD, mcpServers: [] },
         promptContext([]),
       );
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -914,7 +919,7 @@ describe('ACP Session registry', () => {
     });
     try {
       await registry.load(
-        { sessionId, cwd: '/workspace', mcpServers: [] },
+        { sessionId, cwd: TEST_CWD, mcpServers: [] },
         promptContext(notifications),
       );
       assert.equal(subscription.transcriptPageReads, 4);
@@ -969,10 +974,8 @@ describe('ACP Session registry', () => {
       },
     };
     try {
-      await assert.rejects(
-        registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, context),
-      );
-      await registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, context);
+      await assert.rejects(registry.load({ sessionId, cwd: TEST_CWD, mcpServers: [] }, context));
+      await registry.load({ sessionId, cwd: TEST_CWD, mcpServers: [] }, context);
       assert.deepEqual(delivered, ['first', 'second']);
       assert.equal(opens, 2);
     } finally {
@@ -980,75 +983,143 @@ describe('ACP Session registry', () => {
     }
   });
 
-  test('history replay omits live output already delivered before its gate', async () => {
-    const sessionId = 'session-pre-gate-replay';
+  for (const firstChunkBeforeLoad of [false, true])
+    test(`history replay omits live output when streaming starts ${firstChunkBeforeLoad ? 'before' : 'during'} load`, async () => {
+      const sessionId = 'session-pre-gate-replay';
+      const turn = runningTurn(sessionId, 'live-turn');
+      const subscription = new FakeSubscription(continuitySnapshot(sessionId, { rootTurn: turn }));
+      const catalogHeld = deferred<void>();
+      const releaseCatalog = deferred<void>();
+      const live: SessionNotification[] = [];
+      const replay: SessionNotification[] = [];
+      let catalogReads = 0;
+      const registry = new AcpSessionRegistry({
+        connect: async () =>
+          fakeConnection({
+            request: async (operation) => {
+              if (operation === 'session.catalog.query') {
+                if (++catalogReads === 2) {
+                  catalogHeld.resolve();
+                  await releaseCatalog.promise;
+                }
+                return { kind: 'session', session: catalogSession(sessionId) };
+              }
+              throw new Error(`Unexpected operation ${operation}`);
+            },
+            openSessionSubscriptionOnce: async () => subscription,
+          }),
+      });
+      try {
+        await registry.resume({ sessionId, cwd: TEST_CWD }, promptContext(live));
+        if (firstChunkBeforeLoad) {
+          subscription.appendText(turn.turnId, turn.runId, 'hel');
+          await waitFor(() =>
+            live.some(
+              ({ update }) =>
+                update.sessionUpdate === 'agent_message_chunk' &&
+                update.content.type === 'text' &&
+                update.content.text === 'hel',
+            ),
+          );
+        }
+        const loading = registry.load(
+          { sessionId, cwd: TEST_CWD, mcpServers: [] },
+          promptContext(replay),
+        );
+        await catalogHeld.promise;
+        if (!firstChunkBeforeLoad) subscription.appendText(turn.turnId, turn.runId, 'hel');
+        await waitFor(() =>
+          live.some(
+            ({ update }) =>
+              update.sessionUpdate === 'agent_message_chunk' &&
+              update.content.type === 'text' &&
+              update.content.text === 'hel',
+          ),
+        );
+        subscription.publishTranscript([
+          {
+            type: 'assistant',
+            id: `message-${turn.turnId}`,
+            turnId: turn.turnId,
+            ts: 2,
+            text: 'hello',
+            modelId: 'test-model',
+          },
+        ]);
+        await waitFor(
+          () =>
+            live
+              .flatMap(({ update }) =>
+                update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text'
+                  ? [update.content.text]
+                  : [],
+              )
+              .join('') === 'hello',
+        );
+        releaseCatalog.resolve();
+        await loading;
+        assert.deepEqual(
+          replay.filter(({ update }) => update.sessionUpdate === 'agent_message_chunk'),
+          [],
+        );
+      } finally {
+        releaseCatalog.resolve();
+        subscription.setRoot(completedTurn(sessionId, turn.turnId));
+        await registry.dispose();
+      }
+    });
+
+  test('load replays a prefix that resume seeded without delivering', async () => {
+    const sessionId = 'session-silent-resume-prefix';
     const turn = runningTurn(sessionId, 'live-turn');
-    const subscription = new FakeSubscription(continuitySnapshot(sessionId, { rootTurn: turn }));
-    const catalogHeld = deferred<void>();
-    const releaseCatalog = deferred<void>();
+    const initial: StoredMessage = {
+      type: 'assistant',
+      id: `message-${turn.turnId}`,
+      turnId: turn.turnId,
+      ts: 2,
+      text: 'hel',
+      modelId: 'test-model',
+    };
+    const subscription = new FakeSubscription(
+      continuitySnapshot(sessionId, { rootTurn: turn }),
+      Promise.resolve([initial]),
+    );
+    subscription.seedBootstrap([initial]);
     const live: SessionNotification[] = [];
     const replay: SessionNotification[] = [];
-    let catalogReads = 0;
     const registry = new AcpSessionRegistry({
       connect: async () =>
         fakeConnection({
           request: async (operation) => {
-            if (operation === 'session.catalog.query') {
-              if (++catalogReads === 2) {
-                catalogHeld.resolve();
-                await releaseCatalog.promise;
-              }
+            if (operation === 'session.catalog.query')
               return { kind: 'session', session: catalogSession(sessionId) };
-            }
             throw new Error(`Unexpected operation ${operation}`);
           },
           openSessionSubscriptionOnce: async () => subscription,
         }),
     });
     try {
-      await registry.resume({ sessionId, cwd: '/workspace' }, promptContext(live));
-      const loading = registry.load(
-        { sessionId, cwd: '/workspace', mcpServers: [] },
-        promptContext(replay),
-      );
-      await catalogHeld.promise;
-      subscription.appendText(turn.turnId, turn.runId, 'hel');
+      await registry.resume({ sessionId, cwd: TEST_CWD }, promptContext(live));
+      subscription.appendText(turn.turnId, turn.runId, 'hello');
       await waitFor(() =>
         live.some(
           ({ update }) =>
             update.sessionUpdate === 'agent_message_chunk' &&
             update.content.type === 'text' &&
-            update.content.text === 'hel',
+            update.content.text === 'lo',
         ),
       );
-      subscription.publishTranscript([
-        {
-          type: 'assistant',
-          id: `message-${turn.turnId}`,
-          turnId: turn.turnId,
-          ts: 2,
-          text: 'hello',
-          modelId: 'test-model',
-        },
-      ]);
-      await waitFor(
-        () =>
-          live
-            .flatMap(({ update }) =>
-              update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text'
-                ? [update.content.text]
-                : [],
-            )
-            .join('') === 'hello',
-      );
-      releaseCatalog.resolve();
-      await loading;
+      subscription.publishTranscript([{ ...initial, text: 'hello' }]);
+      await registry.load({ sessionId, cwd: TEST_CWD, mcpServers: [] }, promptContext(replay));
       assert.deepEqual(
-        replay.filter(({ update }) => update.sessionUpdate === 'agent_message_chunk'),
-        [],
+        replay.flatMap(({ update }) =>
+          update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text'
+            ? [update.content.text]
+            : [],
+        ),
+        ['hello'],
       );
     } finally {
-      releaseCatalog.resolve();
       subscription.setRoot(completedTurn(sessionId, turn.turnId));
       await registry.dispose();
     }
@@ -1067,7 +1138,7 @@ describe('ACP Session registry', () => {
                   ? { kind: 'session', session: null }
                   : {
                       kind: 'session',
-                      session: catalogSession(sessionId, '/workspace', {
+                      session: catalogSession(sessionId, TEST_CWD, {
                         isArchived: scenario === 'archived',
                       }),
                     };
@@ -1084,7 +1155,7 @@ describe('ACP Session registry', () => {
           registry.load(
             {
               sessionId,
-              cwd: scenario === 'cwd' ? '/other' : '/workspace',
+              cwd: scenario === 'cwd' ? '/other' : TEST_CWD,
               mcpServers: [],
             },
             promptContext([]),
@@ -1143,7 +1214,7 @@ describe('ACP Session registry', () => {
     });
     try {
       const result = await registry.resume(
-        { sessionId, cwd: '/workspace' },
+        { sessionId, cwd: TEST_CWD },
         promptContext(notifications),
       );
       assert.deepEqual(result.configOptions, DEFAULT_CONFIG_OPTIONS);
@@ -1217,7 +1288,7 @@ describe('ACP Session registry', () => {
         });
         try {
           await registry.resume(
-            { sessionId, cwd: '/workspace', mcpServers: [] },
+            { sessionId, cwd: TEST_CWD, mcpServers: [] },
             {
               signal: new AbortController().signal,
               notify: async ({ update }) => {
@@ -1323,7 +1394,7 @@ describe('ACP Session registry', () => {
     });
     try {
       await registry.resume(
-        { sessionId, cwd: '/workspace' },
+        { sessionId, cwd: TEST_CWD },
         {
           ...promptContext(notifications),
           interactions: {
@@ -1385,7 +1456,7 @@ describe('ACP Session registry', () => {
     });
     try {
       const loading = registry.load(
-        { sessionId, cwd: '/workspace', mcpServers: [] },
+        { sessionId, cwd: TEST_CWD, mcpServers: [] },
         {
           signal: new AbortController().signal,
           notify: async ({ update }) => {
@@ -1455,7 +1526,7 @@ describe('ACP Session registry', () => {
     });
     try {
       const loading = registry.load(
-        { sessionId, cwd: '/workspace', mcpServers: [] },
+        { sessionId, cwd: TEST_CWD, mcpServers: [] },
         promptContext(notifications),
       );
       await pageRead.promise;
@@ -1520,11 +1591,11 @@ describe('ACP Session registry', () => {
     });
     try {
       await assert.rejects(
-        registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([])),
+        registry.load({ sessionId, cwd: TEST_CWD, mcpServers: [] }, promptContext([])),
         (error: unknown) => error instanceof RequestError,
       );
       assert.equal(subscription.closeCalls, 1);
-      await registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([]));
+      await registry.load({ sessionId, cwd: TEST_CWD, mcpServers: [] }, promptContext([]));
       assert.equal(opens, 2);
       assert.equal(retrySubscription.closeCalls, 0);
     } finally {
@@ -1556,12 +1627,12 @@ describe('ACP Session registry', () => {
         }),
     });
     try {
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       await assert.rejects(
-        registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([])),
+        registry.load({ sessionId, cwd: TEST_CWD, mcpServers: [] }, promptContext([])),
       );
       assert.equal(subscription.closeCalls, 1);
-      await registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([]));
+      await registry.load({ sessionId, cwd: TEST_CWD, mcpServers: [] }, promptContext([]));
       assert.equal(opens, 2);
       assert.equal(retrySubscription.closeCalls, 0);
     } finally {
@@ -1602,12 +1673,12 @@ describe('ACP Session registry', () => {
     });
     try {
       await assert.rejects(
-        registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([])),
+        registry.load({ sessionId, cwd: TEST_CWD, mcpServers: [] }, promptContext([])),
       );
       for (let attempt = 0; attempt < 10; attempt += 1) await new Promise(setImmediate);
       assert.deepEqual(stops, []);
       assert.equal(subscription.closeCalls, 1);
-      await registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([]));
+      await registry.load({ sessionId, cwd: TEST_CWD, mcpServers: [] }, promptContext([]));
       assert.equal(opens, 2);
       assert.equal(retrySubscription.closeCalls, 0);
       assert.deepEqual(stops, []);
@@ -1664,7 +1735,7 @@ describe('ACP Session registry', () => {
     });
     try {
       await registry.resume(
-        { sessionId, cwd: '/workspace' },
+        { sessionId, cwd: TEST_CWD },
         {
           ...promptContext([]),
           notifyTurnStatus: async (status) => {
@@ -1733,7 +1804,7 @@ describe('ACP Session registry', () => {
       });
       try {
         await registry.resume(
-          { sessionId, cwd: '/workspace' },
+          { sessionId, cwd: TEST_CWD },
           {
             ...promptContext([]),
             notify: async () => {
@@ -1819,7 +1890,7 @@ describe('ACP Session registry', () => {
     });
     try {
       await registry.resume(
-        { sessionId, cwd: '/workspace' },
+        { sessionId, cwd: TEST_CWD },
         {
           ...promptContext([]),
           interactions: {
@@ -1904,7 +1975,7 @@ describe('ACP Session registry', () => {
     });
     try {
       await registry.resume(
-        { sessionId, cwd: '/workspace' },
+        { sessionId, cwd: TEST_CWD },
         {
           ...promptContext([]),
           interactions: {
@@ -2029,7 +2100,7 @@ describe('ACP Session registry', () => {
         }),
     });
     try {
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       const result = await registry.resumeTurn(
         { sessionId },
         {
@@ -2104,7 +2175,7 @@ describe('ACP Session registry', () => {
             },
           }),
       });
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       await registry.resumeTurn(
         { sessionId },
         {
@@ -2162,7 +2233,7 @@ describe('ACP Session registry', () => {
         }),
     });
     try {
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       assert.deepEqual(await registry.resumeTurn({ sessionId }, promptContext([])), {
         kind: 'parked',
         plan: { sessionId, disposition: 'parked', reason: 'resume_candidate_missing' },
@@ -2207,7 +2278,7 @@ describe('ACP Session registry', () => {
         }),
     });
     try {
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       await assert.rejects(
         registry.resumeTurn({ sessionId }, promptContext([])),
         (error: unknown) => {
@@ -2314,7 +2385,7 @@ describe('ACP Session registry', () => {
       });
       try {
         await registry.resume(
-          { sessionId, cwd: '/workspace' },
+          { sessionId, cwd: TEST_CWD },
           {
             ...promptContext([]),
             notify: async (notification) => {
@@ -2415,7 +2486,7 @@ describe('ACP Session registry', () => {
         }),
     });
     try {
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       const resuming = registry.resumeTurn({ sessionId }, promptContext([]));
       await started.promise;
       const cancelling = registry.cancel({ sessionId });
@@ -2444,7 +2515,7 @@ describe('ACP Session registry', () => {
             if (operation === 'session.catalog.query')
               return {
                 kind: 'session',
-                session: catalogSession(sessionId, '/workspace', { revision }),
+                session: catalogSession(sessionId, TEST_CWD, { revision }),
               };
             if (operation === 'session.turns.query') {
               queries.push(input);
@@ -2459,7 +2530,7 @@ describe('ACP Session registry', () => {
     try {
       await assert.rejects(registry.queryCopySource(query), RequestError);
       assert.deepEqual(queries, []);
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       assert.deepEqual(await registry.queryCopySource(query), {
         sessionId,
         throughSequence: 20,
@@ -2509,7 +2580,7 @@ describe('ACP Session registry', () => {
         }),
     });
     try {
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       const copy = {
         sourceSessionId,
         targetSessionId,
@@ -2592,7 +2663,7 @@ describe('ACP Session registry', () => {
         }),
     });
     try {
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       const input = {
         sourceSessionId,
         targetSessionId: conflictedId,
@@ -2672,7 +2743,7 @@ describe('ACP Session registry', () => {
         }),
     });
     try {
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       assert.equal(
         (
           await registry.branch({
@@ -2721,7 +2792,7 @@ describe('ACP Session registry', () => {
     await registry.dispose();
 
     for (const [operation, request] of [
-      ['session.create', () => registry.create({ cwd: '/workspace', mcpServers: [] })],
+      ['session.create', () => registry.create({ cwd: TEST_CWD, mcpServers: [] })],
       ['session.catalog.query', () => registry.list({})],
       [
         'session.configuration.update',
@@ -2814,7 +2885,7 @@ describe('ACP Session registry', () => {
       },
       newSessionId: () => 'session-concurrent',
     });
-    const create = registry.create({ cwd: '/workspace', mcpServers: [] });
+    const create = registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const list = registry.list({});
     await waitFor(() => connectCalls === 1);
 
@@ -2933,7 +3004,7 @@ describe('ACP Session registry', () => {
 
     const creates = await Promise.all(
       Array.from({ length: sessionCount }, () =>
-        registry.create({ cwd: '/workspace', mcpServers: [] }),
+        registry.create({ cwd: TEST_CWD, mcpServers: [] }),
       ),
     );
 
@@ -2960,7 +3031,7 @@ describe('ACP Session registry', () => {
         }),
       newSessionId: () => 'session-prompt-validation',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     turnRequests.length = 0;
 
     await assertInvalidParams(
@@ -3025,7 +3096,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => sessionId,
       newTurnId: () => turnIds.shift()!,
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
 
     const first = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'one' }] },
@@ -3142,7 +3213,7 @@ describe('ACP Session registry', () => {
         newSessionId: () => sessionId,
         newTurnId: () => turn.turnId,
       });
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       const prompt = registry.prompt(
         { sessionId, prompt: [{ type: 'text', text: 'use the tool' }] },
         {
@@ -3281,7 +3352,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => sessionId,
       newTurnId: () => turn.turnId,
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const prompt = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'use the tool' }] },
       promptContext(notifications),
@@ -3353,7 +3424,7 @@ describe('ACP Session registry', () => {
     });
     try {
       await registry.resume(
-        { sessionId, cwd: '/workspace' },
+        { sessionId, cwd: TEST_CWD },
         { ...promptContext([]), notifyTurnStatus: async (status) => void statuses.push(status) },
       );
       first.fail(new RuntimeHostSubscriptionError('connection_closed', 'Connection was lost'));
@@ -3409,7 +3480,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => sessionId,
       newTurnId: () => turn.turnId,
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     let cancellation: Promise<void> | undefined;
     const prompt = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'use the tool' }] },
@@ -3450,7 +3521,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => sessionId,
       newTurnId: () => 'turn-cancelled',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const prompt = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'cancel me' }] },
       promptContext([]),
@@ -3513,9 +3584,9 @@ describe('ACP Session registry', () => {
               },
             }),
         });
-        await registry.create({ cwd: '/workspace', mcpServers: [] });
+        await registry.create({ cwd: TEST_CWD, mcpServers: [] });
         const request = registry[method](
-          { sessionId, cwd: '/workspace', mcpServers: [] },
+          { sessionId, cwd: TEST_CWD, mcpServers: [] },
           { ...promptContext([]), signal: controller.signal },
         );
         const rejected = assert.rejects(request);
@@ -3525,7 +3596,7 @@ describe('ACP Session registry', () => {
           await rejected;
           if (phase === 'hydrate') assert.equal(initial.closeCalls, 1);
           // A late open is closed independently; it cannot occupy the retry slot.
-          await registry.load({ sessionId, cwd: '/workspace', mcpServers: [] }, promptContext([]));
+          await registry.load({ sessionId, cwd: TEST_CWD, mcpServers: [] }, promptContext([]));
           assert.equal(opens, 2);
           opening.resolve(initial);
           transcript.resolve([]);
@@ -3584,9 +3655,9 @@ describe('ACP Session registry', () => {
               },
             }),
         });
-        await registry.create({ cwd: '/workspace', mcpServers: [] });
+        await registry.create({ cwd: TEST_CWD, mcpServers: [] });
         const loading = registry.load(
-          { sessionId, cwd: '/workspace', mcpServers: [] },
+          { sessionId, cwd: TEST_CWD, mcpServers: [] },
           {
             ...promptContext([]),
             ...(cancelledMethod === 'load' ? { signal: abort.signal } : {}),
@@ -3640,7 +3711,7 @@ describe('ACP Session registry', () => {
         }),
       newSessionId: () => sessionId,
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     let finished = false;
     const prompt = registry
       .prompt(
@@ -3702,7 +3773,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => sessionId,
       newTurnId: () => turnIds.shift()!,
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const cancelled = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'cancel this one' }] },
       { ...promptContext([]), signal: abort.signal },
@@ -3819,7 +3890,7 @@ describe('ACP Session registry', () => {
       },
       requestPermission: async () => assert.fail('Unexpected permission request'),
     };
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const cancelled = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'cancel A' }] },
       { ...promptContext([]), signal: abortA.signal, interactions },
@@ -3940,7 +4011,7 @@ describe('ACP Session registry', () => {
         };
       },
     };
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const prompt = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'cancel during interaction' }] },
       { ...promptContext([]), signal: abort.signal, interactions },
@@ -4055,7 +4126,7 @@ describe('ACP Session registry', () => {
         };
       },
     };
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const prompt = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'cancel while waiting' }] },
       { ...promptContext([]), signal: abort.signal, interactions },
@@ -4100,7 +4171,7 @@ describe('ACP Session registry', () => {
         newSessionId: () => sessionId,
         newTurnId: () => 'turn-never-admitted',
       });
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       const prompt = registry.prompt(
         { sessionId, prompt: [{ type: 'text', text: 'cancel me' }] },
         promptContext([]),
@@ -4150,7 +4221,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => sessionId,
       newTurnId: () => turn.turnId,
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const prompt = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'run' }] },
       promptContext([]),
@@ -4205,7 +4276,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => sessionId,
       newTurnId: () => turn.turnId,
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const prompt = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'run' }] },
       promptContext([]),
@@ -4261,7 +4332,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => sessionId,
       newTurnId: () => 'turn-pending-query',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const prompt = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'run' }] },
       promptContext([]),
@@ -4351,7 +4422,7 @@ describe('ACP Session registry', () => {
         newSessionId: () => sessionId,
         newTurnId: () => turn.turnId,
       });
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       let outcome: PromiseSettledResult<unknown> | undefined;
       const prompt = registry.prompt(
         { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
@@ -4434,7 +4505,7 @@ describe('ACP Session registry', () => {
           }),
         newSessionId: () => sessionId,
       });
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       const prompt = registry.prompt(
         { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
         promptContext([]),
@@ -4519,7 +4590,7 @@ describe('ACP Session registry', () => {
         newSessionId: () => sessionId,
         newTurnId: () => turn.turnId,
       });
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       const prompt = registry.prompt(
         { sessionId, prompt: [{ type: 'text', text: 'run' }] },
         promptContext([]),
@@ -4586,7 +4657,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => sessionId,
       newTurnId: () => 'turn',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     let promptSettled = false;
     const prompt = registry
       .prompt({ sessionId, prompt: [{ type: 'text', text: 'run' }] }, promptContext([]))
@@ -4643,9 +4714,9 @@ describe('ACP Session registry', () => {
           },
         }),
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     await registry.resume(
-      { sessionId, cwd: '/workspace' },
+      { sessionId, cwd: TEST_CWD },
       {
         signal: new AbortController().signal,
         notify: async () => {
@@ -4706,9 +4777,9 @@ describe('ACP Session registry', () => {
           },
         }),
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     await registry.resume(
-      { sessionId, cwd: '/workspace' },
+      { sessionId, cwd: TEST_CWD },
       {
         signal: new AbortController().signal,
         notify: async () => {
@@ -4775,7 +4846,7 @@ describe('ACP Session registry', () => {
         return () => ids.shift()!;
       })(),
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
 
     await assert.rejects(
       registry.prompt({ sessionId, prompt: [{ type: 'text', text: 'first' }] }, promptContext([])),
@@ -4828,7 +4899,7 @@ describe('ACP Session registry', () => {
         newSessionId: () => sessionId,
         newTurnId: () => 'local',
       });
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       await registry.prompt(
         { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
         promptContext([]),
@@ -4891,7 +4962,7 @@ describe('ACP Session registry', () => {
           newSessionId: () => sessionId,
           newTurnId: () => 'local',
         });
-        await registry.create({ cwd: '/workspace', mcpServers: [] });
+        await registry.create({ cwd: TEST_CWD, mcpServers: [] });
         try {
           await registry.prompt(
             { sessionId, prompt: [{ type: 'text', text: 'attach' }] },
@@ -4963,7 +5034,7 @@ describe('ACP Session registry', () => {
                 if (reads === 1) return read.promise;
                 return {
                   kind: 'session',
-                  session: catalogSession(sessionId, '/workspace', {
+                  session: catalogSession(sessionId, TEST_CWD, {
                     revision: 3,
                     permissionMode: 'bypass',
                   }),
@@ -4990,7 +5061,7 @@ describe('ACP Session registry', () => {
         newSessionId: () => sessionId,
         newTurnId: () => 'turn',
       });
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
       const prompt = registry.prompt(
         { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
         promptContext(notifications),
@@ -5052,7 +5123,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => sessionId,
       newTurnId: () => 'turn',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     await registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
       promptContext(notifications),
@@ -5062,7 +5133,7 @@ describe('ACP Session registry', () => {
     await registry.close({ sessionId });
     read.resolve({
       kind: 'session',
-      session: catalogSession(sessionId, '/workspace', { revision: 2, permissionMode: 'bypass' }),
+      session: catalogSession(sessionId, TEST_CWD, { revision: 2, permissionMode: 'bypass' }),
     });
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(notifications, []);
@@ -5106,7 +5177,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => sessionId,
       newTurnId: () => 'turn',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const prompt = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
       promptContext(notifications),
@@ -5124,7 +5195,7 @@ describe('ACP Session registry', () => {
     } finally {
       read.resolve({
         kind: 'session',
-        session: catalogSession(sessionId, '/workspace', { revision: 2 }),
+        session: catalogSession(sessionId, TEST_CWD, { revision: 2 }),
       });
       await closing;
       await registry.dispose();
@@ -5151,7 +5222,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => sessionId,
       newTurnId: () => 'turn',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const prompt = registry.prompt(
       { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
       promptContext([]),
@@ -5177,7 +5248,7 @@ describe('ACP Session registry', () => {
   test('returns projected configuration and owns only a representable successful create', async () => {
     const requests: Array<{ operation: string; input: unknown }> = [];
     let subscriptionOpens = 0;
-    const created = catalogSession('session-configured', '/workspace', {
+    const created = catalogSession('session-configured', TEST_CWD, {
       thinkingLevel: 'high',
       permissionMode: 'explore',
       collaborationMode: 'plan',
@@ -5203,7 +5274,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => 'session-configured',
     });
 
-    const response = await registry.create({ cwd: '/workspace', mcpServers: [] });
+    const response = await registry.create({ cwd: TEST_CWD, mcpServers: [] });
 
     assert.deepEqual(response, {
       sessionId: 'session-configured',
@@ -5222,7 +5293,7 @@ describe('ACP Session registry', () => {
         operation: 'session.create',
         input: {
           sessionId: 'session-configured',
-          workspace: { kind: 'host_path', path: '/workspace' },
+          workspace: { kind: 'host_path', path: TEST_CWD },
           modelTarget: { kind: 'default' },
         },
       },
@@ -5244,7 +5315,7 @@ describe('ACP Session registry', () => {
       newSessionId: () => 'session-no-thinking',
     });
 
-    const response = await registry.create({ cwd: '/workspace', mcpServers: [] });
+    const response = await registry.create({ cwd: TEST_CWD, mcpServers: [] });
 
     assert.deepEqual(
       response.configOptions?.map(({ id }) => id),
@@ -5314,7 +5385,7 @@ describe('ACP Session registry', () => {
       });
 
       if (!(createOutcome instanceof Error)) {
-        assert.deepEqual(await registry.create({ cwd: '/workspace', mcpServers: [] }), {
+        assert.deepEqual(await registry.create({ cwd: TEST_CWD, mcpServers: [] }), {
           sessionId,
         });
         await registry.close({ sessionId });
@@ -5322,7 +5393,7 @@ describe('ACP Session registry', () => {
         await registry.dispose();
         continue;
       }
-      await assert.rejects(registry.create({ cwd: '/workspace', mcpServers: [] }));
+      await assert.rejects(registry.create({ cwd: TEST_CWD, mcpServers: [] }));
       await assertInvalidParams(
         registry.setConfigOption({
           sessionId,
@@ -5352,7 +5423,7 @@ describe('ACP Session registry', () => {
       connect: async () => connection,
       newSessionId: () => 'created',
     });
-    const creation = registry.create({ cwd: '/workspace', mcpServers: [] });
+    const creation = registry.create({ cwd: TEST_CWD, mcpServers: [] });
     await waitFor(() => projecting);
     await assertInvalidParams(
       registry.setConfigOption({
@@ -5391,7 +5462,7 @@ describe('ACP Session registry', () => {
     );
     assert.equal(requests, 0);
 
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     assert.equal(requests, 1);
     for (const [request, data] of [
       [
@@ -5422,11 +5493,11 @@ describe('ACP Session registry', () => {
   });
 
   test('updates one configuration field with the latest revision and returns committed options', async () => {
-    const current = catalogSession('session-cas', '/workspace', {
+    const current = catalogSession('session-cas', TEST_CWD, {
       revision: 7,
       thinkingLevel: 'minimal',
     });
-    const committed = catalogSession('session-cas', '/workspace', {
+    const committed = catalogSession('session-cas', TEST_CWD, {
       revision: 8,
       permissionMode: 'bypass',
       thinkingLevel: 'high',
@@ -5446,7 +5517,7 @@ describe('ACP Session registry', () => {
         }),
       newSessionId: () => 'session-cas',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
 
     const response = await registry.setConfigOption({
       sessionId: 'session-cas',
@@ -5488,7 +5559,7 @@ describe('ACP Session registry', () => {
               reads += 1;
               return {
                 kind: 'session',
-                session: catalogSession('session-retry', '/workspace', {
+                session: catalogSession('session-retry', TEST_CWD, {
                   revision: reads,
                   collaborationMode: reads === 1 ? 'agent' : 'plan',
                 }),
@@ -5499,7 +5570,7 @@ describe('ACP Session registry', () => {
               ? { kind: 'revision_conflict', expectedRevision: 1, actualRevision: 2 }
               : {
                   kind: 'committed',
-                  session: catalogSession('session-retry', '/workspace', {
+                  session: catalogSession('session-retry', TEST_CWD, {
                     revision: 3,
                     permissionMode: 'bypass',
                     collaborationMode: 'plan',
@@ -5509,7 +5580,7 @@ describe('ACP Session registry', () => {
         }),
       newSessionId: () => 'session-retry',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
 
     await registry.setConfigOption({
       sessionId: 'session-retry',
@@ -5557,7 +5628,7 @@ describe('ACP Session registry', () => {
               }
               return {
                 kind: 'session',
-                session: catalogSession('session-converge', '/workspace', {
+                session: catalogSession('session-converge', TEST_CWD, {
                   revision: 2,
                   permissionMode: 'bypass',
                 }),
@@ -5567,7 +5638,7 @@ describe('ACP Session registry', () => {
             if ('permissionMode' in patch) {
               return {
                 kind: 'committed',
-                session: catalogSession('session-converge', '/workspace', {
+                session: catalogSession('session-converge', TEST_CWD, {
                   revision: 2,
                   permissionMode: 'bypass',
                 }),
@@ -5578,7 +5649,7 @@ describe('ACP Session registry', () => {
             }
             return {
               kind: 'committed',
-              session: catalogSession('session-converge', '/workspace', {
+              session: catalogSession('session-converge', TEST_CWD, {
                 revision: 3,
                 permissionMode: 'bypass',
                 collaborationMode: 'plan',
@@ -5588,7 +5659,7 @@ describe('ACP Session registry', () => {
         }),
       newSessionId: () => 'session-converge',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
 
     const [permission, collaboration] = await Promise.all([
       registry.setConfigOption({
@@ -5638,7 +5709,7 @@ describe('ACP Session registry', () => {
         }),
       newSessionId: () => 'session-conflicts',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
 
     await assert.rejects(
       registry.setConfigOption({
@@ -5733,7 +5804,7 @@ describe('ACP Session registry', () => {
           }),
         newSessionId: () => sessionId,
       });
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
 
       await assert.rejects(
         registry.setConfigOption({
@@ -5825,7 +5896,7 @@ describe('ACP Session registry', () => {
           }),
         newSessionId: () => 'session-errors',
       });
-      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      await registry.create({ cwd: TEST_CWD, mcpServers: [] });
 
       await assert.rejects(
         registry.setConfigOption({
@@ -5862,7 +5933,7 @@ describe('ACP Session registry', () => {
             updates += 1;
             return {
               kind: 'committed',
-              session: catalogSession('session-closing', '/workspace', { revision: 2 }),
+              session: catalogSession('session-closing', TEST_CWD, { revision: 2 }),
             };
           },
           close: async () => {
@@ -5871,7 +5942,7 @@ describe('ACP Session registry', () => {
         }),
       newSessionId: () => 'session-closing',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const update = registry.setConfigOption({
       sessionId: 'session-closing',
       configId: 'permission_mode',
@@ -5938,7 +6009,7 @@ describe('ACP Session registry', () => {
         }),
       newSessionId: () => 'session-conflict-closing',
     });
-    await registry.create({ cwd: '/workspace', mcpServers: [] });
+    await registry.create({ cwd: TEST_CWD, mcpServers: [] });
     const update = registry.setConfigOption({
       sessionId: 'session-conflict-closing',
       configId: 'permission_mode',
@@ -5981,14 +6052,14 @@ describe('ACP Session registry', () => {
       [
         'mcpServers',
         {
-          cwd: '/workspace',
+          cwd: TEST_CWD,
           mcpServers: [{ name: 'server', command: 'server', args: [], env: [] }],
         },
       ],
       [
         'additionalDirectories',
         {
-          cwd: '/workspace',
+          cwd: TEST_CWD,
           mcpServers: [],
           additionalDirectories: ['/other'],
         },
@@ -6030,20 +6101,17 @@ describe('ACP Session registry', () => {
         newSessionId: () => `session-${hostCode}`,
       });
 
-      await assert.rejects(
-        registry.create({ cwd: '/workspace', mcpServers: [] }),
-        (error: unknown) => {
-          assert.ok(error instanceof RequestError);
-          assert.equal(error.code, acpCode);
-          assert.deepEqual(error.data, {
-            source: 'runtime_host',
-            operation: 'session.create',
-            code: hostCode,
-            sessionId: `session-${hostCode}`,
-          });
-          return true;
-        },
-      );
+      await assert.rejects(registry.create({ cwd: TEST_CWD, mcpServers: [] }), (error: unknown) => {
+        assert.ok(error instanceof RequestError);
+        assert.equal(error.code, acpCode);
+        assert.deepEqual(error.data, {
+          source: 'runtime_host',
+          operation: 'session.create',
+          code: hostCode,
+          sessionId: `session-${hostCode}`,
+        });
+        return true;
+      });
       await registry.dispose();
     }
   });
@@ -6743,7 +6811,7 @@ function connectionCatalogPage(thinkingLevels: readonly ThinkingLevel[]) {
 
 function catalogSession(
   id: string,
-  cwd = '/workspace',
+  cwd = TEST_CWD,
   overrides: Partial<SessionCatalogProjection> = {},
 ): SessionCatalogProjection {
   return {
