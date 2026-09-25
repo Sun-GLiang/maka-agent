@@ -111,9 +111,12 @@ offset checks, upload identity, quotas and five-minute upload expiry. An open
 upload is tied to its Host connection. Session close waits for its in-flight
 Artifact requests and aborts known unfinished uploads; EOF closes the shared
 connection and releases Host staging. A completed Artifact remains durable after
-close. On reconnect, a prior upload may be gone; the client must use a new
-upload identity. The adapter never resends an uncertain command. An interrupted
-response reports `request_interrupted` with `reason` and `dispatch`; if
+close. The adapter tracks at most 64 unresolved upload identities, releases
+identities after definitive Host rejection or completion, and at capacity asks
+Host to abort expired identities before admitting more. On reconnect, a prior
+upload may be gone; the client must use a new upload identity. The adapter never
+resends an uncertain command. An interrupted response reports
+`request_interrupted` with `reason` and `dispatch`; if
 `dispatch` is `dispatched`, inspect Host state before deciding what to do.
 Protected execution evidence can reject delete with `operation_conflict`.
 

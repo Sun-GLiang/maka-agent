@@ -319,8 +319,59 @@ describe('ACP Session registry', () => {
     }
   });
 
+  test('a failed concurrent begin does not discard a successful begin with the same ID', async () => {
+    const first = deferred<{ kind: 'upload_opened'; uploadId: string; nextOffset: number }>();
+    const second = deferred<{ kind: 'upload_opened'; uploadId: string; nextOffset: number }>();
+    let begins = 0;
+    let aborts = 0;
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => 'session-overlapping-begins',
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession('session-overlapping-begins');
+            if (operation !== 'artifact.ingest') throw new Error(`Unexpected ${operation}`);
+            const upload = input as { kind: string; uploadId: string };
+            if (upload.kind === 'begin') return ++begins === 1 ? first.promise : second.promise;
+            aborts += 1;
+            return { kind: 'upload_aborted', uploadId: upload.uploadId };
+          },
+        }),
+    });
+    const input = {
+      kind: 'begin' as const,
+      sessionId: 'session-overlapping-begins',
+      uploadId: 'same-upload',
+      name: 'payload.bin',
+      mimeType: 'application/octet-stream',
+      totalBytes: 0,
+      contentSha256: `sha256:${'0'.repeat(64)}` as const,
+    };
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      const failed = registry.artifactIngest(input);
+      const opened = registry.artifactIngest(input);
+      await waitFor(() => begins === 2);
+      second.resolve({ kind: 'upload_opened', uploadId: input.uploadId, nextOffset: 0 });
+      await opened;
+      first.reject(
+        new RuntimeHostOperationError(
+          'artifact.ingest',
+          'operation_conflict',
+          'Upload identity is already in use',
+        ),
+      );
+      await assert.rejects(failed);
+      await registry.close({ sessionId: input.sessionId });
+      assert.equal(aborts, 1);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
   test('failed Artifact commits do not exhaust an adapter-only upload limit', async () => {
     let begins = 0;
+    let aborts = 0;
     const registry = new AcpSessionRegistry({
       newSessionId: () => 'session-failed-commits',
       connect: async () =>
@@ -340,6 +391,7 @@ describe('ACP Session registry', () => {
                 'Attachment content digest does not match',
               );
             }
+            aborts += 1;
             return { kind: 'upload_aborted', uploadId: upload.uploadId };
           },
         }),
@@ -366,6 +418,161 @@ describe('ACP Session registry', () => {
         );
       }
       assert.equal(begins, 65);
+      await registry.close({ sessionId: 'session-failed-commits' });
+      assert.equal(aborts, 0);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('definitively rejected Artifact begins do not accumulate for Session close', async () => {
+    let aborts = 0;
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => 'session-rejected-begins',
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession('session-rejected-begins');
+            if (operation !== 'artifact.ingest') throw new Error(`Unexpected ${operation}`);
+            const upload = input as { kind: string; uploadId: string };
+            if (upload.kind === 'begin') {
+              throw new RuntimeHostOperationError(
+                'artifact.ingest',
+                'operation_conflict',
+                'Attachment upload capacity is exhausted',
+              );
+            }
+            aborts += 1;
+            return { kind: 'upload_aborted', uploadId: upload.uploadId };
+          },
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      for (let index = 0; index < 65; index += 1) {
+        await assert.rejects(
+          registry.artifactIngest({
+            kind: 'begin',
+            sessionId: 'session-rejected-begins',
+            uploadId: `rejected-${index}`,
+            name: 'payload.bin',
+            mimeType: 'application/octet-stream',
+            totalBytes: 0,
+            contentSha256: `sha256:${'0'.repeat(64)}`,
+          }),
+        );
+      }
+      await registry.close({ sessionId: 'session-rejected-begins' });
+      assert.equal(aborts, 0);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('outcome-unknown Artifact begins remain bounded and are cleaned up on close', async () => {
+    let dispatchedBegins = 0;
+    let aborts = 0;
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => 'session-uncertain-begins',
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession('session-uncertain-begins');
+            if (operation !== 'artifact.ingest') throw new Error(`Unexpected ${operation}`);
+            const upload = input as { kind: string; uploadId: string };
+            if (upload.kind === 'begin') {
+              dispatchedBegins += 1;
+              throw new RuntimeHostRequestInterruptedError(
+                'artifact.ingest',
+                'command',
+                'dispatched',
+                'connection_lost',
+              );
+            }
+            aborts += 1;
+            return { kind: 'upload_aborted', uploadId: upload.uploadId };
+          },
+        }),
+    });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      for (let index = 0; index < 64; index += 1) {
+        await assert.rejects(
+          registry.artifactIngest({
+            kind: 'begin',
+            sessionId: 'session-uncertain-begins',
+            uploadId: `uncertain-${index}`,
+            name: 'payload.bin',
+            mimeType: 'application/octet-stream',
+            totalBytes: 0,
+            contentSha256: `sha256:${'0'.repeat(64)}`,
+          }),
+        );
+      }
+      await assert.rejects(
+        registry.artifactIngest({
+          kind: 'begin',
+          sessionId: 'session-uncertain-begins',
+          uploadId: 'uncertain-64',
+          name: 'payload.bin',
+          mimeType: 'application/octet-stream',
+          totalBytes: 0,
+          contentSha256: `sha256:${'0'.repeat(64)}`,
+        }),
+        (error: unknown) =>
+          error instanceof RequestError &&
+          (error.data as { code?: string }).code === 'upload_tracking_capacity',
+      );
+      assert.equal(dispatchedBegins, 64);
+      await registry.close({ sessionId: 'session-uncertain-begins' });
+      assert.equal(aborts, 64);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
+  test('expired Artifact identities are aborted before the tracking limit rejects a new upload', async (t) => {
+    let now = Date.now();
+    t.mock.method(Date, 'now', () => now);
+    let begins = 0;
+    let aborts = 0;
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => 'session-expired-uploads',
+      connect: async () =>
+        fakeConnection({
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession('session-expired-uploads');
+            if (operation !== 'artifact.ingest') throw new Error(`Unexpected ${operation}`);
+            const upload = input as { kind: string; uploadId: string };
+            if (upload.kind === 'begin') {
+              begins += 1;
+              return { kind: 'upload_opened', uploadId: upload.uploadId, nextOffset: 0 };
+            }
+            aborts += 1;
+            return { kind: 'upload_aborted', uploadId: upload.uploadId };
+          },
+        }),
+    });
+    const begin = (uploadId: string) =>
+      registry.artifactIngest({
+        kind: 'begin',
+        sessionId: 'session-expired-uploads',
+        uploadId,
+        name: 'payload.bin',
+        mimeType: 'application/octet-stream',
+        totalBytes: 0,
+        contentSha256: `sha256:${'0'.repeat(64)}`,
+      });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      for (let index = 0; index < 64; index += 1) await begin(`expired-${index}`);
+      assert.equal(aborts, 0);
+      now += 5 * 60_000 + 30_001;
+      await begin('fresh');
+      assert.equal(begins, 65);
+      assert.equal(aborts, 64);
+      await registry.close({ sessionId: 'session-expired-uploads' });
+      assert.equal(aborts, 65);
     } finally {
       await registry.dispose();
     }

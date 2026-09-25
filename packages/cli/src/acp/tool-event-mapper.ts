@@ -475,7 +475,8 @@ function artifactReferences(
     result.ref.sessionId === sessionId
   )
     artifactId = result.ref.relativePath;
-  else if (result.kind === 'archived_tool_result') artifactId = result.artifactId;
+  else if (result.kind === 'archived_tool_result' && result.status === 'not_loaded')
+    artifactId = result.artifactId;
   if (!isCanonicalArtifactEntityId(artifactId)) return [];
   return [
     {

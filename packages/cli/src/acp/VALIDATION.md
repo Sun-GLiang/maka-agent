@@ -19,6 +19,26 @@
 
 # ACP validation record
 
+## PR7 ready-for-review follow-up (September 25, 2026)
+
+After removing Draft, a fresh review against main found two P2 cases. The
+adapter could retain every definitively rejected Artifact `begin`, and failed
+digest commits or Host expiry could leave stale identities in its cleanup set.
+It now distinguishes open or outcome-unknown uploads from definite failures,
+limits unresolved identities to 64, and asks Host to abort expired identities
+before admitting more. Concurrent begins with one identity retain any successful
+opening. `session/close` still waits for in-flight requests and aborts the
+remaining identities. The tool mapper no longer advertises a readable Artifact
+when an archived tool result is already marked `missing` or `corrupt`.
+
+New regressions cover 65 rejected begins, 65 digest-rejected commits, 64
+outcome-unknown begins and the bounded cleanup on close, overlapping begins,
+expired identity cleanup, and missing/corrupt archive cards. In an isolated
+worktree at the preceding PR head `a7e40a763`, all six selected new regression
+cases failed; they pass with this repair. CLI build and typecheck passed. The
+complete CLI `test:dist` passed 1273, skipped 3, failed 0. Repository lint,
+format, and `git diff --check` passed.
+
 ## PR7 main refresh and review fixes (September 25, 2026)
 
 PR7 was merged locally with Apache main `9c96bb716` after PR6 landed. The

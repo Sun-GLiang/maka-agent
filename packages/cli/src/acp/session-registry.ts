@@ -108,6 +108,8 @@ const ADMISSION_QUERY_TIMEOUT_MS = 1_000;
 const ADMISSION_QUERY_RETRY_MS = 25;
 const EXTENSION_REQUEST_TIMEOUT_MS = 30_000;
 const ARTIFACT_CLEANUP_TIMEOUT_MS = 5_000;
+const ARTIFACT_UPLOAD_TTL_MS = 5 * 60_000;
+const MAX_TRACKED_ARTIFACT_UPLOADS = 64;
 const TURN_STOP_TIMEOUT_MS = 30_000;
 const COPY_RECONCILIATION_TIMEOUT_MS = 30_000;
 const UNAVAILABLE_INTERACTION_CLIENT: AcpInteractionClient = {
@@ -119,6 +121,12 @@ const UNAVAILABLE_INTERACTION_CLIENT: AcpInteractionClient = {
     throw RequestError.methodNotFound('elicitation/create');
   },
 };
+
+interface ArtifactUploadTracking {
+  touchedAt: number;
+  pendingBegins: number;
+  mayBeOpen: boolean;
+}
 
 type AcpSessionRegistryOperation =
   | 'connection.catalog.query'
@@ -224,7 +232,7 @@ export class AcpSessionRegistry {
   readonly #externalObservationContexts = new Map<string, AcpLoadContext>();
   readonly #externalContextLeases = new Map<string, AcpExternalContextLease>();
   readonly #sessionCloseTasks = new Map<string, Promise<CloseSessionResponse>>();
-  readonly #artifactUploads = new Map<string, Set<string>>();
+  readonly #artifactUploads = new Map<string, Map<string, ArtifactUploadTracking>>();
   readonly #artifactOperations = new Map<string, Set<Promise<unknown>>>();
   readonly #sessionCloseGenerations = new Map<string, number>();
   readonly #sessionLoadTails = new Map<string, Promise<unknown>>();
@@ -499,6 +507,7 @@ export class AcpSessionRegistry {
     this.#assertOpen(operation);
     return this.#track(
       (async () => {
+        let trackedBegin: { uploadId: string; state: ArtifactUploadTracking } | undefined;
         try {
           const connection = await this.#getConnection(operation);
           this.#assertOpen(operation);
@@ -508,31 +517,120 @@ export class AcpSessionRegistry {
             if (upload.kind === 'begin') {
               let uploads = this.#artifactUploads.get(upload.sessionId);
               if (!uploads) {
-                uploads = new Set();
+                uploads = new Map();
                 this.#artifactUploads.set(upload.sessionId, uploads);
               }
+              if (!uploads.has(upload.uploadId) && uploads.size >= MAX_TRACKED_ARTIFACT_UPLOADS) {
+                await this.#pruneExpiredArtifactUploads(connection, upload.sessionId, uploads);
+                this.#assertOpen(operation);
+                beforeDispatch?.();
+              }
+              if (!uploads.has(upload.uploadId) && uploads.size >= MAX_TRACKED_ARTIFACT_UPLOADS) {
+                throw RequestError.internalError(
+                  { source: 'adapter', operation, code: 'upload_tracking_capacity' },
+                  'Too many unresolved Artifact uploads',
+                );
+              }
               // Remember before dispatch: an interrupted response can hide an opened upload.
-              uploads.add(upload.uploadId);
+              let state = uploads.get(upload.uploadId);
+              if (!state) {
+                state = { touchedAt: Date.now(), pendingBegins: 0, mayBeOpen: false };
+                uploads.set(upload.uploadId, state);
+              }
+              state.pendingBegins += 1;
+              trackedBegin = { uploadId: upload.uploadId, state };
             }
           }
           const result = await connection.request(operation, input, EXTENSION_REQUEST_TIMEOUT_MS);
           if (operation === 'artifact.ingest') {
             const upload = input as ArtifactIngestInput;
+            const uploads = this.#artifactUploads.get(upload.sessionId);
             if (
               upload.kind === 'abort' ||
               upload.kind === 'commit' ||
               (upload.kind === 'begin' && (result as ArtifactIngestResult).kind === 'committed')
             ) {
-              this.#artifactUploads.get(upload.sessionId)?.delete(upload.uploadId);
+              const state = uploads?.get(upload.uploadId);
+              if (state) {
+                state.mayBeOpen = false;
+                if (state.pendingBegins === 0) uploads?.delete(upload.uploadId);
+              }
+            } else if (upload.kind === 'begin' && trackedBegin) {
+              trackedBegin.state.mayBeOpen = true;
+              trackedBegin.state.touchedAt = Date.now();
+            } else if (upload.kind === 'chunk') {
+              const state = uploads?.get(upload.uploadId);
+              if (state) state.touchedAt = Date.now();
             }
           }
           return result;
         } catch (error) {
+          if (operation === 'artifact.ingest') {
+            const upload = input as ArtifactIngestInput;
+            const uploads = this.#artifactUploads.get(upload.sessionId);
+            if (upload.kind === 'begin' && trackedBegin) {
+              if (
+                error instanceof RuntimeHostRequestInterruptedError &&
+                error.dispatch === 'dispatched'
+              ) {
+                trackedBegin.state.mayBeOpen = true;
+              }
+            } else if (
+              upload.kind === 'commit' &&
+              error instanceof RuntimeHostOperationError &&
+              (error.code === 'not_found' ||
+                (error.code === 'operation_conflict' &&
+                  error.message === 'Attachment content digest does not match'))
+            ) {
+              const state = uploads?.get(upload.uploadId);
+              if (state) {
+                state.mayBeOpen = false;
+                if (state.pendingBegins === 0) uploads?.delete(upload.uploadId);
+              }
+            }
+          }
           if (error instanceof RequestError) throw error;
           throw requestErrorFromRuntimeHost(error, operation);
+        } finally {
+          if (trackedBegin) {
+            const upload = input as ArtifactIngestInput;
+            const uploads = this.#artifactUploads.get(upload.sessionId);
+            trackedBegin.state.pendingBegins -= 1;
+            if (!trackedBegin.state.mayBeOpen && trackedBegin.state.pendingBegins === 0) {
+              if (uploads?.get(trackedBegin.uploadId) === trackedBegin.state) {
+                uploads.delete(trackedBegin.uploadId);
+              }
+            }
+          }
         }
       })(),
     );
+  }
+
+  async #pruneExpiredArtifactUploads(
+    connection: AcpSessionRegistryConnection,
+    sessionId: string,
+    uploads: Map<string, ArtifactUploadTracking>,
+  ): Promise<void> {
+    const expired = [...uploads].filter(
+      ([, state]) =>
+        state.pendingBegins === 0 &&
+        Date.now() - state.touchedAt > ARTIFACT_UPLOAD_TTL_MS + EXTENSION_REQUEST_TIMEOUT_MS,
+    );
+    const results = await Promise.allSettled(
+      expired.map(([uploadId]) =>
+        connection.request(
+          'artifact.ingest',
+          { kind: 'abort', sessionId, uploadId },
+          ARTIFACT_CLEANUP_TIMEOUT_MS,
+        ),
+      ),
+    );
+    results.forEach((result, index) => {
+      const [uploadId, state] = expired[index]!;
+      if (result.status === 'fulfilled' && uploads.get(uploadId) === state)
+        uploads.delete(uploadId);
+    });
   }
 
   dispose(): Promise<void> {
@@ -1191,7 +1289,7 @@ export class AcpSessionRegistry {
     this.#artifactUploads.delete(sessionId);
     if (uploads && this.#connection) {
       const aborts = await Promise.allSettled(
-        [...uploads].map((uploadId) =>
+        [...uploads.keys()].map((uploadId) =>
           this.#connection!.request(
             'artifact.ingest',
             { kind: 'abort', sessionId, uploadId },
