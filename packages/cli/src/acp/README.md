@@ -114,9 +114,10 @@ connection and releases Host staging. A completed Artifact remains durable after
 close. The adapter tracks at most 64 unresolved upload identities, releases
 identities after definitive Host rejection or completion, and at capacity asks
 Host to abort expired identities before admitting more. On reconnect, a prior
-upload may be gone; the client must use a new upload identity. The adapter never
-resends an uncertain command. An interrupted response reports
-`request_interrupted` with `reason` and `dispatch`; if
+upload may be gone and the adapter drops old connection tracking; the client
+must use a new upload identity. The adapter never resends an uncertain command.
+An interrupted response reports `request_interrupted` with `reason` and
+`dispatch`; if
 `dispatch` is `dispatched`, inspect Host state before deciding what to do.
 Protected execution evidence can reject delete with `operation_conflict`.
 

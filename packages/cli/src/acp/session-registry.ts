@@ -125,7 +125,12 @@ const UNAVAILABLE_INTERACTION_CLIENT: AcpInteractionClient = {
 interface ArtifactUploadTracking {
   touchedAt: number;
   pendingBegins: number;
+  pendingRequests: number;
   mayBeOpen: boolean;
+}
+
+function artifactUploadKey(sessionId: string, uploadId: string): string {
+  return JSON.stringify([sessionId, uploadId]);
 }
 
 type AcpSessionRegistryOperation =
@@ -234,6 +239,10 @@ export class AcpSessionRegistry {
   readonly #sessionCloseTasks = new Map<string, Promise<CloseSessionResponse>>();
   readonly #artifactUploads = new Map<string, Map<string, ArtifactUploadTracking>>();
   readonly #artifactOperations = new Map<string, Set<Promise<unknown>>>();
+  // Retain cleanup waits across Host replacement so a late abort cannot race a reused ID.
+  readonly #artifactCleanupTasks = new Map<string, Promise<void>>();
+  #artifactConnectionIdentity?: string;
+  #artifactConnectionDisposer?: () => void;
   readonly #sessionCloseGenerations = new Map<string, number>();
   readonly #sessionLoadTails = new Map<string, Promise<unknown>>();
   readonly #sessionLoadControllers = new Map<string, AbortController>();
@@ -508,13 +517,25 @@ export class AcpSessionRegistry {
     return this.#track(
       (async () => {
         let trackedBegin: { uploadId: string; state: ArtifactUploadTracking } | undefined;
+        let trackedIngest: ArtifactUploadTracking | undefined;
         try {
           const connection = await this.#getConnection(operation);
           this.#assertOpen(operation);
           beforeDispatch?.();
           if (operation === 'artifact.ingest') {
             const upload = input as ArtifactIngestInput;
+            let cleaning: Promise<void> | undefined;
+            while (
+              (cleaning = this.#artifactCleanupTasks.get(
+                artifactUploadKey(upload.sessionId, upload.uploadId),
+              ))
+            ) {
+              await cleaning;
+              this.#assertOpen(operation);
+              beforeDispatch?.();
+            }
             if (upload.kind === 'begin') {
+              this.#watchArtifactConnection(connection);
               let uploads = this.#artifactUploads.get(upload.sessionId);
               if (!uploads) {
                 uploads = new Map();
@@ -524,6 +545,10 @@ export class AcpSessionRegistry {
                 await this.#pruneExpiredArtifactUploads(connection, upload.sessionId, uploads);
                 this.#assertOpen(operation);
                 beforeDispatch?.();
+                if (this.#artifactUploads.get(upload.sessionId) !== uploads) {
+                  uploads = this.#artifactUploads.get(upload.sessionId) ?? new Map();
+                  this.#artifactUploads.set(upload.sessionId, uploads);
+                }
               }
               if (!uploads.has(upload.uploadId) && uploads.size >= MAX_TRACKED_ARTIFACT_UPLOADS) {
                 throw RequestError.internalError(
@@ -534,12 +559,19 @@ export class AcpSessionRegistry {
               // Remember before dispatch: an interrupted response can hide an opened upload.
               let state = uploads.get(upload.uploadId);
               if (!state) {
-                state = { touchedAt: Date.now(), pendingBegins: 0, mayBeOpen: false };
+                state = {
+                  touchedAt: Date.now(),
+                  pendingBegins: 0,
+                  pendingRequests: 0,
+                  mayBeOpen: false,
+                };
                 uploads.set(upload.uploadId, state);
               }
               state.pendingBegins += 1;
               trackedBegin = { uploadId: upload.uploadId, state };
             }
+            trackedIngest = this.#artifactUploads.get(upload.sessionId)?.get(upload.uploadId);
+            if (trackedIngest) trackedIngest.pendingRequests += 1;
           }
           const result = await connection.request(operation, input, EXTENSION_REQUEST_TIMEOUT_MS);
           if (operation === 'artifact.ingest') {
@@ -558,6 +590,14 @@ export class AcpSessionRegistry {
             } else if (upload.kind === 'begin' && trackedBegin) {
               trackedBegin.state.mayBeOpen = true;
               trackedBegin.state.touchedAt = Date.now();
+              let currentUploads = this.#artifactUploads.get(upload.sessionId);
+              if (!currentUploads) {
+                currentUploads = new Map();
+                this.#artifactUploads.set(upload.sessionId, currentUploads);
+              }
+              if (!currentUploads.has(upload.uploadId)) {
+                currentUploads.set(upload.uploadId, trackedBegin.state);
+              }
             } else if (upload.kind === 'chunk') {
               const state = uploads?.get(upload.uploadId);
               if (state) state.touchedAt = Date.now();
@@ -592,6 +632,7 @@ export class AcpSessionRegistry {
           if (error instanceof RequestError) throw error;
           throw requestErrorFromRuntimeHost(error, operation);
         } finally {
+          if (trackedIngest) trackedIngest.pendingRequests -= 1;
           if (trackedBegin) {
             const upload = input as ArtifactIngestInput;
             const uploads = this.#artifactUploads.get(upload.sessionId);
@@ -613,24 +654,52 @@ export class AcpSessionRegistry {
     uploads: Map<string, ArtifactUploadTracking>,
   ): Promise<void> {
     const expired = [...uploads].filter(
-      ([, state]) =>
-        state.pendingBegins === 0 &&
+      ([uploadId, state]) =>
+        state.pendingRequests === 0 &&
+        !this.#artifactCleanupTasks.has(artifactUploadKey(sessionId, uploadId)) &&
         Date.now() - state.touchedAt > ARTIFACT_UPLOAD_TTL_MS + EXTENSION_REQUEST_TIMEOUT_MS,
     );
-    const results = await Promise.allSettled(
-      expired.map(([uploadId]) =>
-        connection.request(
-          'artifact.ingest',
-          { kind: 'abort', sessionId, uploadId },
-          ARTIFACT_CLEANUP_TIMEOUT_MS,
-        ),
-      ),
-    );
-    results.forEach((result, index) => {
-      const [uploadId, state] = expired[index]!;
-      if (result.status === 'fulfilled' && uploads.get(uploadId) === state)
-        uploads.delete(uploadId);
+    const cleanups = expired.map(([uploadId, state]) => {
+      const key = artifactUploadKey(sessionId, uploadId);
+      const cleanup = Promise.resolve()
+        .then(() =>
+          connection.request(
+            'artifact.ingest',
+            { kind: 'abort', sessionId, uploadId },
+            ARTIFACT_CLEANUP_TIMEOUT_MS,
+          ),
+        )
+        .then(
+          () => {
+            if (uploads.get(uploadId) === state) uploads.delete(uploadId);
+          },
+          () => undefined,
+        )
+        .finally(() => {
+          if (this.#artifactCleanupTasks.get(key) === cleanup) {
+            this.#artifactCleanupTasks.delete(key);
+          }
+        });
+      this.#artifactCleanupTasks.set(key, cleanup);
+      return cleanup;
     });
+    await Promise.all(cleanups);
+  }
+
+  #watchArtifactConnection(connection: AcpSessionRegistryConnection): void {
+    if (this.#artifactConnectionDisposer) return;
+    this.#artifactConnectionDisposer = connection.subscribeConnectionAvailability(
+      (availability) => {
+        const identity =
+          availability.kind === 'connected'
+            ? JSON.stringify([availability.hostEpoch, availability.connectionId])
+            : undefined;
+        if (identity !== this.#artifactConnectionIdentity) {
+          this.#artifactConnectionIdentity = identity;
+          this.#artifactUploads.clear();
+        }
+      },
+    );
   }
 
   dispose(): Promise<void> {
@@ -2319,12 +2388,15 @@ export class AcpSessionRegistry {
       ...configurations.map(({ tail }) => tail),
     ]);
     this.#artifactOperations.clear();
+    this.#artifactCleanupTasks.clear();
     this.#artifactUploads.clear();
     this.#ownedSessionIds.clear();
     this.#historyReplayDelivery.clear();
   }
 
   #closeOwnedConnection(): Promise<void> {
+    this.#artifactConnectionDisposer?.();
+    this.#artifactConnectionDisposer = undefined;
     const connection = this.#connection;
     const connectTask = this.#connectTask;
     if (!connection && !connectTask) return Promise.resolve();

@@ -19,6 +19,24 @@
 
 # ACP validation record
 
+## PR7 final concurrency follow-up (September 25, 2026)
+
+Final review found that expiry cleanup could race a concurrent `begin` or
+`chunk` for the same upload identity, and that upload IDs from a replaced Host
+connection could still occupy the adapter's 64-ID bound. Cleanup now holds the
+identity until its Host abort settles; same-ID ingest requests wait for that
+cleanup. A listener starts on the first Artifact begin and clears connection-
+bound tracking on Host disconnect or replacement. A successful begin restores
+its tracking if the connection changed while the request was in flight.
+
+Focused regressions cover cleanup/reopen interleaving on one Host, after Host
+replacement, with a failed old abort, and with a lost new-begin response. They
+also cover 64 old IDs after replacement. The original two cases failed in an
+isolated worktree at the preceding head `efd5db120` and pass after repair. The
+complete CLI `test:dist` passed 1278, skipped 3, failed 0. CLI
+build, repository lint and format, and
+`git diff --check` passed.
+
 ## PR7 ready-for-review follow-up (September 25, 2026)
 
 After removing Draft, a fresh review against main found two P2 cases. The

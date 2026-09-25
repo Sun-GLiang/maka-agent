@@ -578,6 +578,179 @@ describe('ACP Session registry', () => {
     }
   });
 
+  for (const mode of [
+    'same_host',
+    'replaced_host',
+    'failed_old_abort',
+    'lost_new_begin',
+  ] as const) {
+    test(`expired-upload cleanup finishes before a concurrent begin reuses that identity (${mode})`, async (t) => {
+      let now = Date.now();
+      t.mock.method(Date, 'now', () => now);
+      const oldAbort = deferred<void>();
+      const requests: string[] = [];
+      let firstOldAbort = true;
+      let availability:
+        | Parameters<
+            NonNullable<AcpSessionRegistryConnection['subscribeConnectionAvailability']>
+          >[0]
+        | undefined;
+      const registry = new AcpSessionRegistry({
+        newSessionId: () => 'session-prune-race',
+        connect: async () =>
+          fakeConnection({
+            subscribeConnectionAvailability: (listener) => {
+              availability = listener;
+              listener({ kind: 'connected', hostEpoch: 'host-1', connectionId: 'connection-1' });
+              return () => undefined;
+            },
+            request: async (operation, input) => {
+              if (operation === 'session.create') return catalogSession('session-prune-race');
+              if (operation !== 'artifact.ingest') throw new Error(`Unexpected ${operation}`);
+              const upload = input as { kind: string; uploadId: string };
+              requests.push(`${upload.kind}:${upload.uploadId}`);
+              if (upload.kind === 'abort' && upload.uploadId === 'expired-0' && firstOldAbort) {
+                firstOldAbort = false;
+                await oldAbort.promise;
+              }
+              if (
+                upload.kind === 'begin' &&
+                upload.uploadId === 'fresh' &&
+                mode === 'lost_new_begin'
+              ) {
+                throw new RuntimeHostRequestInterruptedError(
+                  'artifact.ingest',
+                  'command',
+                  'dispatched',
+                  'connection_lost',
+                );
+              }
+              return upload.kind === 'begin'
+                ? { kind: 'upload_opened', uploadId: upload.uploadId, nextOffset: 0 }
+                : { kind: 'upload_aborted', uploadId: upload.uploadId };
+            },
+          }),
+      });
+      const begin = (uploadId: string) =>
+        registry.artifactIngest({
+          kind: 'begin',
+          sessionId: 'session-prune-race',
+          uploadId,
+          name: 'payload.bin',
+          mimeType: 'application/octet-stream',
+          totalBytes: 0,
+          contentSha256: `sha256:${'0'.repeat(64)}`,
+        });
+      try {
+        await registry.create({ cwd: '/workspace', mcpServers: [] });
+        for (let index = 0; index < 64; index += 1) await begin(`expired-${index}`);
+        now += 5 * 60_000 + 30_001;
+        const fresh = begin('fresh');
+        await waitFor(() => requests.includes('abort:expired-0'));
+        if (mode !== 'same_host') {
+          availability?.({ kind: 'unavailable' });
+          availability?.({ kind: 'connected', hostEpoch: 'host-2', connectionId: 'connection-2' });
+        }
+        const replay = begin('expired-0');
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(requests.filter((request) => request === 'begin:expired-0').length, 1);
+        if (mode === 'failed_old_abort') {
+          oldAbort.reject(
+            new RuntimeHostRequestInterruptedError(
+              'artifact.ingest',
+              'command',
+              'not_dispatched',
+              'connection_lost',
+            ),
+          );
+        } else {
+          oldAbort.resolve();
+        }
+        if (mode === 'lost_new_begin') {
+          await assert.rejects(fresh);
+          await replay;
+        } else {
+          await Promise.all([fresh, replay]);
+        }
+        assert.equal(requests.filter((request) => request === 'begin:expired-0').length, 2);
+        await registry.close({ sessionId: 'session-prune-race' });
+        assert.equal(requests.filter((request) => request === 'abort:expired-0').length, 2);
+        if (mode === 'lost_new_begin') {
+          assert.equal(requests.filter((request) => request === 'abort:fresh').length, 1);
+        }
+      } finally {
+        oldAbort.resolve();
+        await registry.dispose();
+      }
+    });
+  }
+
+  test('Host replacement releases upload identities from the previous connection', async () => {
+    let availability:
+      | ((
+          value:
+            | { kind: 'connected'; hostEpoch: string; connectionId: string }
+            | { kind: 'unavailable' },
+        ) => void)
+      | undefined;
+    let begins = 0;
+    const aborts: string[] = [];
+    const registry = new AcpSessionRegistry({
+      newSessionId: () => 'session-replaced-host',
+      connect: async () =>
+        fakeConnection({
+          subscribeConnectionAvailability: (listener) => {
+            availability = listener;
+            listener({ kind: 'connected', hostEpoch: 'host-1', connectionId: 'connection-1' });
+            return () => undefined;
+          },
+          request: async (operation, input) => {
+            if (operation === 'session.create') return catalogSession('session-replaced-host');
+            if (operation !== 'artifact.ingest') throw new Error(`Unexpected ${operation}`);
+            const upload = input as { kind: string; uploadId: string };
+            if (upload.kind === 'begin') {
+              begins += 1;
+              if (upload.uploadId !== 'fresh') {
+                throw new RuntimeHostRequestInterruptedError(
+                  'artifact.ingest',
+                  'command',
+                  'dispatched',
+                  'connection_lost',
+                );
+              }
+              return { kind: 'upload_opened', uploadId: upload.uploadId, nextOffset: 0 };
+            }
+            aborts.push(upload.uploadId);
+            return { kind: 'upload_aborted', uploadId: upload.uploadId };
+          },
+        }),
+    });
+    const begin = (uploadId: string) =>
+      registry.artifactIngest({
+        kind: 'begin',
+        sessionId: 'session-replaced-host',
+        uploadId,
+        name: 'payload.bin',
+        mimeType: 'application/octet-stream',
+        totalBytes: 0,
+        contentSha256: `sha256:${'0'.repeat(64)}`,
+      });
+    try {
+      await registry.create({ cwd: '/workspace', mcpServers: [] });
+      for (let index = 0; index < 64; index += 1) {
+        await assert.rejects(begin(`old-${index}`));
+      }
+      availability?.({ kind: 'unavailable' });
+      availability?.({ kind: 'connected', hostEpoch: 'host-2', connectionId: 'connection-2' });
+      await begin('fresh');
+      assert.equal(begins, 65);
+      await registry.close({ sessionId: 'session-replaced-host' });
+      assert.deepEqual(aborts, ['fresh']);
+    } finally {
+      await registry.dispose();
+    }
+  });
+
   for (const method of ['load', 'resume'] as const) {
     test(`${method} failure before client replacement preserves a live prompt interaction`, async () => {
       const sessionId = `interaction-rollback-${method}`;
@@ -6878,22 +7051,19 @@ function fakeConnection(
     thinkingLevels?: readonly ThinkingLevel[];
     openSessionSubscription?: AcpSessionRegistryConnection['openSessionSubscription'];
     openSessionSubscriptionOnce?: AcpSessionRegistryConnection['openSessionSubscriptionOnce'];
+    subscribeConnectionAvailability?: AcpSessionRegistryConnection['subscribeConnectionAvailability'];
   } = {},
 ): AcpSessionRegistryConnection {
   return {
     reconnecting: true,
     replaceClientCapabilities: async () => ({ registrationId: 'registration-1', revision: 1 }),
     unregisterClientCapabilities: async () => ({ registrationId: 'registration-1', revision: 2 }),
-    subscribeConnectionAvailability: (
-      listener: (availability: {
-        kind: 'connected';
-        hostEpoch: string;
-        connectionId: string;
-      }) => void,
-    ) => {
-      listener({ kind: 'connected', hostEpoch: 'host-1', connectionId: 'connection-1' });
-      return () => undefined;
-    },
+    subscribeConnectionAvailability:
+      overrides.subscribeConnectionAvailability ??
+      ((listener) => {
+        listener({ kind: 'connected', hostEpoch: 'host-1', connectionId: 'connection-1' });
+        return () => undefined;
+      }),
     request: async (operation: string, input: unknown, timeoutMs?: number) =>
       operation === 'connection.catalog.query'
         ? connectionCatalogPage(overrides.thinkingLevels ?? THINKING_LEVELS)
