@@ -35,6 +35,16 @@ failed 0. Repository lint and format checks passed. New registry regressions
 cover conflicting upload identity and repeated failed commits; a mapper
 regression covers corrected tool-result metadata.
 
+After commit `8ab023995`, an isolated ablation removed the duplicate-ID
+`Set` from Artifact reference projection. `ToolResultContent.kind` is exclusive,
+so one result can contribute at most one reference; the simplified projection
+passed 31 event-mapper and real ACP/Host child-process tests and was retained.
+Removing the per-Session in-flight Artifact wait from `session/close` stalled
+its close-race regression, so that wait remains in place. Reintroducing the
+64-ID adapter cap made the failed-commit regression fail with
+`upload_tracking_capacity`, confirming that the cap cannot remain without
+tracking Host release and expiry.
+
 ## PR7 Artifact and Memory extensions (September 24, 2026)
 
 Based on Apache main `0a5b9dc9518089c44d183fc4a623a3681e5e8fc7`.

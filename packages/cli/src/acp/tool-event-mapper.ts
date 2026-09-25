@@ -468,23 +468,25 @@ function artifactReferences(
   sessionId: string | undefined,
 ): { artifactId: string; resourceRef: string }[] {
   if (!sessionId) return [];
-  const ids: string[] = [];
+  let artifactId: string | undefined;
   if (
     result.kind === 'image' &&
     result.ref.kind === 'session_file' &&
     result.ref.sessionId === sessionId
   )
-    ids.push(result.ref.relativePath);
-  if (result.kind === 'archived_tool_result' && result.artifactId) ids.push(result.artifactId);
-  const distinct = [...new Set(ids)].filter(isCanonicalArtifactEntityId);
-  return distinct.map((artifactId) => ({
-    artifactId,
-    resourceRef: formatAttachmentResourceRef({
-      kind: 'session_file',
-      sessionId,
-      relativePath: artifactId,
-    })!,
-  }));
+    artifactId = result.ref.relativePath;
+  else if (result.kind === 'archived_tool_result') artifactId = result.artifactId;
+  if (!isCanonicalArtifactEntityId(artifactId)) return [];
+  return [
+    {
+      artifactId,
+      resourceRef: formatAttachmentResourceRef({
+        kind: 'session_file',
+        sessionId,
+        relativePath: artifactId,
+      })!,
+    },
+  ];
 }
 
 function fixedStateChars(tool: ToolState): number {
