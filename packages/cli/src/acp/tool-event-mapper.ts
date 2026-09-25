@@ -310,6 +310,7 @@ export class AcpToolEventMapper {
       tool.authoritative = true;
       const artifacts = artifactReferences(result, this.sessionId);
       if (artifacts.length > 0) tool.meta.artifacts = artifacts;
+      else delete tool.meta.artifacts;
       const artifactHints = artifacts.map(
         ({ artifactId, resourceRef }) =>
           `Artifact ${artifactId}: ${resourceRef} (read with _maka/artifact/query)`,
