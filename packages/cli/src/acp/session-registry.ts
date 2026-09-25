@@ -124,7 +124,6 @@ const UNAVAILABLE_INTERACTION_CLIENT: AcpInteractionClient = {
 
 interface ArtifactUploadTracking {
   touchedAt: number;
-  pendingBegins: number;
   pendingRequests: number;
   mayBeOpen: boolean;
 }
@@ -516,7 +515,6 @@ export class AcpSessionRegistry {
     this.#assertOpen(operation);
     return this.#track(
       (async () => {
-        let trackedBegin: { uploadId: string; state: ArtifactUploadTracking } | undefined;
         let trackedIngest: ArtifactUploadTracking | undefined;
         try {
           const connection = await this.#getConnection(operation);
@@ -561,14 +559,11 @@ export class AcpSessionRegistry {
               if (!state) {
                 state = {
                   touchedAt: Date.now(),
-                  pendingBegins: 0,
                   pendingRequests: 0,
                   mayBeOpen: false,
                 };
                 uploads.set(upload.uploadId, state);
               }
-              state.pendingBegins += 1;
-              trackedBegin = { uploadId: upload.uploadId, state };
             }
             trackedIngest = this.#artifactUploads.get(upload.sessionId)?.get(upload.uploadId);
             if (trackedIngest) trackedIngest.pendingRequests += 1;
@@ -585,18 +580,17 @@ export class AcpSessionRegistry {
               const state = uploads?.get(upload.uploadId);
               if (state) {
                 state.mayBeOpen = false;
-                if (state.pendingBegins === 0) uploads?.delete(upload.uploadId);
               }
-            } else if (upload.kind === 'begin' && trackedBegin) {
-              trackedBegin.state.mayBeOpen = true;
-              trackedBegin.state.touchedAt = Date.now();
+            } else if (upload.kind === 'begin' && trackedIngest) {
+              trackedIngest.mayBeOpen = true;
+              trackedIngest.touchedAt = Date.now();
               let currentUploads = this.#artifactUploads.get(upload.sessionId);
               if (!currentUploads) {
                 currentUploads = new Map();
                 this.#artifactUploads.set(upload.sessionId, currentUploads);
               }
               if (!currentUploads.has(upload.uploadId)) {
-                currentUploads.set(upload.uploadId, trackedBegin.state);
+                currentUploads.set(upload.uploadId, trackedIngest);
               }
             } else if (upload.kind === 'chunk') {
               const state = uploads?.get(upload.uploadId);
@@ -608,12 +602,12 @@ export class AcpSessionRegistry {
           if (operation === 'artifact.ingest') {
             const upload = input as ArtifactIngestInput;
             const uploads = this.#artifactUploads.get(upload.sessionId);
-            if (upload.kind === 'begin' && trackedBegin) {
+            if (upload.kind === 'begin' && trackedIngest) {
               if (
                 error instanceof RuntimeHostRequestInterruptedError &&
                 error.dispatch === 'dispatched'
               ) {
-                trackedBegin.state.mayBeOpen = true;
+                trackedIngest.mayBeOpen = true;
               }
             } else if (
               upload.kind === 'commit' &&
@@ -625,22 +619,18 @@ export class AcpSessionRegistry {
               const state = uploads?.get(upload.uploadId);
               if (state) {
                 state.mayBeOpen = false;
-                if (state.pendingBegins === 0) uploads?.delete(upload.uploadId);
               }
             }
           }
           if (error instanceof RequestError) throw error;
           throw requestErrorFromRuntimeHost(error, operation);
         } finally {
-          if (trackedIngest) trackedIngest.pendingRequests -= 1;
-          if (trackedBegin) {
+          if (trackedIngest) {
+            trackedIngest.pendingRequests -= 1;
             const upload = input as ArtifactIngestInput;
             const uploads = this.#artifactUploads.get(upload.sessionId);
-            trackedBegin.state.pendingBegins -= 1;
-            if (!trackedBegin.state.mayBeOpen && trackedBegin.state.pendingBegins === 0) {
-              if (uploads?.get(trackedBegin.uploadId) === trackedBegin.state) {
-                uploads.delete(trackedBegin.uploadId);
-              }
+            if (!trackedIngest.mayBeOpen && trackedIngest.pendingRequests === 0) {
+              if (uploads?.get(upload.uploadId) === trackedIngest) uploads.delete(upload.uploadId);
             }
           }
         }

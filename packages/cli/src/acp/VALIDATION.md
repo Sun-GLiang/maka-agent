@@ -19,6 +19,22 @@
 
 # ACP validation record
 
+## PR7 upload-tracking ablation (September 25, 2026)
+
+In an isolated worktree at `76fc0b3b2`, the per-upload `pendingBegins`
+counter and separate `trackedBegin` reference were removed. The existing
+`pendingRequests` counter now defers removal until every in-flight ingest for
+that identity settles. The registry and real Host Artifact/Memory suites passed
+162 tests with this simplification.
+
+Two removal controls established which surrounding coordination remains
+necessary. Without the same-ID cleanup wait, all four cleanup/reopen race cases
+failed because a new begin reached Host before the old abort settled. Without
+the connection availability listener, the Host-replacement regression failed
+with `upload_tracking_capacity` after old upload IDs occupied the bound.
+After restoring both controls, the full CLI suite passed 1278 tests, skipped
+3, and failed 0; repository lint and format checks passed.
+
 ## PR7 final concurrency follow-up (September 25, 2026)
 
 Final review found that expiry cleanup could race a concurrent `begin` or
