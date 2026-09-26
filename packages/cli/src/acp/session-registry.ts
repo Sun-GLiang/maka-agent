@@ -303,7 +303,7 @@ export class AcpSessionRegistry {
       ?.setClient(context.interactions ?? UNAVAILABLE_INTERACTION_CLIENT);
     const creatingAttachment = !this.#attachments.has(sessionId);
     let observation: AcpAdmittedTurnObservation | undefined;
-    let terminalReplay = false;
+    let observedReplay = false;
     let admissionFinished = false;
     let attachment: RuntimeHostSessionChannel | undefined;
     const finishAdmission = (retain: boolean, error?: unknown) => {
@@ -348,7 +348,7 @@ export class AcpSessionRegistry {
       );
       attachment = prepared.attachment;
       observation = prepared.observation;
-      terminalReplay = prepared.terminalReplay ?? false;
+      observedReplay = prepared.observedReplay ?? false;
       if (observation) {
         const state = this.#pendingPlanAdmissions.get(observation) ?? {
           users: 0,
@@ -364,7 +364,7 @@ export class AcpSessionRegistry {
       }
       return {
         connection,
-        ...(terminalReplay ? { terminalReplay } : {}),
+        ...(observedReplay ? { observedReplay } : {}),
         ...(observation ? { observation } : {}),
         ...(observation
           ? { reconcileAdmission: () => this.#queryPromptAdmission(observation!, connection) }
@@ -402,7 +402,7 @@ export class AcpSessionRegistry {
   ): Promise<{
     attachment: RuntimeHostSessionChannel;
     observation?: AcpAdmittedTurnObservation;
-    terminalReplay?: boolean;
+    observedReplay?: boolean;
   }> {
     await this.#mcps.get(sessionId)?.ready(context.signal);
     const attachment = await this.#ensureAttachment(sessionId, connection, context);
@@ -412,9 +412,14 @@ export class AcpSessionRegistry {
     if (!turnId) return { attachment };
     const root = attachment.snapshot.rootTurn;
     if (root?.turnId === turnId && isRuntimeHostTerminalTurn(root))
-      return { attachment, terminalReplay: true };
+      return { attachment, observedReplay: true };
     const observation = await this.#adoptTurn(sessionId, turnId, attachment, true);
-    if (!(observation instanceof AcpAdmittedTurnObservation)) throw registryClosedError(operation);
+    if (!observation) throw registryClosedError(operation);
+    // Load/resume already observes an admitted Host Turn without local admission
+    // bookkeeping. Let the Host validate the replay while preserving that sole
+    // consumer, including when this request is rejected or its result is lost.
+    if (!(observation instanceof AcpAdmittedTurnObservation))
+      return { attachment, observedReplay: true };
     return { attachment, observation };
   }
 

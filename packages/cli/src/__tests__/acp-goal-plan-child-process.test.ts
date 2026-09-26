@@ -24,154 +24,257 @@ import { describe, test } from 'node:test';
 import { methods, RequestError } from '@agentclientprotocol/sdk';
 import { waitFor } from '@maka/core/test-only/async-primitives';
 import { connectRuntimeHost } from '@maka/runtime-host/client';
-import { RUNTIME_HOST_PROTOCOL_VERSION } from '@maka/runtime-host/protocol';
+import {
+  RUNTIME_HOST_PROTOCOL_VERSION,
+  type PlanTurnStartResult,
+} from '@maka/runtime-host/protocol';
 import { withAcpChildProcessHarness } from './acp-child-process-harness.js';
 
 describe('ACP Goal/Plan real Host routes', () => {
-  test('cancel stops the exact Plan Turn and close/EOF release its attachment', {
-    timeout: 30_000,
-  }, async () => {
-    let submitted = false;
-    let executionStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      executionStarted = resolve;
-    });
-    const model = createServer((request, response) => {
-      void readRequest(request)
-        .then((body) => {
-          const input = JSON.parse(body) as {
-            stream?: boolean;
-            tools?: Array<{ function?: { name?: string } }>;
-          };
-          if (input.stream !== true) {
-            response.writeHead(200, { 'content-type': 'application/json' });
-            response.end(
-              JSON.stringify({
-                id: 'summary',
-                object: 'chat.completion',
-                created: 1,
-                model: 'cancel-plan-fixture',
-                choices: [
-                  {
-                    index: 0,
-                    message: { role: 'assistant', content: 'Summary' },
-                    finish_reason: 'stop',
+  for (const restoreMethod of [undefined, 'load', 'resume'] as const) {
+    test(restoreMethod
+      ? `${restoreMethod} reuses an active Plan observer across retries, cancellation and close`
+      : 'cancel stops the exact Plan Turn and close/EOF release its attachment', {
+      timeout: 30_000,
+    }, async () => {
+      let submitted = false;
+      let executionCalls = 0;
+      let executionResponse: ServerResponse | undefined;
+      let executionStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        executionStarted = resolve;
+      });
+      const model = createServer((request, response) => {
+        void readRequest(request)
+          .then((body) => {
+            const input = JSON.parse(body) as {
+              stream?: boolean;
+              tools?: Array<{ function?: { name?: string } }>;
+            };
+            if (input.stream !== true) {
+              response.writeHead(200, { 'content-type': 'application/json' });
+              response.end(
+                JSON.stringify({
+                  id: 'summary',
+                  object: 'chat.completion',
+                  created: 1,
+                  model: 'cancel-plan-fixture',
+                  choices: [
+                    {
+                      index: 0,
+                      message: { role: 'assistant', content: 'Summary' },
+                      finish_reason: 'stop',
+                    },
+                  ],
+                }),
+              );
+              return;
+            }
+            const names = (input.tools ?? []).flatMap((tool) =>
+              tool.function?.name ? [tool.function.name] : [],
+            );
+            if (!submitted && names.includes('SubmitPlan')) {
+              submitted = true;
+              respondTool(response, 'SubmitPlan', {
+                title: 'Cancellable plan',
+                steps: [{ id: 'step-1', title: 'Wait', description: 'Wait for cancellation' }],
+              });
+            } else if (!submitted) respondTool(response, 'tool_search', { query: 'SubmitPlan' });
+            else {
+              executionCalls += 1;
+              executionResponse = response;
+              response.writeHead(200, { 'content-type': 'text/event-stream' });
+              response.write(
+                `data: ${JSON.stringify(modelChunk({ role: 'assistant', content: 'Working.' }, null))}\n\n`,
+              );
+              executionStarted();
+            }
+          })
+          .catch((error: unknown) => response.destroy(error as Error));
+      });
+      await new Promise<void>((resolve, reject) => {
+        model.once('error', reject);
+        model.listen(0, '127.0.0.1', resolve);
+      });
+      const address = model.address();
+      assert.ok(address && typeof address !== 'string');
+      try {
+        await withAcpChildProcessHarness(
+          async (harness) => {
+            const statuses: unknown[] = [];
+            await harness.withClient(
+              async ({ context }) => {
+                await context.request(methods.agent.initialize, {
+                  protocolVersion: 1,
+                  clientCapabilities: { _meta: { '_maka/turnStatus': true } },
+                });
+                const { sessionId } = await context.request(methods.agent.session.new, {
+                  cwd: harness.workspaceRoot,
+                  mcpServers: [],
+                });
+                await context.request(methods.agent.session.setConfigOption, {
+                  sessionId,
+                  configId: 'collaboration_mode',
+                  value: 'plan',
+                });
+                await context.request(methods.agent.session.prompt, {
+                  sessionId,
+                  prompt: [{ type: 'text', text: 'Prepare a cancellable plan' }],
+                });
+                const page = (await context.request('_maka/plan/query', {
+                  kind: 'list_start',
+                  sessionId,
+                })) as {
+                  storeVersion: number;
+                  items: Array<{
+                    kind: string;
+                    proposal?: { proposalId: string; revision: number };
+                  }>;
+                };
+                const proposal = page.items.find((item) => item.kind === 'proposal')?.proposal;
+                assert.ok(proposal);
+                const approvalInput = {
+                  kind: 'approve_proposal' as const,
+                  sessionId,
+                  proposalId: proposal.proposalId,
+                  expectedRevision: proposal.revision,
+                  expectedStoreVersion: page.storeVersion,
+                  turnId: randomUUID(),
+                };
+                const admission = (await context.request(
+                  '_maka/plan/turn/start',
+                  approvalInput,
+                )) as PlanTurnStartResult;
+                await started;
+                if (restoreMethod) {
+                  const sibling = await harness.spawnSibling();
+                  const restoredStatuses: unknown[] = [];
+                  const restoredText: string[] = [];
+                  try {
+                    await sibling.withClient(
+                      async ({ context: restored }) => {
+                        await restored.request(methods.agent.initialize, {
+                          protocolVersion: 1,
+                          clientCapabilities: { _meta: { '_maka/turnStatus': true } },
+                        });
+                        await restored.request(methods.agent.session[restoreMethod], {
+                          sessionId,
+                          cwd: harness.workspaceRoot,
+                          mcpServers: [],
+                        });
+                        for (let retry = 0; retry < 2; retry += 1) {
+                          const replay = (await restored.request(
+                            '_maka/plan/turn/start',
+                            approvalInput,
+                          )) as PlanTurnStartResult;
+                          assert.equal(replay.turn.turnId, admission.turn.turnId);
+                          assert.equal(replay.turn.runId, admission.turn.runId);
+                          assert.equal(replay.turn.status, 'running');
+                          assert.equal(replay.plan.executionId, admission.plan.executionId);
+                        }
+                        // A rejected replay must not dispose the retained output consumer.
+                        await assert.rejects(
+                          restored.request('_maka/plan/turn/start', {
+                            ...approvalInput,
+                            expectedRevision: proposal.revision + 1,
+                          }),
+                          (error: unknown) =>
+                            error instanceof RequestError &&
+                            (error.data as { code?: string }).code === 'operation_conflict',
+                        );
+                        assert.ok(executionResponse);
+                        executionResponse.write(
+                          `data: ${JSON.stringify(modelChunk({ content: 'After restored replay.' }, null))}\n\n`,
+                        );
+                        await waitFor(() =>
+                          restoredText.join('').includes('After restored replay.'),
+                        );
+                        await restored.notify(methods.agent.session.cancel, { sessionId });
+                        await waitFor(() => restoredStatuses.length > 0);
+                        assert.equal(
+                          (restoredStatuses[0] as { turnId: string }).turnId,
+                          admission.turn.turnId,
+                        );
+                        await restored.request(methods.agent.session.close, { sessionId });
+                      },
+                      (app) =>
+                        app
+                          .onNotification(methods.client.session.update, ({ params }) => {
+                            if (
+                              params.update.sessionUpdate === 'agent_message_chunk' &&
+                              params.update.content.type === 'text'
+                            )
+                              restoredText.push(params.update.content.text);
+                          })
+                          .onNotification(
+                            '_maka/turn/status',
+                            { parse: (value: unknown) => value },
+                            ({ params }) => {
+                              restoredStatuses.push(params);
+                            },
+                          ),
+                    );
+                    await sibling.closeStdin();
+                    assert.deepEqual(await sibling.waitForExit(), { code: 0, signal: null });
+                    assert.equal(
+                      restoredText.join('').split('After restored replay.').length - 1,
+                      1,
+                    );
+                    assert.equal(restoredStatuses.length, 1, 'one terminal notification per Turn');
+                    assert.equal(executionCalls, 1, 'retries must not invoke the model again');
+                  } finally {
+                    await sibling.close();
+                  }
+                }
+                await context.notify(methods.agent.session.cancel, { sessionId });
+                await waitFor(() => statuses.length > 0);
+                const current = (await context.request('_maka/plan/query', {
+                  kind: 'list_start',
+                  sessionId,
+                })) as {
+                  items: Array<{
+                    kind: string;
+                    execution?: { status: string; executionId: string };
+                  }>;
+                };
+                const execution = current.items.find(
+                  (item) => item.kind === 'execution',
+                )?.execution;
+                assert.equal(execution?.status, 'interrupted');
+                await context.request('_maka/plan/control', {
+                  kind: 'cancel_execution',
+                  sessionId,
+                  executionId: execution.executionId,
+                  operationId: randomUUID(),
+                });
+                await context.request(methods.agent.session.close, { sessionId });
+              },
+              (app) =>
+                app.onNotification(
+                  '_maka/turn/status',
+                  { parse: (value: unknown) => value },
+                  ({ params }) => {
+                    statuses.push(params);
                   },
-                ],
-              }),
+                ),
             );
-            return;
-          }
-          const names = (input.tools ?? []).flatMap((tool) =>
-            tool.function?.name ? [tool.function.name] : [],
-          );
-          if (!submitted && names.includes('SubmitPlan')) {
-            submitted = true;
-            respondTool(response, 'SubmitPlan', {
-              title: 'Cancellable plan',
-              steps: [{ id: 'step-1', title: 'Wait', description: 'Wait for cancellation' }],
-            });
-          } else if (!submitted) respondTool(response, 'tool_search', { query: 'SubmitPlan' });
-          else {
-            response.writeHead(200, { 'content-type': 'text/event-stream' });
-            response.write(
-              `data: ${JSON.stringify(modelChunk({ role: 'assistant', content: 'Working.' }, null))}\n\n`,
-            );
-            executionStarted();
-          }
-        })
-        .catch((error: unknown) => response.destroy(error as Error));
-    });
-    await new Promise<void>((resolve, reject) => {
-      model.once('error', reject);
-      model.listen(0, '127.0.0.1', resolve);
-    });
-    const address = model.address();
-    assert.ok(address && typeof address !== 'string');
-    try {
-      await withAcpChildProcessHarness(
-        async (harness) => {
-          const statuses: unknown[] = [];
-          await harness.withClient(
-            async ({ context }) => {
-              await context.request(methods.agent.initialize, {
-                protocolVersion: 1,
-                clientCapabilities: { _meta: { '_maka/turnStatus': true } },
-              });
-              const { sessionId } = await context.request(methods.agent.session.new, {
-                cwd: harness.workspaceRoot,
-                mcpServers: [],
-              });
-              await context.request(methods.agent.session.setConfigOption, {
-                sessionId,
-                configId: 'collaboration_mode',
-                value: 'plan',
-              });
-              await context.request(methods.agent.session.prompt, {
-                sessionId,
-                prompt: [{ type: 'text', text: 'Prepare a cancellable plan' }],
-              });
-              const page = (await context.request('_maka/plan/query', {
-                kind: 'list_start',
-                sessionId,
-              })) as {
-                storeVersion: number;
-                items: Array<{ kind: string; proposal?: { proposalId: string; revision: number } }>;
-              };
-              const proposal = page.items.find((item) => item.kind === 'proposal')?.proposal;
-              assert.ok(proposal);
-              await context.request('_maka/plan/turn/start', {
-                kind: 'approve_proposal',
-                sessionId,
-                proposalId: proposal.proposalId,
-                expectedRevision: proposal.revision,
-                expectedStoreVersion: page.storeVersion,
-                turnId: randomUUID(),
-              });
-              await started;
-              await context.notify(methods.agent.session.cancel, { sessionId });
-              await waitFor(() => statuses.length > 0);
-              const current = (await context.request('_maka/plan/query', {
-                kind: 'list_start',
-                sessionId,
-              })) as {
-                items: Array<{ kind: string; execution?: { status: string; executionId: string } }>;
-              };
-              const execution = current.items.find((item) => item.kind === 'execution')?.execution;
-              assert.equal(execution?.status, 'interrupted');
-              await context.request('_maka/plan/control', {
-                kind: 'cancel_execution',
-                sessionId,
-                executionId: execution.executionId,
-                operationId: randomUUID(),
-              });
-              await context.request(methods.agent.session.close, { sessionId });
-            },
-            (app) =>
-              app.onNotification(
-                '_maka/turn/status',
-                { parse: (value: unknown) => value },
-                ({ params }) => {
-                  statuses.push(params);
-                },
-              ),
-          );
-          await harness.closeStdin();
-          assert.deepEqual(await harness.waitForExit(), { code: 0, signal: null });
-        },
-        {
-          startRuntimeHost: true,
-          model: {
-            id: 'cancel-plan-fixture',
-            thinkingLevels: [],
-            baseUrl: `http://127.0.0.1:${address.port}/v1`,
+            await harness.closeStdin();
+            assert.deepEqual(await harness.waitForExit(), { code: 0, signal: null });
           },
-        },
-      );
-    } finally {
-      await new Promise<void>((resolve) => model.close(() => resolve()));
-    }
-  });
+          {
+            startRuntimeHost: true,
+            model: {
+              id: 'cancel-plan-fixture',
+              thinkingLevels: [],
+              baseUrl: `http://127.0.0.1:${address.port}/v1`,
+            },
+          },
+        );
+      } finally {
+        await new Promise<void>((resolve) => model.close(() => resolve()));
+      }
+    });
+  }
 
   test('Plan paging preserves storeVersion and returns revision_changed after an external write', {
     timeout: 45_000,

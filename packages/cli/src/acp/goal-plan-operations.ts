@@ -42,7 +42,8 @@ import type { AcpAdmittedTurnObservation } from './turn-observation.js';
 export interface PreparedGoalPlanOperation {
   readonly connection: AcpSessionRegistryConnection;
   readonly observation?: AcpAdmittedTurnObservation;
-  readonly terminalReplay?: boolean;
+  /** Host already exposed this Turn; a replay does not own its observation. */
+  readonly observedReplay?: boolean;
   reconcileAdmission?(): void;
   cancelObservation?(): void;
   commit(): void;
@@ -108,7 +109,7 @@ export class AcpGoalPlanOperations {
       context.signal.throwIfAborted();
       this.#port.assertCurrent(input.sessionId);
       const observation = prepared.observation;
-      if (!observation && !prepared.terminalReplay)
+      if (!observation && !prepared.observedReplay)
         throw new Error('Plan Turn observer was not installed');
       observation?.markDispatched();
       dispatched = true;

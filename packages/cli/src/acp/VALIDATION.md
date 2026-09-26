@@ -19,6 +19,23 @@
 
 # ACP validation record
 
+## PR8 restored Plan replay fix — September 26, 2026
+
+A fresh ACP process can now replay `plan.turn.start` for a live Turn after
+`session/load` or `session/resume`. The existing output observer stays attached;
+the Host validates the original Turn identity and returns its admission result.
+The replay does not take ownership of the restored observer's lifecycle.
+
+Both real SDK/stdio/Host regression cases failed with `registry_closed` before
+the fix and pass after rebuilding. They cover repeated admission replies with
+unchanged Turn/Run/execution identities, Host rejection of a conflicting replay,
+continued output exactly once, one model execution, cancellation, one terminal
+notification, Session close, and clean EOF.
+
+Validation: root build and workspace typecheck passed; full CLI `test:dist`
+passed with 1277 passed, 3 skipped, 0 failed. Root lint, format checking, and
+Desktop/UI knip passed. No Host implementation or wire schema changed.
+
 ## PR8 Goal/Plan execution — September 26, 2026
 
 Implementation baseline: official `apache/maka` main at
