@@ -803,7 +803,8 @@ export class AcpExecutor implements PluginExecutorProvider {
 
   async #requestPermission(session: RetainedSession, request: RequestPermissionRequest) {
     this.#assertSession(session, request.sessionId);
-    if (session.restoring) return { outcome: { outcome: 'cancelled' as const } };
+    if (session.restoring || session.historyGap || session.lost)
+      return { outcome: { outcome: 'cancelled' as const } };
     const active = session.active;
     if (!active) return { outcome: { outcome: 'cancelled' as const } };
     const outcome = await active.context.requestPermission({
@@ -823,6 +824,7 @@ export class AcpExecutor implements PluginExecutorProvider {
       }
       return;
     }
+    if (session.historyGap || session.lost) return;
     if (update.sessionUpdate === 'config_option_update') {
       // During our mutation, its response (or rollback response) is authoritative.
       if (!session.configuring && !session.lost) session.configOptions = update.configOptions;

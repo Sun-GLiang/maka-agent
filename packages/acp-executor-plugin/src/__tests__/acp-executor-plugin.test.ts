@@ -179,6 +179,71 @@ test('unacknowledged prompt loads replay as restoration and exposes history gap 
   }
 });
 
+test('late restored-session updates stay quarantined while the history gap is persisted', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.supportsRestore = true;
+  const storage = durableState();
+  let releaseGapWrite!: () => void;
+  const gapWriteBlocked = new Promise<void>((resolve) => {
+    releaseGapWrite = resolve;
+  });
+  let gapWriteStarted!: () => void;
+  const gapWriteReached = new Promise<void>((resolve) => {
+    gapWriteStarted = resolve;
+  });
+  const state: AcpConversationStateStore = {
+    ...storage.state,
+    write: async (key, record) => {
+      if (record.phase === 'history_gap') {
+        gapWriteStarted();
+        await gapWriteBlocked;
+      }
+      await storage.state.write!(key, record);
+    },
+  };
+  const make = () =>
+    new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      { state, createConnection: protocol.factory },
+    );
+  const first = make();
+  try {
+    assert.equal((await first.execute(request('first'), executorContext([]))).status, 'completed');
+    await first.dispose();
+    const restored = make();
+    const events: unknown[] = [];
+    try {
+      const execution = restored.execute(request('unsent-new-turn'), executorContext(events));
+      await gapWriteReached;
+      protocol.notifyUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'LATE OLD EXTERNAL OUTPUT' },
+      });
+      protocol.notifyUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'late-old-tool',
+        title: 'Historical tool',
+      });
+      assert.deepEqual(await protocol.requestPermission(), { outcome: { outcome: 'cancelled' } });
+      releaseGapWrite();
+      const result = await execution;
+      assert.equal(result.status, 'failed');
+      if (result.status === 'failed') assert.equal(result.code, 'acp_history_gap');
+      assert.deepEqual(events, []);
+      assert.equal(protocol.prompts, 1);
+      assert.equal(storage.record().phase, 'history_gap');
+    } finally {
+      releaseGapWrite();
+      await restored.dispose();
+    }
+  } finally {
+    await first.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('failed restore permits explicit retry and never creates a replacement Session', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
@@ -980,6 +1045,8 @@ function fakeProtocol(): {
   restoreFailure?: boolean;
   resumes: number;
   loads: number;
+  notifyUpdate(update: unknown): void;
+  requestPermission(): Promise<unknown>;
   notifyConfiguration(model: string): void;
 } {
   const fixture = {
@@ -1000,6 +1067,8 @@ function fakeProtocol(): {
     restoreFailure: false,
     resumes: 0,
     loads: 0,
+    notifyUpdate: (_update: unknown): void => {},
+    requestPermission: async (): Promise<unknown> => undefined,
     notifyConfiguration: (_model: string): void => {},
     factory: undefined as unknown as AcpConnectionFactory,
   };
@@ -1018,6 +1087,19 @@ function fakeProtocol(): {
       },
     } as unknown as ClientApp;
     input.configureClient(app);
+    fixture.notifyUpdate = (update) => {
+      notifications.get(methods.client.session.update)?.({
+        params: { sessionId: 'acp-session', update } as never,
+      });
+    };
+    fixture.requestPermission = async () =>
+      await requests.get(methods.client.session.requestPermission)?.({
+        params: {
+          sessionId: 'acp-session',
+          toolCall: { toolCallId: 'late-old-tool', title: 'Allow edit?' },
+          options: [{ optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' }],
+        } as never,
+      });
     fixture.notifyConfiguration = (model) => {
       notifications.get(methods.client.session.update)?.({
         params: {
