@@ -22,7 +22,7 @@ import { test } from 'node:test';
 import { mkdtemp, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AcpExecutor, type AcpAgentAdapter } from '../index.js';
+import { AcpExecutor, type AcpAgentAdapter, type AcpContinuityRecord } from '../index.js';
 import { readWorkspaceTextFile } from '../acp-filesystem.js';
 import { Context } from '@maka/runtime/plugin-kernel';
 import { PluginExecutorService } from '@maka/runtime/plugin-executor-service';
@@ -69,6 +69,7 @@ createInterface({input:process.stdin}).on('line',async line=>{
  const value=m.params.prompt[0].text;
  update({sessionUpdate:'user_message_chunk',content:{type:'text',text:value}});
  if(value==='crash'){process.exit(3);return;}
+ if(value==='refusal'){respond(m.id,{stopReason:'refusal'});return;}
  if(value==='ignore-cancel'){text('waiting');return;}
  if(value==='wait'){promptId=m.id;text('waiting');return;}
  if(value==='helper'){const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});text(String(child.pid));respond(m.id,{stopReason:'end_turn'});return;}
@@ -248,6 +249,92 @@ test('real stdio restores the same Session in a new process after durable acknow
     await f.dispose();
   }
 });
+
+for (const prompt of ['wait', 'refusal', 'ignore-cancel', 'crash']) {
+  test(`real stdio checkpoint after ${prompt} preserves safe restart behavior`, async () => {
+    const f = await fixture();
+    const values = new Map<string, AcpContinuityRecord>();
+    const state = {
+      has: async (key: string) => values.has(key),
+      mark: async () => {
+        throw new Error('Expected versioned storage');
+      },
+      read: async (key: string) => values.get(key),
+      write: async (key: string, record: AcpContinuityRecord) => {
+        values.set(key, record);
+      },
+    };
+    const adapter: AcpAgentAdapter = {
+      id: 'stdio-checkpoint-fixture',
+      displayName: 'Fixture',
+      configure: () => ({ launch: { executable: process.execPath, args: [f.script] } }),
+      permissionKind: () => 'question',
+    };
+    const make = () => new AcpExecutor(adapter, {}, { state });
+    const first = make();
+    const root = new Context();
+    const service = new PluginExecutorService(root);
+    root
+      .extend({
+        maka: { rootId: 'profile', packageId: 'fixture', entryId: 'stdio', generation: 1 },
+      })
+      .executors.register(first);
+    const backend = new PluginExecutorBackend({
+      sessionId: 'task',
+      cwd: f.root,
+      binding: service.bind('task', first.id),
+    });
+    const restored = make();
+    try {
+      let firstPid: number | undefined;
+      for await (const event of backend.send({ turnId: 'one', text: 'one' })) {
+        if (event.type === 'text_complete') firstPid = JSON.parse(event.text).pid;
+      }
+      assert.equal(values.get('task')?.phase, 'committed');
+      const terminalEvents: string[] = [];
+      for await (const event of backend.send({ turnId: 'stopped', text: prompt })) {
+        terminalEvents.push(event.type);
+        if (event.type === 'text_delta') await backend.stop('user_stop');
+        if (event.type === 'complete')
+          assert.equal(values.get('task')?.phase, 'prompt_pending', 'delivery alone cannot commit');
+      }
+      assert.equal(terminalEvents.at(-1), 'complete');
+      assert.ok(terminalEvents.includes(['crash', 'refusal'].includes(prompt) ? 'error' : 'abort'));
+      const settled = prompt === 'wait' || prompt === 'refusal';
+      assert.equal(values.get('task')?.phase, settled ? 'committed' : 'prompt_pending');
+      assert.equal(values.get('task')?.committedPrompts, settled ? 2 : 1);
+      await first.dispose();
+      assert.equal(
+        (await restored.inspectConversation({ conversationKey: 'task', cwd: f.root })).readiness,
+        settled ? 'restorable' : 'history_gap',
+      );
+      const events: PluginExecutorOutputEvent[] = [];
+      const result = await restored.execute(
+        f.request('after'),
+        f.context(undefined, (event) => events.push(event)),
+      );
+      if (settled) {
+        assert.equal(result.status, 'completed');
+        if (result.status !== 'completed') throw new Error('Expected restored completion');
+        assert.equal(JSON.parse(result.text).turn, 3);
+        assert.notEqual(JSON.parse(result.text).pid, firstPid);
+        await restored.acknowledgeExecution('task', 'after');
+        assert.equal(values.get('task')?.committedPrompts, 3);
+      } else {
+        assert.equal(result.status, 'failed');
+        if (result.status !== 'failed') throw new Error('Expected history gap');
+        assert.equal(result.code, 'acp_history_gap');
+        assert.deepEqual(events, [], 'uncertain replay must not reach canonical history');
+      }
+    } finally {
+      await backend.dispose();
+      await root.fiber.dispose();
+      await first.dispose();
+      await restored.dispose();
+      await f.dispose();
+    }
+  });
+}
 
 test('real stdio load replay stays separate when the Agent may be ahead of durable history', async () => {
   const f = await fixture();

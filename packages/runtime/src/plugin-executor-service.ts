@@ -175,7 +175,7 @@ export interface PluginExecutorProvider {
     signal: AbortSignal,
   ): Promise<void>;
   inspectConversation?(input: PluginExecutorConversationInput): Promise<ExecutorCatalogEntry>;
-  /** Confirm a completed Run only after its terminal event is durably consumed. */
+  /** Confirm terminal consumption for any result; the provider decides whether it can checkpoint. */
   acknowledgeExecution?(conversationKey: string, turnId: string): Promise<void>;
   execute(
     request: Readonly<PluginExecutorRequest>,

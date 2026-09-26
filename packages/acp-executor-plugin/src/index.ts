@@ -380,6 +380,10 @@ export class AcpExecutor implements PluginExecutorProvider {
       });
       const response = await this.#awaitPrompt(session, prompt, context.signal);
       if (!response) return { status: 'cancelled', reason: 'timeout' };
+      // A settled prompt can be checkpointed even when it was cancelled or failed.
+      // Timeouts and transport failures never reach this point, and the Runtime
+      // must still durably consume the terminal event before acknowledging it.
+      if (session.record) session.awaitingAck = request.turnId;
       if (context.signal.aborted || response.stopReason === 'cancelled') {
         return { status: 'cancelled', providerStopReason: response.stopReason };
       }
@@ -392,7 +396,6 @@ export class AcpExecutor implements PluginExecutorProvider {
           'acp_prompt_incomplete',
         );
       }
-      if (session.record) session.awaitingAck = request.turnId;
       return { status: 'completed', text: active.text };
     } catch (error) {
       if (errorCode(error) === 'acp_history_gap') session.historyGap = true;

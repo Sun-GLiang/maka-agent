@@ -644,6 +644,7 @@ for (const stopReason of [
 ]) {
   test(`runtime drains cancellation and preserves ${stopReason}`, async () => {
     const fixture = await executableFixture();
+    const storage = durableState();
     let started!: () => void;
     const ready = new Promise<void>((resolve) => {
       started = resolve;
@@ -688,7 +689,7 @@ for (const stopReason of [
     const executor = new AcpExecutor(
       adapter,
       { executable: fixture.executable },
-      { createConnection: factory },
+      { createConnection: factory, state: storage.state },
     );
     const abort = new AbortController();
     const execution = executor.execute(request('cancel'), executorContext([], abort.signal));
@@ -702,6 +703,16 @@ for (const stopReason of [
           : { providerStopReason: stopReason }),
       });
       assert.equal(cancellations, 1);
+      assert.equal(storage.record().phase, 'prompt_pending');
+      await executor.acknowledgeExecution('session-a', 'turn-cancel');
+      const uncertain = ['request_error', 'process_crash'].includes(stopReason);
+      assert.equal(storage.record().phase, uncertain ? 'prompt_pending' : 'committed');
+      await executor.disposeConversation('session-a');
+      assert.equal(
+        (await executor.inspectConversation({ conversationKey: 'session-a', cwd: process.cwd() }))
+          .readiness,
+        uncertain ? 'restore_failed' : 'restorable',
+      );
     } finally {
       await executor.dispose();
       await rm(fixture.root, { recursive: true, force: true });

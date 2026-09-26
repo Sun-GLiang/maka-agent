@@ -98,11 +98,12 @@ export class PluginExecutorBackend implements AgentBackend {
         yield event;
         queue.ackConsumed();
       }
-      const completed = await producer;
-      if (completed) {
+      const returnedResult = await producer;
+      if (returnedResult) {
         // The Runtime Kernel requests the next item only after onSessionEvent
         // resolves. Reaching this point means its terminal event was accepted.
-        // A failed Plugin checkpoint leaves the conservative pending marker.
+        // The Plugin decides whether its external execution actually settled;
+        // uncertain execution or a failed checkpoint keeps the pending marker.
         if (this.#binding.acknowledgeExecution)
           await this.#binding
             .acknowledgeExecution(this.sessionId, input.turnId)
@@ -213,7 +214,7 @@ export class PluginExecutorBackend implements AgentBackend {
       return false;
     }
     this.#publishResult(turnId, messageId, result, queue);
-    return result.status === 'completed';
+    return true;
   }
 
   async #requestPermission(
