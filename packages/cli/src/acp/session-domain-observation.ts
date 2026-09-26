@@ -80,12 +80,10 @@ export class AcpSessionDomainObservation {
       return;
     this.#goalKnown = true;
     this.#goal = goal;
-    const status = { sessionId: this.#sessionId, goal };
-    const key = JSON.stringify(status);
-    if (key !== this.#goalDelivered) {
-      this.#pendingGoal = status;
-      this.#sendGoal();
-    }
+    // Even a return to the last delivered value must replace an older pending
+    // snapshot: an in-flight notification may still change what the client sees.
+    this.#pendingGoal = { sessionId: this.#sessionId, goal };
+    this.#sendGoal();
   }
 
   planChanged(): void {
@@ -175,9 +173,11 @@ export class AcpSessionDomainObservation {
     const status = this.#pendingGoal;
     const epoch = this.#epoch;
     this.#pendingGoal = undefined;
+    const key = JSON.stringify(status);
+    if (key === this.#goalDelivered) return;
     this.#goalDelivery = notify(status)
       .then(() => {
-        if (!this.#disposed && epoch === this.#epoch) this.#goalDelivered = JSON.stringify(status);
+        if (!this.#disposed && epoch === this.#epoch) this.#goalDelivered = key;
       })
       .catch((error: unknown) => console.error('[acp] Goal status delivery failed:', error))
       .finally(() => {

@@ -18,10 +18,141 @@
  */
 
 import assert from 'node:assert/strict';
+import { setImmediate as nextEventLoopTurn } from 'node:timers/promises';
 import { test } from 'node:test';
-import { waitFor } from '@maka/core/test-only/async-primitives';
-import type { PlanQueryResult } from '@maka/runtime-host/protocol';
+import { deferred, waitFor } from '@maka/core/test-only/async-primitives';
+import type { GoalProjection, PlanQueryResult } from '@maka/runtime-host/protocol';
 import { AcpSessionDomainObservation } from '../acp/session-domain-observation.js';
+
+for (const withPendingClear of [false, true]) {
+  test(`latest null Goal survives an in-flight notification (pending clear: ${withPendingClear})`, async (t) => {
+    const delivery = deferred();
+    const goals: Array<GoalProjection | null> = [];
+    const active = goal();
+    const observer = new AcpSessionDomainObservation({
+      sessionId: 'session-1',
+      queryPlan: async () => page(0),
+      goalNotify: () => async (status) => {
+        if (status.goal === active) await delivery.promise;
+        goals.push(status.goal);
+      },
+      planNotify: () => undefined,
+    });
+    t.after(() => observer.dispose());
+    observer.goalChanged(null);
+    await nextEventLoopTurn();
+    assert.deepEqual(goals, [null]);
+    observer.goalChanged(active);
+    if (withPendingClear) observer.goalChanged(goal({ revision: 2, status: 'cleared' }));
+    // A Session retirement can remove the Goal after clear while the client is slow.
+    observer.goalChanged(null);
+    assert.deepEqual(goals, [null], 'only one notification may be in flight');
+    delivery.resolve();
+    await nextEventLoopTurn();
+    assert.deepEqual(goals, [null, active, null]);
+  });
+}
+
+test('Goal delivery coalesces newer revisions and deduplicates only after delivery', async (t) => {
+  const delivery = deferred();
+  const goals: Array<GoalProjection | null> = [];
+  const active = goal();
+  const latest = goal({ revision: 3, status: 'cleared' });
+  const observer = new AcpSessionDomainObservation({
+    sessionId: 'session-1',
+    queryPlan: async () => page(0),
+    goalNotify: () => async (status) => {
+      if (goals.length === 0) await delivery.promise;
+      goals.push(status.goal);
+    },
+    planNotify: () => undefined,
+  });
+  t.after(() => observer.dispose());
+  observer.goalChanged(active);
+  observer.goalChanged(goal({ revision: 2, status: 'paused' }));
+  observer.goalChanged(latest);
+  observer.goalChanged(goal({ revision: 2, status: 'paused' }));
+  delivery.resolve();
+  await nextEventLoopTurn();
+  assert.deepEqual(
+    goals,
+    [active, latest],
+    'stale revisions cannot overwrite the latest pending Goal',
+  );
+  observer.goalChanged({ ...latest });
+  await nextEventLoopTurn();
+  assert.deepEqual(goals, [active, latest], 'already delivered snapshots are not repeated');
+});
+
+test('duplicate Goal changes during delivery do not schedule a duplicate notification', async (t) => {
+  const delivery = deferred();
+  const goals: Array<GoalProjection | null> = [];
+  const active = goal();
+  const observer = new AcpSessionDomainObservation({
+    sessionId: 'session-1',
+    queryPlan: async () => page(0),
+    goalNotify: () => async (status) => {
+      goals.push(status.goal);
+      await delivery.promise;
+    },
+    planNotify: () => undefined,
+  });
+  t.after(() => observer.dispose());
+  observer.goalChanged(active);
+  observer.goalChanged({ ...active });
+  delivery.resolve();
+  await nextEventLoopTurn();
+  assert.deepEqual(goals, [active]);
+});
+
+test('a late Goal delivery cannot suppress the same snapshot in a new canonical epoch', async (t) => {
+  const delivery = deferred();
+  const goals: Array<GoalProjection | null> = [];
+  const active = goal();
+  const observer = new AcpSessionDomainObservation({
+    sessionId: 'session-1',
+    queryPlan: async () => page(0),
+    goalNotify: () => async (status) => {
+      goals.push(status.goal);
+      if (goals.length === 1) await delivery.promise;
+    },
+    planNotify: () => undefined,
+  });
+  t.after(() => observer.dispose());
+  observer.goalChanged(active);
+  observer.canonicalReplacement({ ...active });
+  delivery.resolve();
+  await nextEventLoopTurn();
+  assert.deepEqual(goals, [active, active]);
+});
+
+for (const rejectDelivery of [false, true]) {
+  test(`dispose fences a pending Goal after delivery ${rejectDelivery ? 'failure' : 'success'}`, async (t) => {
+    const delivery = deferred();
+    const goals: Array<GoalProjection | null> = [];
+    const errors = t.mock.method(console, 'error', () => undefined);
+    const active = goal();
+    const observer = new AcpSessionDomainObservation({
+      sessionId: 'session-1',
+      queryPlan: async () => page(0),
+      goalNotify: () => async (status) => {
+        goals.push(status.goal);
+        await delivery.promise;
+      },
+      planNotify: () => undefined,
+    });
+    t.after(() => observer.dispose());
+    observer.goalChanged(active);
+    observer.goalChanged(null);
+    observer.dispose();
+    if (rejectDelivery) delivery.reject(new Error('notification transport closed'));
+    else delivery.resolve();
+    await nextEventLoopTurn();
+    observer.goalChanged(null);
+    assert.deepEqual(goals, [active]);
+    assert.equal(errors.mock.callCount(), rejectDelivery ? 1 : 0);
+  });
+}
 
 test('canonical Plan replacement rereads even when Goal is unchanged and rejects an old page', async () => {
   const reads: Array<(result: PlanQueryResult) => void> = [];
@@ -105,6 +236,27 @@ test('failed initial Plan refresh retries without inventing a state notification
   assert.equal(reads, 2);
   observer.dispose();
 });
+
+function goal(overrides: Partial<GoalProjection> = {}): GoalProjection {
+  return {
+    sessionId: 'session-1',
+    goalId: 'goal-1',
+    revision: 1,
+    condition: 'Finish the task',
+    status: 'active',
+    setAt: 1,
+    iterations: 0,
+    maxIterations: 10,
+    consecutiveNoProgress: 0,
+    blockCap: 3,
+    tokenBudget: null,
+    tokensSpent: 0,
+    lastReason: null,
+    achievedAt: null,
+    pausedAt: null,
+    ...overrides,
+  };
+}
 
 function page(storeVersion: number): PlanQueryResult {
   return {
