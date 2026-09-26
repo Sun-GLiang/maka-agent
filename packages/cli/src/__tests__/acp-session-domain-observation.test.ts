@@ -18,7 +18,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { setImmediate as nextEventLoopTurn } from 'node:timers/promises';
+import { setImmediate as nextEventLoopTurn, setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { deferred, waitFor } from '@maka/core/test-only/async-primitives';
 import type { GoalProjection, PlanQueryResult } from '@maka/runtime-host/protocol';
@@ -153,6 +153,65 @@ for (const rejectDelivery of [false, true]) {
     assert.equal(errors.mock.callCount(), rejectDelivery ? 1 : 0);
   });
 }
+
+test('failed Goal delivery is logged once and retried only after another domain update', async (t) => {
+  const active = goal();
+  const goals: Array<GoalProjection | null> = [];
+  const errors = t.mock.method(console, 'error', () => undefined);
+  const observer = new AcpSessionDomainObservation({
+    sessionId: 'session-1',
+    queryPlan: async () => page(0),
+    goalNotify: () => async (status) => {
+      goals.push(status.goal);
+      if (goals.length === 1) throw new Error('temporary notification failure');
+    },
+    planNotify: () => undefined,
+  });
+  t.after(() => observer.dispose());
+
+  observer.goalChanged(active);
+  await waitFor(() => errors.mock.callCount() === 1);
+  await delay(100);
+  assert.deepEqual(goals, [active], 'a failed send is not automatically retried');
+  assert.match(String(errors.mock.calls[0]?.arguments[0]), /Goal status delivery failed/);
+
+  observer.goalChanged({ ...active });
+  await waitFor(() => goals.length === 2);
+  assert.deepEqual(goals, [active, active], 'failure did not mark the Goal as delivered');
+  assert.equal(errors.mock.callCount(), 1);
+  observer.goalChanged({ ...active });
+  await nextEventLoopTurn();
+  assert.equal(goals.length, 2, 'a successfully delivered duplicate is suppressed');
+});
+
+test('failed Plan delivery is logged once and retried only after another domain update', async (t) => {
+  const plans: number[] = [];
+  const errors = t.mock.method(console, 'error', () => undefined);
+  const observer = new AcpSessionDomainObservation({
+    sessionId: 'session-1',
+    queryPlan: async () => page(4),
+    goalNotify: () => undefined,
+    planNotify: () => async (status) => {
+      plans.push(status.storeVersion);
+      if (plans.length === 1) throw new Error('temporary notification failure');
+    },
+  });
+  t.after(() => observer.dispose());
+
+  observer.planChanged();
+  await waitFor(() => errors.mock.callCount() === 1);
+  await delay(100);
+  assert.deepEqual(plans, [4], 'a failed send is not automatically retried');
+  assert.match(String(errors.mock.calls[0]?.arguments[0]), /Plan status delivery failed/);
+
+  observer.planChanged();
+  await waitFor(() => plans.length === 2);
+  assert.deepEqual(plans, [4, 4], 'failure did not mark the Plan as delivered');
+  assert.equal(errors.mock.callCount(), 1);
+  observer.planChanged();
+  await nextEventLoopTurn();
+  assert.equal(plans.length, 2, 'a successfully delivered duplicate is suppressed');
+});
 
 test('canonical Plan replacement rereads even when Goal is unchanged and rejects an old page', async () => {
   const reads: Array<(result: PlanQueryResult) => void> = [];
