@@ -119,6 +119,8 @@ Goal/Plan 成功响应表示 Host 已接受该操作，不表示任务成功完�
 
 域通知是最新权威状态，不是每次转换的审计日志。允许合并中间刷新；同一 attachment 内不得被迟到旧结果回退。Goal 以 goalId/revision 去重，Plan 以 storeVersion 去重；重连或 canonical replacement 必须失效旧请求并重新读取，不跨 Host epoch 盲比版本数。
 
+Goal 与 Plan 域通知均为尽力投递：发送失败只记录 stderr，不自动重试；若没有后续域更新或 canonical replacement，客户端可能保留旧视图，应通过 `_maka/goal/query` 或 `_maka/plan/query` 恢复权威状态。有界退避只用于刷新 Plan 提示时的 Host 查询失败，不用于通知发送失败。
+
 不保证响应先于通知：Host 可在请求尚未返回时产生输出或域变化，客户端必须先注册 handler，再按 Session、实体 ID 和版本关联。只有 Turn 终态通知需要严格等待该 Turn 的文本/工具输出 flush；域通知不充当输出完成屏障。
 
 ### 4.3 错误与未知结果
@@ -133,7 +135,8 @@ Goal/Plan 成功响应表示 Host 已接受该操作，不表示任务成功完�
 | Plan start 丢响应 | 可复用 PR6 有界 `turn.query` 核实精确 turnId；只有完整且可关联的 plan 与 turn 结果都可建立才返回正常成功，否则保留 outcome_unknown，不伪造 PlanControlResult |
 | Goal arm 丢响应 | query 可展示当前事实，但相同 condition/budget 不证明原请求成功；保留不确定性，不能据此自动重新 arm |
 | Plan control persistence_failed | 保留 Host code 及未知结果含义；query 恢复可见状态，不自动变更 |
-| 状态刷新失败 | 不撤销已确认 mutation，不虚报业务终态；保留 dirty，限定重试，日志写 stderr；显式 query 仍能返回可诊断错误 |
+| Plan 状态刷新中的 Host 查询失败 | 不撤销已确认 mutation，不虚报业务终态；保留 dirty，限定重试，日志写 stderr；显式 query 仍能返回可诊断错误 |
+| Goal/Plan 域通知发送失败 | 日志写 stderr，不自动重试发送，也不撤销已确认 mutation；客户端通过显式 query 恢复权威状态 |
 
 未确认是否生效的 mutation 必须保留已准备的合法观察/交互资源，直到权威事实、close 或 dispose 决定其生命周期。请求 signal 的结束不等于 retained attachment 的结束。
 

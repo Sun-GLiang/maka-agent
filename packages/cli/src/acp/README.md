@@ -113,6 +113,12 @@ for the full proposal, execution, and step projection. A client without the
 notification preference can still use every request. Register notification
 handlers before sending mutations: a Host change can precede its request result.
 
+Both domain notifications use best-effort delivery: a rejected send is logged to
+stderr and is not automatically retried. Without a later domain update or
+canonical replacement, the client may keep an older view; use `_maka/goal/query`
+or `_maka/plan/query` to recover authoritative state. The bounded backoff applies
+only to failed Host reads while refreshing Plan hints, not notification sends.
+
 Successful mutation responses mean Host admission, not task completion. A lost
 dispatched response returns `error.data.code: outcome_unknown` with the original
 Session and available entity/operation/Turn identity. The adapter never resends
