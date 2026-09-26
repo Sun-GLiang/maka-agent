@@ -617,10 +617,11 @@ test('WorkHub Host queue owns restored, consumed and retracted rows without tran
   await act(() => project('queued'));
   assert.deepEqual(h.controller.messageQueue.entries, [entry]);
   assert.deepEqual(h.controller.transientMessages, []);
-  await act(() => h.emit({ type: 'steering_message', id: 'consumed', turnId: 'active-turn', ts: 3, messageId: entry.messageId, content: entry.content }));
   await act(() => project('in_flight'));
+  assert.deepEqual(h.controller.messageQueue.entries, [{ ...entry, state: 'in_flight' }], 'a pulled message stays pending until the runtime places it');
+  await act(() => h.emit({ type: 'steering_message', id: 'consumed', turnId: 'active-turn', ts: 3, messageId: entry.messageId, content: entry.content }));
   assert.deepEqual(h.controller.messageQueue.entries, []);
-  assert.deepEqual(h.controller.transientMessages, [], 'an in-flight snapshot cannot resurrect consumed steering');
+  assert.deepEqual(h.controller.transientMessages, []);
   await act(() => project('queued'));
   await act(async () => { await h.controller.deleteQueuedEntry(entry.entryId); });
   await act(() => h.emit({ type: 'queue_update', id: 'removed', turnId: 'active-turn', ts: 4, steering: [], followup: [], steeringEntries: [] }));
@@ -683,9 +684,9 @@ test('WorkHub defaults to follow-up and moves each message into its admitted suc
     h.emit({ type: 'text_delta', id: 'successor-output', turnId: 'successor', messageId: 'successor-answer', ts: 3, text: 'Responding to first follow-up' });
   });
   assert.equal(h.controller.liveTurn?.steps[0]?.text?.text, 'Responding to first follow-up');
-  assert.deepEqual(h.controller.transientMessages.map(({ id, text, attachments, hostTurnId, transientPlacement, pendingSteering }) =>
-    ({ id, text, attachments, hostTurnId, transientPlacement, pendingSteering })), [{
-    id: first, text: 'first follow-up', attachments, hostTurnId: 'successor', transientPlacement: 'current_turn', pendingSteering: false,
+  assert.deepEqual(h.controller.transientMessages.map(({ id, text, attachments, hostTurnId, transientPlacement }) =>
+    ({ id, text, attachments, hostTurnId, transientPlacement })), [{
+    id: first, text: 'first follow-up', attachments, hostTurnId: 'successor', transientPlacement: 'transcript',
   }], 'the admitted prompt must accompany its live answer before transcript publication');
   await act(() => h.emit({ type: 'queue_update', id: 'remaining', turnId: 'successor', ts: 3,
     steering: [], followup: ['second follow-up'], followupEntries: entries.slice(1) }));
@@ -754,7 +755,7 @@ test('follow-up admission before an uncertain response keeps its successor place
   h.setSteerResult('unknown');
   h.onSteer(([, messageId]) => h.emit({ type: 'message_admission', id: 'admitted', turnId: 'successor', messageId, ts: 2, outcome: 'admitted' }));
   await act(async () => { assert.equal(await h.controller.send('next request', []), true); });
-  assert.equal(h.controller.transientMessages[0]?.transientPlacement, 'current_turn');
+  assert.equal(h.controller.transientMessages[0]?.transientPlacement, 'transcript');
   assert.equal(h.controller.transientMessages[0]?.hostTurnId, 'successor');
   assert.equal(h.controller.error, undefined);
 });
