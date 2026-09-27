@@ -146,7 +146,6 @@ function useSidebarHoverCardTrigger(
 export interface SessionRowActions {
   onToggleFlag(sessionId: string, next: boolean): void | Promise<void>;
   onArchive(sessionId: string): void | Promise<void>;
-  onUnarchive(sessionId: string): void | Promise<void>;
   onRename(sessionId: string, name: string): void | Promise<void>;
   /**
    * Re-file ONE task under another project (`projectId`), or out of every
@@ -1460,21 +1459,17 @@ function SessionItemActions(props: {
     [],
   );
 
-  // Where this task may go, asked of the shell rather than derived here: the
-  // rail holds no project list beyond the rows it draws, and one Host's
-  // projects are not another's. The row that leaves every project is offered
-  // only while the task is in one.
-  const moveTargets = useMemo(() => {
-    const currentProjectId = props.session.projectId ?? null;
-    return props.moveTargets
-      .filter((target) => target.projectId !== currentProjectId)
-      .filter((target) => target.projectId !== null || currentProjectId !== null)
-      .map((target) => ({
+  // The provider resolves project membership and destination eligibility.
+  // An exit remains valid even when the current project cannot receive tasks.
+  const moveTargets = useMemo(
+    () =>
+      props.moveTargets.map((target) => ({
         label: target.projectId === null ? copy.moveToNoProject : (target.name ?? ''),
         onClick: () =>
           runRowAction('move', () => actions.onMoveToProject?.(props.session.id, target.projectId)),
-      }));
-  }, [actions, copy.moveToNoProject, props.moveTargets, props.session.id, props.session.projectId]);
+      })),
+    [actions, copy.moveToNoProject, props.moveTargets, props.session.id],
+  );
 
   function runRowAction(actionId: SessionRowActionId, action: () => void | Promise<void>) {
     if (pendingActionRef.current) return;
@@ -1557,14 +1552,10 @@ function SessionItemActions(props: {
                 // reachable only for a task already archived, which is the step
                 // that makes the intent deliberate.
                 {
-                  label: props.session.isArchived ? copy.unarchive : copy.archive,
-                  icon: props.session.isArchived ? ArchiveRestore : Archive,
+                  label: copy.archive,
+                  icon: Archive,
                   onClick: () =>
-                    runRowAction('archive', () =>
-                      props.session.isArchived
-                        ? actions.onUnarchive(props.session.id)
-                        : actions.onArchive(props.session.id),
-                    ),
+                    runRowAction('archive', () => actions.onArchive(props.session.id)),
                 },
                 // No submenu to build when the shell has no project authority or
                 // there is nowhere to move the task to. `moveTargets` already

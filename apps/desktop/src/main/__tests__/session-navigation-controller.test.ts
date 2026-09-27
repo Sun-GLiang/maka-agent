@@ -127,7 +127,7 @@ function ports(
 ): SessionNavigationPorts {
   return {
     sessionsRef: { current: sessions },
-    pendingSessionRowActionsRef: { current: new Set<string>() },
+    acquireAutomaticQueryBlock: () => ({ release: () => undefined }),
     activateSession: (sessionId) => calls.push(`activate:${sessionId ?? 'none'}`),
     clearSessionRendererState: (sessionId) => calls.push(`clear:${sessionId}`),
     refreshSessions: async () => sessions,

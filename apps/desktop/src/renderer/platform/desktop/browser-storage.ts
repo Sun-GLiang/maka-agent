@@ -17,8 +17,18 @@
  * under the License.
  */
 
-/** Compatibility entry point; quote state now belongs to Conversation. */
-import { useComposerQuotes } from './features/conversation/index.js';
+export function safeLocalStorageGet(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
 
-export { useComposerQuotes };
-export const useAppShellComposerQuotes: typeof useComposerQuotes = useComposerQuotes;
+export function safeLocalStorageSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Storage may be unavailable in restricted or test renderer contexts.
+  }
+}

@@ -1639,18 +1639,6 @@ export interface MakaBridge {
       };
     };
   };
-  notifications: {
-    /** Fire-and-forget: report that an agent turn reached a terminal
-     * state or is waiting on the user. `title` is the session name,
-     * `body` the start of the reply, error message, or question; main
-     * sanitizes + falls back to generic copy. Main gates on the product
-     * toggle + window focus before raising a native OS notification. */
-    runEnded(payload: {
-      kind: 'completed' | 'errored' | 'waiting';
-      title?: string;
-      body?: string;
-    }): Promise<void>;
-  };
   onboarding: {
     getSnapshot(): Promise<OnboardingSnapshot>;
     getSessionUpdate(sessionId: string): Promise<DesktopOnboardingSessionUpdate | null>;
@@ -1698,6 +1686,7 @@ export interface MakaBridge {
   };
   attachments: {
     pickDirectory(): Promise<{ ok: true; reference: import('@maka/core/events').DirectoryReference } | { ok: false; reason: 'cancelled' }>;
+    detectDirectories(files: readonly File[]): Promise<boolean[]>;
     pickFiles(): Promise<
       | {
           ok: true;

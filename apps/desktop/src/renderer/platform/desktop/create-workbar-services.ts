@@ -19,11 +19,13 @@
 
 import type { MakaBridge } from '../../../preload/bridge-contract.js';
 import type { ShellRunUpdate } from '@maka/core/events';
+import { AttachmentIngestBlockedError } from '@maka/core/attachments';
 import {
   isDesktopTerminalShellRun,
   isTerminalShellRunStatus,
 } from '@maka/core/shell-run';
 import type { WorkbarServices } from '../../features/workbar';
+import { createReviewBaseBranchPreferences } from './review-base-branch-preferences.js';
 import { readSettledMessagesFrom } from './session-message-settlement.js';
 import { expectSessionUpdate } from './create-session-settings-services.js';
 
@@ -97,6 +99,9 @@ export function createDesktopWorkbarServices(
       if (result.reason === 'outcome_unknown') {
         return { kind: 'outcome_unknown' };
       }
+      // Keep the classified refusal so the companion can name the attachment
+      // rule that blocked the send, as the main composer does.
+      if (result.reason === 'attachment_blocked') throw new AttachmentIngestBlockedError(result.code);
       throw new Error('Runtime Host refused the follow-up Message');
     }
     return result.disposition === 'turn_started' && result.turnId
@@ -105,6 +110,7 @@ export function createDesktopWorkbarServices(
   };
 
   return {
+    reviewBaseBranchPreference: createReviewBaseBranchPreferences(),
     popupMenu: (input) => bridge.appWindow.popupMenu(input),
     review: {
       read: (input) => bridge.gitReview.read(input),

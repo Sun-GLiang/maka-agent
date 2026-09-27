@@ -32,6 +32,7 @@ import type {
   ArtifactSaveResult,
   ArtifactTextReadResult,
 } from '@maka/core/artifacts';
+import type { AttachmentIngestBlockedCode } from '@maka/core/attachments';
 import type { BrowserState, BrowserViewRect } from '@maka/core/browser';
 import type { GitReviewReadResult, GitReviewSource } from '@maka/core/git-review';
 import type { PermissionMode } from '@maka/core/permission';
@@ -167,6 +168,7 @@ export interface WorkbarAttachmentsService {
     | { ok: true; base64: string; mimeType: string }
     | { ok: false; reason: string }
   >;
+  detectDirectories?(files: readonly File[]): Promise<readonly boolean[]>;
 }
 
 export interface WorkbarWorkBoardService {
@@ -183,6 +185,7 @@ export type SideChatSendResult =
   | { ok: true; turnId: string; steered?: false }
   | { ok: true; turnId: string; steered: true; messageId: string }
   | { ok: false; reason: 'outcome_unknown'; messageId: string }
+  | { ok: false; reason: 'attachment_blocked'; code: AttachmentIngestBlockedCode; messageId?: never }
   | { ok: false; reason?: string; messageId?: never };
 
 export type SideChatFollowUpResult =
@@ -284,6 +287,15 @@ export interface SideChatSessionPort {
 export interface WorkbarServices {
   popupMenu(input: import('../../../shared/native-menu.js').NativeMenuRequest): Promise<string | null>;
   readonly review: WorkbarReviewService;
+  /**
+   * Explicit qualified refs persist per Session across panel/app restarts.
+   * `null` means unpinned: new Sessions follow their repository's current default.
+   * Unavailable persistence reads as null; writes are best-effort and never throw.
+   */
+  readonly reviewBaseBranchPreference: {
+    read(sessionId: string): string | null;
+    write(sessionId: string, branch: string | null): void;
+  };
   readonly terminal: WorkbarTerminalService;
   readonly browser: WorkbarBrowserService;
   readonly artifacts: WorkbarArtifactsService;

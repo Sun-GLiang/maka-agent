@@ -101,6 +101,7 @@ export function useSessionNavigationController(
   // be upstream of the rail, where a single ordinary `function` declaration
   // anywhere in the chain silently undoes the whole thing (#4109).
   const portsRef = useRef(ports);
+  const pendingSessionRowActionsRef = useRef(new Set<string>());
   useLayoutEffect(() => {
     portsRef.current = ports;
   });
@@ -109,9 +110,11 @@ export function useSessionNavigationController(
     () =>
       createSessionNavigationRowActions({
         uiLocale: locale,
+        acquireAutomaticQueryBlock: (sessionIds) =>
+          portsRef.current.acquireAutomaticQueryBlock(sessionIds),
         clearSessionRendererState: (sessionId) =>
           portsRef.current.clearSessionRendererState(sessionId),
-        pendingSessionRowActionsRef: portsRef.current.pendingSessionRowActionsRef,
+        pendingSessionRowActionsRef,
         refreshSessions: () => portsRef.current.refreshSessions(),
         service,
         sessionsRef: portsRef.current.sessionsRef,

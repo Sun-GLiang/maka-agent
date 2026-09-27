@@ -109,6 +109,7 @@ import { createAppUpdateService } from "./app-update-service.js";
 import { createAttachmentApprovalRegistry } from "./attachment-approval.js";
 import { renderAttachmentPreview, resizeImageForAttachment } from "./attachment-resize-native.js";
 import { registerAttachmentPreviewIpc } from "./attachment-preview.js";
+import { registerAttachmentDirectoryDetectionIpc } from "./attachment-directory-detection.js";
 import { readFileCapped, resolvePickedAttachments } from "./attachment-ingest.js";
 import { DesktopSessionLocalStore } from './session-local-store.js';
 import { createSessionLocalChangedEmitter, DesktopSessionLocalService, desktopSessionLocalPartition, registerDesktopSessionLocalIpc, type DesktopSessionLocalTarget } from './session-local-service.js';
@@ -152,7 +153,7 @@ import {
   registerTaskSubmissionReadinessIpc,
   type DesktopModelTargetResolution,
 } from "./task-submission-readiness-main.js";
-import { registerNotificationsIpc } from "./notifications-ipc-main.js";
+import { createRunNotifier } from "./notifications-main.js";
 import { registerMarkdownSaveIpc } from "./markdown-save-ipc-main.js";
 import { registerPetPackIpc } from "./pet-pack-import.js";
 import { registerWorkBoardIpc } from "./work-board-ipc-main.js";
@@ -972,8 +973,7 @@ registerPetPackIpc({
   settingsStore,
   resolveLocale: () => desktopLocale.resolve(),
 });
-registerNotificationsIpc({
-  ipcMain,
+const notifyRun = createRunNotifier({
   settingsStore,
   locale: desktopLocale,
   mainWindowController,
@@ -1149,6 +1149,7 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
       ? { transcriptHistoryBytes: PARTIAL_HISTORY_TRANSCRIPT_BYTES }
       : {}),
     completeDesktopInteractionTurn,
+    notifyRun,
     createSessionCopyCleanup: ({ removeSession, resumeSessionCopy }) =>
       createSessionCopyCleanupAuthority({
         workspaceRoot,
@@ -1972,6 +1973,7 @@ function registerPersistentClientIpc(): void {
       files: attachmentApprovals.issueApprovals(event.sender.id, chosen),
     };
   });
+  registerAttachmentDirectoryDetectionIpc({ ipcMain });
   registerAttachmentPreviewIpc({
     ipcMain,
     approvals: attachmentApprovals,
