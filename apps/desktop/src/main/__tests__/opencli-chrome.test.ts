@@ -105,7 +105,12 @@ test('Windows opens the store page in installed Chrome, not the default browser'
   };
 
   await openInChrome(url, openExternal, 'win32', { PROGRAMFILES: join(local, 'missing'), LOCALAPPDATA: local });
-  for (let waited = 0; !existsSync(received) && waited < 5_000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+  // The detached process resolves after spawn, and shell redirection can create
+  // the file before printf has written the URL. Wait for the expected content.
+  for (let waited = 0; waited < 5_000; waited += 50) {
+    if (existsSync(received) && readFileSync(received, 'utf8') === url) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
   assert.equal(readFileSync(received, 'utf8'), url);
   assert.deepEqual(defaultBrowser, []);
 
