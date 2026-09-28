@@ -209,6 +209,7 @@ test('late restored-session updates stay quarantined while the history gap is pe
       { state, createConnection: protocol.factory },
     );
   const first = make();
+  const blockedWrite = 'node_modules/.maka-acp-restore-write';
   try {
     assert.equal((await first.execute(request('first'), executorContext([]))).status, 'completed');
     await first.dispose();
@@ -227,6 +228,14 @@ test('late restored-session updates stay quarantined while the history gap is pe
         title: 'Historical tool',
       });
       assert.deepEqual(await protocol.requestPermission(), { outcome: { outcome: 'cancelled' } });
+      const workspaceAccess = await Promise.allSettled([
+        protocol.readTextFile('package.json'),
+        protocol.writeTextFile(blockedWrite, 'must not be written'),
+      ]);
+      assert.deepEqual(
+        workspaceAccess.map((result) => result.status),
+        ['rejected', 'rejected'],
+      );
       releaseGapWrite();
       const result = await execution;
       assert.equal(result.status, 'failed');
@@ -240,6 +249,7 @@ test('late restored-session updates stay quarantined while the history gap is pe
     }
   } finally {
     await first.dispose();
+    await rm(join(process.cwd(), blockedWrite), { force: true });
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
@@ -362,6 +372,115 @@ test('failed Plugin acknowledgement leaves a visible gap', async () => {
     assert.equal(storage.record().phase, 'prompt_pending');
   } finally {
     await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('a terminal result abandoned before durable consumption becomes a history gap', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const storage = durableState();
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { state: storage.state, createConnection: protocol.factory },
+  );
+  try {
+    assert.equal(
+      (await executor.execute(request('first'), executorContext([]))).status,
+      'completed',
+    );
+    await executor.abandonExecution('session-a', 'turn-first');
+    assert.equal(storage.record().phase, 'history_gap');
+    assert.equal(
+      (await executor.inspectConversation({ conversationKey: 'session-a', cwd: process.cwd() }))
+        .readiness,
+      'history_gap',
+    );
+    const blocked = await executor.execute(request('second'), executorContext([]));
+    assert.equal(blocked.status, 'failed');
+    if (blocked.status === 'failed') assert.equal(blocked.code, 'acp_history_gap');
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('fresh configure initialization failure remains retryable', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const storage = durableState();
+  let rejectWrite = true;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      createConnection: protocol.factory,
+      state: {
+        ...storage.state,
+        write: async (key, record) => {
+          if (rejectWrite) throw new Error('Storage unavailable');
+          await storage.state.write!(key, record);
+        },
+      },
+    },
+  );
+  const input = {
+    conversationKey: 'session-a',
+    cwd: process.cwd(),
+    configuration: { model: 'default' },
+  };
+  try {
+    await assert.rejects(executor.configureConversation(input, new AbortController().signal));
+    assert.equal((await executor.inspectConversation(input)).readiness, 'ready');
+    rejectWrite = false;
+    await executor.configureConversation(input, new AbortController().signal);
+    assert.equal((await executor.inspectConversation(input)).readiness, 'ready');
+    assert.equal(protocol.sessions, 1);
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('concurrent restore retries share one replacement Session', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.supportsRestore = true;
+  const storage = durableState();
+  const make = () =>
+    new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      { state: storage.state, createConnection: protocol.factory },
+    );
+  const first = make();
+  try {
+    await first.execute(request('first'), executorContext([]));
+    await first.acknowledgeExecution('session-a', 'turn-first');
+    await first.dispose();
+    const restored = make();
+    const input = {
+      conversationKey: 'session-a',
+      cwd: process.cwd(),
+      configuration: { model: 'default' },
+    };
+    try {
+      protocol.restoreFailure = true;
+      await assert.rejects(restored.configureConversation(input, new AbortController().signal));
+      protocol.restoreFailure = false;
+      const retries = await Promise.allSettled([
+        restored.configureConversation(input, new AbortController().signal),
+        restored.configureConversation(input, new AbortController().signal),
+      ]);
+      assert.equal(retries.filter((result) => result.status === 'fulfilled').length, 1);
+      assert.equal(protocol.resumes, 1);
+      assert.equal((await restored.inspectConversation(input)).readiness, 'ready');
+    } finally {
+      await restored.dispose();
+    }
+  } finally {
+    await first.dispose();
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
@@ -1047,6 +1166,8 @@ function fakeProtocol(): {
   loads: number;
   notifyUpdate(update: unknown): void;
   requestPermission(): Promise<unknown>;
+  readTextFile(path: string): Promise<unknown>;
+  writeTextFile(path: string, content: string): Promise<unknown>;
   notifyConfiguration(model: string): void;
 } {
   const fixture = {
@@ -1069,6 +1190,8 @@ function fakeProtocol(): {
     loads: 0,
     notifyUpdate: (_update: unknown): void => {},
     requestPermission: async (): Promise<unknown> => undefined,
+    readTextFile: async (_path: string): Promise<unknown> => undefined,
+    writeTextFile: async (_path: string, _content: string): Promise<unknown> => undefined,
     notifyConfiguration: (_model: string): void => {},
     factory: undefined as unknown as AcpConnectionFactory,
   };
@@ -1099,6 +1222,14 @@ function fakeProtocol(): {
           toolCall: { toolCallId: 'late-old-tool', title: 'Allow edit?' },
           options: [{ optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' }],
         } as never,
+      });
+    fixture.readTextFile = async (path) =>
+      await requests.get(methods.client.fs.readTextFile)?.({
+        params: { sessionId: 'acp-session', path } as never,
+      });
+    fixture.writeTextFile = async (path, content) =>
+      await requests.get(methods.client.fs.writeTextFile)?.({
+        params: { sessionId: 'acp-session', path, content } as never,
       });
     fixture.notifyConfiguration = (model) => {
       notifications.get(methods.client.session.update)?.({

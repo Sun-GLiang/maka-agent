@@ -291,6 +291,9 @@ export class AcpExecutor implements PluginExecutorProvider {
       if (!wasConnected || session.lost) {
         await this.#lose(session);
         if (session.record?.sessionId && !session.historyGap) session.restoreFailed = true;
+        const retryable = !session.acpSessionId && !session.continuityReserved && !session.record;
+        if (retryable && this.#sessions.get(session.conversationKey) === session)
+          this.#sessions.delete(session.conversationKey);
       }
       throw error;
     } finally {
@@ -462,8 +465,8 @@ export class AcpExecutor implements PluginExecutorProvider {
           'acp_history_only',
         );
       await existing.loss;
-      if (this.#sessions.get(request.conversationKey) === existing)
-        this.#sessions.delete(request.conversationKey);
+      if (this.#sessions.get(request.conversationKey) !== existing) return this.#session(request);
+      this.#sessions.delete(request.conversationKey);
     }
     const created: RetainedSession = {
       conversationKey: request.conversationKey,
@@ -697,6 +700,30 @@ export class AcpExecutor implements PluginExecutorProvider {
     session.awaitingAck = undefined;
   }
 
+  /** The external turn settled, but Maka did not durably consume its terminal event. */
+  async abandonExecution(conversationKey: string, turnId: string): Promise<void> {
+    const session = this.#sessions.get(conversationKey);
+    if (
+      !session?.record ||
+      session.awaitingAck !== turnId ||
+      session.record.phase !== 'prompt_pending' ||
+      session.record.pendingTurnId !== turnId
+    )
+      return;
+    session.historyGap = true;
+    session.awaitingAck = undefined;
+    session.record = {
+      ...session.record,
+      phase: 'history_gap',
+      pendingTurnId: undefined,
+    };
+    try {
+      await this.#state?.write?.(conversationKey, session.record);
+    } finally {
+      await this.#lose(session);
+    }
+  }
+
   async #applyInitialConfig(
     session: RetainedSession,
     values: Readonly<Record<string, string>>,
@@ -786,13 +813,13 @@ export class AcpExecutor implements PluginExecutorProvider {
         if (params.sessionId === session.acpSessionId) this.#acceptUpdate(session, params.update);
       })
       .onRequest(methods.client.fs.readTextFile, async ({ params }) => {
-        this.#assertSession(session, params.sessionId);
+        this.#assertWorkspaceAccess(session, params.sessionId);
         return {
           content: await readWorkspaceTextFile(session.cwd, params.path, params.line, params.limit),
         };
       })
       .onRequest(methods.client.fs.writeTextFile, async ({ params }) => {
-        this.#assertSession(session, params.sessionId);
+        this.#assertWorkspaceAccess(session, params.sessionId);
         await writeWorkspaceTextFile(session.cwd, params.path, params.content);
         return {};
       })
@@ -843,6 +870,16 @@ export class AcpExecutor implements PluginExecutorProvider {
     }
     if (update.sessionUpdate === 'tool_call') this.#acceptTool(active, update);
     if (update.sessionUpdate === 'tool_call_update') this.#acceptTool(active, update);
+  }
+
+  #assertWorkspaceAccess(session: RetainedSession, sessionId: string): void {
+    this.#assertSession(session, sessionId);
+    if (session.restoring || session.historyGap || session.lost) {
+      throw new AcpRuntimeError(
+        'ACP filesystem access is unavailable while Session history is untrusted',
+        'acp_history_gap',
+      );
+    }
   }
 
   #acceptTool(active: ActivePrompt, update: ToolCall | ToolCallUpdate): void {

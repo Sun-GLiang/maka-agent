@@ -195,6 +195,8 @@ test('late draft discovery cannot replace the current target; existing tasks ins
     assert.equal(latest.changing, true);
     await act(async () => {
       await assert.rejects(latest.select({ executorId: 'external', configuration: { model: 'other' } }), /pending/);
+      await assert.rejects(latest.restore(), /pending/);
+      assert.equal(latest.entry?.readiness, 'ready', 'a rejected restore is not shown as active');
       serverModel = 'fast';
       confirm({ ok: true, session: { executorConfig: { model: 'fast' } } });
       await pending;

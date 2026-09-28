@@ -35,6 +35,7 @@ for (const result of [
       const root = new Context();
       const service = new PluginExecutorService(root);
       const acknowledgements: string[] = [];
+      const abandonments: string[] = [];
       root
         .extend({
           maka: { rootId: 'profile', packageId: 'fixture', entryId: 'provider', generation: 1 },
@@ -44,6 +45,9 @@ for (const result of [
           execute: async () => result,
           acknowledgeExecution: async (conversationKey, turnId) => {
             acknowledgements.push(`${conversationKey}/${turnId}`);
+          },
+          abandonExecution: async (conversationKey, turnId) => {
+            abandonments.push(`${conversationKey}/${turnId}`);
           },
         });
       const backend = new PluginExecutorBackend({
@@ -75,9 +79,11 @@ for (const result of [
             [],
             'an unconsumed terminal event cannot be acknowledged',
           );
+          assert.deepEqual(abandonments, ['session-a/turn-a']);
         } else {
           assert.equal((await iterator.next()).done, true);
           assert.deepEqual(acknowledgements, ['session-a/turn-a']);
+          assert.deepEqual(abandonments, []);
         }
       } finally {
         await backend.dispose();
@@ -86,6 +92,31 @@ for (const result of [
     });
   }
 }
+
+test('failed Plugin acknowledgement abandons the settled external execution', async () => {
+  const { root, binding } = fixture(async () => ({ status: 'completed', text: 'done' }));
+  const abandoned: string[] = [];
+  const backend = new PluginExecutorBackend({
+    sessionId: 'session-a',
+    cwd: '/workspace',
+    binding: {
+      ...binding,
+      acknowledgeExecution: async () => {
+        throw new Error('checkpoint unavailable');
+      },
+      abandonExecution: async (conversationKey, turnId) => {
+        abandoned.push(`${conversationKey}/${turnId}`);
+      },
+    },
+  });
+  try {
+    await collect(backend.send({ turnId: 'turn-a', text: 'task' }));
+    assert.deepEqual(abandoned, ['session-a/turn-a']);
+  } finally {
+    await backend.dispose();
+    await root.fiber.dispose();
+  }
+});
 
 test('executor backend converts plugin output and result to ordinary Session events', async () => {
   const { root, binding } = fixture(async (request, context) => {
