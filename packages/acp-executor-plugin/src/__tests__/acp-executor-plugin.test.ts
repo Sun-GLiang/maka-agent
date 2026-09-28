@@ -209,7 +209,7 @@ test('late restored-session updates stay quarantined while the history gap is pe
       { state, createConnection: protocol.factory },
     );
   const first = make();
-  const blockedWrite = 'node_modules/.maka-acp-restore-write';
+  const blockedWrite = join(process.cwd(), 'node_modules/.maka-acp-restore-write');
   try {
     assert.equal((await first.execute(request('first'), executorContext([]))).status, 'completed');
     await first.dispose();
@@ -228,14 +228,14 @@ test('late restored-session updates stay quarantined while the history gap is pe
         title: 'Historical tool',
       });
       assert.deepEqual(await protocol.requestPermission(), { outcome: { outcome: 'cancelled' } });
-      const workspaceAccess = await Promise.allSettled([
-        protocol.readTextFile('package.json'),
-        protocol.writeTextFile(blockedWrite, 'must not be written'),
+      await Promise.all([
+        assert.rejects(protocol.readTextFile(join(process.cwd(), 'package.json')), {
+          code: 'acp_history_gap',
+        }),
+        assert.rejects(protocol.writeTextFile(blockedWrite, 'must not be written'), {
+          code: 'acp_history_gap',
+        }),
       ]);
-      assert.deepEqual(
-        workspaceAccess.map((result) => result.status),
-        ['rejected', 'rejected'],
-      );
       releaseGapWrite();
       const result = await execution;
       assert.equal(result.status, 'failed');
@@ -249,7 +249,7 @@ test('late restored-session updates stay quarantined while the history gap is pe
     }
   } finally {
     await first.dispose();
-    await rm(join(process.cwd(), blockedWrite), { force: true });
+    await rm(blockedWrite, { force: true });
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
@@ -410,7 +410,7 @@ test('fresh configure initialization failure remains retryable', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
   const storage = durableState();
-  let rejectWrite = true;
+  let rejectRead = true;
   const executor = new AcpExecutor(
     adapter,
     { executable: fixture.executable },
@@ -418,9 +418,9 @@ test('fresh configure initialization failure remains retryable', async () => {
       createConnection: protocol.factory,
       state: {
         ...storage.state,
-        write: async (key, record) => {
-          if (rejectWrite) throw new Error('Storage unavailable');
-          await storage.state.write!(key, record);
+        read: async (key) => {
+          if (rejectRead) throw new Error('Storage unavailable');
+          return await storage.state.read!(key);
         },
       },
     },
@@ -431,9 +431,12 @@ test('fresh configure initialization failure remains retryable', async () => {
     configuration: { model: 'default' },
   };
   try {
-    await assert.rejects(executor.configureConversation(input, new AbortController().signal));
+    await assert.rejects(
+      executor.configureConversation(input, new AbortController().signal),
+      /Storage unavailable/u,
+    );
+    rejectRead = false;
     assert.equal((await executor.inspectConversation(input)).readiness, 'ready');
-    rejectWrite = false;
     await executor.configureConversation(input, new AbortController().signal);
     assert.equal((await executor.inspectConversation(input)).readiness, 'ready');
     assert.equal(protocol.sessions, 1);
