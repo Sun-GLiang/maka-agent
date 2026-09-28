@@ -230,9 +230,39 @@ export function waitForCatalogSession(
   });
 }
 
-/** A committed row at a newer revision is authoritative over an older snapshot of it. */
+/**
+ * A committed row at a newer revision is authoritative over an older snapshot
+ * of it. Equal revisions tie on the live run state's own order: a turn
+ * starting or ending does not move `revision`, so two same-revision reads can
+ * disagree about `runningTurnIds` — the run epoch says which observation is
+ * older, and the stale one must not overwrite the fresher (#5713).
+ *
+ * The epoch counter only orders observations of one Host generation.
+ * Generations themselves are not ordered, so a read from a different
+ * generation is never stale: a restarted Host must take the row over from its
+ * predecessor whatever the two counters read (#5713 review). A successful
+ * cross-generation response cannot exist on the wire, either: closing a
+ * connection rejects every in-flight request with `connection_lost`
+ * (client/connection.ts), so a lagging predecessor read never delivers after
+ * the successor's row has landed.
+ */
 function isStaleSummary(prior: DesktopSessionSummary, next: DesktopSessionSummary): boolean {
-  return prior.revision > next.revision;
+  if (prior.revision !== next.revision) return prior.revision > next.revision;
+  const priorGeneration = prior.runHostGeneration;
+  const nextGeneration = next.runHostGeneration;
+  if (
+    priorGeneration !== undefined &&
+    nextGeneration !== undefined &&
+    priorGeneration !== nextGeneration
+  ) {
+    return false;
+  }
+  const priorEpoch = prior.runEpoch;
+  const nextEpoch = next.runEpoch;
+  if (priorEpoch === undefined || nextEpoch === undefined || priorEpoch === nextEpoch) {
+    return false;
+  }
+  return priorEpoch > nextEpoch;
 }
 
 export const selectSessions = (state: SessionCatalogState): readonly DesktopSessionSummary[] =>

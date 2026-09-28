@@ -22,19 +22,9 @@ import type { PermissionMode } from '@maka/core/permission';
 import type { SessionBlockedReason, SessionStatus } from '@maka/core/session';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { UiCatalog, UiLocale } from '@maka/core/ui-locale';
+import { formatCompactTokenCount } from './compact-token-count.js';
 
 export type DayPeriod = 'morning' | 'noon' | 'afternoon' | 'evening';
-
-/** Compact token count: 999 → "999", 45,200 → "45.2k", 128,000 → "128k", 1,048,576 → "1M". */
-function formatCompactTokenCount(count: number): string {
-  if (count < 1_000) return `${count}`;
-  if (count >= 1_000_000) {
-    const millions = count / 1_000_000;
-    return `${millions >= 100 ? Math.round(millions) : Math.round(millions * 10) / 10}M`;
-  }
-  const thousands = count / 1_000;
-  return `${thousands >= 100 ? Math.round(thousands) : Math.round(thousands * 10) / 10}k`;
-}
 
 /** Wall-clock units per locale (zh uses words, en letters); each copy entry supplies its own. */
 interface DurationUnits {
@@ -101,14 +91,11 @@ export interface ConversationCopy {
     importing: string;
     sendLabel: string;
     queuedMessagesAriaLabel(count: number): string;
-    steeringPending: string;
-    followupPending: string;
-    queueShortcutsLabel: string;
-    queueShortcuts: { apple: string; other: string };
+    /** Noun label for the staging drawer when it holds only queued follow-ups —
+     * the collapsed badge reads "N 待发送". Mixed drawers use `stagedContext`. */
+    queuedMessages: string;
     promoteQueuedEntry: string;
     editQueuedEntry: string;
-    saveQueuedEntry: string;
-    cancelQueuedEntryEdit: string;
     deleteQueuedEntry: string;
     reorderQueuedEntry: string;
     stopLabel: string;
@@ -359,7 +346,7 @@ export interface ConversationCopy {
     resumeGoal: (condition: string, iteration: number, max: number) => string;
     /** Wall-clock elapsed label for the goal chip, e.g. "12m". */
     goalElapsed: (elapsedMs: number) => string;
-    /** Token usage label for the goal chip when a budget exists, e.g. "12k / 100k". */
+    /** Token usage label for the goal chip when a budget exists, e.g. "12K / 100K". */
     goalTokens: (spent: number, budget: number) => string;
     loadFailed: string;
     loading: string;
@@ -367,12 +354,8 @@ export interface ConversationCopy {
     loadEarlierHistory: string;
     quoteSelection: string;
     askInSidePanel: string;
-    /** Stages the quote as-is, with no annotation. */
-    quoteCommentSkip: string;
     noMessages: string;
-    branchBeforeInterrupt: string;
     sessionContextAriaLabel: string;
-    sessionLineageAriaLabel: string;
     titlebarIdentityAriaLabel: string;
     taskActions: string;
     openProjectFolderAction: string;
@@ -461,11 +444,8 @@ const CONVERSATION_COPY = {
       placeholder: '描述任务，@ 引用文件或会话，/ 选择技能…', textareaAriaLabel: '消息输入框', quoteCommentTitle: '引用注释', quoteCommentSave: '保存', quoteCommentCancel: '取消', selectedSkillsAriaLabel: '已选择的 Skill', removeSkillAriaLabel: (name) => `移除 Skill：${name}`, awaitingPermission: '等待你确认权限…',
       sending: '正在发送…', importing: '正在导入…', sendLabel: '发送',
       queuedMessagesAriaLabel: (count) => `${count} 条待发送消息`,
-      steeringPending: '调整方向 · 等待整批生效',
-      followupPending: '下一轮 · 每轮一条',
-      queueShortcutsLabel: '发送快捷键',
-      queueShortcuts: { apple: 'Cmd+Enter：转向（Steering）\nEnter：下一轮（Follow-up）\nShift+Enter：换行', other: 'Ctrl+Enter：转向（Steering）\nEnter：下一轮（Follow-up）\nShift+Enter：换行' },
-      promoteQueuedEntry: '调整方向', editQueuedEntry: '编辑', saveQueuedEntry: '保存', cancelQueuedEntryEdit: '取消编辑', deleteQueuedEntry: '删除', reorderQueuedEntry: '拖动排序',
+      queuedMessages: '待发送',
+      promoteQueuedEntry: '直接发送', editQueuedEntry: '编辑', deleteQueuedEntry: '删除', reorderQueuedEntry: '拖动排序',
       stopLabel: '停止', stopping: '停止中…',
       addContext: '添加上下文', stagedContext: '附加内容',
       selectModel: '选择模型', dropToImport: '松开以导入文件内容', addingAttachment: '正在添加附件', addFileOrDirectory: '添加文件', referenceFolder: '引用文件夹',
@@ -562,8 +542,8 @@ const CONVERSATION_COPY = {
       memory: '记忆', memoryAriaLabel: '本地记忆已启用', memoryTitle: '本地 MEMORY.md 已加入 agent 系统提示。点击进入设置 · 记忆管理。',
       clearGoal: (condition, iteration, max, status) => `自主执行目标进行中：「${condition}」（第 ${iteration}/${max} 轮，${status}）。系统每轮后自动续行；点击可清除目标、停止续行。`, clearGoalAriaLabel: (iteration, max) => `清除自主执行目标（已进行 ${iteration}/${max} 轮）`, goalProgress: (iteration, max) => `目标 ${iteration} / ${max}`, goalRunningAriaLabel: '自主目标正在运行', goalWaitingAriaLabel: '自主目标正在等待条件变化',
       goalPausedAriaLabel: '自主目标已暂停', pauseGoalAriaLabel: (iteration, max) => `暂停自主执行目标（已进行 ${iteration}/${max} 轮）`, resumeGoalAriaLabel: (iteration, max) => `恢复自主执行目标（已进行 ${iteration}/${max} 轮）`, pauseGoal: (condition, iteration, max, status) => `暂停自主执行目标：「${condition}」（第 ${iteration}/${max} 轮，${status}）。暂停后立即停止自动续行，不再消耗令牌；可随时恢复。`, resumeGoal: (condition, iteration, max) => `恢复自主执行目标：「${condition}」（第 ${iteration}/${max} 轮）。恢复后立即继续自动续行。`, goalElapsed: (elapsedMs) => formatGoalElapsedUnits(elapsedMs, { second: ' 秒', minute: ' 分钟', hour: ' 小时', day: ' 天' }), goalTokens: (spent, budget) => `${formatCompactTokenCount(spent)} / ${formatCompactTokenCount(budget)}`,
-      loadFailed: '任务载入失败', loading: '载入中…', retryLoad: '重试载入', loadEarlierHistory: '载入更早的记录', quoteSelection: '引用', askInSidePanel: '在侧栏追问', quoteCommentSkip: '直接引用', noMessages: '暂无消息',
-      branchBeforeInterrupt: '从中断前分支', sessionContextAriaLabel: '任务上下文', sessionLineageAriaLabel: '任务来源', sessionContextMore: (count) => `更多任务上下文（${count}）`,
+      loadFailed: '任务载入失败', loading: '载入中…', retryLoad: '重试载入', loadEarlierHistory: '载入更早的记录', quoteSelection: '引用', askInSidePanel: '在侧栏追问', noMessages: '暂无消息',
+      sessionContextAriaLabel: '任务上下文', sessionContextMore: (count) => `更多任务上下文（${count}）`,
       titlebarIdentityAriaLabel: '当前任务', taskActions: '任务操作', openProjectFolderAction: '打开项目文件夹', projectInfo: '项目信息', copyProjectPath: '复制路径',
       openParentSession: (name) => `返回父任务「${name}」`,
       revisionVersionsAriaLabel: '任务版本', revisionVersion: (current, total) => `版本 ${current} / ${total}`, previousRevision: '查看上一版本', nextRevision: '查看下一版本',
@@ -588,11 +568,8 @@ const CONVERSATION_COPY = {
       placeholder: '描述任務，@ 引用檔案，/ 選擇技能…', textareaAriaLabel: '訊息輸入框', quoteCommentTitle: '引用註解', quoteCommentSave: '儲存', quoteCommentCancel: '取消', selectedSkillsAriaLabel: '已選擇的 Skill', removeSkillAriaLabel: (name) => `移除 Skill：${name}`, awaitingPermission: '等待你確認權限…',
       sending: '正在傳送…', importing: '正在匯入…', sendLabel: '傳送',
       queuedMessagesAriaLabel: (count) => `${count} 條待發送訊息`,
-      steeringPending: '調整方向 · 等待整批生效',
-      followupPending: '下一輪 · 每輪一條',
-      queueShortcutsLabel: '傳送快速鍵',
-      queueShortcuts: { apple: 'Cmd+Enter：轉向（Steering）\nEnter：下一輪（Follow-up）\nShift+Enter：換行', other: 'Ctrl+Enter：轉向（Steering）\nEnter：下一輪（Follow-up）\nShift+Enter：換行' },
-      promoteQueuedEntry: '調整方向', editQueuedEntry: '編輯', saveQueuedEntry: '儲存', cancelQueuedEntryEdit: '取消編輯', deleteQueuedEntry: '刪除', reorderQueuedEntry: '拖動排序',
+      queuedMessages: '待發送',
+      promoteQueuedEntry: '直接傳送', editQueuedEntry: '編輯', deleteQueuedEntry: '刪除', reorderQueuedEntry: '拖動排序',
       stopLabel: '停止', stopping: '停止中…',
       addContext: '新增上下文', stagedContext: '附加內容',
       selectModel: '選擇模型', dropToImport: '鬆開以匯入檔案內容', addingAttachment: '正在新增附件', addFileOrDirectory: '新增檔案或目錄', referenceFolder: '引用資料夾',
@@ -689,8 +666,8 @@ const CONVERSATION_COPY = {
       memory: '記憶', memoryAriaLabel: '本地記憶已啟用', memoryTitle: '本地 MEMORY.md 已加入 agent 系統提示。點選進入設定 · 記憶管理。',
       clearGoal: (condition, iteration, max, status) => `自主執行目標進行中：「${condition}」（第 ${iteration}/${max} 輪，${status}）。系統每輪後自動續行；點選可清除目標、停止續行。`, clearGoalAriaLabel: (iteration, max) => `清除自主執行目標（已進行 ${iteration}/${max} 輪）`, goalProgress: (iteration, max) => `目標 ${iteration} / ${max}`, goalRunningAriaLabel: '自主目標正在執行', goalWaitingAriaLabel: '自主目標正在等待條件變化',
       goalPausedAriaLabel: '自主目標已暫停', pauseGoalAriaLabel: (iteration, max) => `暫停自主執行目標（已進行 ${iteration}/${max} 輪）`, resumeGoalAriaLabel: (iteration, max) => `恢復自主執行目標（已進行 ${iteration}/${max} 輪）`, pauseGoal: (condition, iteration, max, status) => `暫停自主執行目標：「${condition}」（第 ${iteration}/${max} 輪，${status}）。暫停後立即停止自動續行，不再消耗權杖；可隨時恢復。`, resumeGoal: (condition, iteration, max) => `恢復自主執行目標：「${condition}」（第 ${iteration}/${max} 輪）。恢復後立即繼續自動續行。`, goalElapsed: (elapsedMs) => formatGoalElapsedUnits(elapsedMs, { second: ' 秒', minute: ' 分鐘', hour: ' 小時', day: ' 天' }), goalTokens: (spent, budget) => `${formatCompactTokenCount(spent)} / ${formatCompactTokenCount(budget)}`,
-      loadFailed: '任務載入失敗', loading: '載入中…', retryLoad: '重試載入', loadEarlierHistory: '載入更早的記錄', quoteSelection: '引用', askInSidePanel: '在側欄追問', quoteCommentSkip: '直接引用', noMessages: '暫無訊息',
-      branchBeforeInterrupt: '從中斷前分支', sessionContextAriaLabel: '任務上下文', sessionLineageAriaLabel: '任務來源', sessionContextMore: (count) => `更多工上下文（${count}）`,
+      loadFailed: '任務載入失敗', loading: '載入中…', retryLoad: '重試載入', loadEarlierHistory: '載入更早的記錄', quoteSelection: '引用', askInSidePanel: '在側欄追問', noMessages: '暫無訊息',
+      sessionContextAriaLabel: '任務上下文', sessionContextMore: (count) => `更多工上下文（${count}）`,
       titlebarIdentityAriaLabel: '目前任務', taskActions: '任務操作', openProjectFolderAction: '開啟專案資料夾', projectInfo: '專案資訊', copyProjectPath: '複製路徑',
       openParentSession: (name) => `返回父任務「${name}」`,
       revisionVersionsAriaLabel: '任務版本', revisionVersion: (current, total) => `版本 ${current} / ${total}`, previousRevision: '檢視上一版本', nextRevision: '檢視下一版本',
@@ -715,11 +692,8 @@ const CONVERSATION_COPY = {
       placeholder: 'Describe a task, @ to reference files or sessions, / for skills…', textareaAriaLabel: 'Message input', quoteCommentTitle: 'Quote annotation', quoteCommentSave: 'Save', quoteCommentCancel: 'Cancel', selectedSkillsAriaLabel: 'Selected Skills', removeSkillAriaLabel: (name) => `Remove Skill: ${name}`, awaitingPermission: 'Waiting for your permission decision…',
       sending: 'Sending…', importing: 'Importing…', sendLabel: 'Send',
       queuedMessagesAriaLabel: (count) => `${count} queued message${count === 1 ? '' : 's'}`,
-      steeringPending: 'Steering · Applied together',
-      followupPending: 'Follow-up · One per turn',
-      queueShortcutsLabel: 'Send shortcuts',
-      queueShortcuts: { apple: 'Cmd+Enter: Steering\nEnter: Follow-up\nShift+Enter: New line', other: 'Ctrl+Enter: Steering\nEnter: Follow-up\nShift+Enter: New line' },
-      promoteQueuedEntry: 'Steer', editQueuedEntry: 'Edit', saveQueuedEntry: 'Save', cancelQueuedEntryEdit: 'Cancel editing', deleteQueuedEntry: 'Delete', reorderQueuedEntry: 'Drag to reorder',
+      queuedMessages: 'queued',
+      promoteQueuedEntry: 'Send now', editQueuedEntry: 'Edit', deleteQueuedEntry: 'Delete', reorderQueuedEntry: 'Drag to reorder',
       stopLabel: 'Stop', stopping: 'Stopping…',
       addContext: 'Add context', stagedContext: 'staged items',
       selectModel: 'Choose model', dropToImport: 'Drop to import file contents', addingAttachment: 'Adding attachment', addFileOrDirectory: 'Add files', referenceFolder: 'Reference folder',
@@ -813,8 +787,8 @@ const CONVERSATION_COPY = {
       memory: 'Memory', memoryAriaLabel: 'Local memory enabled', memoryTitle: 'Local MEMORY.md is included in the agent system prompt. Click to manage it in Settings · Memory.',
       clearGoal: (condition, iteration, max, status) => `Autonomous goal in progress: “${condition}” (iteration ${iteration}/${max}, ${status}). Maka continues after each iteration; click to clear the goal and stop continuing.`, clearGoalAriaLabel: (iteration, max) => `Clear autonomous goal after ${iteration}/${max} iterations`, goalProgress: (iteration, max) => `Goal ${iteration} of ${max}`, goalRunningAriaLabel: 'Autonomous goal running', goalWaitingAriaLabel: 'Autonomous goal waiting for conditions to change',
       goalPausedAriaLabel: 'Autonomous goal paused', pauseGoalAriaLabel: (iteration, max) => `Pause autonomous goal after ${iteration}/${max} iterations`, resumeGoalAriaLabel: (iteration, max) => `Resume autonomous goal after ${iteration}/${max} iterations`, pauseGoal: (condition, iteration, max, status) => `Pause autonomous goal: “${condition}” (iteration ${iteration}/${max}, ${status}). Pausing stops autonomous continuation immediately — no more tokens burn; resume any time.`, resumeGoal: (condition, iteration, max) => `Resume autonomous goal: “${condition}” (iteration ${iteration}/${max}). Resuming continues autonomous iteration immediately.`, goalElapsed: (elapsedMs) => formatGoalElapsedUnits(elapsedMs, { second: 's', minute: 'm', hour: 'h', day: 'd' }), goalTokens: (spent, budget) => `${formatCompactTokenCount(spent)} / ${formatCompactTokenCount(budget)}`,
-      loadFailed: 'Task failed to load', loading: 'Loading…', retryLoad: 'Retry', loadEarlierHistory: 'Load earlier history', quoteSelection: 'Quote', askInSidePanel: 'Ask in side panel', quoteCommentSkip: 'Quote as-is', noMessages: 'No messages yet',
-      branchBeforeInterrupt: 'Branched before interruption', sessionContextAriaLabel: 'Task context', sessionLineageAriaLabel: 'Task origin', sessionContextMore: (count) => `More task context (${count})`,
+      loadFailed: 'Task failed to load', loading: 'Loading…', retryLoad: 'Retry', loadEarlierHistory: 'Load earlier history', quoteSelection: 'Quote', askInSidePanel: 'Ask in side panel', noMessages: 'No messages yet',
+      sessionContextAriaLabel: 'Task context', sessionContextMore: (count) => `More task context (${count})`,
       titlebarIdentityAriaLabel: 'Current task', taskActions: 'Task actions', openProjectFolderAction: 'Open project folder', projectInfo: 'Project information', copyProjectPath: 'Copy path',
       openParentSession: (name) => `Return to parent task “${name}”`,
       revisionVersionsAriaLabel: 'Task versions', revisionVersion: (current, total) => `Version ${current} of ${total}`, previousRevision: 'View previous version', nextRevision: 'View next version',

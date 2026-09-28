@@ -110,10 +110,12 @@ export function createDesktopWorkHubServices(
       if (result.ok) return result.disposition === (placement === 'current_turn' ? 'steering' : 'followup') ? 'admitted' : 'rejected';
       return result.reason === 'outcome_unknown' ? 'unknown' : 'rejected';
     },
+    queryMessageExecutions: (sessionId, messageIds) =>
+      bridge.sessions.queryMessageExecutions(sessionId, messageIds),
     retractQueueEntry: (sessionId, entryId) => bridge.sessions.retractQueueEntry(sessionId, entryId),
     promoteQueueEntry: (sessionId, entryId) => bridge.sessions.promoteQueueEntry(sessionId, entryId),
     updateQueueEntry: (sessionId, entryId, revision, text) => bridge.sessions.updateQueueEntry(sessionId, entryId, revision, text),
-    reorderQueueEntries: (sessionId, entryIds) => bridge.sessions.reorderQueueEntries(sessionId, entryIds),
+    reorderQueueEntries: (sessionId, entryIds, revision) => bridge.sessions.reorderQueueEntries(sessionId, entryIds, revision),
     configureModel: (sessionId, input) => bridge.workHub.configureModel(sessionId, input),
     getNewWorkDefaults: (sessionId) => bridge.workHub.getNewWorkDefaults(sessionId),
     setNewWorkDefaults: (sessionId, defaults) =>

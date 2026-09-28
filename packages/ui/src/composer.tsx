@@ -139,11 +139,19 @@ import {
   workspaceFileReferencePositions,
   type WorkspaceFileReferencePosition,
 } from './inline-reference.js';
-import { ComposerMessageQueue, projectComposerMessageQueue } from './composer-message-queue.js';
+import {
+  ComposerMessageQueue,
+  projectComposerMessageQueue,
+  type ComposerMessageQueueHostProps,
+} from './composer-message-queue.js';
 import {
   MakaClientSessionScope,
   MakaClientSlotOutlet,
 } from './client-plugin-slots.js';
+import {
+  deriveComposerSendPolicy,
+  hasComposerStagedContext,
+} from './composer-send-policy.js';
 
 // Astryx keeps this selection helper internal, so the shell owns its small
 // equivalent instead of importing an unpublished root export.
@@ -332,20 +340,6 @@ export const Composer = forwardRef<
     /** True while the current streaming session is processing a stop request. */
     stopPending?: boolean;
     pendingMessages?: readonly import('./chat-view.js').TransientUserMessageProjection[];
-    queuedMessages?: readonly MessageQueueEntryProjection[];
-    queuedMessageRevision?: number;
-    /** Promote a queued follow-up into the active Turn (调整方向). */
-    onPromoteQueuedEntry?(entryId: string): void | Promise<void>;
-    /** Update one queued entry in place without changing its order or placement. */
-    onUpdateQueuedEntry?(
-      entryId: string,
-      expectedQueueRevision: number,
-      text: string,
-    ): void | Promise<void>;
-    /** Remove one queued entry without restoring it. */
-    onDeleteQueuedEntry?(entryId: string): void | Promise<void>;
-    /** Reorder the follow-up queue; entryIds is the full intended order. */
-    onReorderQueuedEntries?(entryIds: readonly string[]): void | Promise<void>;
     /** Runtime-only key used to keep unsent drafts isolated per session. */
     draftKey?: string;
     /** Optional host persistence for reload-safe draft scopes. */
@@ -596,7 +590,7 @@ export const Composer = forwardRef<
     mentionSkillsLoading?: boolean;
     slashCommands?: ReadonlyArray<ComposerSlashCommandOption>;
     onSearchMentionFiles?(query: string): Promise<ReadonlyArray<{ relativePath: string }>>;
-  } & ComposerGoalProps
+  } & ComposerGoalProps & ComposerMessageQueueHostProps
 >(function Composer(props, ref) {
   const formRef = useRef<HTMLFormElement>(null);
   const composerAnchorRef = useRef<HTMLDivElement>(null);
@@ -1408,10 +1402,7 @@ export const Composer = forwardRef<
   // on the Host opt-in (`allowAttachmentOnlySend`), so the upstream flag
   // governs that half while staged quotes pass the same gates (send handler,
   // disabled state, send/stop toggle) as text.
-  const hasStagedContext =
-    (props.pendingQuotes?.length ?? 0) > 0 ||
-    (props.pendingSessionReferences?.length ?? 0) > 0 ||
-    (props.allowAttachmentOnlySend === true && (props.pendingAttachments?.length ?? 0) > 0);
+  const hasStagedContext = hasComposerStagedContext(props);
 
   async function sendCurrent(followUpMode?: FollowUpMode) {
     if (
@@ -1472,8 +1463,6 @@ export const Composer = forwardRef<
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    // Mid-turn the host queues the draft as a follow-up by default; only
-    // Cmd/Ctrl+Enter (see onInputKeyDown) steers it into the active Turn.
     void sendCurrent();
   }
 
@@ -1637,14 +1626,18 @@ export const Composer = forwardRef<
 
   const importActionBusy = pendingImportAction !== null;
   const noModelConnection = props.noModelConnection === true;
-  const sendDisabled =
-    props.disabled ||
-    props.sendBlocked ||
-    executorModelPending ||
-    sendPending ||
-    importActionBusy ||
-    (!text.trim() && !hasStagedContext) ||
-    noModelConnection;
+  const sendPolicy = deriveComposerSendPolicy({
+    text,
+    hasStagedContext,
+    disabled: props.disabled,
+    sendBlocked: props.sendBlocked,
+    executorModelPending,
+    sendPending,
+    importActionBusy,
+    noModelConnection,
+    streaming: props.streaming,
+  });
+  const { sendDisabled, stopShown } = sendPolicy;
   // Hosts can explain a disabled Send without adding a second visible notice;
   // other disabled reasons (empty draft, in-flight import) keep the neutral label.
   const sendTitle = props.sendBlocked && props.sendBlockedReason?.trim()
@@ -1652,18 +1645,7 @@ export const Composer = forwardRef<
     : noModelConnection && !props.disabled
       ? copy.noModelSendTitle
       : copy.sendLabel;
-  // One slot, one button, two states — Astryx's send/stop toggle. Mid-turn an
-  // empty draft has nothing to submit, so the slot is Stop; the moment there is
-  // a draft, handing it over is the only meaningful action there and the button
-  // returns to Send (the host queues it as a follow-up). Stop is not lost in
-  // that window: Esc interrupts from the input, which is where the hands already
-  // are.
-  // Union of two contracts: a blocked send always shows Stop (#4979 — a dead
-  // Send helps nobody), and an unblocked structured-only draft (#4804) shows
-  // Send so the staged context can still be handed over as a follow-up.
-  const stopShown =
-    props.streaming === true
-    && (props.sendBlocked === true || (!text.trim() && !hasStagedContext));
+  // Send and Stop share one slot; structured staged content is also sendable.
   // A Host receipt is not model consumption. Keep steering above the composer
   // until the host surface retires its transient on steering_message.
   const queuedMessages = projectComposerMessageQueue(props.queuedMessages ?? [], props.pendingMessages ?? []);
@@ -1907,12 +1889,13 @@ export const Composer = forwardRef<
           <ComposerMessageQueue
             queuedMessages={queuedMessages}
             queueRevision={props.queuedMessageRevision}
-          copy={copy}
-          onPromoteEntry={props.onPromoteQueuedEntry}
-          onUpdateEntry={props.onUpdateQueuedEntry}
-          onDeleteEntry={props.onDeleteQueuedEntry}
-          onReorderEntries={props.onReorderQueuedEntries}
-        />
+            copy={copy}
+            onPromoteEntry={props.onPromoteQueuedEntry}
+            onEditEntry={props.onEditQueuedEntry}
+            onUpdateEntry={props.onUpdateQueuedEntry}
+            onDeleteEntry={props.onDeleteQueuedEntry}
+            onReorderEntries={props.onReorderQueuedEntries}
+          />
       ) : null}
       <form
         ref={formRef}
@@ -2242,7 +2225,7 @@ export const Composer = forwardRef<
             </div>
           )}
           footerActions={(
-            <div className="maka-composer-left-controls">
+            <div className="maka-composer-footer-leading maka-composer-left-controls">
               {/* Resting order: ＋ leftmost, then permission icon. */}
               {showPlusMenu ? (
                 <span className="maka-composer-plus-menu">
@@ -2619,11 +2602,6 @@ export const Composer = forwardRef<
               icon={<Square size={ICON_SIZE.control} aria-hidden="true" />}
             />
           ) : (
-            // GLOBAL ANCHOR — DO NOT RESTYLE. This Send/Stop slot (its size,
-            // shape, glyph, and placement) is the one control the whole app
-            // navigates by; it has regressed multiple times from well-meaning
-            // "improvements". Queue affordances live in the pending plate
-            // above the card, never in this button.
             <IconButton
               variant="primary"
               type="submit"
@@ -2686,6 +2664,7 @@ function ContextUsageAction(props: {
     <UiButton
       variant="ghost"
       size="sm"
+      className="maka-context-usage-action"
       icon={<CircleGauge size={ICON_SIZE.meta} aria-hidden="true" />}
       label={copy.systemNotes.contextUsageOpen}
       tooltip={tooltip}

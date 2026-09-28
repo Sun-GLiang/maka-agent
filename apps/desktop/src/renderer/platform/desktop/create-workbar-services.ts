@@ -92,6 +92,7 @@ export function createDesktopWorkbarServices(
         // with its structured content (#4804).
         ...(content?.quotes ? { quotes: content.quotes } : {}),
         ...(content?.attachmentItems ? { attachmentItems: content.attachmentItems } : {}),
+        ...(content?.retainedAttachments ? { retainedAttachments: content.retainedAttachments } : {}),
       },
       { waitForHostAdmission: true },
     );
@@ -204,10 +205,8 @@ export function createDesktopWorkbarServices(
         bridge.sessions.retractQueueEntry(sessionId, entryId),
       promoteQueueEntry: (sessionId, entryId) =>
         bridge.sessions.promoteQueueEntry(sessionId, entryId),
-      updateQueueEntry: (sessionId, entryId, expectedQueueRevision, text) =>
-        bridge.sessions.updateQueueEntry(sessionId, entryId, expectedQueueRevision, text),
-      reorderQueueEntries: (sessionId, entryIds) =>
-        bridge.sessions.reorderQueueEntries(sessionId, entryIds),
+      reorderQueueEntries: (sessionId, entryIds, revision) =>
+        bridge.sessions.reorderQueueEntries(sessionId, entryIds, revision),
       setPermissionMode: async (sessionId, mode) =>
         expectSessionUpdate(await bridge.sessions.setPermissionMode(sessionId, mode)),
       respondToSandboxBoundary: (sessionId, response) =>

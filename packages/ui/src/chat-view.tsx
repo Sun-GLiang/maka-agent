@@ -144,7 +144,7 @@ export interface ChatViewGoalIndicatorProps {
 export interface TransientUserMessageProjection {
   deliveryStatus?: string;
   deliveryDetail?: string;
-  deliveryActions?: readonly { label: string; onClick(): void }[];
+  deliveryActions?: readonly { label: string; icon: ReactNode; onClick(): void | Promise<void> }[];
   id: string;
   text: string;
   ts: number;
@@ -152,8 +152,8 @@ export interface TransientUserMessageProjection {
   directoryReferences?: readonly import('@maka/core/events').DirectoryReference[];
   quotes?: readonly QuoteRef[];
   inlineReferences?: readonly InlineReference[];
-  /** Steering and follow-ups stay in the composer queue until the Host takes them. */
-  transientPlacement: 'transcript' | 'steering' | 'follow_up';
+  /** Follow-ups stay in the composer queue until the Host takes them. */
+  transientPlacement: 'transcript' | 'follow_up';
   /** The Host Turn this Message is already bound to, once the Host named one. */
   hostTurnId?: string;
 }
@@ -294,26 +294,6 @@ export function ChatView(props: {
   /** Optional identity decorations shared with a host's work navigation. */
   promptRailDecorations?: ReadonlyMap<string, Pick<PromptAnchorRailTurn, 'accentColor' | 'accentBackground' | 'highlighted'>>;
   onPromptRailHighlight?(turnId: string | undefined): void;
-  /**
-   * PR109f: when the active session is a branched session
-   * (`parentSessionId` set on its summary), show a banner above the
-   * chat surface so the user knows they're in a derived conversation
-   * and can jump back to the parent.
-   *
-   * Renderer (main.tsx) resolves the parent name from the connections /
-   * sessions list — @maka/ui never queries the storage layer directly.
-   */
-  branchBanner?: {
-    parentSessionId: string;
-    parentSessionName: string;
-    /**
-     * Set when the branch starting point was an aborted turn. UI shows
-     * "从中断前分支" copy so the user understands the branch starts
-     * from before the cancel point, not from the abort itself.
-     */
-    fromAbortedTurn?: boolean;
-  };
-  onBranchBannerClick?: (parentSessionId: string) => void;
   /** Edit-and-resend versions stay in one conversation slot. */
   revisionNavigation?: {
     current: number;
@@ -339,12 +319,12 @@ export function ChatView(props: {
   onPromptSuggestion?(prompt: string): void;
   /**
    * Codex/Cursor-style "quote this": when set, selecting text in the transcript
-   * surfaces 引用 (open a note panel under the selection) and 直接引用 (stage it
-   * with no note). Either hands the excerpt, its turn and any note to the
-   * host, which stages it on the composer; an excerpt already in
-   * `pendingQuotes` is never handed over again. Omitted by hosts that don't
-   * compose quotes. Only selections that resolve to a turn are offered, so
-   * `turnId` always arrives.
+   * surfaces 引用, which opens a note panel under the selection; submitting
+   * hands the excerpt, its turn and any note to the host, which stages it on
+   * the composer (an empty note stages the bare quote). An excerpt already in
+   * `pendingQuotes` is never handed over again — 引用 reopens its note instead.
+   * Omitted by hosts that don't compose quotes. Only selections that resolve
+   * to a turn are offered, so `turnId` always arrives.
    */
   onQuoteSelection?(input: { text: string; turnId: string; comment?: string }): void;
   /**
@@ -702,7 +682,6 @@ export function ChatView(props: {
   }, [props.activeSession?.id]);
   const selectionActionsLabel = [
     props.onQuoteSelection ? copy.quoteSelection : null,
-    props.onQuoteSelection ? copy.quoteCommentSkip : null,
     props.onAskAboutSelection ? copy.askInSidePanel : null,
   ].filter((label): label is string => label !== null).join(' / ');
   const hasConversationHeaderActions = useMakaClientSlotOccupied(
@@ -945,9 +924,6 @@ export function ChatView(props: {
         aria-label={copy.conversationAriaLabel(props.activeSession.name)}
       >
       <SessionContextLayer
-        sessionName={props.activeSession.name}
-        branch={props.branchBanner}
-        onBranchNavigate={props.onBranchBannerClick}
         revision={props.revisionNavigation}
         onRevisionNavigate={props.onRevisionNavigate}
         memoryActive={props.memoryActive}
@@ -1139,38 +1115,23 @@ export function ChatView(props: {
                   elevation="med"
                 >
                   {props.onQuoteSelection ? (
-                    <>
-                      <Button
-                        type="button"
-                        label={copy.quoteSelection}
-                        onClick={() => {
-                          const selection = window.getSelection();
-                          setQuoteAnnotation({
-                            kind: selectionStaged ? 'edit' : 'annotate',
-                            text: selectionQuote.text,
-                            turnId: selectionQuote.turnId,
-                            anchor: excerptAnchor(
-                              selection?.rangeCount
-                                ? selection.getRangeAt(0).getBoundingClientRect()
-                                : new DOMRect(selectionQuote.anchor.x, selectionQuote.anchor.y),
-                            ),
-                          });
-                        }}
-                      />
-                      <Button
-                        type="button"
-                        label={copy.quoteCommentSkip}
-                        onClick={() => {
-                          if (!selectionStaged) {
-                            props.onQuoteSelection?.({
-                              text: selectionQuote.text,
-                              turnId: selectionQuote.turnId,
-                            });
-                          }
-                          dismissSelectionActions();
-                        }}
-                      />
-                    </>
+                    <Button
+                      type="button"
+                      label={copy.quoteSelection}
+                      onClick={() => {
+                        const selection = window.getSelection();
+                        setQuoteAnnotation({
+                          kind: selectionStaged ? 'edit' : 'annotate',
+                          text: selectionQuote.text,
+                          turnId: selectionQuote.turnId,
+                          anchor: excerptAnchor(
+                            selection?.rangeCount
+                              ? selection.getRangeAt(0).getBoundingClientRect()
+                              : new DOMRect(selectionQuote.anchor.x, selectionQuote.anchor.y),
+                          ),
+                        });
+                      }}
+                    />
                   ) : null}
                   {props.onAskAboutSelection ? (
                     <Button

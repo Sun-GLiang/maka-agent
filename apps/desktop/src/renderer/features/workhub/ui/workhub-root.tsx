@@ -25,6 +25,7 @@ import { useLiveContextUsage } from '../../../application/contracts/session-insp
 import { selectLatestRequestUsage } from '../../../application/contracts/session-inspector/latest-request-usage.js';
 import { WorkHubProgressCard } from './workhub-progress-card.js';
 import { WorkHubComposer } from './workhub-composer.js';
+import type { RestoredDraftContent } from '../../../application/contracts/transient-message-projection.js';
 import { WorkHubConversation } from './workhub-conversation.js';
 import { FormInteractionPrompt } from '@maka/ui';
 import { getShellCopy } from '../../../locales/shell-copy.js';
@@ -69,7 +70,12 @@ function revealWordmark(element: HTMLDivElement | null, content: HTMLDivElement 
 
 export function WorkHubRoot() {
   const highlight = useWorkHubHighlightState();
-  const controller = useWorkHubController(() => highlight.selectWork(undefined));
+  const composer = useRef<ComposerHandle>(null);
+  const draftRestore = useRef<((sessionId: string, draft: RestoredDraftContent) => void) | undefined>(undefined);
+  const controller = useWorkHubController(
+    () => highlight.selectWork(undefined),
+    (sessionId, draft) => draftRestore.current?.(sessionId, draft),
+  );
   const { services, session, transcript, busy } = controller;
   useEffect(() => {
     services.bindBrowserSession(controller.sessionId ?? null);
@@ -102,7 +108,6 @@ export function WorkHubRoot() {
   const locale = useUiLocale();
   const t = workHubLiveCopy[locale];
   const shortcutLabel = navigator.platform.toLowerCase().includes('mac') ? '⌘⇧K' : 'Ctrl+Shift+K';
-  const composer = useRef<ComposerHandle>(null);
   const composerSurface = useRef<HTMLDivElement>(null);
   const revealMark = useRef<HTMLDivElement>(null);
   const history = useRef<HTMLDivElement>(null);
@@ -258,7 +263,7 @@ export function WorkHubRoot() {
     <WorkHubHighlightContext.Provider value={highlight}>
     <WorkHubHueProvider sessionIds={delegatedSessionIds}>
     <section ref={surface} data-progress={progress} data-progress-editing={editingProgress} className="workHubLive workhub-surface" data-maka-content-ready data-placement={presentation?.placement ?? 'docked'} data-conversation-expanded={showConversation} aria-label={t.title}>
-      {!floating && presentation?.workbar && presentation.workbar.togglePosition !== 'titlebar' && <WorkbarEdgeToggle label={getShellCopy(locale).chrome[presentation.workbar.collapsed ? 'expandWorkbar' : 'collapseWorkbar']} {...presentation.workbar} onToggle={() => call(services.presentation.toggleWorkbar())} />}
+      {!floating && presentation?.workbar && presentation.workbar.togglePosition !== 'titlebar' && <WorkbarEdgeToggle className="workhub-workbar-edge" label={getShellCopy(locale).chrome[presentation.workbar.collapsed ? 'expandWorkbar' : 'collapseWorkbar']} {...presentation.workbar} onToggle={() => call(services.presentation.toggleWorkbar())} />}
       {progress && <WorkHubProgressCard ref={progressHeader} request={presentation.progressRequest!} control={control} liveTurn={controller.liveTurn} messages={transcript.messages} busy={Boolean(controller.activeTurn) || controller.sending} onOpen={() => {
         setConversationExpanded(true);
         if (presentation.progressRequest !== undefined) call(services.presentation.expandProgress(presentation.progressRequest));
@@ -301,14 +306,14 @@ export function WorkHubRoot() {
             <WorkHubComposer
               pendingMessages={controller.transientMessages}
               queuedMessages={controller.messageQueue.entries}
-              queuedMessageRevision={controller.messageQueue.revision}
-              onUpdateQueuedEntry={controller.updateQueuedEntry}
+              onEditQueuedEntry={controller.editQueuedEntry}
               onDeleteQueuedEntry={controller.deleteQueuedEntry}
               onPromoteQueuedEntry={controller.promoteQueuedEntry}
               onReorderQueuedEntries={controller.reorderQueuedEntries}
               placeholder={progress ? t.progressInput : t.welcome}
               ref={composer}
               hidden={Boolean(controller.activeQuestion || controller.activeForm)}
+              draftRestore={draftRestore}
               sessionId={controller.sessionId}
               streaming={busy}
               sendBlocked={!controller.sessionId || controller.sending || !session?.model}
