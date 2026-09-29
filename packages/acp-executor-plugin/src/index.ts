@@ -221,7 +221,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     const cached = this.#catalog.get(cwd);
     if (cached && cached.expires > Date.now()) return cached.entry;
     const existing = this.#discovery.get(cwd);
-    if (existing) return await waitForSignal(existing, input.signal);
+    if (existing) return await this.#waitForDiscovery(cwd, existing, input.signal);
     const epoch = this.#catalogEpoch;
     const scopeToken = this.#scopeTokens.get(cwd) ?? {};
     this.#scopeTokens.set(cwd, scopeToken);
@@ -268,7 +268,30 @@ export class AcpExecutor implements PluginExecutorProvider {
         this.#scopeTokens.delete(cwd);
     });
     this.#discovery.set(cwd, discovery);
-    return await waitForSignal(discovery, input.signal);
+    return await this.#waitForDiscovery(cwd, discovery, input.signal);
+  }
+
+  async #waitForDiscovery(
+    cwd: string,
+    discovery: Promise<ExecutorCatalogEntry>,
+    signal: AbortSignal,
+  ): Promise<ExecutorCatalogEntry> {
+    let pending = discovery;
+    while (true) {
+      const result = await waitForSignal(pending, signal);
+      const cached = this.#catalog.get(cwd);
+      if (result.readiness === 'unavailable' && cached && cached.expires > Date.now())
+        return cached.entry;
+      const replacement = this.#discovery.get(cwd);
+      if (
+        result.readiness !== 'unavailable' ||
+        !replacement ||
+        replacement === pending ||
+        this.#disposed
+      )
+        return result;
+      pending = replacement;
+    }
   }
 
   invalidateCatalog(): void {
@@ -661,16 +684,31 @@ export class AcpExecutor implements PluginExecutorProvider {
         owner.failed,
       ]);
       session.configOptions = restored.configOptions ?? [];
-      const restoredModel = currentAcpModel(session.configOptions);
-      const restoredMode = acpOption(session.configOptions, 'mode')?.currentValue;
+      let restoredModel = currentAcpModel(session.configOptions);
+      let restoredMode = acpOption(session.configOptions, 'mode')?.currentValue;
       if (
         (stored.confirmedModel && restoredModel !== stored.confirmedModel) ||
         (stored.confirmedMode && restoredMode !== stored.confirmedMode)
-      )
-        throw new AcpRuntimeError(
-          'Restored Agent configuration differs from the saved task',
-          'acp_config_unconfirmed',
+      ) {
+        await this.#applyInitialConfig(
+          session,
+          {
+            ...(stored.confirmedModel ? { model: stored.confirmedModel } : {}),
+            ...(stored.confirmedMode ? { mode: stored.confirmedMode } : {}),
+          },
+          startupSignal,
         );
+        restoredModel = currentAcpModel(session.configOptions);
+        restoredMode = acpOption(session.configOptions, 'mode')?.currentValue;
+        if (
+          (stored.confirmedModel && restoredModel !== stored.confirmedModel) ||
+          (stored.confirmedMode && restoredMode !== stored.confirmedMode)
+        )
+          throw new AcpRuntimeError(
+            'Restored Agent configuration differs from the saved task',
+            'acp_config_unconfirmed',
+          );
+      }
       await this.#persistConfirmedConfig(session);
       session.restoring = false;
       if (pending) {
@@ -846,9 +884,10 @@ export class AcpExecutor implements PluginExecutorProvider {
           'acp_config_invalid',
         );
     }
+    const changes = target.filter(([key, value]) => acpOption(before, key)?.currentValue !== value);
     let mutationAttempted = false;
     try {
-      for (const [key, value] of target) {
+      for (const [key, value] of changes) {
         const option = acpOption(session.configOptions, key);
         if (!option)
           throw new AcpRuntimeError(
@@ -871,7 +910,9 @@ export class AcpExecutor implements PluginExecutorProvider {
           );
       }
       if (
-        target.some(([key, value]) => acpOption(session.configOptions, key)?.currentValue !== value)
+        changes.some(
+          ([key, value]) => acpOption(session.configOptions, key)?.currentValue !== value,
+        )
       )
         throw new AcpRuntimeError(
           'Agent changed another selected configuration',
@@ -920,9 +961,12 @@ export class AcpExecutor implements PluginExecutorProvider {
     }
   }
 
-  async #persistConfirmedConfig(session: RetainedSession): Promise<void> {
+  async #persistConfirmedConfig(
+    session: RetainedSession,
+    configOptions: readonly SessionConfigOption[] = session.configOptions,
+  ): Promise<void> {
     if (!session.record) return;
-    const record = withConfirmedConfiguration(session.record, session.configOptions);
+    const record = withConfirmedConfiguration(session.record, configOptions);
     if (record === session.record) return;
     await this.#state?.write?.(session.conversationKey, record);
     session.record = record;
@@ -976,18 +1020,25 @@ export class AcpExecutor implements PluginExecutorProvider {
     if (update.sessionUpdate === 'config_option_update') {
       // During our mutation, its response (or rollback response) is authoritative.
       if (!session.configuring && !session.lost) {
-        if (
-          ['model', 'mode'].some((key) => {
-            const current = acpOption(session.configOptions, key)?.currentValue;
-            const notified = acpOption(update.configOptions, key)?.currentValue;
-            return current !== notified;
-          })
-        )
-          return;
+        const diverged = ['model', 'mode'].some((key) => {
+          const current = acpOption(session.configOptions, key)?.currentValue;
+          const notified = acpOption(update.configOptions, key)?.currentValue;
+          return current !== notified;
+        });
         session.configOptions = update.configOptions;
-        if (!session.active && !session.awaitingAck && session.record?.phase !== 'prompt_pending') {
+        // A divergent idle notification describes the Agent's actual state, but
+        // it must not replace the durable user selection. The next configure or
+        // prompt re-applies that selection because configOptions now reflects
+        // the drift instead of the previously confirmed value.
+        if (
+          !diverged &&
+          !session.active &&
+          !session.awaitingAck &&
+          session.record?.phase !== 'prompt_pending'
+        ) {
+          const confirmed = update.configOptions;
           const previous = session.configPersistence ?? Promise.resolve();
-          const persistence = previous.then(() => this.#persistConfirmedConfig(session));
+          const persistence = previous.then(() => this.#persistConfirmedConfig(session, confirmed));
           session.configPersistence = persistence;
           void persistence.catch(() => this.#lose(session)).catch(() => undefined);
         }

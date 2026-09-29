@@ -1047,6 +1047,39 @@ test('a catalog caller can cancel without owning or leaking the shared probe', a
   }
 });
 
+test('refresh redirects callers awaiting the superseded catalog probe', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.holdInitialize = true;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory },
+  );
+  try {
+    const waiting = executor.discover({
+      cwd: fixture.root,
+      signal: new AbortController().signal,
+    });
+    for (let attempt = 0; attempt < 20 && protocol.connections === 0; attempt++)
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    assert.equal(protocol.connections, 1);
+    protocol.holdInitialize = false;
+    const refreshed = executor.discover({
+      cwd: fixture.root,
+      signal: new AbortController().signal,
+      refresh: true,
+    });
+    const [waitingResult, refreshedResult] = await Promise.all([waiting, refreshed]);
+    assert.equal(waitingResult.readiness, 'ready');
+    assert.deepEqual(waitingResult, refreshedResult);
+    assert.equal(protocol.connections, 2);
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('ACP modes remain distinct from models across discovery, prompt, idle change and restoration', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
@@ -1095,6 +1128,8 @@ test('ACP modes remain distinct from models across discovery, prompt, idle chang
     );
     assert.equal(protocol.selectedMode, 'ask');
     await first.dispose();
+    protocol.selectedModel = 'default';
+    protocol.selectedMode = 'auto';
     const restored = make();
     try {
       const saved = await restored.inspectConversation({
@@ -1124,6 +1159,8 @@ test('ACP modes remain distinct from models across discovery, prompt, idle chang
           .currentMode,
         'ask',
       );
+      assert.equal(protocol.selectedModel, 'fast');
+      assert.equal(protocol.selectedMode, 'ask');
       assert.equal(
         protocol.sessions,
         2,
@@ -1134,6 +1171,35 @@ test('ACP modes remain distinct from models across discovery, prompt, idle chang
     }
   } finally {
     await first.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('merged configuration preserves the model when a mode change opens a fresh Session', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.hasMode = true;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory },
+  );
+  try {
+    assert.deepEqual(
+      await executor.configureConversation(
+        {
+          conversationKey: 'session-a',
+          cwd: process.cwd(),
+          configuration: { model: 'fast', mode: 'auto' },
+        },
+        new AbortController().signal,
+      ),
+      { model: 'fast', mode: 'auto' },
+    );
+    assert.equal(protocol.selectedModel, 'fast');
+    assert.equal(protocol.selectedMode, 'auto');
+  } finally {
+    await executor.dispose();
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
@@ -1241,7 +1307,7 @@ test('a failed second configuration option restores both model and mode', async 
   }
 });
 
-test('late configuration notifications cannot overwrite an idle confirmed change', async () => {
+test('late configuration notifications are reasserted before the next change', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
   const executor = new AcpExecutor(
@@ -1264,8 +1330,13 @@ test('late configuration notifications cannot overwrite an idle confirmed change
     assert.equal(
       (await executor.inspectConversation({ conversationKey: 'session-a', cwd: process.cwd() }))
         .currentModel,
-      'fast',
+      'default',
     );
+    await executor.configureConversation(
+      { conversationKey: 'session-a', cwd: process.cwd(), configuration: { model: 'fast' } },
+      new AbortController().signal,
+    );
+    assert.equal(protocol.selectedModel, 'fast');
   } finally {
     await executor.dispose();
     await rm(fixture.root, { recursive: true, force: true });
@@ -1560,6 +1631,7 @@ function fakeProtocol(): {
         params: { sessionId: 'acp-session', path, content } as never,
       });
     fixture.notifyConfiguration = (model) => {
+      fixture.selectedModel = model;
       notifications.get(methods.client.session.update)?.({
         params: {
           sessionId: 'acp-session',
@@ -1811,7 +1883,7 @@ test('idle Agent configuration notifications cannot diverge from the Session con
     assert.equal(
       (await executor.inspectConversation({ conversationKey: 'session-a', cwd: process.cwd() }))
         .currentModel,
-      'default',
+      'fast',
     );
     assert.equal(storage.record().confirmedModel, 'default');
     assert.equal(

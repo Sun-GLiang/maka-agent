@@ -854,7 +854,8 @@ export class HostSessionCatalogCoordinator {
           if (
             this.#manager.runningTurnIds(input.sessionId).length ||
             this.#isTurnBusy?.(input.sessionId) ||
-            current.header.status !== 'active'
+            current.header.status === 'running' ||
+            current.header.status === 'waiting_for_user'
           )
             throw new SessionOperationFailure(
               'operation_conflict',
@@ -868,7 +869,7 @@ export class HostSessionCatalogCoordinator {
           try {
             const confirmed = await this.#configureExecutor(
               current.header,
-              input.patch.executorConfig,
+              configuration.executorConfig!,
             );
             if (confirmed) {
               if (

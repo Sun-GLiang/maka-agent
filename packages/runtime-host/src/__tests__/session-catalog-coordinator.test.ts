@@ -2492,7 +2492,7 @@ test('mode-only changes retain the saved model and wait for Agent confirmation',
       executorConfig: { model: 'before', mode: 'ask' },
     },
     configureExecutor: async (_header, config) => {
-      assert.deepEqual(config, { mode: 'auto' });
+      assert.deepEqual(config, { model: 'before', mode: 'auto' });
       assert.deepEqual(fixture.header().executorConfig, { model: 'before', mode: 'ask' });
     },
   });
@@ -2516,7 +2516,7 @@ test('Agent-confirmed mode side effects are persisted with a model change', asyn
       executorConfig: { model: 'before', mode: 'ask' },
     },
     configureExecutor: async (_header, config) => {
-      assert.deepEqual(config, { model: 'after' });
+      assert.deepEqual(config, { model: 'after', mode: 'ask' });
       return { model: 'after', mode: 'auto' };
     },
   });
@@ -2540,7 +2540,7 @@ test('Agent-confirmed snapshots clear options removed by a model change', async 
       executorConfig: { model: 'before', mode: 'ask' },
     },
     configureExecutor: async (_header, config) => {
-      assert.deepEqual(config, { model: 'after' });
+      assert.deepEqual(config, { model: 'after', mode: 'ask' });
       return { model: 'after' };
     },
   });
@@ -2564,7 +2564,7 @@ test('Agent-confirmed snapshots clear removed models from both executor routes',
       executorConfig: { model: 'before', mode: 'ask' },
     },
     configureExecutor: async (_header, config) => {
-      assert.deepEqual(config, { mode: 'auto' });
+      assert.deepEqual(config, { model: 'before', mode: 'auto' });
       return { mode: 'auto' };
     },
   });
@@ -2673,6 +2673,62 @@ test('rejected or busy executor model changes preserve durable configuration wit
     assert.equal(called, !busy);
     assert.equal(fixture.header().executorConfig?.model, 'before');
     assert.equal(fixture.drainRequests(), 0);
+  }
+});
+
+test('idle executor changes remain available after failed or aborted turns', async () => {
+  for (const status of ['blocked', 'aborted'] as const) {
+    let confirmations = 0;
+    const fixture = createFixture({
+      header: {
+        status,
+        backend: 'plugin-executor',
+        executorId: 'remote',
+        executorConfig: { model: 'before' },
+      },
+      configureExecutor: async () => {
+        confirmations++;
+      },
+    });
+    const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+      {
+        sessionId: fixture.sessionId,
+        expectedRevision: fixture.revision(),
+        patch: { executorConfig: { model: 'after' } },
+      },
+      context,
+    );
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+    assert.equal(confirmations, 1);
+    assert.equal(fixture.header().executorConfig?.model, 'after');
+  }
+});
+
+test('executor changes reject running and waiting Sessions even without an active manager turn', async () => {
+  for (const status of ['running', 'waiting_for_user'] as const) {
+    let confirmations = 0;
+    const fixture = createFixture({
+      header: {
+        status,
+        backend: 'plugin-executor',
+        executorId: 'remote',
+        executorConfig: { model: 'before' },
+      },
+      configureExecutor: async () => {
+        confirmations++;
+      },
+    });
+    const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+      {
+        sessionId: fixture.sessionId,
+        expectedRevision: fixture.revision(),
+        patch: { executorConfig: { model: 'after' } },
+      },
+      context,
+    );
+    assert.equal(outcome.ok, false);
+    assert.equal(confirmations, 0);
+    assert.equal(fixture.header().executorConfig?.model, 'before');
   }
 });
 
