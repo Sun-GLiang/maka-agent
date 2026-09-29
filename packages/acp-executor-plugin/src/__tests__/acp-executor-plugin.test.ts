@@ -1267,6 +1267,38 @@ test('confirmed configuration clears a mode removed by a model change', async ()
   }
 });
 
+test('a fresh Session confirms a model-only change that removes the saved mode', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.hasMode = true;
+  protocol.dropModeForModel = 'fast';
+  const storage = durableState();
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory, state: storage.state },
+  );
+  try {
+    assert.deepEqual(
+      await executor.configureConversation(
+        {
+          conversationKey: 'session-a',
+          cwd: process.cwd(),
+          configuration: { model: 'fast', mode: 'ask' },
+        },
+        new AbortController().signal,
+      ),
+      { model: 'fast' },
+    );
+    assert.equal(protocol.selectedModel, 'fast');
+    assert.equal(storage.record().confirmedModel, 'fast');
+    assert.equal(storage.record().confirmedMode, undefined);
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('a failed second configuration option restores both model and mode', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
@@ -1520,6 +1552,7 @@ function fakeProtocol(): {
   selectedMode?: string;
   hasMode: boolean;
   dropModeForModel?: string;
+  notifyDuringPromptModel?: string;
   holdInitialize: boolean;
   configurationFailure?: 'response_lost' | 'unconfirmed' | 'timeout' | 'once' | 'mode_once';
   sessionCreationFailure?: 'once';
@@ -1544,6 +1577,7 @@ function fakeProtocol(): {
     selectedMode: 'ask',
     hasMode: false,
     dropModeForModel: undefined as string | undefined,
+    notifyDuringPromptModel: undefined as string | undefined,
     holdInitialize: false,
     configurationFailure: undefined as
       | 'response_lost'
@@ -1735,6 +1769,8 @@ function fakeProtocol(): {
             fixture.prompts += 1;
             fixture.promptModels.push(fixture.selectedModel ?? 'default');
             fixture.promptModes.push(fixture.selectedMode);
+            if (fixture.notifyDuringPromptModel)
+              fixture.notifyConfiguration(fixture.notifyDuringPromptModel);
             const text = (params.prompt as Array<{ text: string }>)[0]!.text;
             await requests.get(methods.client.session.requestPermission)?.({
               params: {
@@ -1880,6 +1916,7 @@ test('idle Agent configuration notifications cannot diverge from the Session con
     );
     await executor.acknowledgeExecution('session-a', 'turn-first');
     protocol.notifyConfiguration('fast');
+    protocol.notifyConfiguration('fast');
     assert.equal(
       (await executor.inspectConversation({ conversationKey: 'session-a', cwd: process.cwd() }))
         .currentModel,
@@ -1898,6 +1935,57 @@ test('idle Agent configuration notifications cannot diverge from the Session con
     assert.deepEqual(protocol.promptModels, ['default', 'default']);
   } finally {
     await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('an Agent configuration update during a prompt cannot replace the saved selection', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.supportsRestore = true;
+  const storage = durableState();
+  const make = () =>
+    new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      { createConnection: protocol.factory, state: storage.state },
+    );
+  const first = make();
+  try {
+    protocol.notifyDuringPromptModel = 'fast';
+    assert.equal(
+      (
+        await first.execute(
+          { ...request('first'), configuration: { model: 'default' } },
+          executorContext([]),
+        )
+      ).status,
+      'completed',
+    );
+    assert.equal(storage.record().confirmedModel, 'default');
+    await first.acknowledgeExecution('session-a', 'turn-first');
+    assert.equal(storage.record().confirmedModel, 'default');
+    await first.dispose();
+
+    protocol.notifyDuringPromptModel = undefined;
+    const restored = make();
+    try {
+      assert.equal(
+        (
+          await restored.execute(
+            { ...request('second'), configuration: { model: 'default' } },
+            executorContext([]),
+          )
+        ).status,
+        'completed',
+      );
+      assert.deepEqual(protocol.promptModels, ['default', 'default']);
+      assert.equal(storage.record().confirmedModel, 'default');
+    } finally {
+      await restored.dispose();
+    }
+  } finally {
+    await first.dispose();
     await rm(fixture.root, { recursive: true, force: true });
   }
 });

@@ -165,7 +165,6 @@ interface RetainedSession {
   initialization?: Promise<void>;
   active?: ActivePrompt;
   configuring?: boolean;
-  configPersistence?: Promise<void>;
   lost: boolean;
   loss?: Promise<void>;
 }
@@ -355,8 +354,10 @@ export class AcpExecutor implements PluginExecutorProvider {
     session.configuring = true;
     const wasConnected = !!session.connection;
     try {
-      await this.#ensureInitialized(session, signal);
-      await session.configPersistence;
+      // A fresh Session applies the merged selection once, after initialization.
+      // Applying it during session/new and again here can reject a mode that
+      // the requested model legitimately removed.
+      await this.#ensureInitialized(session, signal, true);
       await this.#applyInitialConfig(session, input.configuration, signal, true);
       return {
         ...(currentAcpModel(session.configOptions)
@@ -468,7 +469,6 @@ export class AcpExecutor implements PluginExecutorProvider {
     session.active = active;
     try {
       await this.#ensureInitialized(session, context.signal);
-      await session.configPersistence;
       context.signal.throwIfAborted();
       if (request.configuration?.model || request.configuration?.mode)
         await this.#applyInitialConfig(session, request.configuration, context.signal);
@@ -579,9 +579,13 @@ export class AcpExecutor implements PluginExecutorProvider {
     return created;
   }
 
-  async #ensureInitialized(session: RetainedSession, signal: AbortSignal): Promise<void> {
+  async #ensureInitialized(
+    session: RetainedSession,
+    signal: AbortSignal,
+    deferSelectedConfig = false,
+  ): Promise<void> {
     if (session.initialization) return await session.initialization;
-    const initialization = this.#initialize(session, signal);
+    const initialization = this.#initialize(session, signal, false, deferSelectedConfig);
     session.initialization = initialization;
     try {
       await initialization;
@@ -593,7 +597,12 @@ export class AcpExecutor implements PluginExecutorProvider {
     }
   }
 
-  async #initialize(session: RetainedSession, signal: AbortSignal, probe = false): Promise<void> {
+  async #initialize(
+    session: RetainedSession,
+    signal: AbortSignal,
+    probe = false,
+    deferSelectedConfig = false,
+  ): Promise<void> {
     const timeout = AbortSignal.timeout(INITIALIZE_TIMEOUT_MS);
     const startupSignal = AbortSignal.any([signal, timeout]);
     startupSignal.throwIfAborted();
@@ -777,7 +786,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     if (!probe) {
       await this.#applyInitialConfig(
         session,
-        session.configuration?.model || session.configuration?.mode
+        !deferSelectedConfig && (session.configuration?.model || session.configuration?.mode)
           ? { ...launch.initialConfig, ...session.configuration }
           : (launch.initialConfig ?? {}),
         startupSignal,
@@ -786,7 +795,6 @@ export class AcpExecutor implements PluginExecutorProvider {
   }
 
   async #beginPrompt(session: RetainedSession, turnId: string): Promise<void> {
-    await session.configPersistence;
     if (!session.record) return;
     const pending: AcpContinuityRecord = {
       ...session.record,
@@ -807,15 +815,12 @@ export class AcpExecutor implements PluginExecutorProvider {
       session.record.pendingTurnId !== turnId
     )
       return;
-    const committed = withConfirmedConfiguration(
-      {
-        ...session.record,
-        phase: 'committed',
-        committedPrompts: session.record.committedPrompts + 1,
-        pendingTurnId: undefined,
-      },
-      session.configOptions,
-    );
+    const committed: AcpContinuityRecord = {
+      ...session.record,
+      phase: 'committed',
+      committedPrompts: session.record.committedPrompts + 1,
+      pendingTurnId: undefined,
+    };
     try {
       await this.#state?.write?.(conversationKey, committed);
     } catch (error) {
@@ -825,12 +830,6 @@ export class AcpExecutor implements PluginExecutorProvider {
     }
     session.record = committed;
     session.awaitingAck = undefined;
-    try {
-      await this.#persistConfirmedConfig(session);
-    } catch (error) {
-      await this.#lose(session);
-      throw error;
-    }
   }
 
   /** The external turn settled, but Maka did not durably consume its terminal event. */
@@ -1020,28 +1019,9 @@ export class AcpExecutor implements PluginExecutorProvider {
     if (update.sessionUpdate === 'config_option_update') {
       // During our mutation, its response (or rollback response) is authoritative.
       if (!session.configuring && !session.lost) {
-        const diverged = ['model', 'mode'].some((key) => {
-          const current = acpOption(session.configOptions, key)?.currentValue;
-          const notified = acpOption(update.configOptions, key)?.currentValue;
-          return current !== notified;
-        });
         session.configOptions = update.configOptions;
-        // A divergent idle notification describes the Agent's actual state, but
-        // it must not replace the durable user selection. The next configure or
-        // prompt re-applies that selection because configOptions now reflects
-        // the drift instead of the previously confirmed value.
-        if (
-          !diverged &&
-          !session.active &&
-          !session.awaitingAck &&
-          session.record?.phase !== 'prompt_pending'
-        ) {
-          const confirmed = update.configOptions;
-          const previous = session.configPersistence ?? Promise.resolve();
-          const persistence = previous.then(() => this.#persistConfirmedConfig(session, confirmed));
-          session.configPersistence = persistence;
-          void persistence.catch(() => this.#lose(session)).catch(() => undefined);
-        }
+        // Agent notifications report observed state. Only a confirmed response
+        // to our own configuration request may change the durable selection.
       }
       return;
     }
