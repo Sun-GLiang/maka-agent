@@ -173,6 +173,7 @@ export interface PluginExecutorProvider {
   discover?(input: PluginExecutorDiscoveryInput): Promise<ExecutorCatalogEntry>;
   /** Clear provider-owned discovery data after an observable account or setup change. */
   invalidateCatalog?(): void;
+  /** Return the complete confirmed configuration snapshot; omit the result when unchanged. */
   configureConversation?(
     input: PluginExecutorConversationInput,
     signal: AbortSignal,

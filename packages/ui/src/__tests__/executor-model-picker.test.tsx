@@ -99,6 +99,67 @@ test('provider mode selector preserves the model and commits only a real mode ID
   } finally { await dom.cleanup(); }
 });
 
+test('fixed executor controls send partial patches so Agent side effects can be confirmed', async () => {
+  const dom = installTranscriptDom();
+  const selections: ExecutorSelection[] = [];
+  const entry = {
+    ...catalog[0]!,
+    modes: [
+      { id: 'ask', name: 'Ask' },
+      { id: 'auto', name: 'Auto' },
+    ],
+    currentMode: 'ask',
+    supportsModeChange: true,
+  };
+  const selection = {
+    executorId: entry.id,
+    configuration: { model: 'model-0', mode: 'ask' },
+  };
+  try {
+    await dom.render(<LocaleProvider locale="en"><ExecutorModelPicker
+      catalog={[entry]}
+      selection={selection}
+      fixed
+      onSelect={(next) => { if (next) selections.push(next); }}
+      onSetup={() => {}} onRetry={() => {}} onNewTask={() => {}}
+    /></LocaleProvider>);
+    await act(async () => {
+      dom.document.querySelector('.maka-executor-selector')!
+        .dispatchEvent(new dom.window.Event('click', { bubbles: true }));
+    });
+    const model = [...dom.document.querySelectorAll('[role="option"]')]
+      .find((row) => row.textContent?.includes('Agent model 1'));
+    assert.ok(model);
+    await act(async () => {
+      model.dispatchEvent(new dom.window.Event('click', { bubbles: true }));
+    });
+
+    await dom.render(<LocaleProvider locale="en"><ExecutorModeSelector
+      catalog={[entry]}
+      selection={selection}
+      fixed
+      onSelect={(next) => { if (next) selections.push(next); }}
+      onSetup={() => {}} onRetry={() => {}} onNewTask={() => {}}
+    /></LocaleProvider>);
+    await act(async () => {
+      dom.document.querySelector('.maka-executor-mode-selector')!
+        .dispatchEvent(new dom.window.Event('click', { bubbles: true }));
+    });
+    const mode = [...dom.document.querySelectorAll('[role="option"]')]
+      .find((row) => row.textContent?.includes('Auto'));
+    assert.ok(mode);
+    await act(async () => {
+      mode.dispatchEvent(new dom.window.Event('click', { bubbles: true }));
+    });
+    assert.deepEqual(selections, [
+      { executorId: entry.id, configuration: { model: 'model-1' } },
+      { executorId: entry.id, configuration: { mode: 'auto' } },
+    ]);
+  } finally {
+    await dom.cleanup();
+  }
+});
+
 test('the picker shows a generic loading state until the executor catalog arrives', async () => {
   const dom = installTranscriptDom();
   const selections: unknown[] = [];

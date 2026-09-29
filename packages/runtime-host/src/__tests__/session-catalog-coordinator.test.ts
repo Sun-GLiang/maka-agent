@@ -2532,6 +2532,55 @@ test('Agent-confirmed mode side effects are persisted with a model change', asyn
   assert.deepEqual(fixture.header().executorConfig, { model: 'after', mode: 'auto' });
 });
 
+test('Agent-confirmed snapshots clear options removed by a model change', async () => {
+  const fixture = createFixture({
+    header: {
+      backend: 'plugin-executor',
+      executorId: 'remote',
+      executorConfig: { model: 'before', mode: 'ask' },
+    },
+    configureExecutor: async (_header, config) => {
+      assert.deepEqual(config, { model: 'after' });
+      return { model: 'after' };
+    },
+  });
+  const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+    {
+      sessionId: fixture.sessionId,
+      expectedRevision: fixture.revision(),
+      patch: { executorConfig: { model: 'after' } },
+    },
+    context,
+  );
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  assert.deepEqual(fixture.header().executorConfig, { model: 'after' });
+});
+
+test('Agent-confirmed snapshots clear removed models from both executor routes', async () => {
+  const fixture = createFixture({
+    header: {
+      backend: 'plugin-executor',
+      executorId: 'remote',
+      executorConfig: { model: 'before', mode: 'ask' },
+    },
+    configureExecutor: async (_header, config) => {
+      assert.deepEqual(config, { mode: 'auto' });
+      return { mode: 'auto' };
+    },
+  });
+  const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+    {
+      sessionId: fixture.sessionId,
+      expectedRevision: fixture.revision(),
+      patch: { executorConfig: { mode: 'auto' } },
+    },
+    context,
+  );
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  assert.deepEqual(fixture.header().executorConfig, { mode: 'auto' });
+  assert.equal(fixture.header().model, 'remote');
+});
+
 test('failed Session commit restores the confirmed executor model', async () => {
   const confirmed: string[] = [];
   const fixture = createFixture({

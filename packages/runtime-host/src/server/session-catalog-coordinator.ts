@@ -880,8 +880,11 @@ export class HostSessionCatalogCoordinator {
                 throw new Error('Executor confirmation differs from the requested configuration');
               configuration = {
                 ...configuration,
-                executorConfig: { ...configuration.executorConfig, ...confirmed },
-                model: confirmed.model ?? configuration.model,
+                // A provider confirmation is the complete current snapshot. In
+                // particular, omission clears an option the provider removed as
+                // a side effect of changing another option.
+                executorConfig: confirmed,
+                model: confirmed.model ?? current.header.executorId ?? configuration.model,
               };
             }
             confirmedExecutor = current.header;

@@ -165,7 +165,6 @@ interface RetainedSession {
   initialization?: Promise<void>;
   active?: ActivePrompt;
   configuring?: boolean;
-  suppressConflictingConfigUpdates?: boolean;
   configPersistence?: Promise<void>;
   lost: boolean;
   loss?: Promise<void>;
@@ -212,6 +211,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     input.signal.throwIfAborted();
     const cwd = await realpath(resolve(input.cwd)).catch(() => undefined);
     if (!cwd) return this.#catalogEntry('unavailable');
+    input.signal.throwIfAborted();
     if (input.refresh) {
       this.#catalog.delete(cwd);
       this.#scopeTokens.set(cwd, {});
@@ -221,7 +221,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     const cached = this.#catalog.get(cwd);
     if (cached && cached.expires > Date.now()) return cached.entry;
     const existing = this.#discovery.get(cwd);
-    if (existing) return existing;
+    if (existing) return await waitForSignal(existing, input.signal);
     const epoch = this.#catalogEpoch;
     const scopeToken = this.#scopeTokens.get(cwd) ?? {};
     this.#scopeTokens.set(cwd, scopeToken);
@@ -268,7 +268,7 @@ export class AcpExecutor implements PluginExecutorProvider {
         this.#scopeTokens.delete(cwd);
     });
     this.#discovery.set(cwd, discovery);
-    return discovery;
+    return await waitForSignal(discovery, input.signal);
   }
 
   invalidateCatalog(): void {
@@ -749,7 +749,6 @@ export class AcpExecutor implements PluginExecutorProvider {
 
   async #beginPrompt(session: RetainedSession, turnId: string): Promise<void> {
     await session.configPersistence;
-    session.suppressConflictingConfigUpdates = false;
     if (!session.record) return;
     const pending: AcpContinuityRecord = {
       ...session.record,
@@ -770,18 +769,15 @@ export class AcpExecutor implements PluginExecutorProvider {
       session.record.pendingTurnId !== turnId
     )
       return;
-    const committed: AcpContinuityRecord = {
-      ...session.record,
-      phase: 'committed',
-      committedPrompts: session.record.committedPrompts + 1,
-      pendingTurnId: undefined,
-      ...(currentAcpModel(session.configOptions)
-        ? { confirmedModel: currentAcpModel(session.configOptions) }
-        : {}),
-      ...(acpOption(session.configOptions, 'mode')?.currentValue
-        ? { confirmedMode: acpOption(session.configOptions, 'mode')!.currentValue }
-        : {}),
-    };
+    const committed = withConfirmedConfiguration(
+      {
+        ...session.record,
+        phase: 'committed',
+        committedPrompts: session.record.committedPrompts + 1,
+        pendingTurnId: undefined,
+      },
+      session.configOptions,
+    );
     try {
       await this.#state?.write?.(conversationKey, committed);
     } catch (error) {
@@ -882,7 +878,6 @@ export class AcpExecutor implements PluginExecutorProvider {
           'acp_config_unconfirmed',
         );
       await this.#persistConfirmedConfig(session);
-      session.suppressConflictingConfigUpdates = true;
     } catch (error) {
       let restored = false;
       if (restoreOnFailure && !session.lost && !signal.aborted) {
@@ -927,14 +922,8 @@ export class AcpExecutor implements PluginExecutorProvider {
 
   async #persistConfirmedConfig(session: RetainedSession): Promise<void> {
     if (!session.record) return;
-    const model = acpOption(session.configOptions, 'model')?.currentValue;
-    const mode = acpOption(session.configOptions, 'mode')?.currentValue;
-    if (session.record.confirmedModel === model && session.record.confirmedMode === mode) return;
-    const record = {
-      ...session.record,
-      ...(model ? { confirmedModel: model } : {}),
-      ...(mode ? { confirmedMode: mode } : {}),
-    };
+    const record = withConfirmedConfiguration(session.record, session.configOptions);
+    if (record === session.record) return;
     await this.#state?.write?.(session.conversationKey, record);
     session.record = record;
   }
@@ -988,11 +977,10 @@ export class AcpExecutor implements PluginExecutorProvider {
       // During our mutation, its response (or rollback response) is authoritative.
       if (!session.configuring && !session.lost) {
         if (
-          session.suppressConflictingConfigUpdates &&
           ['model', 'mode'].some((key) => {
             const current = acpOption(session.configOptions, key)?.currentValue;
             const notified = acpOption(update.configOptions, key)?.currentValue;
-            return current !== undefined && notified !== undefined && current !== notified;
+            return current !== notified;
           })
         )
           return;
@@ -1145,6 +1133,39 @@ export class AcpExecutor implements PluginExecutorProvider {
 
 function currentAcpModel(options: readonly SessionConfigOption[]): string | undefined {
   return acpOption(options, 'model')?.currentValue;
+}
+
+function withConfirmedConfiguration(
+  record: AcpContinuityRecord,
+  options: readonly SessionConfigOption[],
+): AcpContinuityRecord {
+  const model = currentAcpModel(options);
+  const mode = acpOption(options, 'mode')?.currentValue;
+  const { confirmedModel, confirmedMode, ...base } = record;
+  if (confirmedModel === model && confirmedMode === mode) return record;
+  return {
+    ...base,
+    ...(model ? { confirmedModel: model } : {}),
+    ...(mode ? { confirmedMode: mode } : {}),
+  };
+}
+
+async function waitForSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return await new Promise<T>((resolvePromise, rejectPromise) => {
+    const aborted = () => rejectPromise(signal.reason);
+    signal.addEventListener('abort', aborted, { once: true });
+    void promise.then(
+      (value) => {
+        signal.removeEventListener('abort', aborted);
+        resolvePromise(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', aborted);
+        rejectPromise(error);
+      },
+    );
+  });
 }
 
 function isAuthenticationFailure(error: unknown): boolean {

@@ -328,7 +328,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                         : value.slice('model:'.length);
                       if (model !== undefined) return chooseModel({
                         model,
-                        ...(props.selection?.executorId === browsed.id && props.selection.configuration.mode
+                        ...(!props.fixed && props.selection?.executorId === browsed.id && props.selection.configuration.mode
                           ? { mode: props.selection.configuration.mode }
                           : {}),
                       });
@@ -412,10 +412,9 @@ export function ExecutorThinkingLevelSelector(props: ExecutorModelPickerProps) {
     disabled={props.disabled || entry.readiness !== 'ready' || (props.fixed && !entry.supportsModelChange)}
     onChange={async (level) => {
       const variant = group.variants.find(candidate => candidate.level === level);
-      if (variant) await props.onSelect({ executorId: entry.id, configuration: {
-        ...props.selection?.configuration,
-        model: variant.modelId,
-      } });
+      if (variant) await props.onSelect({ executorId: entry.id, configuration: props.fixed
+        ? { model: variant.modelId }
+        : { ...props.selection?.configuration, model: variant.modelId } });
     }}
   />;
 }
@@ -449,7 +448,9 @@ export function ExecutorModeSelector(props: ExecutorModelPickerProps) {
           try {
             await props.onSelect({
               executorId: entry.id,
-              configuration: { ...props.selection!.configuration, mode },
+              configuration: props.fixed
+                ? { mode }
+                : { ...props.selection!.configuration, mode },
             });
             setOpen(false);
           } catch {

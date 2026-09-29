@@ -1022,6 +1022,31 @@ test('discovery shares a disposable probe, does not mark a task, and first promp
   }
 });
 
+test('a catalog caller can cancel without owning or leaking the shared probe', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.holdInitialize = true;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory },
+  );
+  const abort = new AbortController();
+  try {
+    const discovery = executor.discover({ cwd: fixture.root, signal: abort.signal });
+    for (let attempt = 0; attempt < 20 && protocol.connections === 0; attempt++)
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    assert.equal(protocol.connections, 1);
+    abort.abort(new Error('Catalog caller cancelled'));
+    await assert.rejects(discovery, /caller cancelled/u);
+    assert.equal(protocol.disposals, 0, 'caller cancellation must not own the shared probe');
+  } finally {
+    await executor.dispose();
+    assert.equal(protocol.disposals, 1, 'provider disposal must abort and drain the shared probe');
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('ACP modes remain distinct from models across discovery, prompt, idle change and restoration', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
@@ -1103,6 +1128,69 @@ test('ACP modes remain distinct from models across discovery, prompt, idle chang
         protocol.sessions,
         2,
         'one catalog probe and one retained Session; restore does not create another',
+      );
+    } finally {
+      await restored.dispose();
+    }
+  } finally {
+    await first.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('confirmed configuration clears a mode removed by a model change', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.hasMode = true;
+  protocol.supportsRestore = true;
+  const storage = durableState();
+  const make = () =>
+    new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      { createConnection: protocol.factory, state: storage.state },
+    );
+  const first = make();
+  try {
+    assert.equal(
+      (
+        await first.execute(
+          { ...request('first'), configuration: { model: 'default', mode: 'ask' } },
+          executorContext([]),
+        )
+      ).status,
+      'completed',
+    );
+    await first.acknowledgeExecution('session-a', 'turn-first');
+    protocol.dropModeForModel = 'fast';
+    assert.deepEqual(
+      await first.configureConversation(
+        { conversationKey: 'session-a', cwd: process.cwd(), configuration: { model: 'fast' } },
+        new AbortController().signal,
+      ),
+      { model: 'fast' },
+    );
+    assert.equal(storage.record().confirmedModel, 'fast');
+    assert.equal(storage.record().confirmedMode, undefined);
+    await first.dispose();
+
+    const restored = make();
+    try {
+      assert.deepEqual(
+        await restored.configureConversation(
+          { conversationKey: 'session-a', cwd: process.cwd(), configuration: { model: 'fast' } },
+          new AbortController().signal,
+        ),
+        { model: 'fast' },
+      );
+      assert.equal(
+        (
+          await restored.execute(
+            { ...request('second'), configuration: { model: 'fast' } },
+            executorContext([]),
+          )
+        ).status,
+        'completed',
       );
     } finally {
       await restored.dispose();
@@ -1360,10 +1448,12 @@ function fakeProtocol(): {
   selectedModel?: string;
   selectedMode?: string;
   hasMode: boolean;
+  dropModeForModel?: string;
+  holdInitialize: boolean;
   configurationFailure?: 'response_lost' | 'unconfirmed' | 'timeout' | 'once' | 'mode_once';
   sessionCreationFailure?: 'once';
   promptModels: string[];
-  promptModes: string[];
+  promptModes: Array<string | undefined>;
   supportsRestore: boolean;
   restoreFailure?: boolean;
   resumes: number;
@@ -1382,6 +1472,8 @@ function fakeProtocol(): {
     selectedModel: undefined as string | undefined,
     selectedMode: 'ask',
     hasMode: false,
+    dropModeForModel: undefined as string | undefined,
+    holdInitialize: false,
     configurationFailure: undefined as
       | 'response_lost'
       | 'unconfirmed'
@@ -1391,7 +1483,7 @@ function fakeProtocol(): {
       | undefined,
     sessionCreationFailure: undefined as 'once' | undefined,
     promptModels: [] as string[],
-    promptModes: [] as string[],
+    promptModes: [] as Array<string | undefined>,
     supportsRestore: false,
     restoreFailure: false,
     resumes: 0,
@@ -1414,7 +1506,8 @@ function fakeProtocol(): {
         { value: 'fast', name: 'Fast' },
       ],
     },
-    ...(fixture.hasMode
+    ...(fixture.hasMode &&
+    (fixture.dropModeForModel === undefined || fixture.selectedModel !== fixture.dropModeForModel)
       ? [
           {
             type: 'select',
@@ -1495,13 +1588,21 @@ function fakeProtocol(): {
           params: Record<string, unknown>,
           options?: { cancellationSignal?: AbortSignal },
         ) => {
-          if (method === methods.agent.initialize)
+          if (method === methods.agent.initialize) {
+            if (fixture.holdInitialize) {
+              const signal = options!.cancellationSignal!;
+              signal.throwIfAborted();
+              await new Promise((_, reject) =>
+                signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+              );
+            }
             return {
               protocolVersion: 1,
               agentCapabilities: fixture.supportsRestore
                 ? { loadSession: true, sessionCapabilities: { resume: {} } }
                 : {},
             };
+          }
           if (method === methods.agent.session.resume || method === methods.agent.session.load) {
             assert.equal(params.sessionId, 'acp-session');
             assert.equal(params.cwd, process.cwd());
@@ -1691,7 +1792,7 @@ for (const failure of ['once', 'unconfirmed'] as const)
     }
   });
 
-test('idle Agent configuration notifications update the inspected model without another prompt', async () => {
+test('idle Agent configuration notifications cannot diverge from the Session configuration', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
   const storage = durableState();
@@ -1710,12 +1811,19 @@ test('idle Agent configuration notifications update the inspected model without 
     assert.equal(
       (await executor.inspectConversation({ conversationKey: 'session-a', cwd: process.cwd() }))
         .currentModel,
-      'fast',
+      'default',
     );
-    for (let attempt = 0; attempt < 20 && storage.record().confirmedModel !== 'fast'; attempt++)
-      await new Promise<void>((resolve) => setTimeout(resolve, 5));
-    assert.equal(storage.record().confirmedModel, 'fast');
-    assert.equal(protocol.prompts, 1);
+    assert.equal(storage.record().confirmedModel, 'default');
+    assert.equal(
+      (
+        await executor.execute(
+          { ...request('second'), configuration: { model: 'default' } },
+          executorContext([]),
+        )
+      ).status,
+      'completed',
+    );
+    assert.deepEqual(protocol.promptModels, ['default', 'default']);
   } finally {
     await executor.dispose();
     await rm(fixture.root, { recursive: true, force: true });
