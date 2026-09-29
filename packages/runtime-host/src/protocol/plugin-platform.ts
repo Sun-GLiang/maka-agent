@@ -342,7 +342,7 @@ export const PLUGIN_PLATFORM_OPERATION_SPECS = {
     decodeInput: (value) => {
       const record = requireRecord(value, 'Executor query');
       if (record.kind === 'catalog') {
-        const input = requireExactRecord(record, 'Executor catalog', ['kind', 'cwd', 'refresh']);
+        const input = requireShapedRecord(record, 'Executor catalog', ['kind', 'cwd'], ['refresh']);
         if (input.refresh !== undefined && typeof input.refresh !== 'boolean')
           throw invalidProtocolFrame('Invalid executor refresh flag');
         return {

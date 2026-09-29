@@ -128,7 +128,11 @@ export function normalizeCatalogEntry(
       (!Array.isArray(value.modes) ||
         value.modes.length > 64 ||
         !value.modes.every(
-          (mode) => mode && isExecutorConfiguration({ mode: mode.id }) && isCatalogText(mode.name),
+          (mode) =>
+            mode &&
+            typeof mode.id === 'string' &&
+            isExecutorConfiguration({ mode: mode.id }) &&
+            isCatalogText(mode.name),
         ) ||
         new Set(value.modes.map((mode) => mode.id)).size !== value.modes.length)) ||
     !isExecutorConfiguration({ mode: value.currentMode }) ||

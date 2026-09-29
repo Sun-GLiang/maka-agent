@@ -76,6 +76,12 @@ test('opaque modes round-trip through generic configuration and catalog validati
   assert.throws(() =>
     normalizeCatalogEntry({ ...entry, modes: [entry.modes![0]!, entry.modes![0]!] }, 'external'),
   );
+  assert.throws(() =>
+    normalizeCatalogEntry(
+      { ...entry, modes: [{ name: 'Missing id' }] } as unknown as ExecutorCatalogEntry,
+      'external',
+    ),
+  );
 });
 for (const readiness of ['restorable', 'restoring', 'restore_failed', 'history_gap'] as const)
   test(`restoration readiness survives executor catalog normalization: ${readiness}`, () => {
