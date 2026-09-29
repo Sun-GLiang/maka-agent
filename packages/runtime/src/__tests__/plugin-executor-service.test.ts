@@ -337,6 +337,7 @@ test('catalog inspection stays process-free and model configuration is isolated 
   let discoveries = 0,
     inspections = 0,
     configured = 0,
+    invalidations = 0,
     retired = '';
   let release!: () => void;
   const catalog = {
@@ -352,6 +353,9 @@ test('catalog inspection stays process-free and model configuration is isolated 
     discover: async () => {
       discoveries++;
       return catalog;
+    },
+    invalidateCatalog: () => {
+      invalidations++;
     },
     inspectConversation: async () => {
       inspections++;
@@ -379,6 +383,8 @@ test('catalog inspection stays process-free and model configuration is isolated 
   assert.equal(state?.readiness, 'history_only');
   assert.equal(discoveries, 1);
   assert.equal(inspections, 1);
+  service.invalidateCatalog();
+  assert.equal(invalidations, 1);
   const execution = service.execute('remote', request('session-a'));
   await service.configureConversation('session-b', 'remote', {
     conversationKey: 'session-b',

@@ -41,15 +41,28 @@ export function useExecutorSelection(input: {
   const inFlight = useRef<string | undefined>(undefined);
   const sessionId = input.session?.id;
   const executorId = input.session?.executorId;
-  const key = sessionId ?? input.key;
+  const key = sessionId ?? JSON.stringify([
+    input.key,
+    input.target?.hostId,
+    input.target?.profileId,
+    input.target?.projectId,
+    input.cwd,
+  ]);
   const current = useRef(key);
   current.current = key;
   const revision = useRef(0);
   const refreshes = useRef(new Map<string, Promise<void>>());
   const pendingInvalidations = useRef(new Set<string>());
-  const refresh = useCallback((): Promise<void> => {
+  const pendingForce = useRef(new Set<string>());
+  const refresh = useCallback((force = false): Promise<void> => {
     const existing = refreshes.current.get(key);
-    if (existing) return existing;
+    if (existing) {
+      if (force) {
+        pendingInvalidations.current.add(key);
+        pendingForce.current.add(key);
+      }
+      return existing;
+    }
     const run = (async () => {
       const attempt = ++revision.current;
       if (sessionId && !executorId) {
@@ -65,7 +78,7 @@ export function useExecutorSelection(input: {
       try {
         const catalog = sessionId
           ? ((await services.sessions.getExecutorState?.(sessionId)) ?? [])
-          : ((await services.newTasks.getExecutors?.(input.target!, input.cwd!)) ?? []);
+          : ((await services.newTasks.getExecutors?.(input.target!, input.cwd!, force)) ?? []);
         if (current.current === key && revision.current === attempt)
           setSnapshot({ key, catalog, loading: false });
       } catch (error) {
@@ -82,7 +95,8 @@ export function useExecutorSelection(input: {
     tracked = run.finally(() => {
       if (refreshes.current.get(key) !== tracked) return;
       refreshes.current.delete(key);
-      if (pendingInvalidations.current.delete(key) && current.current === key) void refresh();
+      const forced = pendingForce.current.delete(key);
+      if (pendingInvalidations.current.delete(key) && current.current === key) void refresh(forced);
     });
     refreshes.current.set(key, tracked);
     return tracked;
@@ -91,6 +105,7 @@ export function useExecutorSelection(input: {
     sessionId,
     executorId,
     input.session?.executorConfig?.model,
+    input.session?.executorConfig?.mode,
     input.target?.hostId,
     input.target?.profileId,
     input.target?.projectId,
@@ -122,6 +137,7 @@ export function useExecutorSelection(input: {
       revision.current++;
       refreshes.current.delete(key);
       pendingInvalidations.current.delete(key);
+      pendingForce.current.delete(key);
       unsubscribe();
       unSession();
       clearTimeout(timer);
@@ -133,19 +149,24 @@ export function useExecutorSelection(input: {
   const catalog = snapshot?.key === key ? snapshot.catalog : [];
   const inspected = catalog.find(candidate => candidate.id === executorId);
   const selection = executorId
-    ? { executorId, configuration: inspected?.readiness === 'ready' && inspected.currentModel
-        ? { model: inspected.currentModel } : input.session?.executorConfig ?? {} }
+    ? { executorId, configuration: inspected?.readiness === 'ready'
+        ? { ...input.session?.executorConfig,
+            ...(inspected.currentModel ? { model: inspected.currentModel } : {}),
+            ...(inspected.currentMode ? { mode: inspected.currentMode } : {}) }
+        : input.session?.executorConfig ?? {} }
     : sessionId
       ? undefined
-      : draft?.key === input.key
+      : draft?.key === key
         ? draft.selection
         : undefined;
   const select = async (next: ExecutorSelection | undefined) => {
     if (inFlight.current === key) throw new Error('Executor configuration is pending');
     if (!sessionId) {
       if (next && !catalog.some(entry => entry.id === next.executorId && entry.readiness === 'ready' &&
-        entry.models.some(model => model.id === next.configuration.model))) throw new Error('Executor model is unavailable');
-      setDraft({ key: input.key, selection: next });
+        (!next.configuration.model || entry.models.some(model => model.id === next.configuration.model)) &&
+        (!next.configuration.mode || entry.modes?.some(mode => mode.id === next.configuration.mode))))
+        throw new Error('Executor configuration is unavailable');
+      setDraft({ key, selection: next });
       return;
     }
     if (!next || next.executorId !== executorId || !services.sessions.setExecutorModelConfiguration)
@@ -158,14 +179,15 @@ export function useExecutorSelection(input: {
         next.configuration,
       );
       if (!result.ok) throw new Error(result.code);
-      if (result.session.executorConfig?.model !== next.configuration.model)
-        throw new Error('Executor model change was not confirmed');
+      if ((next.configuration.model && result.session.executorConfig?.model !== next.configuration.model) ||
+        (next.configuration.mode && result.session.executorConfig?.mode !== next.configuration.mode))
+        throw new Error('Executor configuration change was not confirmed');
       if (current.current === key) {
         revision.current++;
         setSnapshot(previous => ({
           key, loading: false,
           catalog: (previous?.key === key ? previous.catalog : []).map(entry => entry.id === executorId
-            ? { ...entry, currentModel: result.session.executorConfig!.model } : entry),
+            ? { ...entry, currentModel: result.session.executorConfig?.model, currentMode: result.session.executorConfig?.mode } : entry),
         }));
         await refresh();
       }
@@ -188,8 +210,10 @@ export function useExecutorSelection(input: {
   const restore = async () => {
     if (!sessionId || !executorId) throw new Error('Executor Session is unavailable');
     if (inFlight.current === key) throw new Error('Executor configuration is pending');
-    const model = input.session?.executorConfig?.model ?? inspected?.currentModel;
-    if (!model) throw new Error('Executor model is unavailable');
+    const configuration = input.session?.executorConfig ?? {
+      ...(inspected?.currentModel ? { model: inspected.currentModel } : {}),
+      ...(inspected?.currentMode ? { mode: inspected.currentMode } : {}),
+    };
     setSnapshot((previous) =>
       previous?.key === key
         ? {
@@ -200,7 +224,7 @@ export function useExecutorSelection(input: {
           }
         : previous,
     );
-    await select({ executorId, configuration: { model } });
+    await select({ executorId, configuration });
   };
   return {
     selection,

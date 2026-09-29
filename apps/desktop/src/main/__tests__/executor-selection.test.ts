@@ -24,7 +24,7 @@ import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { ExecutorCatalogEntry } from '@maka/core/executor-catalog';
 import type { SessionSummary } from '@maka/core/session';
-import { useExecutorSelection, newTaskConfiguration, ConversationServicesProvider, type ConversationServices } from '../../renderer/features/conversation/index.js';
+import { useExecutorSelection, newTaskConfiguration, executorSubmissionError, ConversationServicesProvider, type ConversationServices } from '../../renderer/features/conversation/index.js';
 
 const entry: ExecutorCatalogEntry = { id: 'external', displayName: 'External', readiness: 'ready', models: [{ id: 'selected', name: 'Selected' }], supportsAttachments: false, supportsModelChange: true };
 
@@ -245,4 +245,19 @@ test('an executor choice uses its exact model without inheriting native thinking
   assert.equal(Object.hasOwn(configuration, 'thinkingLevel'), false);
   assert.equal(configuration.collaborationMode, 'agent');
   assert.equal(configuration.orchestrationMode, 'default');
+});
+
+test('draft submission keeps the selected mode and blocks a removed catalog choice', () => {
+  const executorSelection = { executorId: 'external', configuration: { model: 'selected', mode: 'auto' } };
+  const configuration = newTaskConfiguration({
+    executorSelection,
+    newChatModel: null, pendingNewChatThinkingLevel: undefined,
+    newChatPermissionChoice: undefined, newChatCollaborationMode: 'agent',
+    newChatOrchestrationMode: 'default',
+  });
+  assert.deepEqual(configuration.executorConfig, { model: 'selected', mode: 'auto' });
+  assert.match(executorSubmissionError({
+    executorSelection,
+    executorEntry: { ...entry, modes: [{ id: 'ask', name: 'Ask' }] },
+  }, 0, 'en') ?? '', /no longer available/u);
 });

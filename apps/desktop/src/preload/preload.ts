@@ -1925,8 +1925,8 @@ const makaBridge = {
     },
   },
   newTasks: {
-    async getExecutors(target, cwd) {
-      return ipcRenderer.invoke('sessions:executorCatalog', await runtimeHostScope(target), cwd);
+    async getExecutors(target, cwd, refresh) {
+      return ipcRenderer.invoke('sessions:executorCatalog', await runtimeHostScope(target), cwd, refresh);
     },
     getCatalog(): Promise<DesktopNewTaskCatalog> {
       return loadNewTaskCatalog();

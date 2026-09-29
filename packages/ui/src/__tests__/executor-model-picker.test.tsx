@@ -24,6 +24,7 @@ import type { ChatModelChoice } from '@maka/core/chat-model-choice';
 import {
   ExecutorModelPicker,
   ExecutorThinkingLevelSelector,
+  ExecutorModeSelector,
   type ExecutorSelection,
   type ExecutorModelPickerProps,
 } from '../executor-model-picker.js';
@@ -75,6 +76,28 @@ const choices: ChatModelChoice[] = [
     thinkingLevels: [],
   },
 ];
+
+test('provider mode selector preserves the model and commits only a real mode ID', async () => {
+  const dom = installTranscriptDom();
+  const selections: ExecutorSelection[] = [];
+  try {
+    await dom.render(<LocaleProvider locale="zh-CN"><ExecutorModeSelector
+      catalog={[{ ...catalog[0]!, modes: [
+        { id: 'ask', name: '询问' }, { id: 'auto', name: '自动' },
+      ], currentMode: 'ask', supportsModeChange: true }]}
+      selection={{ executorId: 'antigravity', configuration: { model: 'model-0', mode: 'ask' } }}
+      onSelect={(selection) => { if (selection) selections.push(selection); }}
+      onSetup={() => {}} onRetry={() => {}} onNewTask={() => {}}
+    /></LocaleProvider>);
+    const trigger = dom.document.querySelector('.maka-executor-mode-selector');
+    assert.ok(trigger?.textContent?.includes('模式: 询问'));
+    await act(async () => { trigger!.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
+    const auto = [...dom.document.querySelectorAll('[role="option"]')].find(row => row.textContent?.includes('自动'));
+    assert.ok(auto);
+    await act(async () => { auto.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
+    assert.deepEqual(selections, [{ executorId: 'antigravity', configuration: { model: 'model-0', mode: 'auto' } }]);
+  } finally { await dom.cleanup(); }
+});
 
 test('the picker shows a generic loading state until the executor catalog arrives', async () => {
   const dom = installTranscriptDom();

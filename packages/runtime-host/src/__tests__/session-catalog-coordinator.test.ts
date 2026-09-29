@@ -918,14 +918,14 @@ test('plugin executor creation bypasses model resolution and persists the execut
       executorId: 'codex',
       executorModel: 'gpt-codex',
       thinkingLevel: 'high',
-      executorConfig: { model: 'gpt-codex' },
+      executorConfig: { model: 'gpt-codex', mode: 'auto' },
     },
     context,
   );
 
   assert.equal(outcome.ok, true, JSON.stringify(outcome));
   assert.equal(persistedInput?.executorId, 'codex');
-  assert.deepEqual(persistedInput?.executorConfig, { model: 'gpt-codex' });
+  assert.deepEqual(persistedInput?.executorConfig, { model: 'gpt-codex', mode: 'auto' });
   assert.equal(persistedInput?.llmConnectionId, undefined);
   assert.equal(persistedInput?.llmConnectionSlug, 'executor:codex');
   assert.equal(persistedInput?.model, 'gpt-codex');
@@ -2482,6 +2482,54 @@ test('executor model changes commit only after idle agent confirmation', async (
   assert.deepEqual(order, ['confirmed']);
   assert.equal(fixture.header().executorConfig?.model, 'after');
   assert.equal(fixture.drainRequests(), 0);
+});
+
+test('mode-only changes retain the saved model and wait for Agent confirmation', async () => {
+  const fixture = createFixture({
+    header: {
+      backend: 'plugin-executor',
+      executorId: 'remote',
+      executorConfig: { model: 'before', mode: 'ask' },
+    },
+    configureExecutor: async (_header, config) => {
+      assert.deepEqual(config, { mode: 'auto' });
+      assert.deepEqual(fixture.header().executorConfig, { model: 'before', mode: 'ask' });
+    },
+  });
+  const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+    {
+      sessionId: fixture.sessionId,
+      expectedRevision: fixture.revision(),
+      patch: { executorConfig: { mode: 'auto' } },
+    },
+    context,
+  );
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  assert.deepEqual(fixture.header().executorConfig, { model: 'before', mode: 'auto' });
+});
+
+test('Agent-confirmed mode side effects are persisted with a model change', async () => {
+  const fixture = createFixture({
+    header: {
+      backend: 'plugin-executor',
+      executorId: 'remote',
+      executorConfig: { model: 'before', mode: 'ask' },
+    },
+    configureExecutor: async (_header, config) => {
+      assert.deepEqual(config, { model: 'after' });
+      return { model: 'after', mode: 'auto' };
+    },
+  });
+  const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+    {
+      sessionId: fixture.sessionId,
+      expectedRevision: fixture.revision(),
+      patch: { executorConfig: { model: 'after' } },
+    },
+    context,
+  );
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  assert.deepEqual(fixture.header().executorConfig, { model: 'after', mode: 'auto' });
 });
 
 test('failed Session commit restores the confirmed executor model', async () => {

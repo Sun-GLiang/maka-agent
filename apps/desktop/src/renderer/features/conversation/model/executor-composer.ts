@@ -45,7 +45,7 @@ export function executorComposerProps(
             onSelect: (selection) => executor.select(selection),
             onRestore: () => executor.restore(),
             onRetry: () => {
-              void executor.refresh();
+              void executor.refresh(true);
             },
             onSetup: input.onSetup,
             onNewTask: input.onNewTask,

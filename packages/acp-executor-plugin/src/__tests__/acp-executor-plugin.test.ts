@@ -1022,6 +1022,204 @@ test('discovery shares a disposable probe, does not mark a task, and first promp
   }
 });
 
+test('ACP modes remain distinct from models across discovery, prompt, idle change and restoration', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.hasMode = true;
+  protocol.supportsRestore = true;
+  const storage = durableState();
+  const make = () =>
+    new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      {
+        createConnection: protocol.factory,
+        state: storage.state,
+      },
+    );
+  const first = make();
+  try {
+    const catalog = await first.discover({
+      cwd: fixture.root,
+      signal: new AbortController().signal,
+    });
+    assert.deepEqual(
+      catalog.modes?.map((mode) => mode.id),
+      ['ask', 'auto'],
+    );
+    assert.equal(catalog.currentMode, 'ask');
+    assert.equal(catalog.supportsModeChange, true);
+    const requestWithMode = { ...request('first'), configuration: { model: 'fast', mode: 'auto' } };
+    assert.equal((await first.execute(requestWithMode, executorContext([]))).status, 'completed');
+    assert.deepEqual(protocol.promptModels, ['fast']);
+    assert.deepEqual(protocol.promptModes, ['auto']);
+    assert.equal(storage.record().confirmedMode, 'auto');
+    await first.acknowledgeExecution('session-a', 'turn-first');
+    await first.configureConversation(
+      { conversationKey: 'session-a', cwd: process.cwd(), configuration: { mode: 'ask' } },
+      new AbortController().signal,
+    );
+    assert.equal(protocol.selectedModel, 'fast');
+    assert.equal(protocol.selectedMode, 'ask');
+    assert.equal(storage.record().confirmedMode, 'ask');
+    await assert.rejects(
+      first.configureConversation(
+        { conversationKey: 'session-a', cwd: process.cwd(), configuration: { mode: 'invented' } },
+        new AbortController().signal,
+      ),
+    );
+    assert.equal(protocol.selectedMode, 'ask');
+    await first.dispose();
+    const restored = make();
+    try {
+      const saved = await restored.inspectConversation({
+        conversationKey: 'session-a',
+        cwd: process.cwd(),
+        configuration: { model: 'fast', mode: 'ask' },
+      });
+      assert.equal(saved.readiness, 'restorable');
+      assert.deepEqual(
+        saved.models.map((model) => model.id),
+        ['fast'],
+      );
+      assert.deepEqual(
+        saved.modes?.map((mode) => mode.id),
+        ['ask'],
+      );
+      await restored.configureConversation(
+        {
+          conversationKey: 'session-a',
+          cwd: process.cwd(),
+          configuration: { model: 'fast', mode: 'ask' },
+        },
+        new AbortController().signal,
+      );
+      assert.equal(
+        (await restored.inspectConversation({ conversationKey: 'session-a', cwd: process.cwd() }))
+          .currentMode,
+        'ask',
+      );
+      assert.equal(
+        protocol.sessions,
+        2,
+        'one catalog probe and one retained Session; restore does not create another',
+      );
+    } finally {
+      await restored.dispose();
+    }
+  } finally {
+    await first.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('a failed second configuration option restores both model and mode', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.hasMode = true;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory },
+  );
+  try {
+    assert.equal(
+      (await executor.execute(request('first'), executorContext([]))).status,
+      'completed',
+    );
+    protocol.configurationFailure = 'mode_once';
+    await assert.rejects(
+      executor.configureConversation(
+        {
+          conversationKey: 'session-a',
+          cwd: process.cwd(),
+          configuration: { model: 'fast', mode: 'auto' },
+        },
+        new AbortController().signal,
+      ),
+    );
+    assert.equal(protocol.selectedModel, 'default');
+    assert.equal(protocol.selectedMode, 'ask');
+    const state = await executor.inspectConversation({
+      conversationKey: 'session-a',
+      cwd: process.cwd(),
+    });
+    assert.equal(state.readiness, 'ready');
+    assert.equal(state.currentModel, 'default');
+    assert.equal(state.currentMode, 'ask');
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('late configuration notifications cannot overwrite an idle confirmed change', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      createConnection: protocol.factory,
+    },
+  );
+  try {
+    assert.equal(
+      (await executor.execute(request('first'), executorContext([]))).status,
+      'completed',
+    );
+    await executor.configureConversation(
+      { conversationKey: 'session-a', cwd: process.cwd(), configuration: { model: 'fast' } },
+      new AbortController().signal,
+    );
+    protocol.notifyConfiguration('default');
+    assert.equal(
+      (await executor.inspectConversation({ conversationKey: 'session-a', cwd: process.cwd() }))
+        .currentModel,
+      'fast',
+    );
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('catalog reuse is scoped to cwd and refresh only replaces that scope', async () => {
+  const fixture = await executableFixture();
+  const other = await mkdtemp(join(tmpdir(), 'maka-acp-catalog-other-'));
+  const protocol = fakeProtocol();
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      createConnection: protocol.factory,
+    },
+  );
+  const signal = new AbortController().signal;
+  try {
+    await Promise.all([
+      executor.discover({ cwd: fixture.root, signal }),
+      executor.discover({ cwd: fixture.root, signal }),
+    ]);
+    assert.equal(protocol.connections, 1);
+    await executor.discover({ cwd: other, signal });
+    assert.equal(protocol.connections, 2);
+    await executor.discover({ cwd: fixture.root, signal });
+    assert.equal(protocol.connections, 2);
+    await executor.discover({ cwd: fixture.root, signal, refresh: true });
+    assert.equal(protocol.connections, 3);
+    await executor.discover({ cwd: other, signal });
+    assert.equal(protocol.connections, 3, 'refreshing one cwd must retain another cwd cache');
+    executor.invalidateCatalog();
+    await executor.discover({ cwd: other, signal });
+    assert.equal(protocol.connections, 4);
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+    await rm(other, { recursive: true, force: true });
+  }
+});
+
 for (const failure of ['response_lost', 'timeout'] as const) {
   test(`an applied model change with ${failure} prevents prompts using stale configuration`, async () => {
     const fixture = await executableFixture();
@@ -1160,9 +1358,12 @@ function fakeProtocol(): {
   prompts: number;
   disposals: number;
   selectedModel?: string;
-  configurationFailure?: 'response_lost' | 'unconfirmed' | 'timeout' | 'once';
+  selectedMode?: string;
+  hasMode: boolean;
+  configurationFailure?: 'response_lost' | 'unconfirmed' | 'timeout' | 'once' | 'mode_once';
   sessionCreationFailure?: 'once';
   promptModels: string[];
+  promptModes: string[];
   supportsRestore: boolean;
   restoreFailure?: boolean;
   resumes: number;
@@ -1179,14 +1380,18 @@ function fakeProtocol(): {
     prompts: 0,
     disposals: 0,
     selectedModel: undefined as string | undefined,
+    selectedMode: 'ask',
+    hasMode: false,
     configurationFailure: undefined as
       | 'response_lost'
       | 'unconfirmed'
       | 'timeout'
       | 'once'
+      | 'mode_once'
       | undefined,
     sessionCreationFailure: undefined as 'once' | undefined,
     promptModels: [] as string[],
+    promptModes: [] as string[],
     supportsRestore: false,
     restoreFailure: false,
     resumes: 0,
@@ -1198,6 +1403,33 @@ function fakeProtocol(): {
     notifyConfiguration: (_model: string): void => {},
     factory: undefined as unknown as AcpConnectionFactory,
   };
+  const configOptions = () => [
+    {
+      type: 'select',
+      id: 'model',
+      name: 'Model',
+      currentValue: fixture.selectedModel ?? 'default',
+      options: [
+        { value: 'default', name: 'Default' },
+        { value: 'fast', name: 'Fast' },
+      ],
+    },
+    ...(fixture.hasMode
+      ? [
+          {
+            type: 'select',
+            id: 'mode',
+            category: 'mode',
+            name: 'Mode',
+            currentValue: fixture.selectedMode,
+            options: [
+              { value: 'ask', name: 'Ask before edits' },
+              { value: 'auto', name: 'Autonomous' },
+            ],
+          },
+        ]
+      : []),
+  ];
   fixture.factory = (input) => {
     fixture.connections += 1;
     const notifications = new Map<string, (input: { params: never }) => unknown>();
@@ -1286,20 +1518,7 @@ function fakeProtocol(): {
                   params: { sessionId: 'acp-session', update } as never,
                 });
             }
-            return {
-              configOptions: [
-                {
-                  type: 'select',
-                  id: 'model',
-                  name: 'Model',
-                  currentValue: fixture.selectedModel ?? 'default',
-                  options: [
-                    { value: 'default', name: 'Default' },
-                    { value: 'fast', name: 'Fast' },
-                  ],
-                },
-              ],
-            };
+            return { configOptions: configOptions() };
           }
           if (method === methods.agent.session.new) {
             fixture.sessions += 1;
@@ -1307,25 +1526,15 @@ function fakeProtocol(): {
               fixture.sessionCreationFailure = undefined;
               throw new Error('Session creation response was lost');
             }
-            return {
-              sessionId: 'acp-session',
-              configOptions: [
-                {
-                  type: 'select',
-                  id: 'model',
-                  name: 'Model',
-                  currentValue: 'default',
-                  options: [
-                    { value: 'default', name: 'Default' },
-                    { value: 'fast', name: 'Fast' },
-                  ],
-                },
-              ],
-            };
+            return { sessionId: 'acp-session', configOptions: configOptions() };
           }
           if (method === methods.agent.session.setConfigOption) {
-            fixture.selectedModel = String(params.value);
-            if (fixture.configurationFailure === 'once') {
+            if (params.configId === 'mode') fixture.selectedMode = String(params.value);
+            else fixture.selectedModel = String(params.value);
+            if (
+              fixture.configurationFailure === 'once' ||
+              (fixture.configurationFailure === 'mode_once' && params.configId === 'mode')
+            ) {
               fixture.configurationFailure = undefined;
               throw new Error('Transient rejection after mutation');
             }
@@ -1339,24 +1548,20 @@ function fakeProtocol(): {
               );
             }
             return {
-              configOptions: [
-                {
-                  type: 'select',
-                  id: 'model',
-                  name: 'Model',
-                  currentValue:
-                    fixture.configurationFailure === 'unconfirmed' ? 'default' : params.value,
-                  options: [
-                    { value: 'default', name: 'Default' },
-                    { value: 'fast', name: 'Fast' },
-                  ],
-                },
-              ],
+              configOptions:
+                fixture.configurationFailure === 'unconfirmed'
+                  ? configOptions().map((option) =>
+                      option.id === params.configId
+                        ? { ...option, currentValue: option.id === 'mode' ? 'ask' : 'default' }
+                        : option,
+                    )
+                  : configOptions(),
             };
           }
           if (method === methods.agent.session.prompt) {
             fixture.prompts += 1;
             fixture.promptModels.push(fixture.selectedModel ?? 'default');
+            fixture.promptModes.push(fixture.selectedMode);
             const text = (params.prompt as Array<{ text: string }>)[0]!.text;
             await requests.get(methods.client.session.requestPermission)?.({
               params: {
@@ -1489,22 +1694,27 @@ for (const failure of ['once', 'unconfirmed'] as const)
 test('idle Agent configuration notifications update the inspected model without another prompt', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
+  const storage = durableState();
   const executor = new AcpExecutor(
     adapter,
     { executable: fixture.executable },
-    { createConnection: protocol.factory },
+    { createConnection: protocol.factory, state: storage.state },
   );
   try {
     await executor.execute(
       { ...request('first'), configuration: { model: 'default' } },
       executorContext([]),
     );
+    await executor.acknowledgeExecution('session-a', 'turn-first');
     protocol.notifyConfiguration('fast');
     assert.equal(
       (await executor.inspectConversation({ conversationKey: 'session-a', cwd: process.cwd() }))
         .currentModel,
       'fast',
     );
+    for (let attempt = 0; attempt < 20 && storage.record().confirmedModel !== 'fast'; attempt++)
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    assert.equal(storage.record().confirmedModel, 'fast');
     assert.equal(protocol.prompts, 1);
   } finally {
     await executor.dispose();
