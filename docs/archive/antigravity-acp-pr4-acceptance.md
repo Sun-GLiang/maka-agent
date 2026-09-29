@@ -31,6 +31,18 @@ This record separates controlled protocol fixtures from official Agent results.
 
 The gate is **blocked by authentication**, not proven protocol incompatibility. Real mode IDs, mode/model interaction, confirmation responses, different-directory catalogs, restoration of mode, and the full Desktop acceptance path are **not verified** in this environment. Controlled fixtures below cannot satisfy those real-Agent checklist items. No account or proxy configuration was changed by this work.
 
+## Authenticated official Agent follow-up, 2026-09-29
+
+A later check on macOS arm64 used the official 1.2.1 archive linked by the ACP registry. Its server and helper matched the SHA-256 values above. With the existing authenticated Agent home and a disposable toy workspace:
+
+- A production `AcpExecutor` catalog probe returned 11 real model IDs and three mode IDs: `default`, `auto_edit`, and `yolo`. The current mode was `default`.
+- A fresh Session confirmed `gemini-3.8-flash-high` with `default`, then confirmed an idle change to `auto_edit`. Another idle change confirmed `gemini-3.7-flash-high` with `default`. Inspection returned those exact final values.
+- After disposing and recreating the executor, inspection reported `restorable`. Explicit restoration retained the same external Session ID and reconfirmed the saved model and mode. The comparison was made in memory; the ID was not logged.
+- Synthetic text prompts with both `gemini-3.8-flash-high` and `gemini-3.7-flash-high` failed with `acp_prompt_failed`. The Agent's output contained HTTP 403 and a location restriction. This check therefore does **not** establish successful prompt execution or post-restart context retention.
+- A Desktop development build opened in an isolated worktree profile, but authenticated Desktop selection, refresh, idle change, and restart evidence remains outstanding. The isolated profile has no configured external Agent, and the prompt restriction above still blocks the complete task flow.
+
+All probes used a temporary project, sent no private project content, and disposed their Agent processes. No account or network settings were changed. Real discovery, confirmed configuration, and same-Session restoration are now verified; full Desktop and successful prompt acceptance remain open.
+
 ## Implementation and controlled checks
 
 The generic executor configuration and catalog now carry optional opaque mode IDs. ACP maps only real `select` mode options from the Agent; omitted mode preserves the Agent default. The same Host query and Desktop picker carry models and modes. Catalogs are keyed by resolved directory, share one bounded probe per directory, and can be invalidated by setup/login, policy changes, expiration, or explicit refresh. The retained task's configuration is inspected independently of draft discovery.

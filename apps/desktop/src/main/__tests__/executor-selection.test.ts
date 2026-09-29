@@ -205,7 +205,8 @@ test('late draft discovery cannot replace the current target; existing tasks ins
     assert.equal(latest.changing, false);
     serverModel = 'selected';
     await act(async () => latest.refresh());
-    assert.equal(latest.selection?.configuration.model, 'selected', 'Agent state updates synchronize the control');
+    assert.equal(latest.entry?.currentModel, 'selected', 'inspection still reports observed Agent state');
+    assert.equal(latest.selection?.configuration.model, 'fast', 'Agent drift cannot replace the confirmed selection');
     await act(async () => { pending = latest.select({ executorId: 'external', configuration: { model: 'fast' } }); });
     await render('next-draft');
     await act(async () => {
@@ -213,6 +214,51 @@ test('late draft discovery cannot replace the current target; existing tasks ins
       await pending;
     });
     assert.equal(latest.selection, undefined);
+  } finally {
+    await act(async () => root.unmount());
+    for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); }
+  }
+});
+
+test('a late Agent mode update cannot replace the saved task selection', async () => {
+  const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
+  const values = { document, window, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true };
+  const originals = new Map(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const root = createRoot(document.getElementById('root')!);
+  const modes = [{ id: 'ask', name: 'Ask' }, { id: 'auto', name: 'Auto' }];
+  let observedMode = 'auto';
+  let latest!: ReturnType<typeof useExecutorSelection>;
+  const services = {
+    subscribeChanges: () => () => {},
+    newTasks: { subscribeChanges: () => () => {} },
+    sessions: {
+      getExecutorState: async () => [{ ...entry, modes, currentModel: 'selected', currentMode: observedMode }],
+      setExecutorModelConfiguration: async () => ({
+        ok: true,
+        session: { executorConfig: { model: 'selected', mode: 'auto' } },
+      }),
+    },
+  } as unknown as ConversationServices;
+  const session = { id: 'saved', executorId: 'external', executorConfig: { model: 'selected', mode: 'ask' } } as SessionSummary;
+  function Probe(props: { session: SessionSummary }) {
+    latest = useExecutorSelection({ key: 'saved', session: props.session });
+    return null;
+  }
+  try {
+    await act(async () => root.render(createElement(ConversationServicesProvider, { services, children: createElement(Probe, { session }) })));
+    assert.equal(latest.entry?.currentMode, 'auto');
+    assert.equal(latest.selection?.configuration.mode, 'ask', 'saved mode remains selected after Agent drift');
+    await act(async () => latest.select({ executorId: 'external', configuration: { mode: 'auto' } }));
+    assert.equal(latest.selection?.configuration.mode, 'auto', 'confirmed change is visible before Session props catch up');
+    observedMode = 'ask';
+    await act(async () => latest.refresh());
+    assert.equal(latest.entry?.currentMode, 'ask');
+    assert.equal(latest.selection?.configuration.mode, 'auto', 'another late update cannot replace the confirmed choice');
+    await act(async () => root.render(createElement(ConversationServicesProvider, { services, children: createElement(Probe, { session: { ...session, executorConfig: { model: 'selected', mode: 'auto' } } }) })));
+    assert.equal(latest.selection?.configuration.mode, 'auto');
+    await act(async () => root.render(createElement(ConversationServicesProvider, { services, children: createElement(Probe, { session }) })));
+    assert.equal(latest.selection?.configuration.mode, 'ask', 'a later saved configuration supersedes the local confirmation');
   } finally {
     await act(async () => root.unmount());
     for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); }

@@ -18,7 +18,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ExecutorCatalogEntry, ExecutorSelection } from '@maka/core/executor-catalog';
+import type { ExecutorCatalogEntry, ExecutorConfiguration, ExecutorSelection } from '@maka/core/executor-catalog';
 import type { SessionSummary } from '@maka/core/session';
 import type { ConversationNewTaskTarget } from '../ports.js';
 import { useConversationServices } from '../services.js';
@@ -38,6 +38,11 @@ export function useExecutorSelection(input: {
     error?: string;
   }>();
   const [changingKey, setChangingKey] = useState<string>();
+  const [confirmed, setConfirmed] = useState<{
+    key: string;
+    previous?: ExecutorConfiguration;
+    configuration: ExecutorConfiguration;
+  }>();
   const inFlight = useRef<string | undefined>(undefined);
   const sessionId = input.session?.id;
   const executorId = input.session?.executorId;
@@ -146,14 +151,27 @@ export function useExecutorSelection(input: {
   useEffect(() => {
     if (sessionId) setDraft(undefined);
   }, [sessionId]);
+  useEffect(() => {
+    if (confirmed?.key === key &&
+      confirmed.configuration.model === input.session?.executorConfig?.model &&
+      confirmed.configuration.mode === input.session?.executorConfig?.mode)
+      setConfirmed(undefined);
+  }, [key, confirmed, input.session?.executorConfig?.model, input.session?.executorConfig?.mode]);
   const catalog = snapshot?.key === key ? snapshot.catalog : [];
   const inspected = catalog.find(candidate => candidate.id === executorId);
+  // The catalog describes observed Agent state. The saved Session config is the
+  // selection that will be applied before the next prompt.
+  const savedConfiguration = confirmed?.key === key &&
+    confirmed.previous?.model === input.session?.executorConfig?.model &&
+    confirmed.previous?.mode === input.session?.executorConfig?.mode
+      ? confirmed.configuration
+      : input.session?.executorConfig;
   const selection = executorId
     ? { executorId, configuration: inspected?.readiness === 'ready'
-        ? { ...input.session?.executorConfig,
-            ...(inspected.currentModel ? { model: inspected.currentModel } : {}),
-            ...(inspected.currentMode ? { mode: inspected.currentMode } : {}) }
-        : input.session?.executorConfig ?? {} }
+        ? { ...(inspected.currentModel ? { model: inspected.currentModel } : {}),
+            ...(inspected.currentMode ? { mode: inspected.currentMode } : {}),
+            ...savedConfiguration }
+        : savedConfiguration ?? {} }
     : sessionId
       ? undefined
       : draft?.key === key
@@ -183,6 +201,11 @@ export function useExecutorSelection(input: {
         (next.configuration.mode && result.session.executorConfig?.mode !== next.configuration.mode))
         throw new Error('Executor configuration change was not confirmed');
       if (current.current === key) {
+        setConfirmed({
+          key,
+          previous: input.session?.executorConfig,
+          configuration: result.session.executorConfig ?? {},
+        });
         revision.current++;
         setSnapshot(previous => ({
           key, loading: false,
