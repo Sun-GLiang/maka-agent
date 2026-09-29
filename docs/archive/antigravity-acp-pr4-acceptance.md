@@ -41,7 +41,19 @@ A later check on macOS arm64 used the official 1.2.1 archive linked by the ACP r
 - Synthetic text prompts with both `gemini-3.8-flash-high` and `gemini-3.7-flash-high` failed with `acp_prompt_failed`. The Agent's output contained HTTP 403 and a location restriction. This check therefore does **not** establish successful prompt execution or post-restart context retention.
 - A Desktop development build opened in an isolated worktree profile, but authenticated Desktop selection, refresh, idle change, and restart evidence remains outstanding. The isolated profile has no configured external Agent, and the prompt restriction above still blocks the complete task flow.
 
-All probes used a temporary project, sent no private project content, and disposed their Agent processes. No account or network settings were changed. Real discovery, confirmed configuration, and same-Session restoration are now verified; full Desktop and successful prompt acceptance remain open.
+All probes used a temporary project, sent no private project content, and disposed their Agent processes. No account or network settings were changed. At that stage, real discovery, confirmed configuration, and same-Session restoration were verified; full Desktop and successful prompt acceptance were still open.
+
+## Desktop acceptance, 2026-09-30
+
+The Desktop development build ran on macOS arm64 with an isolated user-data directory and two temporary toy folders. The installed Agent was the official 1.2.1 distribution verified above. No private project content was sent to it.
+
+- The macOS file picker disabled selection of the official Mach-O `agy_acp_server.par` file. Desktop now asks for its extracted directory and resolves the server path from that directory. In the real UI, choosing the directory saved the executable path, `Check connection` succeeded, and Google sign-in verification succeeded.
+- In the first toy project, the Antigravity picker showed the four model families backed by the real catalog. The production catalog probe returned 11 model IDs. The mode picker showed `Default`, `Auto Edit`, and `YOLO`. A manual refresh retained the selected model.
+- A new Desktop task used `gemini-3.7-flash-high` with `auto_edit`. The first synthetic prompt asked the Agent to remember `RIVER-4821` without reading or writing files. The task completed in nine seconds and answered that it had remembered the code.
+- While idle, the same task confirmed a change to `default` and `gemini-3.6-flash-high`. After a normal Desktop quit and restart, the task showed a restore action. Restoration completed with that model and mode. A second prompt omitted the code and asked the Agent to recall it; the completed answer was exactly `RIVER-4821`.
+- The private Plugin continuity record showed `phase: committed`, two committed prompts, and the confirmed model and mode. A second normal quit and restart again restored the task. A one-way fingerprint comparison of the record before and after that restart confirmed the same external Session ID; the ID was not logged.
+
+The attempt to add a second toy project for a Desktop directory-isolation check did not complete: the macOS project-folder picker disabled its Open button despite the folder being selected. The first toy project had been added successfully through that picker. Directory isolation remains covered by controlled tests, but is not claimed as a second-project Desktop pass.
 
 ## Implementation and controlled checks
 
@@ -56,6 +68,7 @@ Controlled tests cover the contract, prompt application, idle mode update, combi
 ## Final validation
 
 - `npm run build`, `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run check:renderer-architecture`, `npm run check:locale-hygiene`, and `npm run check:asf-headers`: passed.
+- For the 2026-09-30 Desktop picker follow-up, the development build completed and targeted Biome lint passed. A fresh Desktop workspace typecheck still reports errors in unchanged browser tools, notifications, overlays, runtime config, and conversation selector files; those errors are not counted as a pass for this follow-up.
 - `node scripts/run-workspace-tests-parallel.mjs --concurrency=1` with the bundled Node.js 24.19.0 and Python 3.12.14: all workspaces passed. A separate three-workspace concurrent run was stopped after unrelated timing-sensitive Runtime Host integration cases failed under load; it is not counted as passing validation.
 - The protocol epoch changed from 198 to 199 for the additive mode and refresh wire fields. `node scripts/protocol-epoch-check.mjs --staged` passed against the complete staged diff.
-- The initial unauthenticated `session/new` failure was resolved for the official-Agent follow-up above. That run verified real mode candidates, confirmed idle model/mode changes, and explicit same-Session restoration. Successful prompts, post-restart context retention, different-directory catalogs with the official Agent, and the Desktop end-to-end path remain unverified. Synthetic prompts encountered an Agent HTTP 403 location restriction; Desktop acceptance requires a fresh signed-in run with a working prompt route.
+- The initial unauthenticated `session/new` failure and later HTTP 403 prompt restriction were resolved for the Desktop run above. The real Desktop flow verified selection, authentication, catalog refresh, mode and model changes, a completed prompt, and post-restart continuation. A second-project Desktop directory-isolation check remains unverified for the picker reason recorded above.
