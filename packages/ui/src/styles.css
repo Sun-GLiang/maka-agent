@@ -519,6 +519,15 @@
   line-height: 1.6;
   text-autospace: normal;
 }
+/* Keep prose and code links visibly continuous. The browser's default
+   `text-decoration-skip-ink: auto` cuts gaps around descenders (g/p/y), which
+   looks like a broken underline on model IDs. A small em-based offset keeps
+   the continuous line clear of glyphs at both prose and inline-code sizes.
+   Scope to Markdown links; control links elsewhere keep Astryx's defaults. */
+[data-maka-contract="markdown"] .astryx-link {
+  text-decoration-skip-ink: none;
+  text-underline-offset: 0.2em;
+}
 /* Only a fenced block's own lines declare the code leading. CodeBlock wraps
    every 20 of them in a `content-visibility: auto` box whose placeholder is
    `20lh`, and `lh` there resolves against what the box inherits — this prose
