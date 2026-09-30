@@ -1204,6 +1204,115 @@ test('merged configuration preserves the model when a mode change opens a fresh 
   }
 });
 
+test('a fresh Session selects a model before validating a mode unavailable on the launch model', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.hasMode = true;
+  protocol.dropModeForModel = 'default';
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable, model: 'default' },
+    { createConnection: protocol.factory },
+  );
+  try {
+    assert.deepEqual(
+      await executor.configureConversation(
+        {
+          conversationKey: 'session-a',
+          cwd: process.cwd(),
+          configuration: { model: 'fast', mode: 'auto' },
+        },
+        new AbortController().signal,
+      ),
+      { model: 'fast', mode: 'auto' },
+    );
+    assert.equal(protocol.sessions, 1);
+    assert.equal(protocol.selectedModel, 'fast');
+    assert.equal(protocol.selectedMode, 'auto');
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('an idle model drift does not block restoring the saved mode with a model change', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.hasMode = true;
+  protocol.dropModeForModel = 'default';
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory },
+  );
+  try {
+    await executor.configureConversation(
+      {
+        conversationKey: 'session-a',
+        cwd: process.cwd(),
+        configuration: { model: 'fast', mode: 'auto' },
+      },
+      new AbortController().signal,
+    );
+    protocol.notifyConfiguration('default');
+    assert.deepEqual(
+      await executor.configureConversation(
+        {
+          conversationKey: 'session-a',
+          cwd: process.cwd(),
+          configuration: { model: 'fast', mode: 'auto' },
+        },
+        new AbortController().signal,
+      ),
+      { model: 'fast', mode: 'auto' },
+    );
+    assert.equal(protocol.sessions, 1);
+    assert.equal(protocol.selectedModel, 'fast');
+    assert.equal(protocol.selectedMode, 'auto');
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('an invalid mode after changing models rolls the Agent back to its prior selection', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.hasMode = true;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory },
+  );
+  try {
+    await executor.configureConversation(
+      { conversationKey: 'session-a', cwd: process.cwd(), configuration: { model: 'default' } },
+      new AbortController().signal,
+    );
+    await assert.rejects(
+      executor.configureConversation(
+        {
+          conversationKey: 'session-a',
+          cwd: process.cwd(),
+          configuration: { model: 'fast', mode: 'invented' },
+        },
+        new AbortController().signal,
+      ),
+      { code: 'acp_config_invalid' },
+    );
+    assert.equal(protocol.selectedModel, 'default');
+    assert.equal(protocol.selectedMode, 'ask');
+    assert.equal(
+      (await executor.inspectConversation({ conversationKey: 'session-a', cwd: process.cwd() }))
+        .readiness,
+      'ready',
+    );
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('confirmed configuration clears a mode removed by a model change', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
@@ -1612,7 +1721,8 @@ function fakeProtocol(): {
       ],
     },
     ...(fixture.hasMode &&
-    (fixture.dropModeForModel === undefined || fixture.selectedModel !== fixture.dropModeForModel)
+    (fixture.dropModeForModel === undefined ||
+      (fixture.selectedModel ?? 'default') !== fixture.dropModeForModel)
       ? [
           {
             type: 'select',

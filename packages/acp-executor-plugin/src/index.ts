@@ -151,6 +151,7 @@ interface RetainedSession {
   readonly conversationKey: string;
   readonly configuration?: ExecutorConfiguration;
   readonly cwd: string;
+  restoredFromState?: boolean;
   owner?: AcpConnectionOwner;
   connection?: ClientConnection;
   acpSessionId?: string;
@@ -354,11 +355,17 @@ export class AcpExecutor implements PluginExecutorProvider {
     session.configuring = true;
     const wasConnected = !!session.connection;
     try {
-      // A fresh Session applies the merged selection once, after initialization.
-      // Applying it during session/new and again here can reject a mode that
-      // the requested model legitimately removed.
+      // A fresh Session must select the requested model before checking which
+      // modes that model exposes. Do not apply the launch defaults separately.
       await this.#ensureInitialized(session, signal, true);
-      await this.#applyInitialConfig(session, input.configuration, signal, true);
+      await this.#applyInitialConfig(
+        session,
+        !wasConnected && !session.restoredFromState
+          ? { ...this.#configured.launch.initialConfig, ...input.configuration }
+          : input.configuration,
+        signal,
+        true,
+      );
       return {
         ...(currentAcpModel(session.configOptions)
           ? { model: currentAcpModel(session.configOptions) }
@@ -633,6 +640,7 @@ export class AcpExecutor implements PluginExecutorProvider {
         'External Session history cannot be aligned with saved conversation events',
         'acp_history_gap',
       );
+    session.restoredFromState = !!stored;
     if (stored) {
       session.record = stored;
       session.acpSessionId = stored.sessionId;
@@ -783,10 +791,10 @@ export class AcpExecutor implements PluginExecutorProvider {
       session.record = established;
       await this.#persistConfirmedConfig(session);
     }
-    if (!probe) {
+    if (!probe && !deferSelectedConfig) {
       await this.#applyInitialConfig(
         session,
-        !deferSelectedConfig && (session.configuration?.model || session.configuration?.mode)
+        session.configuration?.model || session.configuration?.mode
           ? { ...launch.initialConfig, ...session.configuration }
           : (launch.initialConfig ?? {}),
         startupSignal,
@@ -866,9 +874,11 @@ export class AcpExecutor implements PluginExecutorProvider {
       (entry): entry is [string, string] => entry[1] !== undefined,
     );
     const before = session.configOptions;
-    // Validate the entire target before the first Agent mutation.
-    for (const [key, value] of target) {
-      const option = acpOption(before, key);
+    const selectedModel = target.find(([key]) => key === 'model')?.[1];
+    const changingModel =
+      selectedModel !== undefined && acpOption(before, 'model')?.currentValue !== selectedModel;
+    const validate = (options: readonly SessionConfigOption[], key: string, value: string) => {
+      const option = acpOption(options, key);
       if (!option)
         throw new AcpRuntimeError(
           `ACP configuration is unavailable: ${key}`,
@@ -882,17 +892,27 @@ export class AcpExecutor implements PluginExecutorProvider {
           `ACP configuration value is unavailable: ${key}`,
           'acp_config_invalid',
         );
+    };
+    // A model change can add, remove or replace the mode option. Validate that
+    // dependent option against the Agent's post-model response instead.
+    for (const [key, value] of target) {
+      if (!changingModel || key === 'model') validate(before, key, value);
     }
-    const changes = target.filter(([key, value]) => acpOption(before, key)?.currentValue !== value);
+    const ordered = [
+      ...target.filter(([key]) => key === 'model'),
+      ...target.filter(([key]) => key !== 'model'),
+    ];
     let mutationAttempted = false;
+    const removed = new Set<string>();
     try {
-      for (const [key, value] of changes) {
+      for (const [key, value] of ordered) {
         const option = acpOption(session.configOptions, key);
-        if (!option)
-          throw new AcpRuntimeError(
-            `ACP configuration is unavailable: ${key}`,
-            'acp_config_unavailable',
-          );
+        if (!option && changingModel && key === 'mode' && acpOption(before, key)) {
+          removed.add(key);
+          continue;
+        }
+        validate(session.configOptions, key, value);
+        if (!option) throw new Error('Validated ACP option disappeared');
         if (option.currentValue === value) continue;
         signal.throwIfAborted();
         mutationAttempted = true;
@@ -909,8 +929,9 @@ export class AcpExecutor implements PluginExecutorProvider {
           );
       }
       if (
-        changes.some(
-          ([key, value]) => acpOption(session.configOptions, key)?.currentValue !== value,
+        target.some(
+          ([key, value]) =>
+            !removed.has(key) && acpOption(session.configOptions, key)?.currentValue !== value,
         )
       )
         throw new AcpRuntimeError(
