@@ -19,7 +19,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { act, useState } from 'react';
+import { act, createRef, useState } from 'react';
 import type { ChatModelChoice } from '@maka/core/chat-model-choice';
 import {
   ExecutorModelPicker,
@@ -30,7 +30,7 @@ import {
 } from '../executor-model-picker.js';
 import { highestExecutorModelVariant } from '../executor-model-presentation.js';
 import { NewChatModelPicker } from '../chat-model-switcher.js';
-import { Composer } from '../composer.js';
+import { Composer, type ComposerHandle } from '../composer.js';
 import { exactModelChoiceValue } from '../chat-model-helpers.js';
 import { LocaleProvider } from '../locale-context.js';
 import { installTranscriptDom } from './transcript-test-dom.js';
@@ -97,6 +97,138 @@ test('provider mode selector preserves the model and commits only a real mode ID
     await act(async () => { auto.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
     assert.deepEqual(selections, [{ executorId: 'antigravity', configuration: { model: 'model-0', mode: 'auto' } }]);
   } finally { await dom.cleanup(); }
+});
+
+for (const option of ['model', 'mode'] as const) {
+  for (const outcome of ['confirmed', 'rejected'] as const) {
+    test(`Composer preserves the draft while an executor ${option} change is ${outcome}`, async () => {
+      const dom = installTranscriptDom();
+      dom.window.getSelection = () => null;
+      dom.document.getSelection = () => null;
+      const composer = createRef<ComposerHandle>();
+      const sent: ExecutorSelection[] = [];
+      const requested: ExecutorSelection[] = [];
+      let finish!: () => void;
+      const confirmation = new Promise<void>((resolve) => { finish = resolve; });
+      const initial: ExecutorSelection = {
+        executorId: 'antigravity',
+        configuration: { model: 'model-0', mode: 'ask' },
+      };
+      const entry = {
+        ...catalog[0]!,
+        modes: [{ id: 'ask', name: 'Ask' }, { id: 'auto', name: 'Auto' }],
+        currentMode: 'ask',
+        supportsModeChange: true,
+      };
+      function Harness() {
+        const [selection, setSelection] = useState(initial);
+        return <LocaleProvider locale="en"><Composer
+          ref={composer}
+          executorPicker={{
+            catalog: [entry], selection, fixed: true,
+            onSelect: async (next) => {
+              assert.ok(next);
+              requested.push(next);
+              await confirmation;
+              if (outcome === 'rejected') throw new Error('Agent rejected configuration');
+              setSelection(previous => ({
+                ...previous,
+                configuration: { ...previous.configuration, ...next.configuration },
+              }));
+            },
+            onSetup: () => {}, onRetry: () => {}, onNewTask: () => {},
+          }}
+          onSend={() => { sent.push(selection); return true; }}
+          onStop={() => {}}
+        /></LocaleProvider>;
+      }
+      const click = async (element: Element | null | undefined) => {
+        assert.ok(element);
+        await act(async () => {
+          element.dispatchEvent(new dom.window.Event('click', { bubbles: true }));
+        });
+      };
+      const submit = async () => {
+        await act(async () => {
+          dom.document.querySelector('form')!.dispatchEvent(
+            new dom.window.Event('submit', { bubbles: true, cancelable: true }),
+          );
+        });
+      };
+      try {
+        await dom.render(<Harness />);
+        await act(async () => { composer.current!.setText('Keep this draft'); });
+        await click(dom.document.querySelector(option === 'mode'
+          ? '.maka-executor-mode-selector' : '.maka-executor-selector'));
+        await click([...dom.document.querySelectorAll('[role="option"]')].find(row =>
+          option === 'mode' ? row.textContent === 'Auto' : row.textContent?.includes('Agent model 1'),
+        ));
+        assert.equal(requested.length, 1);
+        assert.deepEqual(requested[0]!.configuration, option === 'mode'
+          ? { mode: 'auto' } : { model: 'model-1' });
+        if (option === 'mode') {
+          const modelTrigger = dom.document.querySelector('.maka-executor-selector');
+          assert.ok(modelTrigger?.hasAttribute('disabled') || modelTrigger?.getAttribute('aria-disabled') === 'true',
+            'model changes must wait for mode confirmation');
+        }
+        await submit();
+        assert.equal(sent.length, 0, 'unconfirmed configuration must block submission');
+        assert.equal(composer.current!.getText(), 'Keep this draft');
+        await act(async () => { finish(); await confirmation; });
+        assert.equal(sent.length, 0, 'settlement must not automatically send the draft');
+        assert.equal(composer.current!.getText(), 'Keep this draft');
+        if (outcome === 'rejected') assert.ok(dom.document.querySelector('[role="alert"]'));
+        await submit();
+        assert.deepEqual(sent, [{
+          ...initial,
+          configuration: outcome === 'confirmed'
+            ? { ...initial.configuration, ...requested[0]!.configuration }
+            : initial.configuration,
+        }]);
+        assert.equal(composer.current!.getText(), '');
+      } finally {
+        finish();
+        await dom.cleanup();
+      }
+    });
+  }
+}
+
+test('unmounting a pending mode selector releases the Composer configuration gate', async () => {
+  const dom = installTranscriptDom();
+  const pending: boolean[] = [];
+  let finish!: () => void;
+  const confirmation = new Promise<void>((resolve) => { finish = resolve; });
+  const onPendingChange = (value: boolean) => { pending.push(value); };
+  try {
+    await dom.render(<LocaleProvider locale="en"><ExecutorModelPicker
+      catalog={[{
+        ...catalog[0]!,
+        modes: [{ id: 'ask', name: 'Ask' }, { id: 'auto', name: 'Auto' }],
+        currentMode: 'ask', supportsModeChange: true,
+      }]}
+      selection={{ executorId: 'antigravity', configuration: { model: 'model-0', mode: 'ask' } }}
+      onPendingChange={onPendingChange}
+      onSelect={() => confirmation}
+      onSetup={() => {}} onRetry={() => {}} onNewTask={() => {}}
+    /></LocaleProvider>);
+    await act(async () => {
+      dom.document.querySelector('.maka-executor-mode-selector')!
+        .dispatchEvent(new dom.window.Event('click', { bubbles: true }));
+    });
+    await act(async () => {
+      [...dom.document.querySelectorAll('[role="option"]')].find(row => row.textContent === 'Auto')!
+        .dispatchEvent(new dom.window.Event('click', { bubbles: true }));
+    });
+    assert.equal(pending.at(-1), true);
+    await dom.render(<span>Another conversation</span>);
+    assert.equal(pending.at(-1), false);
+    await act(async () => { finish(); await confirmation; });
+    assert.equal(pending.at(-1), false, 'a late response must not lock the next conversation');
+  } finally {
+    finish();
+    await dom.cleanup();
+  }
 });
 
 test('fixed executor controls send partial patches so Agent side effects can be confirmed', async () => {
