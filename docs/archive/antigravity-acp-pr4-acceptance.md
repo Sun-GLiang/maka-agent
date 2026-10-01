@@ -22,6 +22,104 @@
 PR 4 follows [issue #5103](https://github.com/apache/maka/issues/5103).
 This record separates controlled protocol fixtures from official Agent results.
 
+## Repeatable acceptance procedure, 2026-10-01
+
+Use this procedure for PR [#5826](https://github.com/apache/maka/pull/5826).
+The historical runs below are evidence, not a claim that every step passed on the
+latest code. Record the tested commit, macOS architecture, Node version, Agent
+version and hashes, Desktop build kind, and profile alias before starting.
+
+### Preconditions and automated gate
+
+1. Check out the PR head in an isolated worktree. Create two empty disposable
+   projects A and B and a dedicated Desktop profile. Use that **same profile**
+   throughout the two-project run and its restarts. Build Desktop from the tested
+   commit; record whether it is a development build, unsigned local app, or signed
+   distributable. An unsigned app cannot satisfy release-signing acceptance.
+2. Use the official Agent and an account eligible to execute prompts. A successful
+   connection or sign-in check alone does not establish prompt eligibility. Do not
+   change account or network settings to bypass an eligibility error.
+3. Run the repository gates below with dependencies installed. Build before running
+   compiled tests so stale `dist` output cannot count as evidence. Record each exit
+   status and retain logs. Run workspace tests serially for the local acceptance
+   gate; record CI separately, with its exact head SHA and job URL.
+
+```sh
+npm run build
+npm run typecheck
+npm run lint
+npm run format:check
+npm run check:renderer-architecture
+npm run check:locale-hygiene
+npm run check:asf-headers
+node scripts/run-workspace-tests-parallel.mjs --concurrency=1
+```
+
+Fetch the current PR base before the protocol gate. Pass its fetched ref to
+`node scripts/protocol-epoch-check.mjs --base <fetched-base-ref>` and run
+`git diff <fetched-base-ref>...HEAD --check`. Reconcile the epoch against that base
+before merge; the previous 200 → 201 result is historical evidence.
+
+The affected suites must exercise fresh-Session model-dependent mode availability,
+model-only changes removing a saved mode, idle notification drift, combined-option
+rollback, retained Session restoration, and per-directory catalog reuse/refresh.
+The ACP cases live in `packages/acp-executor-plugin/src/__tests__/acp-executor-plugin.test.ts`;
+Host routing cases live in `packages/runtime-host/src/__tests__/session-catalog-coordinator.test.ts`.
+Controlled fixtures establish failure/rollback semantics; real Agent runs establish
+actual discovery and execution. Keep those results separate.
+
+### Desktop steps and pass criteria
+
+| Step | Action | Required result and evidence |
+| --- | --- | --- |
+| 1. Configure Agent | In external-Agent settings, select the extracted official Agent directory using the macOS picker, check connection, and verify sign-in. | Executable resolves correctly; both checks succeed. Capture settings status with account details redacted. |
+| 2. Discover B | Add both projects through the project picker, select B, then select Antigravity and open model/mode pickers. | Real model and mode choices appear. Record actual IDs from confirmed task state; labels alone do not establish IDs. |
+| 3. Refresh A | Switch B → A and refresh A's catalog with the UI refresh/retry control. Select an available model and mode. | Refresh completes; candidates remain usable and selection is displayed. Capture A's project label and picker. |
+| 4. Return to B | Switch A → B without manually refreshing B; inspect its pickers. | B's candidates remain available. Capture B's project label and choices. Identical A/B candidates do not prove cache isolation; retain the production-executor cache identity check or controlled isolation test as separate evidence. |
+| 5. Execute in B | Create a B task with a real model and `default` (if offered). Send: “Do not read or write files or run commands. Remember synthetic code B-5826-7319. Reply only ACK.” | Task reaches completed with ACK, and task metadata records B's directory and confirmed model/mode. An error or HTTP 403 is blocked/failed execution, never a pass. |
+| 6. Execute in A | Switch to A. Create a task with another available model and `auto_edit` (if offered). Send the same no-file-access prompt with code A-5826-2648. | Completed with ACK; metadata records A's directory and confirmed selection. Both steps 5 and 6 must pass in this same profile to close cross-project execution. |
+| 7. Confirm idle change | In one completed task, change mode and model while idle. | Agent confirmation and inspected task configuration agree with the selected IDs. Do not treat an optimistic picker label as confirmation. |
+| 8. Restart and recall | Quit Desktop normally, reopen the same profile, open that task, and invoke restore if shown. Ask: “Do not read or write files or run commands. What synthetic code did I ask you to remember? Reply only the code.” | Completed with the correct prior code, which is absent from the recall prompt. The restored task retains its confirmed model/mode. Capture the recall answer and restored selection. |
+| 9. Verify continuity | Compare external Session ID fingerprints before and after a second normal restart/restore. | Fingerprints match and continuity remains committed. Log only the equality result, never the external Session ID or private continuity record. |
+
+Use actual offered choices if the official Agent catalog changes. Record the chosen
+IDs and reason for substitution rather than hard-coding a now-unavailable model.
+Save screenshots, task completion status, confirmed selections, and redacted logs
+under a run-specific evidence location. Report each step as PASS, FAIL, BLOCKED,
+or NOT RUN, with the tested commit. Never promote an earlier profile's success to
+a pass for steps 5–6 in a different profile.
+
+### Blocked-run handoff and completion rule
+
+On authentication failure, retain the completed discovery/configuration checks and
+resume execution after an eligible account is available. On account/location HTTP
+403, record the affected project, model, mode, and error category without account
+identifiers; leave cross-project execution open. Rerun steps 2–9 in one profile when
+eligibility is restored. If code changes, repeat the affected automated gates and
+record the new tested commit. Do not substitute a mock Agent for official-Agent
+execution acceptance.
+
+Cross-project acceptance closes only when both project prompts complete in the same
+profile. Full behavior acceptance additionally requires confirmed idle changes,
+restart recall, same external Session continuity, and passing automated gates on the
+tested code. Signed distribution qualification is separate from this feature gate.
+
+### Latest verified status
+
+- Code head `d8d36d71a6346552f5a9c87c3b35728cc6a87a02`: the
+  [CI run](https://github.com/apache/maka/actions/runs/36696757301) passed on
+  2026-09-30. Verified successful steps include build, typecheck, lint, ASF headers,
+  locale hygiene, renderer architecture, protocol epoch guard, affected workspace
+  tests, Runtime Host tests, and Desktop e2e. This supersedes “current-head CI
+  pending” for that commit; it does not convert historical local typecheck failures
+  into local passes or establish real official-Agent prompt execution.
+- Real Desktop discovery, B → A → B, A refresh, and B availability: PASS in the
+  previously recorded unsigned app/profile. Production executor probes separately
+  established per-directory refresh isolation.
+- Successful prompt execution in **both** projects of that profile: BLOCKED by
+  account/location HTTP 403. Earlier single-project prompt/recall/continuity success
+  remains valid separate evidence. The remaining execution checkbox stays open.
+
 ## Official Agent capability gate, 2026-09-29
 
 - Platform: macOS arm64. Client: ACP SDK 1.4.0, Node.js 24.19.0.
@@ -77,7 +175,7 @@ Configuration updates validate the complete target before applying it, use Agent
 
 Controlled tests cover the contract, prompt application, idle mode update, combined-option rollback, same-Session restore, directory cache isolation, refresh, login invalidation, and late notification handling.
 
-## Final validation
+## Historical validation (see latest verified status above)
 
 - `npm run build`, `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run check:renderer-architecture`, `npm run check:locale-hygiene`, and `npm run check:asf-headers`: passed.
 - For the 2026-09-30 Desktop picker follow-up, the development build completed and targeted Biome lint passed. A fresh Desktop workspace typecheck still reports errors in unchanged browser tools, notifications, overlays, runtime config, and conversation selector files; those errors are not counted as a pass for this follow-up.
