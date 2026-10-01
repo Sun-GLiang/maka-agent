@@ -943,9 +943,9 @@ export class AcpExecutor implements PluginExecutorProvider {
       let restored = false;
       if (restoreOnFailure && !session.lost && !signal.aborted) {
         try {
-          // A rejected response can still have changed the Agent. Restore both
-          // fields, then verify the full original snapshot.
-          for (const key of ['mode', 'model']) {
+          // A rejected response can still have changed the Agent. Restore the
+          // model before its dependent mode, then verify the original snapshot.
+          for (const key of ['model', 'mode']) {
             const original = acpOption(before, key);
             const current = acpOption(session.configOptions, key);
             if (

@@ -1275,43 +1275,62 @@ test('an idle model drift does not block restoring the saved mode with a model c
   }
 });
 
-test('an invalid mode after changing models rolls the Agent back to its prior selection', async () => {
-  const fixture = await executableFixture();
-  const protocol = fakeProtocol();
-  protocol.hasMode = true;
-  const executor = new AcpExecutor(
-    adapter,
-    { executable: fixture.executable },
-    { createConnection: protocol.factory },
-  );
-  try {
-    await executor.configureConversation(
-      { conversationKey: 'session-a', cwd: process.cwd(), configuration: { model: 'default' } },
-      new AbortController().signal,
+for (const mode of ['ask', 'invented'])
+  test(`a rejected ${mode} mode restores the model before its dependent mode`, async () => {
+    const fixture = await executableFixture();
+    const protocol = fakeProtocol();
+    protocol.hasMode = true;
+    protocol.modeValuesByModel = { default: ['auto', 'ask'], fast: ['auto'] };
+    const storage = durableState();
+    const executor = new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      { createConnection: protocol.factory, state: storage.state },
     );
-    await assert.rejects(
-      executor.configureConversation(
-        {
-          conversationKey: 'session-a',
-          cwd: process.cwd(),
-          configuration: { model: 'fast', mode: 'invented' },
-        },
+    const input = { conversationKey: 'session-a', cwd: process.cwd() };
+    try {
+      await executor.configureConversation(
+        { ...input, configuration: { model: 'default', mode: 'ask' } },
         new AbortController().signal,
-      ),
-      { code: 'acp_config_invalid' },
-    );
-    assert.equal(protocol.selectedModel, 'default');
-    assert.equal(protocol.selectedMode, 'ask');
-    assert.equal(
-      (await executor.inspectConversation({ conversationKey: 'session-a', cwd: process.cwd() }))
-        .readiness,
-      'ready',
-    );
-  } finally {
-    await executor.dispose();
-    await rm(fixture.root, { recursive: true, force: true });
-  }
-});
+      );
+      const original = structuredClone(storage.record());
+      await assert.rejects(
+        executor.configureConversation(
+          { ...input, configuration: { model: 'fast', mode } },
+          new AbortController().signal,
+        ),
+        { code: 'acp_config_invalid' },
+      );
+      assert.equal(protocol.selectedModel, 'default');
+      assert.equal(protocol.selectedMode, 'ask');
+      assert.deepEqual(storage.record(), original);
+      const catalog = await executor.inspectConversation(input);
+      assert.equal(catalog.readiness, 'ready');
+      assert.equal(catalog.currentModel, 'default');
+      assert.equal(catalog.currentMode, 'ask');
+      assert.equal(protocol.disposals, 0);
+      assert.equal(
+        (
+          await executor.execute(
+            { ...request('after-rollback'), configuration: { model: 'default', mode: 'ask' } },
+            executorContext([]),
+          )
+        ).status,
+        'completed',
+      );
+      await executor.acknowledgeExecution('session-a', 'turn-after-rollback');
+      assert.deepEqual(protocol.promptModels, ['default']);
+      assert.deepEqual(protocol.promptModes, ['ask']);
+      assert.equal(protocol.sessions, 1);
+      assert.equal(storage.record().sessionId, original.sessionId);
+      assert.equal(storage.record().phase, 'committed');
+      assert.equal(storage.record().confirmedModel, 'default');
+      assert.equal(storage.record().confirmedMode, 'ask');
+    } finally {
+      await executor.dispose();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
 
 test('confirmed configuration clears a mode removed by a model change', async () => {
   const fixture = await executableFixture();
@@ -1661,6 +1680,7 @@ function fakeProtocol(): {
   selectedMode?: string;
   hasMode: boolean;
   dropModeForModel?: string;
+  modeValuesByModel?: Readonly<Record<string, readonly string[]>>;
   notifyDuringPromptModel?: string;
   holdInitialize: boolean;
   configurationFailure?: 'response_lost' | 'unconfirmed' | 'timeout' | 'once' | 'mode_once';
@@ -1686,6 +1706,7 @@ function fakeProtocol(): {
     selectedMode: 'ask',
     hasMode: false,
     dropModeForModel: undefined as string | undefined,
+    modeValuesByModel: undefined as Readonly<Record<string, readonly string[]>> | undefined,
     notifyDuringPromptModel: undefined as string | undefined,
     holdInitialize: false,
     configurationFailure: undefined as
@@ -1730,10 +1751,12 @@ function fakeProtocol(): {
             category: 'mode',
             name: 'Mode',
             currentValue: fixture.selectedMode,
-            options: [
-              { value: 'ask', name: 'Ask before edits' },
-              { value: 'auto', name: 'Autonomous' },
-            ],
+            options: (
+              fixture.modeValuesByModel?.[fixture.selectedModel ?? 'default'] ?? ['ask', 'auto']
+            ).map((value) => ({
+              value,
+              name: value === 'ask' ? 'Ask before edits' : 'Autonomous',
+            })),
           },
         ]
       : []),
@@ -1846,8 +1869,16 @@ function fakeProtocol(): {
             return { sessionId: 'acp-session', configOptions: configOptions() };
           }
           if (method === methods.agent.session.setConfigOption) {
-            if (params.configId === 'mode') fixture.selectedMode = String(params.value);
-            else fixture.selectedModel = String(params.value);
+            if (params.configId === 'mode') {
+              const mode = configOptions().find((option) => option.id === 'mode');
+              if (!mode?.options.some((option) => option.value === params.value))
+                throw new Error('Mode unavailable for the selected model');
+              fixture.selectedMode = String(params.value);
+            } else {
+              fixture.selectedModel = String(params.value);
+              const modeValues = fixture.modeValuesByModel?.[fixture.selectedModel];
+              if (modeValues) fixture.selectedMode = modeValues[0]!;
+            }
             if (
               fixture.configurationFailure === 'once' ||
               (fixture.configurationFailure === 'mode_once' && params.configId === 'mode')
