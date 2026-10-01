@@ -120,6 +120,13 @@ tested code. Signed distribution qualification is separate from this feature gat
   account/location HTTP 403. Earlier single-project prompt/recall/continuity success
   remains valid separate evidence. The remaining execution checkbox stays open.
 
+- An additional 2026-10-01 eligibility probe reused the earlier production-executor
+  build and official Agent with a disposable directory and a synthetic no-file
+  prompt. It produced no completion or diagnostic within two minutes; its Agent
+  process was terminated, the client reported `cancelled`, and the directory was
+  cleaned up. This is inconclusive, is not a latest-head test, and neither confirms
+  a new HTTP 403 nor clears the outstanding Desktop execution gate.
+
 ## Official Agent capability gate, 2026-09-29
 
 - Platform: macOS arm64. Client: ACP SDK 1.4.0, Node.js 24.19.0.
