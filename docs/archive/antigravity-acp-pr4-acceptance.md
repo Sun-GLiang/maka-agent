@@ -22,6 +22,50 @@
 PR 4 follows [issue #5103](https://github.com/apache/maka/issues/5103).
 This record separates controlled protocol fixtures from official Agent results.
 
+## Execution recheck, 2026-10-01
+
+The earlier eligibility HTTP 403 no longer reproduces in this recheck. Official
+Agent 1.2.1 completed synthetic prompts through the production `AcpExecutor` in
+both disposable directories. This establishes real Agent execution; the same-profile
+Desktop two-project checkbox remains open until the UI steps below are completed.
+
+- Platform: macOS arm64; Node.js 24.19.0; official Agent server/helper SHA-256
+  values match the 1.2.1 distribution recorded below. Existing authentication and
+  network settings were retained. No private project contents were sent.
+- Initial tested code: `a950ce187c7510a762bc2e5c95acf1e63a16b888`. The full
+  official-Agent sequence was repeated after building merged code head
+  `ccd3c195e94bb262df0ef862f121112b5252f2b4` (epoch 204). Both projects ran through one executor and
+  one continuity store, with distinct conversation keys and temporary directories.
+- B completed with exactly `ACK` using `gemini-3.7-flash-high` and `default`.
+  A completed with exactly `ACK` using `gemini-3.8-flash-high` and `auto_edit`.
+  Both continuity records were committed, their directories matched the intended
+  projects, and their confirmed model/mode matched the requested values.
+- Both catalogs were ready with 11 model IDs and `default`, `auto_edit`, `yolo`.
+  Refreshing A replaced A's entry while B returned the identical cached entry.
+- An idle change in A confirmed `gemini-3.6-flash-high` and `default`. After
+  disposing and recreating the executor, A was restorable and recalled the synthetic
+  code omitted from the recall prompt. A second disposal/restoration retained the
+  same external Session and committed configuration. Only equality was logged;
+  external Session IDs and authentication data were not logged.
+- A freshly built development Desktop in the earlier isolated profile verified
+  connection and Google sign-in. Native project/menu automation then repeatedly
+  returned stale-element or `noWindowsAvailable` errors; screenshots stayed on an
+  earlier frame. Rebinding and a GPU-disabled restart did not resolve it. No new
+  Desktop A/B task completion or Desktop restart result is claimed for this run.
+  This is an automation blocker, not a new HTTP 403 or a proven application defect.
+
+Local gates were rerun after integrating `main` at
+`1e80e3b885d963b799f7e2e9a70083ceda99943d`. Build, typecheck, lint,
+format, renderer architecture, locale hygiene, ASF headers and diff checks passed.
+The serial workspace run reported 14,149 tests: 14,111 passed, 38 skipped, zero
+failed or cancelled. Following the final epoch-only adjustment, the full build
+and 89 protocol tests passed again. The current-base protocol guard passed
+202 → 204. Earlier local typecheck failures remain historical, not current failures.
+CI for the resulting push must be evaluated separately.
+
+The remaining action is to run Desktop steps 2–9 in one visible, interactive
+profile. Production-executor success must not be substituted for those UI results.
+
 ## Repeatable acceptance procedure, 2026-10-01
 
 Use this procedure for PR [#5826](https://github.com/apache/maka/pull/5826).
@@ -104,7 +148,7 @@ profile. Full behavior acceptance additionally requires confirmed idle changes,
 restart recall, same external Session continuity, and passing automated gates on the
 tested code. Signed distribution qualification is separate from this feature gate.
 
-### Latest verified status
+### Earlier verified status before the execution recheck
 
 - Code head `d8d36d71a6346552f5a9c87c3b35728cc6a87a02`: the
   [CI run](https://github.com/apache/maka/actions/runs/36696757301) passed on
