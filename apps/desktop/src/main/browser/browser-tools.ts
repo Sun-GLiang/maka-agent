@@ -36,6 +36,7 @@ import {
   type BrowserObservationOptions,
   BROWSER_OBSERVATION_MAX_CHARS,
 } from './browser-observation.js';
+import { runBrowserTargetAction } from './browser-action.js';
 
 /**
  * Generic observe→act browser tools over OpenCLI's action transport:
@@ -160,7 +161,7 @@ function guardBrowserPage(page: IPage, lease: BrowserOriginLease): IPage {
         } else {
           assertOriginLease(lease);
         }
-        const value = await Reflect.apply(member, target, args);
+        const value = await Reflect.apply(member, receiver, args);
         assertOriginLease(lease);
         return value;
       };
@@ -211,9 +212,10 @@ export function buildBrowserNavigateTool(): MakaTool<{ url: string }, string> {
 
 const observationScope = z.string().min(1).max(2000).optional();
 const observationLimit = z.number().int().min(1).max(100).optional();
+const observationStart = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional();
 
 export function buildBrowserSnapshotTool(): MakaTool<
-  { selector?: string; maxElements?: number; source?: 'visible' | 'opencli' }, string
+  { selector?: string; maxElements?: number; start?: number; source?: 'visible' | 'opencli' }, string
 > {
   return {
     name: 'browser_snapshot',
@@ -221,13 +223,14 @@ export function buildBrowserSnapshotTool(): MakaTool<
     description:
       'Observe visible controls and headings as bounded structured data. Use selector to scope a form or dialog. ' +
       'Each candidate includes a document-local CSS ref accepted by browser_click / browser_type. ' +
-      'Hidden menus are excluded. Reload/navigation invalidates refs; inspect again rather than guessing selectors. ' +
-      'Use source=opencli for a capped legacy tree (including supported shadow/iframe observations); no selector/maxElements in that mode.',
-    parameters: z.object({ selector: observationScope, maxElements: observationLimit, source: z.enum(['visible', 'opencli']).optional() }),
+      'Hidden menus are excluded. When nextStart is non-null, continue with start=nextStart and the same scope/limit. ' +
+      'Reload/navigation invalidates refs; inspect again rather than guessing selectors. ' +
+      'Use source=opencli for a capped legacy tree (including supported shadow/iframe observations); no selector/maxElements/start in that mode.',
+    parameters: z.object({ selector: observationScope, maxElements: observationLimit, start: observationStart, source: z.enum(['visible', 'opencli']).optional() }),
     categoryHint: BROWSER_TOOL_CATEGORY,
-    impl: async ({ selector, maxElements, source }, { sessionId, abortSignal }) => {
-      if (source === 'opencli' && (selector !== undefined || maxElements !== undefined)) {
-        throw new Error('selector/maxElements require source=visible.');
+    impl: async ({ selector, maxElements, start, source }, { sessionId, abortSignal }) => {
+      if (source === 'opencli' && (selector !== undefined || maxElements !== undefined || start !== undefined)) {
+        throw new Error('selector/maxElements/start require source=visible.');
       }
       const result = await runBrowserAction({
         sessionId,
@@ -241,7 +244,7 @@ export function buildBrowserSnapshotTool(): MakaTool<
               (text.length > BROWSER_OBSERVATION_MAX_CHARS ? '\n(Tree clipped; prefer a scoped visible snapshot or browser_inspect.)' : ''), info };
           }
           const observation = await page.evaluate<BrowserObservation>(browserObservationJs({
-            scope: selector, maxElements: maxElements ?? 60, context: true,
+            scope: selector, maxElements: maxElements ?? 60, start, context: true,
           }));
           return { text: JSON.stringify(observation), info };
         },
@@ -259,11 +262,12 @@ export function buildBrowserInspectTool(): MakaTool<BrowserObservationOptions, s
     description:
       'Inspect CSS matches with exact matchCount, visibleMatchCount, attributes and actionable refs. ' +
       'Use scope to target one form/dialog; visibleOnly defaults to true and maxElements to 20. ' +
+      'Continue truncated results with start=nextStart and unchanged selector/scope/limit. ' +
       'A visible candidate is not proof that the original selector is unique: use its returned ref to act. ' +
-      'No input values or hidden-input identifiers are returned. Observation does not reload the page.',
+      'Editable values, editor content and hidden-input identifiers are omitted; displayed button labels remain available. Observation does not reload the page.',
     parameters: z.object({
       selector: observationScope, scope: observationScope,
-      visibleOnly: z.boolean().optional(), maxElements: observationLimit,
+      visibleOnly: z.boolean().optional(), maxElements: observationLimit, start: observationStart,
     }),
     categoryHint: BROWSER_TOOL_CATEGORY,
     impl: async (options, { sessionId, abortSignal }) => {
@@ -281,29 +285,10 @@ export function buildBrowserInspectTool(): MakaTool<BrowserObservationOptions, s
   };
 }
 
-/** CSS actions require a unique, visible, enabled target; never pick the first match. */
-async function inspectActionTarget(page: IPage, ref: string): Promise<BrowserObservation | undefined> {
-  if (/^\d+$/.test(ref)) return undefined; // Existing OpenCLI numbered refs retain their resolver.
-  const observation = await page.evaluate<BrowserObservation>(browserObservationJs({
-    selector: ref, visibleOnly: false, maxElements: 8,
-  }));
-  if (ref.startsWith('[data-maka-browser-ref=') && observation.matchCount === 1 &&
-      observation.candidates[0]?.ref !== ref) {
-    observation.error = 'The ref is stale: its element was replaced or the document reference state changed.';
-    return observation;
-  }
-  if (!observation.error && observation.matchCount === 1 &&
-      observation.candidates[0]?.visible && observation.candidates[0]?.enabled) return undefined;
-  if (observation.matchCount === 0 && !observation.error) {
-    const nearby = await page.evaluate<BrowserObservation>(browserObservationJs({ maxElements: 12 }));
-    observation.candidates = nearby.candidates;
-    observation.error = 'No target matched. The ref may be stale after reload/navigation; these are current visible controls.';
-  }
-  return observation;
-}
-
-function noActionTaken(observation: BrowserObservation): string {
-  return 'No action taken: target must match exactly one visible, enabled element. ' +
+function noActionTaken(observation: BrowserObservation, stopped = false): string {
+  return (stopped
+    ? 'Action stopped: target changed during execution; earlier steps may have run. Inspect the current page before retrying. '
+    : 'No action taken: target must match exactly one visible, enabled element. ') +
     'Use a candidate ref below or browser_inspect with a narrower scope.\n' + JSON.stringify(observation);
 }
 
@@ -326,14 +311,12 @@ export function buildBrowserClickTool(): MakaTool<{ ref: string }, string> {
         // A mutating action: harden a taken-over page (reload once) before clicking.
         takeover: 'mutate',
         run: async (page, info) => {
-          const diagnostics = await inspectActionTarget(page, normalizeElementRef(ref));
-          if (diagnostics) return { diagnostics, info };
-          const outcome = await page.click(normalizeElementRef(ref));
-          return { outcome, info };
+          return { ...await runBrowserTargetAction(page, normalizeElementRef(ref),
+            (checkedPage, checkedRef) => checkedPage.click(checkedRef), { sessionId, abortSignal }), info };
         },
       });
       if (result.kind === 'navigated') return navigationResult(result.url, result.requiresApproval);
-      if (result.value.diagnostics) return noActionTaken(result.value.diagnostics) + takeoverNote(result.value.info);
+      if (result.value.diagnostics) return noActionTaken(result.value.diagnostics, result.value.stopped) + takeoverNote(result.value.info);
       const { matches_n, match_level } = result.value.outcome!;
       return (
         `Clicked ${ref} (matched ${matches_n} element${matches_n === 1 ? '' : 's'}, ${match_level} match).` +
@@ -400,15 +383,15 @@ export function buildBrowserTypeTool(): MakaTool<{ ref: string; text: string; su
         // A mutating action: harden a taken-over page (reload once) before typing.
         takeover: 'mutate',
         run: async (page, info) => {
-          const diagnostics = await inspectActionTarget(page, normalizeElementRef(ref));
-          if (diagnostics) return { diagnostics, info };
-          const outcome = await page.fillText(normalizeElementRef(ref), text);
-          if (submit) await page.pressKey('Enter');
-          return { outcome, info };
+          return { ...await runBrowserTargetAction(page, normalizeElementRef(ref), async (checkedPage, checkedRef) => {
+            const outcome = await checkedPage.fillText(checkedRef, text);
+            if (submit) await checkedPage.pressKey('Enter');
+            return outcome;
+          }, { sessionId, abortSignal, typing: true }), info };
         },
       });
       if (result.kind === 'navigated') return navigationResult(result.url, result.requiresApproval);
-      if (result.value.diagnostics) return noActionTaken(result.value.diagnostics) + takeoverNote(result.value.info);
+      if (result.value.diagnostics) return noActionTaken(result.value.diagnostics, result.value.stopped) + takeoverNote(result.value.info);
       const { verified, actual, match_level } = result.value.outcome!;
       const lines = [
         `Filled ${ref} (${match_level} match)${submit ? ', then pressed Enter' : ''}.`,

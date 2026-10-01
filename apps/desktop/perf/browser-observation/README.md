@@ -21,13 +21,13 @@
 
 ## What changed
 
-- `browser_snapshot` defaults to a bounded list of rendered controls and headings. `selector` scopes a unique form/dialog, and `maxElements` limits candidates. Closed menus, CSS-hidden controls and hidden input identifiers are excluded. `display:contents` descendants and children overriding inherited visibility remain observable.
-- `browser_inspect` reports exact CSS match counts, rendered-match counts, candidate names, attributes, enabled state and actionable CSS references. References persist across observations of the same node, but not navigation/reload or replacement nodes.
-- Ambiguous CSS click/type requests return candidates without clicking, filling or pressing Enter. Markdown extraction refuses ambiguous regions rather than silently reading the first match, and includes recovery candidates.
-- Observation uses the existing BrowserSession visibility and Origin-lease admission. No input values are returned. Element scans and output are bounded; incomplete counts are explicitly marked.
+- `browser_snapshot` defaults to a bounded list of rendered controls and headings. `selector` scopes a unique form/dialog, and `maxElements` limits candidates. Both observation tools accept `start`; continue with the returned `nextStart` and unchanged scope/selector/limit, restarting at zero after document changes. Hidden nodes cannot permanently consume the scan budget. Closed menus, CSS-hidden controls and hidden input identifiers are excluded. `display:contents` descendants and children overriding inherited visibility remain observable.
+- `browser_inspect` reports exact CSS match counts, rendered-match counts, candidate names, attributes, inherited enabled/readonly state, native checked/selected state and actionable CSS references. Explicit ARIA naming references can use hidden labels. References persist across observations of the same node, but not navigation/reload or replacement nodes.
+- CSS click/type requests pin the uniquely observed node, serialize actions per conversation, and validate identity and effective enabled state throughout OpenCLI evaluation and native input. Native text/Enter requires the intended focus; native mouse events must still hit the intended target after hover/layout changes. OpenCLI fallback cannot bypass a rejected receiver. Ambiguous requests return candidates without clicking, filling or pressing Enter. Markdown extraction refuses ambiguous regions rather than silently reading the first match, and includes recovery candidates.
+- Observation uses the existing BrowserSession visibility and Origin-lease admission. Editable input values and editor content are omitted; displayed submit/button/reset labels remain observable. Visibility scans are limited to 5,000 matches per page and output to 16,000 characters. Matching uses the normal DOM selector query to obtain an exact total; partial visible counts are null. Candidate and output truncation provide continuation offsets.
 - `source: "opencli"` preserves a capped legacy snapshot for OpenCLI's supported shadow/iframe observations. It cannot be combined with scoped visible-snapshot arguments. OpenCLI itself is unchanged.
 
-Rendered visibility is distinct from viewport visibility: offscreen rendered controls may be returned and OpenCLI can scroll to them. The structured observer covers the current document; it does not pierce shadow roots or iframe documents. Use the explicit legacy mode when those observations are required.
+Rendered visibility is distinct from viewport visibility: offscreen rendered controls may be returned and OpenCLI can scroll to them. The structured observer covers the current document; it does not pierce shadow roots or iframe documents. Use the explicit legacy mode when those observations are required. Legacy numbered actions retain OpenCLI's resolver; the new CSS identity checks apply to structured references and CSS actions. Native event dispatch remains asynchronous: if a page changes after earlier input steps, the tool stops further actions and reports that prior effects may have occurred; it cannot roll them back.
 
 ## Reproduce
 
@@ -37,10 +37,12 @@ From the repository root, with workspace dependencies prepared:
 npm --workspace @maka/desktop run build:test
 npm --workspace @maka/desktop run typecheck
 npm --workspace @maka/desktop run test:dist
+npm --workspace @maka/desktop run test:browser-observation
+npm --workspace @maka/desktop run smoke:browser:run
 BROWSER_MEASURE_TRIALS=30 npm --workspace @maka/desktop run measure:browser-observation
 ```
 
-The measurement defaults to system Chrome. Use `BROWSER_CHANNEL=chromium` with an installed Playwright Chromium. `BROWSER_MEASURE_OUTPUT=/path/to/result.json` optionally saves machine-readable results. `BROWSER_BASELINE_REF` overrides the baseline Git revision; the default is `4c79e3910e106c3af589ffb429143dd4de47d7d3`.
+The browser regression target and measurement default to system Chrome. CI runs the regression target against installed Playwright Chromium on the Desktop e2e lane; it does not require the historical baseline Git object. The regression target uses unchanged OpenCLI CDPBasePage with native mouse/keyboard transport; the timing replay uses BasePage fixture adapters without native input. Use `BROWSER_CHANNEL=chromium` with an installed Playwright Chromium. `BROWSER_MEASURE_OUTPUT=/path/to/result.json` optionally saves machine-readable results. `BROWSER_BASELINE_REF` overrides the baseline Git revision; the default is `4c79e3910e106c3af589ffb429143dd4de47d7d3`.
 
 ## Method
 
@@ -54,7 +56,7 @@ One warm-up per version precedes 30 measured runs per version. Order alternates 
 
 ## Recorded result
 
-Environment: macOS, Node `v24.18.1`, Chrome `154.0.8037.58`, OpenCLI `1.8.8`, viewport `960×720`. Baseline: `4c79e3910e106c3af589ffb429143dd4de47d7d3`.
+Environment: macOS, Node `v24.19.0`, Chrome `154.0.8037.59`, OpenCLI `1.8.8`, viewport `960×720`. Baseline: `4c79e3910e106c3af589ffb429143dd4de47d7d3`.
 
 Both initial snapshots observe the whole document: old default DOM tree versus new default rendered-control snapshot. The improvement does not rely on giving only the new version a manually selected form scope.
 
@@ -62,13 +64,13 @@ Both initial snapshots observe the whole document: old default DOM tree versus n
 | --- | ---: | ---: | ---: |
 | Tool calls to complete the fixture workflow | 17 | 11 | −35.3% |
 | Failed locator calls | 6 | 0 | Eliminated |
-| First snapshot response bytes | 105,035 | 2,271 | −97.8% |
-| Total tool-response bytes | 106,060 | 3,792 | −96.4% |
-| Cumulative tool execution time, median | 45.55 ms | 31.49 ms | −30.9% |
+| First snapshot response bytes | 105,035 | 2,425 | −97.7% |
+| Total tool-response bytes | 106,060 | 4,038 | −96.2% |
+| Cumulative tool execution time, median | 46.26 ms | 40.15 ms | −13.2% |
 
 The real-browser regression driver also passed **24 checks** for hidden menus, hidden/password values, visibility overrides, `display:contents`, exact match counts, no-action ambiguity handling, stale/replacement refs, disabled targets, invalid-selector injection, scan/output limits and ambiguous scope rejection.
 
-Verification: **3,078 Desktop tests passed**, plus Desktop preload/main/renderer/Storybook typechecking and the affected Biome checks.
+Follow-up verification (2026-10-01): **3,078 Desktop tests passed**; **2,183 Runtime Host tests passed, 12 platform-specific tests skipped**; the automated browser target passed **20 tests**, including the shared 23 DOM assertions (the replay adds its historical-baseline check for 24). Real Electron smoke passed **28 checks**, including the production tool wrappers over the actual bridge. Root build/typechecking, lint/format, affected tests and ASF headers passed. Native regressions include post-preflight/resolution replacement, redirected focus, hover/layout changes, pointer cleanup, concurrent actions, scan/output pagination, and icon/editor/Unicode compatibility.
 
 ## Interpretation and limits
 

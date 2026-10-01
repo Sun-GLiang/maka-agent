@@ -58,6 +58,7 @@ const WORKHUB_ATTACHMENT_READ_PARAMETERS = readParameters.refine(
 const WORKHUB_BROWSER_TOOL_NAMES = [
   'mcp__desktop_browser__browser_navigate',
   'mcp__desktop_browser__browser_snapshot',
+  'mcp__desktop_browser__browser_inspect',
   'mcp__desktop_browser__browser_click',
   'mcp__desktop_browser__browser_type',
   'mcp__desktop_browser__browser_wait',

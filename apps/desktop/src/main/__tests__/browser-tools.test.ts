@@ -416,6 +416,9 @@ describe('browser tool execution', () => {
     assert.ok((tool.parameters as z.ZodType).safeParse({ scope: '#pr', maxElements: 8 }).success);
     for (const maxElements of [0, 101, 1.5]) assert.equal((tool.parameters as z.ZodType).safeParse({ maxElements }).success, false);
     assert.equal((tool.parameters as z.ZodType).safeParse({ selector: '' }).success, false);
+    for (const start of [-1, 0.5, Infinity]) assert.equal((tool.parameters as z.ZodType).safeParse({ start }).success, false);
+    assert.ok((tool.parameters as z.ZodType).safeParse({ start: 5000 }).success);
+    assert.ok((buildBrowserSnapshotTool().parameters as z.ZodType).safeParse({ start: 5000 }).success);
   });
 
   it('inspect observes without clicking or typing', async () => {

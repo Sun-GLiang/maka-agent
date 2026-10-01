@@ -49,6 +49,8 @@ import { BrowserViewController } from '../dist/main/browser/controller.js';
 import { BrowserViewManager } from '../dist/main/browser/view-manager.js';
 import { createBrowserViewHost } from '../dist/main/browser/automation-host.js';
 import { provideBrowserViewHost } from '../dist/main/browser/browser-host.js';
+import { withBrowserOriginAdmission } from '../dist/main/browser/browser-origin-admission.js';
+import { buildBrowserSnapshotTool, buildBrowserInspectTool, buildBrowserClickTool, buildBrowserTypeTool, buildBrowserExtractTool } from '../dist/main/browser/browser-tools.js';
 import {
   withBrowserPage,
   releaseBrowserSession,
@@ -281,6 +283,25 @@ async function runSmoke() {
     );
     const markdown = htmlToMarkdown(String(leaseHtml));
     check('extract markdown reflects the page effect', markdown.includes('clicked:leased'));
+
+    // Exercise the actual tool wrappers too: their proxy must preserve CDPPage's
+    // native transport and Origin admission, not just work with fixture adapters.
+    const toolContext = { sessionId: 'leaseS', turnId: 'smoke', toolCallId: 'smoke', cwd: process.cwd(), abortSignal: new AbortController().signal, emitOutput() {} };
+    const invokeTool = (tool, args) => withBrowserOriginAdmission({ sessionId: 'leaseS', url: fixtureUrl }, () => tool.impl(args, toolContext));
+    const structured = JSON.parse(await invokeTool(buildBrowserSnapshotTool(), {}));
+    check('production tool snapshot exposes actionable structured controls', structured.candidates.some(candidate => candidate.name === 'search query'));
+    const toolQueryRef = structured.candidates.find(candidate => candidate.attributes.id === 'q').ref;
+    const toolGoRef = structured.candidates.find(candidate => candidate.attributes.id === 'go').ref;
+    const toolTyped = await invokeTool(buildBrowserTypeTool(), { ref: toolQueryRef, text: '工具中文🙂' });
+    check('production guarded tool fills Unicode through real Electron CDP', toolTyped.includes('Verified:'));
+    const toolClicked = await invokeTool(buildBrowserClickTool(), { ref: toolGoRef });
+    const toolExtracted = await invokeTool(buildBrowserExtractTool(), { selector: '#out' });
+    check('production guarded tool clicks and extracts the actual page effect', toolClicked.startsWith('Clicked') && toolExtracted.includes('clicked:工具中文🙂'));
+    const inspected = JSON.parse(await invokeTool(buildBrowserInspectTool(), { selector: '#go' }));
+    await withBrowserPage('leaseS', 'read', page => page.evaluate('document.getElementById("go").replaceWith(document.getElementById("go").cloneNode(true))'));
+    const replaced = await invokeTool(buildBrowserClickTool(), { ref: inspected.candidates[0].ref });
+    check('production guarded tool refuses a copied stale reference', replaced.startsWith('No action taken') && replaced.includes('stale'));
+
 
     // Throttling tracks shown-ness (the P2 fix): a shown view runs full-speed so
     // native clicks composite, and HIDING it restores background throttling so a

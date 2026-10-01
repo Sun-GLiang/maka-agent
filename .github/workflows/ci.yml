@@ -404,6 +404,12 @@ jobs:
             --target-workspace "$PWD" \
             | tee "$RUNNER_TEMP/durable-state-report.json"
 
+      - name: Browser observation regressions
+        if: steps.plan.outputs.e2e == 'true'
+        run: |
+          npx playwright install --with-deps --only-shell chromium
+          BROWSER_CHANNEL=chromium npm --workspace @maka/desktop run test:browser-observation
+
       - name: Ensure xvfb
         if: steps.plan.outputs.e2e == 'true'
         run: |

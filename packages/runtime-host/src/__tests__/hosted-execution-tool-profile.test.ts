@@ -162,6 +162,12 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
   const browserTools = [
     browserNavigate,
     makeTool('mcp__desktop_browser__browser_snapshot'),
+    {
+      name: 'mcp__desktop_browser__browser_inspect',
+      description: 'Inspect browser controls',
+      parameters: z.object({ selector: z.string() }),
+      impl: async (input: Record<string, unknown>) => `inspected:${input.selector}`,
+    },
     makeTool('mcp__desktop_browser__browser_click'),
     makeTool('mcp__desktop_browser__browser_type'),
     makeTool('mcp__desktop_browser__browser_wait'),
@@ -299,6 +305,7 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
                 'mcp__desktop_workhub__control',
                 'mcp__desktop_browser__browser_navigate',
                 'mcp__desktop_browser__browser_snapshot',
+                'mcp__desktop_browser__browser_inspect',
                 'mcp__desktop_browser__browser_click',
                 'mcp__desktop_browser__browser_type',
                 'mcp__desktop_browser__browser_wait',
@@ -307,7 +314,8 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
                 [name in tools, typeof tools[name]]),
               forbidden: ['Bash', 'Write'].map(name =>
                 [name in tools, typeof tools[name]]),
-              result: await tools.mcp__desktop_browser__browser_navigate({ url: 'https://example.com/' })
+              result: await tools.mcp__desktop_browser__browser_navigate({ url: 'https://example.com/' }),
+              inspection: await tools.mcp__desktop_browser__browser_inspect({ selector: 'button' })
             };`,
                 }),
               });
@@ -358,14 +366,19 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
           [true, 'function'],
           [true, 'function'],
           [true, 'function'],
+          [true, 'function'],
         ],
         forbidden: [
           [false, 'undefined'],
           [false, 'undefined'],
         ],
         result: 'navigated:https://example.com/',
+        inspection: 'inspected:button',
       },
-      toolCalls: [{ index: 1, name: browserNavigate.name }],
+      toolCalls: [
+        { index: 1, name: browserNavigate.name },
+        { index: 2, name: 'mcp__desktop_browser__browser_inspect' },
+      ],
     },
   });
 });

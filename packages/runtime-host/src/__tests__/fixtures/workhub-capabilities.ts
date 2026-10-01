@@ -22,6 +22,7 @@ import type { ClientCapabilityOffer } from '../../protocol/index.js';
 export const WORKHUB_BROWSER_TOOL_NAMES = [
   'browser_navigate',
   'browser_snapshot',
+  'browser_inspect',
   'browser_click',
   'browser_type',
   'browser_wait',
