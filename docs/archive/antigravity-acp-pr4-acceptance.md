@@ -26,8 +26,8 @@ This record separates controlled protocol fixtures from official Agent results.
 
 The earlier eligibility HTTP 403 no longer reproduces in this recheck. Official
 Agent 1.2.1 completed synthetic prompts through the production `AcpExecutor` in
-both disposable directories. This establishes real Agent execution; the same-profile
-Desktop two-project checkbox remains open until the UI steps below are completed.
+both disposable directories. The subsequent same-profile Desktop run also completed
+both project prompts, idle configuration changes, restart recall and continuity checks.
 
 - Platform: macOS arm64; Node.js 24.19.0; official Agent server/helper SHA-256
   values match the 1.2.1 distribution recorded below. Existing authentication and
@@ -48,11 +48,10 @@ Desktop two-project checkbox remains open until the UI steps below are completed
   same external Session and committed configuration. Only equality was logged;
   external Session IDs and authentication data were not logged.
 - A freshly built development Desktop in the earlier isolated profile verified
-  connection and Google sign-in. Native project/menu automation then repeatedly
-  returned stale-element or `noWindowsAvailable` errors; screenshots stayed on an
-  earlier frame. Rebinding and a GPU-disabled restart did not resolve it. No new
-  Desktop A/B task completion or Desktop restart result is claimed for this run.
-  This is an automation blocker, not a new HTTP 403 or a proven application defect.
+  connection and Google sign-in. Native automation initially returned stale-element
+  or `noWindowsAvailable` errors. After the user brought the visible Maka Dev window
+  to the foreground, UI interaction recovered and the following Desktop run completed.
+  That temporary automation blocker is resolved; it was not a new HTTP 403.
 
 Local gates were rerun after integrating `main` at
 `1e80e3b885d963b799f7e2e9a70083ceda99943d`. Build, typecheck, lint,
@@ -63,8 +62,28 @@ and 89 protocol tests passed again. The current-base protocol guard passed
 202 → 204. Earlier local typecheck failures remain historical, not current failures.
 CI for the resulting push must be evaluated separately.
 
-The remaining action is to run Desktop steps 2–9 in one visible, interactive
-profile. Production-executor success must not be substituted for those UI results.
+### Completed same-profile Desktop run
+
+Tested build: code head `ccd3c195e94bb262df0ef862f121112b5252f2b4`, epoch 204;
+record-only head `9580ea7c039e6cb3942750ef9739ce359ece14bb`. This was the ad-hoc
+signed `Maka Dev.app` development build on macOS arm64, not a signed distributable.
+Profile alias: `desktop-acceptance.xdwVZL`, retained through two normal Cmd-Q exits
+and reopenings. Both projects were added through the real native folder picker.
+
+| Steps | Result | Observed evidence |
+| --- | --- | --- |
+| 1. Configure Agent | PASS | Official 1.2.1 connection and Google sign-in checks succeeded in this profile. |
+| 2–4. Discover, refresh and switch | PASS | B showed four Gemini families and Default/Auto Edit/YOLO. B → A, explicit UI Retry refresh, Gemini 3.8 Flash/Auto Edit selection, and A → B all completed. B candidates remained available without manually refreshing B. Executor cache identity evidence above remains separate. |
+| 5. Execute B | PASS | `/private/tmp/pr5826-reaccept-project-b`, `gemini-3.7-flash-high`, confirmed `default`; exact ACK, completed in 7 seconds. Saved continuity was committed with one prompt. |
+| 6. Execute A | PASS | `/private/tmp/pr5826-reaccept-project-a`, `gemini-3.8-flash-high`, `auto_edit`; exact ACK, completed in 6 seconds. Both tasks completed in this same profile, with no HTTP 403. |
+| 7. Idle change | PASS | A changed through UI to `gemini-3.6-flash-high`/`default`. Task metadata and the Agent-confirmed committed continuity record agreed. |
+| 8. Restart and recall | PASS | Normal Cmd-Q/reopen, explicit Restore, retained model/mode. The recall prompt omitted the code; the completed answer was exactly `A-5826-2648` in 15 seconds. |
+| 9. Second restart continuity | PASS | A second normal Cmd-Q/reopen and explicit Restore completed. One-way fingerprint equality against the pre-restart record was true; A retained committed phase, two prompts, and confirmed model/mode. No external Session ID was logged. |
+
+Screenshots, accessibility evidence, redacted continuity projections and local gate
+logs are retained in the local run directory `pr5826-acceptance-2026-10-01`.
+Cross-project Desktop execution and the full behavior acceptance are closed for this
+build. Release signing qualification remains separate.
 
 ## Repeatable acceptance procedure, 2026-10-01
 
