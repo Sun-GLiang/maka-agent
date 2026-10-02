@@ -23,10 +23,16 @@ import type { AdmissionLimiter } from '@maka/runtime/admission-limiter';
 const CATALOG_TTL_MS = 60_000;
 const PROBE_TIMEOUT_MS = 30_000;
 
+interface PendingProbe {
+  revision: number;
+  controller: AbortController;
+  promise: Promise<ExecutorCatalogEntry>;
+}
+
 /** Instance-scoped candidates. Only a retained task Session owns workspace configuration. */
 export class AcpCatalog {
   #cached?: { entry: ExecutorCatalogEntry; expires: number };
-  #pending?: { controller: AbortController; promise: Promise<ExecutorCatalogEntry> };
+  #pending?: PendingProbe;
   #tail?: Promise<ExecutorCatalogEntry>;
   readonly #operations = new Set<Promise<ExecutorCatalogEntry>>();
   #revision = 0;
@@ -42,7 +48,23 @@ export class AcpCatalog {
     signal.throwIfAborted();
     if (this.#disposed) return this.unavailable();
     if (refresh) this.invalidate();
-    if (this.#cached && this.#cached.expires > Date.now()) return this.#cached.entry;
+    while (true) {
+      signal.throwIfAborted();
+      if (this.#disposed) return this.unavailable();
+      const cached = this.#cached;
+      if (cached && cached.expires > Date.now()) return cached.entry;
+      const pending = this.#ensureProbe();
+      const result = await waitForSignal(pending.promise, signal);
+      signal.throwIfAborted();
+      if (this.#disposed) return this.unavailable();
+      // An invalidation need not have another caller to start its replacement.
+      // Only superseded revisions retry; genuine failures remain terminal.
+      if (pending.revision !== this.#revision) continue;
+      return result;
+    }
+  }
+
+  #ensureProbe(): PendingProbe {
     if (!this.#pending) {
       const revision = this.#revision;
       const controller = new AbortController();
@@ -76,19 +98,11 @@ export class AcpCatalog {
         if (this.#pending?.promise === promise) this.#pending = undefined;
         if (this.#tail === promise) this.#tail = undefined;
       });
-      this.#pending = { controller, promise };
+      this.#pending = { revision, controller, promise };
       this.#tail = promise;
       this.#operations.add(promise);
     }
-    let pending = this.#pending.promise;
-    while (true) {
-      const result = await waitForSignal(pending, signal);
-      if (result.readiness !== 'unavailable' || this.#disposed) return result;
-      if (this.#cached && this.#cached.expires > Date.now()) return this.#cached.entry;
-      const replacement = this.#pending?.promise;
-      if (!replacement || replacement === pending) return result;
-      pending = replacement;
-    }
+    return this.#pending;
   }
 
   invalidate(): void {

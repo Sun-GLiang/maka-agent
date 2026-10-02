@@ -19,7 +19,7 @@
 
 import { createHash } from 'node:crypto';
 import { constants, createReadStream } from 'node:fs';
-import { access, mkdtemp, realpath, rm, stat } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, realpath, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { AdmissionLimiter } from '@maka/runtime/admission-limiter';
 import { AcpCatalog } from './acp-catalog.js';
@@ -36,6 +36,7 @@ import {
   type ToolCallContent,
   type ToolCallUpdate,
 } from '@agentclientprotocol/sdk';
+import { pluginIdentity } from '@maka/runtime/plugin-runtime';
 import type { PluginStorageService } from '@maka/runtime/plugin-data-services';
 import type {
   PluginExecutorContext,
@@ -173,6 +174,11 @@ interface RetainedSession {
   loss?: Promise<void>;
 }
 
+type CatalogDirectory = <T>(
+  signal: AbortSignal,
+  use: (directory: string) => Promise<T>,
+) => Promise<T>;
+
 export class AcpExecutor implements PluginExecutorProvider {
   readonly id: string;
   readonly displayName: string;
@@ -184,6 +190,8 @@ export class AcpExecutor implements PluginExecutorProvider {
   readonly #sessions = new Map<string, RetainedSession>();
   #disposed = false;
   readonly #catalog: AcpCatalog;
+  readonly #withCatalogDirectory: CatalogDirectory;
+  #temporaryDirectory?: Promise<string>;
 
   constructor(
     adapter: AcpAgentAdapter,
@@ -192,6 +200,7 @@ export class AcpExecutor implements PluginExecutorProvider {
       readonly createConnection?: AcpConnectionFactory;
       readonly state?: AcpConversationStateStore;
       readonly catalogAdmission?: AdmissionLimiter;
+      readonly withCatalogDirectory?: CatalogDirectory;
     } = {},
   ) {
     this.#adapter = validateAdapter(adapter);
@@ -200,6 +209,21 @@ export class AcpExecutor implements PluginExecutorProvider {
     this.#configured = validateConfiguredAgent(adapter.configure(config));
     this.#createConnection = options.createConnection ?? createAcpConnection;
     this.#state = options.state;
+    this.#withCatalogDirectory =
+      options.withCatalogDirectory ??
+      (async (signal, use) => {
+        // Standalone embeddings have no Host storage; keep their cwd stable for
+        // this executor's lifetime. Registered adapters use durable scratch paths.
+        signal.throwIfAborted();
+        this.#temporaryDirectory ??= mkdtemp(join(tmpdir(), 'maka-acp-catalog-'));
+        const directory = await this.#temporaryDirectory;
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        try {
+          return await use(await realpath(directory));
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      });
     this.#catalog = new AcpCatalog(
       options.catalogAdmission ?? new AdmissionLimiter(1),
       (signal) => this.#probeCatalog(signal),
@@ -218,7 +242,12 @@ export class AcpExecutor implements PluginExecutorProvider {
   }
 
   async #probeCatalog(signal: AbortSignal): Promise<ExecutorCatalogEntry> {
-    const directory = await mkdtemp(join(tmpdir(), 'maka-acp-catalog-'));
+    return await this.#withCatalogDirectory(signal, (directory) =>
+      this.#readCatalog(directory, signal),
+    );
+  }
+
+  async #readCatalog(directory: string, signal: AbortSignal): Promise<ExecutorCatalogEntry> {
     let session: RetainedSession | undefined;
     try {
       signal.throwIfAborted();
@@ -235,12 +264,8 @@ export class AcpExecutor implements PluginExecutorProvider {
         isAuthenticationFailure(error) ? 'authentication_required' : 'unavailable',
       );
     } finally {
-      try {
-        // A connection failure may already own asynchronous process cleanup.
-        if (session) await (session.loss ?? this.#disposeSession(session));
-      } finally {
-        await rm(directory, { recursive: true, force: true });
-      }
+      // The directory lease outlives process cleanup, including failure cleanup.
+      if (session) await (session.loss ?? this.#disposeSession(session));
     }
   }
 
@@ -1196,9 +1221,12 @@ export class AcpRuntimeService {
   ): Disposable<Promise<void>> {
     const storage = consumer.get<PluginStorageService>('storage');
     if (!storage) throw new Error('ACP continuity storage is unavailable');
+    const directoryKey = `acp-catalog/${adapter.id}/${createHash('sha256').update(pluginIdentity(consumer).entryId).digest('hex')}`;
     const provider = new AcpExecutor(adapter as AcpAgentAdapter, config, {
       state: pluginStateStore(storage, adapter.id),
       catalogAdmission: this.#catalogAdmission,
+      withCatalogDirectory: (signal, use) =>
+        storage.withScratchDirectory(directoryKey, signal, use),
     });
     consumer.effect(() => () => provider.dispose(), `acp.dispose(${JSON.stringify(adapter.id)})`);
     return consumer.executors.register(provider);

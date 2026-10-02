@@ -186,15 +186,100 @@ test('late results from an invalidated probe never re-enter the cache', async ()
     () => entry('agent', 'unavailable'),
   );
   try {
-    const pending = catalog.get(signal());
+    const pending = [catalog.get(signal()), catalog.get(signal())];
     await started.promise;
     catalog.invalidate();
     result.resolve(entry('old-account'));
-    assert.equal((await pending).readiness, 'unavailable');
+    const results = await Promise.all(pending);
+    assert.equal(results[0]!.id, 'new-account');
+    assert.equal(results[0], results[1], 'old waiters share one replacement without a new query');
     assert.equal((await catalog.get(signal())).id, 'new-account');
     assert.equal(probes, 2);
   } finally {
     result.resolve(entry('old-account'));
+    await catalog.dispose();
+  }
+});
+
+test('genuine unavailable and authentication failures never automatically retry', async () => {
+  for (const readiness of ['unavailable', 'authentication_required'] as const) {
+    let probes = 0;
+    const catalog = new AcpCatalog(
+      new AdmissionLimiter(1),
+      async () => {
+        probes++;
+        return entry('failed', readiness);
+      },
+      () => entry('failed', 'unavailable'),
+    );
+    try {
+      assert.equal((await catalog.get(signal())).readiness, readiness);
+      assert.equal(probes, 1);
+    } finally {
+      await catalog.dispose();
+    }
+  }
+});
+
+test('caller cancellation and disposal do not restart an invalidated probe', async () => {
+  for (const cancel of [true, false]) {
+    const started = deferred<void>();
+    const result = deferred<ExecutorCatalogEntry>();
+    let probes = 0;
+    const catalog = new AcpCatalog(
+      new AdmissionLimiter(1),
+      async () => {
+        probes++;
+        started.resolve();
+        return await result.promise;
+      },
+      () => entry('agent', 'unavailable'),
+    );
+    const controller = new AbortController();
+    const pending = catalog.get(controller.signal);
+    const checked = cancel
+      ? assert.rejects(pending, /stop waiting/)
+      : pending.then((value) => assert.equal(value.readiness, 'unavailable'));
+    await started.promise;
+    catalog.invalidate();
+    if (cancel) controller.abort(new Error('stop waiting'));
+    const disposal = catalog.dispose();
+    result.resolve(entry('stale'));
+    await checked;
+    await disposal;
+    assert.equal(probes, 1);
+  }
+});
+
+test('repeated invalidations without refresh drain and join the latest revision', async () => {
+  const started = [deferred<void>(), deferred<void>()];
+  const results = [deferred<ExecutorCatalogEntry>(), deferred<ExecutorCatalogEntry>()];
+  let probes = 0;
+  const catalog = new AcpCatalog(
+    new AdmissionLimiter(1),
+    async () => {
+      const index = probes++;
+      if (index === 2) return entry('latest');
+      started[index]!.resolve();
+      return await results[index]!.promise;
+    },
+    () => entry('agent', 'unavailable'),
+  );
+  const waiting = [catalog.get(signal()), catalog.get(signal())];
+  try {
+    await started[0]!.promise;
+    catalog.invalidate();
+    results[0]!.resolve(entry('stale-1'));
+    await started[1]!.promise;
+    catalog.invalidate();
+    results[1]!.resolve(entry('stale-2'));
+    assert.deepEqual(
+      (await Promise.all(waiting)).map((value) => value.id),
+      ['latest', 'latest'],
+    );
+    assert.equal(probes, 3);
+  } finally {
+    for (const result of results) result.resolve(entry('cleanup'));
     await catalog.dispose();
   }
 });

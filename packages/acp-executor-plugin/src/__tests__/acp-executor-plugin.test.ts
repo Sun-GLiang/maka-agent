@@ -1606,7 +1606,11 @@ test('draft catalogs share one neutral probe across projects and refresh the exe
     executor.invalidateCatalog();
     assert.equal((await executor.discover({ cwd: other, signal })).readiness, 'ready');
     assert.equal(protocol.connections, 3);
-    assert.equal(new Set(protocol.sessionCwds).size, 3, 'each probe has its own disposable cwd');
+    assert.equal(
+      new Set(protocol.sessionCwds).size,
+      1,
+      'refresh and invalidation reuse the neutral cwd',
+    );
     for (const cwd of protocol.sessionCwds) {
       assert.notEqual(cwd, await realpath(fixture.root));
       assert.notEqual(cwd, await realpath(other));
@@ -2336,3 +2340,60 @@ test('an Agent configuration update during a prompt cannot replace the saved sel
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+test('registered-style directory ownership covers Agent startup and cleanup', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const started = deferred<void>();
+  const cleanup = deferred<void>();
+  let owned = false;
+  let released = false;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      withCatalogDirectory: async (_signal, use) => {
+        owned = true;
+        try {
+          return await use(fixture.root);
+        } finally {
+          released = true;
+          owned = false;
+        }
+      },
+      createConnection: (input) => {
+        assert.equal(owned, true);
+        const connection = protocol.factory(input);
+        return {
+          ...connection,
+          dispose: async () => {
+            started.resolve();
+            await cleanup.promise;
+            assert.equal(owned, true, 'the directory is leased until process cleanup finishes');
+            await connection.dispose();
+          },
+        };
+      },
+    },
+  );
+  const waiting = executor.discover({ cwd: fixture.root, signal: new AbortController().signal });
+  try {
+    await started.promise;
+    assert.equal(released, false);
+    cleanup.resolve();
+    assert.equal((await waiting).readiness, 'ready');
+    assert.equal(released, true);
+  } finally {
+    cleanup.resolve();
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
