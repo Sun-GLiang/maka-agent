@@ -19,9 +19,12 @@
 
 import { createHash } from 'node:crypto';
 import { constants, createReadStream } from 'node:fs';
-import { access, realpath, stat } from 'node:fs/promises';
+import { access, mkdtemp, realpath, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { AdmissionLimiter } from '@maka/runtime/admission-limiter';
+import { AcpCatalog } from './acp-catalog.js';
 import type { ExecutorCatalogEntry, ExecutorConfiguration } from '@maka/core/executor-catalog';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   methods,
   type ClientApp,
@@ -180,11 +183,7 @@ export class AcpExecutor implements PluginExecutorProvider {
   readonly #state?: AcpConversationStateStore;
   readonly #sessions = new Map<string, RetainedSession>();
   #disposed = false;
-  readonly #catalog = new Map<string, { entry: ExecutorCatalogEntry; expires: number }>();
-  readonly #discovery = new Map<string, Promise<ExecutorCatalogEntry>>();
-  readonly #probes = new Map<string, AbortController>();
-  readonly #scopeTokens = new Map<string, object>();
-  #catalogEpoch = 0;
+  readonly #catalog: AcpCatalog;
 
   constructor(
     adapter: AcpAgentAdapter,
@@ -192,6 +191,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     options: {
       readonly createConnection?: AcpConnectionFactory;
       readonly state?: AcpConversationStateStore;
+      readonly catalogAdmission?: AdmissionLimiter;
     } = {},
   ) {
     this.#adapter = validateAdapter(adapter);
@@ -200,6 +200,11 @@ export class AcpExecutor implements PluginExecutorProvider {
     this.#configured = validateConfiguredAgent(adapter.configure(config));
     this.#createConnection = options.createConnection ?? createAcpConnection;
     this.#state = options.state;
+    this.#catalog = new AcpCatalog(
+      options.catalogAdmission ?? new AdmissionLimiter(1),
+      (signal) => this.#probeCatalog(signal),
+      () => this.#catalogEntry('unavailable'),
+    );
   }
 
   async discover(input: {
@@ -207,99 +212,40 @@ export class AcpExecutor implements PluginExecutorProvider {
     signal: AbortSignal;
     refresh?: boolean;
   }): Promise<ExecutorCatalogEntry> {
-    if (this.#disposed) return this.#catalogEntry('unavailable');
-    input.signal.throwIfAborted();
-    const cwd = await realpath(resolve(input.cwd)).catch(() => undefined);
-    if (!cwd) return this.#catalogEntry('unavailable');
-    input.signal.throwIfAborted();
-    if (input.refresh) {
-      this.#catalog.delete(cwd);
-      this.#scopeTokens.set(cwd, {});
-      this.#probes.get(cwd)?.abort(new Error('ACP catalog scope refreshed'));
-      this.#discovery.delete(cwd);
-    }
-    const cached = this.#catalog.get(cwd);
-    if (cached && cached.expires > Date.now()) return cached.entry;
-    const existing = this.#discovery.get(cwd);
-    if (existing) return await this.#waitForDiscovery(cwd, existing, input.signal);
-    const epoch = this.#catalogEpoch;
-    const scopeToken = this.#scopeTokens.get(cwd) ?? {};
-    this.#scopeTokens.set(cwd, scopeToken);
-    const controller = new AbortController();
-    this.#probes.set(cwd, controller);
-    const probe = async () => {
-      // A bounded disposable ACP probe never creates a Maka task or joins the retained-session map.
-      const session: RetainedSession = {
+    // The generic Host query still supplies its target cwd. ACP draft candidates
+    // belong to this configured executor, and never initialize the user's workspace.
+    return await this.#catalog.get(input.signal, input.refresh);
+  }
+
+  async #probeCatalog(signal: AbortSignal): Promise<ExecutorCatalogEntry> {
+    const directory = await mkdtemp(join(tmpdir(), 'maka-acp-catalog-'));
+    let session: RetainedSession | undefined;
+    try {
+      signal.throwIfAborted();
+      session = {
         conversationKey: 'catalog-probe',
-        cwd,
+        cwd: await realpath(directory),
         configOptions: [],
         lost: false,
       };
+      await this.#initialize(session, signal, true);
+      return this.#catalogEntry('ready', session.configOptions);
+    } catch (error) {
+      return this.#catalogEntry(
+        isAuthenticationFailure(error) ? 'authentication_required' : 'unavailable',
+      );
+    } finally {
       try {
-        await this.#initialize(session, controller.signal, true);
-        const result = this.#catalogEntry('ready', session.configOptions);
-        if (
-          epoch !== this.#catalogEpoch ||
-          this.#scopeTokens.get(cwd) !== scopeToken ||
-          this.#disposed
-        )
-          return this.#catalogEntry('unavailable');
-        this.#catalog.set(cwd, { entry: result, expires: Date.now() + 60_000 });
-        while (this.#catalog.size > 16) {
-          const oldest = this.#catalog.keys().next().value!;
-          this.#catalog.delete(oldest);
-          if (!this.#probes.has(oldest)) this.#scopeTokens.delete(oldest);
-        }
-        return result;
-      } catch (error) {
-        return this.#catalogEntry(
-          (error as { code?: unknown })?.code === -32000
-            ? 'authentication_required'
-            : 'unavailable',
-        );
+        // A connection failure may already own asynchronous process cleanup.
+        if (session) await (session.loss ?? this.#disposeSession(session));
       } finally {
-        await this.#disposeSession(session);
+        await rm(directory, { recursive: true, force: true });
       }
-    };
-    const discovery = probe().finally(() => {
-      if (this.#probes.get(cwd) === controller) this.#probes.delete(cwd);
-      if (this.#discovery.get(cwd) === discovery) this.#discovery.delete(cwd);
-      if (!this.#catalog.has(cwd) && this.#scopeTokens.get(cwd) === scopeToken)
-        this.#scopeTokens.delete(cwd);
-    });
-    this.#discovery.set(cwd, discovery);
-    return await this.#waitForDiscovery(cwd, discovery, input.signal);
-  }
-
-  async #waitForDiscovery(
-    cwd: string,
-    discovery: Promise<ExecutorCatalogEntry>,
-    signal: AbortSignal,
-  ): Promise<ExecutorCatalogEntry> {
-    let pending = discovery;
-    while (true) {
-      const result = await waitForSignal(pending, signal);
-      const cached = this.#catalog.get(cwd);
-      if (result.readiness === 'unavailable' && cached && cached.expires > Date.now())
-        return cached.entry;
-      const replacement = this.#discovery.get(cwd);
-      if (
-        result.readiness !== 'unavailable' ||
-        !replacement ||
-        replacement === pending ||
-        this.#disposed
-      )
-        return result;
-      pending = replacement;
     }
   }
 
   invalidateCatalog(): void {
-    this.#catalogEpoch++;
-    this.#catalog.clear();
-    this.#scopeTokens.clear();
-    for (const probe of this.#probes.values()) probe.abort(new Error('ACP catalog scope changed'));
-    this.#discovery.clear();
+    this.#catalog.invalidate();
   }
 
   async inspectConversation(input: {
@@ -539,9 +485,7 @@ export class AcpExecutor implements PluginExecutorProvider {
   async dispose(): Promise<void> {
     if (this.#disposed) return;
     this.#disposed = true;
-    const probes = [...this.#discovery.values()];
-    this.invalidateCatalog();
-    await Promise.allSettled(probes);
+    await this.#catalog.dispose();
     const sessions = [...this.#sessions.values()];
     this.#sessions.clear();
     const settlements = await Promise.allSettled(
@@ -1202,24 +1146,6 @@ function withConfirmedConfiguration(
   };
 }
 
-async function waitForSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
-  return await new Promise<T>((resolvePromise, rejectPromise) => {
-    const aborted = () => rejectPromise(signal.reason);
-    signal.addEventListener('abort', aborted, { once: true });
-    void promise.then(
-      (value) => {
-        signal.removeEventListener('abort', aborted);
-        resolvePromise(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener('abort', aborted);
-        rejectPromise(error);
-      },
-    );
-  });
-}
-
 function isAuthenticationFailure(error: unknown): boolean {
   return (
     (error as { code?: unknown })?.code === -32000 ||
@@ -1256,6 +1182,9 @@ function toolTextContent(content: readonly ToolCallContent[]): string {
  * immutable package generation.
  */
 export class AcpRuntimeService {
+  // Shared by every adapter below this ACP runtime Entry, including queued probes.
+  readonly #catalogAdmission = new AdmissionLimiter(2);
+
   constructor(ctx: Context) {
     ctx.provide('acp', this);
   }
@@ -1269,6 +1198,7 @@ export class AcpRuntimeService {
     if (!storage) throw new Error('ACP continuity storage is unavailable');
     const provider = new AcpExecutor(adapter as AcpAgentAdapter, config, {
       state: pluginStateStore(storage, adapter.id),
+      catalogAdmission: this.#catalogAdmission,
     });
     consumer.effect(() => () => provider.dispose(), `acp.dispose(${JSON.stringify(adapter.id)})`);
     return consumer.executors.register(provider);

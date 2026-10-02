@@ -85,7 +85,7 @@ logs are retained in the local run directory `pr5826-acceptance-2026-10-01`.
 Cross-project Desktop execution and the full behavior acceptance are closed for this
 build. Release signing qualification remains separate.
 
-## Repeatable acceptance procedure, 2026-10-01
+## Repeatable acceptance procedure, updated 2026-10-02
 
 Use this procedure for PR [#5826](https://github.com/apache/maka/pull/5826).
 The historical runs below are evidence, not a claim that every step passed on the
@@ -125,7 +125,8 @@ before merge; the previous 200 → 201 result is historical evidence.
 
 The affected suites must exercise fresh-Session model-dependent mode availability,
 model-only changes removing a saved mode, idle notification drift, combined-option
-rollback, retained Session restoration, and per-directory catalog reuse/refresh.
+rollback, retained Session restoration, neutral probe directory ownership, shared
+instance catalog reuse/refresh, and admission held through process cleanup.
 The ACP cases live in `packages/acp-executor-plugin/src/__tests__/acp-executor-plugin.test.ts`;
 Host routing cases live in `packages/runtime-host/src/__tests__/session-catalog-coordinator.test.ts`.
 Controlled fixtures establish failure/rollback semantics; real Agent runs establish
@@ -138,7 +139,7 @@ actual discovery and execution. Keep those results separate.
 | 1. Configure Agent | In external-Agent settings, select the extracted official Agent directory using the macOS picker, check connection, and verify sign-in. | Executable resolves correctly; both checks succeed. Capture settings status with account details redacted. |
 | 2. Discover B | Add both projects through the project picker, select B, then select Antigravity and open model/mode pickers. | Real model and mode choices appear. Record actual IDs from confirmed task state; labels alone do not establish IDs. |
 | 3. Refresh A | Switch B → A and refresh A's catalog with the UI refresh/retry control. Select an available model and mode. | Refresh completes; candidates remain usable and selection is displayed. Capture A's project label and picker. |
-| 4. Return to B | Switch A → B without manually refreshing B; inspect its pickers. | B's candidates remain available. Capture B's project label and choices. Identical A/B candidates do not prove cache isolation; retain the production-executor cache identity check or controlled isolation test as separate evidence. |
+| 4. Return to B | Switch A → B without manually refreshing B; inspect its pickers. | B's candidates remain available. Capture B's project label and choices. In a separate production-executor check, assert that A and B share one candidate snapshot and both see the refreshed snapshot. Record that discovery session/new uses only neutral temporary directories. |
 | 5. Execute in B | Create a B task with a real model and `default` (if offered). Send: “Do not read or write files or run commands. Remember synthetic code B-5826-7319. Reply only ACK.” | Task reaches completed with ACK, and task metadata records B's directory and confirmed model/mode. An error or HTTP 403 is blocked/failed execution, never a pass. |
 | 6. Execute in A | Switch to A. Create a task with another available model and `auto_edit` (if offered). Send the same no-file-access prompt with code A-5826-2648. | Completed with ACK; metadata records A's directory and confirmed selection. Both steps 5 and 6 must pass in this same profile to close cross-project execution. |
 | 7. Confirm idle change | In one completed task, change mode and model while idle. | Agent confirmation and inspected task configuration agree with the selected IDs. Do not treat an optimistic picker label as confirmation. |
@@ -237,13 +238,53 @@ The P3 review identified a configuration-order failure: when a new Session begin
 
 ## Implementation and controlled checks
 
-The generic executor configuration and catalog now carry optional opaque mode IDs. ACP maps only real `select` mode options from the Agent; omitted mode preserves the Agent default. The same Host query and Desktop picker carry models and modes. Catalogs are keyed by resolved directory, share one bounded probe per directory, and can be invalidated by setup/login, policy changes, expiration, or explicit refresh. The retained task's configuration is inspected independently of draft discovery.
+The generic executor configuration and catalog carry optional opaque mode IDs. ACP maps real
+select options returned by the Agent; omitted mode preserves the real task Session default.
+The existing Host query and Desktop picker continue to carry models and modes.
 
-Catalog discovery calls the configured Agent's `session/new` in the selected workspace because ACP exposes configuration options per Session. That Agent may read workspace configuration, run its own startup hooks, or retain the empty probe Session in its own history; the client's disabled filesystem and terminal capabilities do not constrain the Agent's own process. Use this discovery only with an Agent trusted for that workspace. Maka sends no prompt, does not retain the probe as a task, deduplicates concurrent queries for the same directory, and disposes its connection after the probe. The 16-entry limit bounds cached catalogs, not the number of distinct directories being probed at once.
+### P2 catalog lifecycle follow-up, 2026-10-02
 
-Configuration updates validate the complete target before applying it, use Agent `setConfigOption` confirmations, and attempt a complete rollback on failure. The saved continuity record keeps the confirmed mode while retaining compatibility with PR 3 records containing only `confirmedModel`. Restore compares the Agent's returned configuration against that record and refuses a mismatch.
+Draft discovery now creates its disposable Session in a neutral temporary directory, rather than
+the selected project. One configured ACP executor shares its 60-second catalog across projects.
+Explicit refresh invalidates that executor's draft cache; setup/login and provider replacement
+invalidate its instance state. Retained task inspection and confirmed configuration are separate.
 
-Controlled tests cover the contract, prompt application, idle mode update, combined-option rollback, same-Session restore, directory cache isolation, refresh, login invalidation, and late notification handling.
+The ACP runtime Entry shares Runtime's AdmissionLimiter with a two-probe capacity across adapter
+registrations. A permit is held until connection and directory cleanup finish. Refresh replacements
+wait for old cleanup, queued invalidations cannot start a process, and the 30-second deadline includes
+admission wait. Disposing an executor drains all its superseded probes as well as its latest one.
+
+The real task still initializes its own Session in its workspace, applies model before dependent
+mode, and validates explicit choices before sending a prompt. A value available in the neutral
+probe may be unavailable in that task; failure never sends the prompt on a substituted default.
+Omitted choices use the real Session defaults. Draft refresh cannot replace a confirmed task choice.
+
+The configured Agent can perform its own startup work and retain an empty Session. A neutral
+directory avoids requesting initialization of the user's project; disabled client filesystem and
+terminal capabilities do not sandbox the process. Maka removes its owned temporary directory after
+closing the connection and does not attempt generic deletion of Agent-native history.
+
+The two-directory official-Agent and Desktop evidence above belongs to the previous workspace-scoped
+implementation. It remains historical evidence for model/mode execution and continuity, but does
+not verify this neutral-probe follow-up. Repeat official-Agent and Desktop acceptance against the
+new code before claiming that path verified. For a production-executor check, query A and B, assert
+one shared candidate snapshot, refresh once, and verify both now see the refreshed instance snapshot;
+record that the Agent session/new requests contain only disposable neutral paths. The old A-only
+cache-identity criterion is superseded for ACP draft catalogs.
+
+Controlled regressions cover neutral directory ownership, cross-project cache sharing, task-specific
+candidate rejection without prompting, real Session defaults, admission through cleanup, repeated
+refresh handoff, queued disposal and late-result fencing. Existing rollback, same-Session restore
+and Composer pending-gate suites remain applicable.
+
+Local verification for this follow-up: the full workspace build, typecheck, lint and format checks
+passed, as did Desktop/UI knip, renderer architecture, locale hygiene and ASF header checks. The ACP
+suite passed 84 tests, the Antigravity adapter passed 9, and the affected Runtime, Host, Desktop and
+UI suites passed 225, with no skips or failures. The stdio fixture writes native history at
+session/new: deliberately passing the selected project reproduces a project file mutation; the
+neutral probe prevents it. Removing the crash-cleanup wait also reproduces overlapping replacement
+startup. Both regressions pass with the fix restored. No official-Agent or real Desktop run is
+claimed for this follow-up.
 
 ## Historical validation (see latest verified status above)
 

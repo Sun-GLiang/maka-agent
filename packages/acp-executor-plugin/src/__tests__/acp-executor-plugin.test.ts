@@ -18,11 +18,12 @@
  */
 
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { methods, type ClientApp, type ClientConnection } from '@agentclientprotocol/sdk';
+import { AdmissionLimiter } from '@maka/runtime/admission-limiter';
 import type { PluginExecutorContext } from '@maka/runtime/plugin-executor-service';
 import {
   AcpExecutor,
@@ -972,6 +973,14 @@ test('discovery shares a disposable probe, does not mark a task, and first promp
     );
     assert.equal(protocol.connections, 1);
     assert.equal(protocol.disposals, 1);
+    assert.equal(protocol.sessionCwds.length, 1);
+    const probeCwd = protocol.sessionCwds[0]!;
+    assert.notEqual(probeCwd, await realpath(fixture.root));
+    assert.notEqual(probeCwd, process.cwd());
+    assert.equal(protocol.clientCapabilities[0]?.fs?.readTextFile, false);
+    assert.equal(protocol.clientCapabilities[0]?.fs?.writeTextFile, false);
+    assert.equal(protocol.clientCapabilities[0]?.terminal, false);
+    await assert.rejects(stat(probeCwd), { code: 'ENOENT' });
     assert.equal(marks, 0);
     assert.equal(protocol.prompts, 0);
     assert.equal(
@@ -984,6 +993,7 @@ test('discovery shares a disposable probe, does not mark a task, and first promp
       'completed',
     );
     assert.equal(protocol.selectedModel, 'fast');
+    assert.equal(protocol.sessionCwds[1], process.cwd());
     assert.equal(marks, 1);
     assert.equal(protocol.connections, 2);
     const before = protocol.connections;
@@ -1075,6 +1085,73 @@ test('refresh redirects callers awaiting the superseded catalog probe', async ()
     assert.deepEqual(waitingResult, refreshedResult);
     assert.equal(protocol.connections, 2);
   } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('a failed probe keeps admission until its already-started process cleanup finishes', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.holdInitialize = true;
+  const admission = new AdmissionLimiter(1);
+  let crash!: (error: Error) => void;
+  let releaseCleanup!: () => void;
+  const cleanup = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  let started!: () => void;
+  const connectionStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let cleaning!: () => void;
+  const cleanupStarted = new Promise<void>((resolve) => {
+    cleaning = resolve;
+  });
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      catalogAdmission: admission,
+      createConnection: (input) => {
+        const owner = protocol.factory(input);
+        if (protocol.connections > 1) return owner;
+        started();
+        return {
+          ...owner,
+          failed: new Promise<never>((_resolve, reject) => {
+            crash = reject;
+          }),
+          dispose: async () => {
+            cleaning();
+            await cleanup;
+            await owner.dispose();
+          },
+        };
+      },
+    },
+  );
+  try {
+    const old = executor.discover({ cwd: fixture.root, signal: new AbortController().signal });
+    await connectionStarted;
+    crash(new Error('Probe process crashed'));
+    await cleanupStarted;
+    protocol.holdInitialize = false;
+    const replacement = executor.discover({
+      cwd: fixture.root,
+      signal: new AbortController().signal,
+      refresh: true,
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.equal(protocol.connections, 1, 'a replacement cannot overlap crash cleanup');
+    assert.equal(admission.activeCount, 1);
+    releaseCleanup();
+    assert.equal((await replacement).readiness, 'ready');
+    assert.equal((await old).readiness, 'ready');
+    assert.equal(protocol.disposals, 2);
+    assert.equal(admission.activeCount, 0);
+  } finally {
+    releaseCleanup();
     await executor.dispose();
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -1503,39 +1580,149 @@ test('late configuration notifications are reasserted before the next change', a
   }
 });
 
-test('catalog reuse is scoped to cwd and refresh only replaces that scope', async () => {
+test('draft catalogs share one neutral probe across projects and refresh the executor instance', async () => {
   const fixture = await executableFixture();
   const other = await mkdtemp(join(tmpdir(), 'maka-acp-catalog-other-'));
   const protocol = fakeProtocol();
   const executor = new AcpExecutor(
     adapter,
     { executable: fixture.executable },
-    {
-      createConnection: protocol.factory,
-    },
+    { createConnection: protocol.factory },
   );
   const signal = new AbortController().signal;
   try {
-    await Promise.all([
+    const [a, b] = await Promise.all([
       executor.discover({ cwd: fixture.root, signal }),
-      executor.discover({ cwd: fixture.root, signal }),
+      executor.discover({ cwd: other, signal }),
     ]);
+    assert.equal(a, b);
     assert.equal(protocol.connections, 1);
-    await executor.discover({ cwd: other, signal });
+    const cached = await executor.discover({ cwd: join(other, 'not-created'), signal });
+    assert.equal(cached, a, 'draft discovery neither reads nor validates the project path');
+    const refreshed = await executor.discover({ cwd: fixture.root, signal, refresh: true });
+    assert.notEqual(refreshed, a);
+    assert.equal(await executor.discover({ cwd: other, signal }), refreshed);
     assert.equal(protocol.connections, 2);
-    await executor.discover({ cwd: fixture.root, signal });
-    assert.equal(protocol.connections, 2);
-    await executor.discover({ cwd: fixture.root, signal, refresh: true });
-    assert.equal(protocol.connections, 3);
-    await executor.discover({ cwd: other, signal });
-    assert.equal(protocol.connections, 3, 'refreshing one cwd must retain another cwd cache');
     executor.invalidateCatalog();
-    await executor.discover({ cwd: other, signal });
-    assert.equal(protocol.connections, 4);
+    assert.equal((await executor.discover({ cwd: other, signal })).readiness, 'ready');
+    assert.equal(protocol.connections, 3);
+    assert.equal(new Set(protocol.sessionCwds).size, 3, 'each probe has its own disposable cwd');
+    for (const cwd of protocol.sessionCwds) {
+      assert.notEqual(cwd, await realpath(fixture.root));
+      assert.notEqual(cwd, await realpath(other));
+      await assert.rejects(stat(cwd), { code: 'ENOENT' });
+    }
   } finally {
     await executor.dispose();
     await rm(fixture.root, { recursive: true, force: true });
     await rm(other, { recursive: true, force: true });
+  }
+});
+
+for (const selection of ['model', 'mode'] as const) {
+  test(
+    'a project Session rejects a ' +
+      selection +
+      ' offered only by the neutral draft probe without prompting',
+    async () => {
+      const fixture = await executableFixture();
+      const protocol = fakeProtocol();
+      protocol.hasMode = true;
+      const project = await realpath(fixture.root);
+      protocol.onSessionNew = (cwd) => {
+        if (cwd === project) {
+          if (selection === 'model') protocol.modelValues = ['default'];
+          else protocol.hasMode = false;
+        }
+      };
+      const storage = durableState();
+      const executor = new AcpExecutor(
+        adapter,
+        { executable: fixture.executable },
+        {
+          createConnection: protocol.factory,
+          state: storage.state,
+        },
+      );
+      const configuration = selection === 'model' ? { model: 'fast' } : { mode: 'auto' };
+      try {
+        const catalog = await executor.discover({
+          cwd: project,
+          signal: new AbortController().signal,
+        });
+        assert.equal(
+          catalog.models.some((model) => model.id === 'fast'),
+          true,
+        );
+        assert.equal(
+          catalog.modes?.some((mode) => mode.id === 'auto'),
+          true,
+        );
+        const result = await executor.execute(
+          { ...request('workspace'), cwd: project, configuration },
+          executorContext([]),
+        );
+        assert.equal(result.status, 'failed');
+        if (result.status === 'failed')
+          assert.equal(
+            result.code,
+            selection === 'model' ? 'acp_config_invalid' : 'acp_config_unavailable',
+          );
+        assert.equal(
+          protocol.prompts,
+          0,
+          'an invalid choice must never send the draft on a default',
+        );
+        assert.equal(protocol.sessionCwds[1], project);
+        assert.equal(storage.record().phase, 'established');
+        assert.equal(storage.record().pendingTurnId, undefined);
+        assert.deepEqual(
+          configuration,
+          selection === 'model' ? { model: 'fast' } : { mode: 'auto' },
+        );
+      } finally {
+        await executor.dispose();
+        await rm(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
+}
+
+test('an unspecified task configuration uses project defaults independently of the probe', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.hasMode = true;
+  const project = await realpath(fixture.root);
+  protocol.onSessionNew = (cwd) => {
+    if (cwd === project) {
+      protocol.selectedModel = 'fast';
+      protocol.selectedMode = 'auto';
+    }
+  };
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory },
+  );
+  try {
+    const catalog = await executor.discover({ cwd: project, signal: new AbortController().signal });
+    assert.equal(catalog.currentModel, 'default');
+    assert.equal(catalog.currentMode, 'ask');
+    assert.equal(
+      (await executor.execute({ ...request('defaults'), cwd: project }, executorContext([])))
+        .status,
+      'completed',
+    );
+    assert.deepEqual(protocol.promptModels, ['fast']);
+    assert.deepEqual(protocol.promptModes, ['auto']);
+    assert.equal(
+      await executor.discover({ cwd: project, signal: new AbortController().signal }),
+      catalog,
+      'live configuration cannot overwrite draft candidates',
+    );
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
@@ -1683,6 +1870,13 @@ function fakeProtocol(): {
   modeValuesByModel?: Readonly<Record<string, readonly string[]>>;
   notifyDuringPromptModel?: string;
   holdInitialize: boolean;
+  sessionCwds: string[];
+  clientCapabilities: Array<{
+    fs?: { readTextFile?: boolean; writeTextFile?: boolean };
+    terminal?: boolean;
+  }>;
+  modelValues: string[];
+  onSessionNew?: (cwd: string) => void;
   configurationFailure?: 'response_lost' | 'unconfirmed' | 'timeout' | 'once' | 'mode_once';
   sessionCreationFailure?: 'once';
   promptModels: string[];
@@ -1709,6 +1903,13 @@ function fakeProtocol(): {
     modeValuesByModel: undefined as Readonly<Record<string, readonly string[]>> | undefined,
     notifyDuringPromptModel: undefined as string | undefined,
     holdInitialize: false,
+    sessionCwds: [] as string[],
+    clientCapabilities: [] as Array<{
+      fs?: { readTextFile?: boolean; writeTextFile?: boolean };
+      terminal?: boolean;
+    }>,
+    modelValues: ['default', 'fast'],
+    onSessionNew: undefined as ((cwd: string) => void) | undefined,
     configurationFailure: undefined as
       | 'response_lost'
       | 'unconfirmed'
@@ -1736,10 +1937,10 @@ function fakeProtocol(): {
       id: 'model',
       name: 'Model',
       currentValue: fixture.selectedModel ?? 'default',
-      options: [
-        { value: 'default', name: 'Default' },
-        { value: 'fast', name: 'Fast' },
-      ],
+      options: fixture.modelValues.map((value) => ({
+        value,
+        name: value === 'default' ? 'Default' : 'Fast',
+      })),
     },
     ...(fixture.hasMode &&
     (fixture.dropModeForModel === undefined ||
@@ -1828,6 +2029,9 @@ function fakeProtocol(): {
           options?: { cancellationSignal?: AbortSignal },
         ) => {
           if (method === methods.agent.initialize) {
+            fixture.clientCapabilities.push(
+              params.clientCapabilities as (typeof fixture.clientCapabilities)[number],
+            );
             if (fixture.holdInitialize) {
               const signal = options!.cancellationSignal!;
               signal.throwIfAborted();
@@ -1862,6 +2066,8 @@ function fakeProtocol(): {
           }
           if (method === methods.agent.session.new) {
             fixture.sessions += 1;
+            fixture.sessionCwds.push(String(params.cwd));
+            fixture.onSessionNew?.(String(params.cwd));
             if (fixture.sessionCreationFailure === 'once') {
               fixture.sessionCreationFailure = undefined;
               throw new Error('Session creation response was lost');
