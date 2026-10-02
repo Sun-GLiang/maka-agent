@@ -22,6 +22,104 @@
 PR 4 follows [issue #5103](https://github.com/apache/maka/issues/5103).
 This record separates controlled protocol fixtures from official Agent results.
 
+## P3 stable-directory and invalidation follow-up, 2026-10-02
+
+Tested implementation commit: `4fefdc1e7fae53bcc2e8412c03be5eadd9e0de4b`.
+Registered ACP adapters now use stable Plugin-storage scratch paths, keyed by the
+Host data root, Plugin namespace, adapter ID and composition Entry. The Host reuses
+its existing native file lifetime leases; no additional native dependency is bundled
+into the ACP Plugin. Leases cover Agent process disposal and directory cleanup.
+Standalone `AcpExecutor` embeddings reuse a temporary path within their lifetime;
+a durable embedding must provide `withCatalogDirectory`.
+
+The official Agent 1.2.1 recheck used the production executor, transport and
+Host scratch-directory implementation. A transparent request observer recorded
+three actual `session/new` requests: initial discovery, explicit refresh and discovery
+after disposing/recreating the executor and its Host data runtime. All three requests
+used the same canonical neutral path; each started empty and its directory was removed
+after discovery returned. The shared A/B cache and refreshed replacement snapshot
+checks passed. All catalogs were ready and contained the same 11 models and three modes
+listed in the preceding-head record below. The two toy project directories stayed empty.
+
+A second check installed the actual production ACP/Antigravity Plugin bundles through
+`HostBuiltinExternalAgentPluginCoordinator` and queried `PluginExecutorService` against
+that official executable. Initial A/B queries opened one probe; a forced refresh opened
+one replacement. Both probes used the same leased path, with namespace
+`antigravity-acp` / `profile`, and both started empty and completed cleanup. No protocol
+fixture or mock Agent was used in these official checks. No task prompt was sent.
+
+Regression coverage passed 286 tests without skips or failures: 97 ACP/Antigravity
+and 189 affected Runtime/Host tests. It includes multi-waiter invalidation without a
+refresh query, repeated invalidations, cancellation/disposal, non-retryable genuine
+failures, stable paths across runtime replacement, namespace/key separation, directory
+cleanup on callback failure, public Plugin storage namespace propagation, competing
+runtime instances and a competing child process killed while holding a native lease.
+Removing the revision fix makes the invalidation regression fail; restoring random
+per-probe paths makes the stable-path regression fail. Positive tests pass with both
+fixes restored.
+
+The complete workspace build, typecheck, lint, format, renderer architecture, locale
+hygiene, ASF headers, Windows skip inventory and diff checks passed. Full workspace
+unit/e2e tests were not repeated locally. Official observer logs and JSON results are
+retained in the local run directory `pr5826-p3-acceptance-2026-10-02`; the tested source
+commit is recorded in the JSON result.
+
+This check does not inspect or delete Agent-private history and does not establish
+that its native UI groups history by cwd. Stable cwd eliminates per-probe path churn;
+the Agent may still keep empty Sessions. Desktop steps 1–4 below were tested on the
+preceding implementation, and steps 5–9 remain historical execution/recovery evidence,
+not fresh Desktop acceptance for this P3 follow-up.
+
+## Preceding-head neutral probe and Desktop acceptance, 2026-10-02
+
+The verification gate for the neutral-directory catalog follow-up passed on exact code
+head `82d6b12b695a2967f2e907915afb817ff5087f9b`. This run covers acceptance steps 1–4;
+prompt execution and restart steps 5–9 were not repeated and remain historical evidence
+for the earlier builds recorded below.
+
+Environment: macOS arm64, Node 24.19.0, Electron 43.4.1 and official Agent 1.2.1.
+The server SHA-256 was `c93c86c0f505fcdf8b13c695bed26d306141ef5446189d591397074d324db34e`;
+the helper SHA-256 was `1b8a2b712ca312c9769e425b800bfbcceec4770f19736404474d1e8e50d65456`.
+Desktop was freshly built from this head and launched as an ad-hoc-signed `Maka Dev.app`
+in the dedicated profile alias `neutral-acceptance-2026-10-02`. Existing Agent authentication
+and network settings were retained. Only empty disposable projects were selected.
+
+The production `AcpExecutor` used the official server and helper, with a transparent
+request observer that delegated every request and cleanup to the real connection.
+Both initial discovery and refresh initialized Agent version 1.2.1, protocol 1, and
+returned `ready`. Actual `session/new` requests used empty neutral temporary directories
+with suffixes `maka-acp-catalog-BqUc4Q` and `maka-acp-catalog-TirUh5`; neither used project A
+or B. Both directories were absent when the respective discovery returned, and both
+project directories remained unchanged. The initial A/B queries returned the same catalog
+object; refreshing A replaced it, and the next B query returned that replacement object.
+Exactly two probe Sessions were opened by this sequence.
+
+Both catalogs contained these model IDs:
+`gemini-3.8-flash-high`, `gemini-3.8-flash-medium`, `gemini-3.8-flash-low`,
+`gemini-3.7-flash-high`, `gemini-3.7-flash-medium`, `gemini-3.7-flash-low`,
+`gemini-3.6-flash-high`, `gemini-3.6-flash-medium`, `gemini-3.6-flash-low`,
+`gemini-pro-agent`, and `gemini-3.1-pro-low`.
+Mode IDs were `default`, `auto_edit`, and `yolo`; the probe default was
+`gemini-3.8-flash-high` / `default`.
+
+| Desktop step | Result | Observed evidence |
+| --- | --- | --- |
+| 1. Configure Agent | PASS | The real macOS picker accepted both the extracted directory and `agy_acp_server.par`. Missing-helper and missing-server directories produced their respective localized errors. The saved runtime-policy executable remained the original official path, and connection and Google sign-in verification succeeded afterwards. |
+| 2. Discover B | PASS | Both empty projects were added through the native folder picker. B showed Gemini 3.8/3.7/3.6 Flash and Gemini 3.1 Pro families, plus Default/Auto Edit/YOLO. B selected Gemini 3.7 Flash, High, Default. |
+| 3. Refresh A | PASS | B → A succeeded. Retry entered its loading state and completed with the model candidates still available. A selected Gemini 3.8 Flash, High, Auto Edit. |
+| 4. Return to B | PASS | A → B succeeded without pressing Retry in B. B still offered the same model families and three modes. The separate production-executor check establishes shared cache identity and neutral paths; the UI alone does not establish either. |
+
+The fresh workspace build, typecheck, lint, format, renderer architecture, locale hygiene,
+ASF headers and diff checks passed. ACP/Antigravity tests passed 93/93, and Desktop picker
+and settings tests passed 28/28, with no skips or failures. The full workspace tests were
+not repeated locally; the [exact-head hosted CI test](https://github.com/apache/maka/actions/runs/36975936091/job/110739653677)
+completed successfully. This run does not establish signed-distribution qualification.
+
+The observer script, request log, JSON results, Desktop log, profile and local gate logs
+are retained under the local run directory `pr5826-neutral-acceptance-2026-10-02`.
+At that head, the stable-directory suggestion was still open. The P3 follow-up above
+supersedes the random-path behavior; the Agent-native empty Session/history caveat remains.
+
 ## Execution recheck, 2026-10-01
 
 The earlier eligibility HTTP 403 no longer reproduces in this recheck. Official
