@@ -105,8 +105,7 @@ export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
 export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 204 as const;
-// 204: Reconcile the ACP mode catalog with main's archive/removal protocol.
-// 203: Executor catalogs and Session configuration carry opaque mode IDs;
+// 204: Executor catalogs and Session configuration carry opaque mode IDs;
 // catalog queries may request a provider refresh. Older peers reject these fields.
 // 202: `session.remove.preview` takes a bounded list of Sessions and reports the
 // child tasks, worktrees and optionally the bytes their removal would delete;

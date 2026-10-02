@@ -136,7 +136,7 @@ actual discovery and execution. Keep those results separate.
 
 | Step | Action | Required result and evidence |
 | --- | --- | --- |
-| 1. Configure Agent | In external-Agent settings, select the extracted official Agent directory using the macOS picker, check connection, and verify sign-in. | Executable resolves correctly; both checks succeed. Capture settings status with account details redacted. |
+| 1. Configure Agent | In external-Agent settings, select the official Agent executable or its extracted directory using the macOS picker, check connection, and verify sign-in. | The executable and sibling helper are validated before saving; both checks succeed. Also verify that incomplete selections report the missing component and preserve the saved path. Capture settings status with account details redacted. |
 | 2. Discover B | Add both projects through the project picker, select B, then select Antigravity and open model/mode pickers. | Real model and mode choices appear. Record actual IDs from confirmed task state; labels alone do not establish IDs. |
 | 3. Refresh A | Switch B → A and refresh A's catalog with the UI refresh/retry control. Select an available model and mode. | Refresh completes; candidates remain usable and selection is displayed. Capture A's project label and picker. |
 | 4. Return to B | Switch A → B without manually refreshing B; inspect its pickers. | B's candidates remain available. Capture B's project label and choices. In a separate production-executor check, assert that A and B share one candidate snapshot and both see the refreshed snapshot. Record that discovery session/new uses only neutral temporary directories. |
@@ -285,6 +285,24 @@ session/new: deliberately passing the selected project reproduces a project file
 neutral probe prevents it. Removing the crash-cleanup wait also reproduces overlapping replacement
 startup. Both regressions pass with the fix restored. No official-Agent or real Desktop run is
 claimed for this follow-up.
+
+### P3 protocol history and program selection follow-up, 2026-10-02
+
+The protocol history now records opaque mode IDs and optional catalog refresh once, under the
+shipped epoch 204. The redundant merge-description entry and unshipped ACP epoch-203 entry were
+removed. The guard passes against fetched main `ab6db58c9` at epoch 202; the wire contract and
+shipped epoch are unchanged by this follow-up.
+
+The macOS native picker allows files and directories. Only a directory selection has the known
+server filename appended; the selected executable and its sibling `localharness_external` must be
+regular, executable files. Selection and Host check/login share the same filesystem validator.
+Invalid selection reports the existing localized executable/helper failure and does not save a
+replacement path. Cancellation remains a no-op, and other platforms retain file-only selection.
+
+Controlled filesystem, settings/IPC, setup/install and protocol suites passed 147 tests without
+skips or failures. These exercise actual temporary files, executable permissions, both selection
+forms, incomplete distributions and an Electron-prefixed failure reaching the settings banner.
+They do not claim a new real macOS dialog or official-Agent run.
 
 ## Historical validation (see latest verified status above)
 
