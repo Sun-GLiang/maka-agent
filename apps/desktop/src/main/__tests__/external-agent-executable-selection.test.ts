@@ -51,6 +51,7 @@ for (const selection of ['directory', 'executable'] as const) {
 
 for (const invalid of ['missing selection', 'missing executable', 'missing helper', 'executable directory', 'helper directory', 'non-executable server', 'non-executable helper'] as const) {
   test(`macOS rejects ${invalid} before returning a path to save`, {
+    // Windows ignores POSIX execute bits; missing-file and file-type cases still run there.
     skip: process.platform === 'win32' && invalid.startsWith('non-executable'),
   }, async () => {
     const fixture = await programFixture();
