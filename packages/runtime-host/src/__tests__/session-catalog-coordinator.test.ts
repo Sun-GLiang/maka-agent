@@ -25,6 +25,9 @@ import {
 } from '../protocol/index.js';
 
 import assert from 'node:assert/strict';
+import type { ExecutorConfiguration } from '@maka/core/executor-catalog';
+import { Context } from '@maka/runtime/plugin-kernel';
+import { PluginExecutorService } from '@maka/runtime/plugin-executor-service';
 import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2157,6 +2160,7 @@ function createFixture(
     readonly header?: Partial<SessionHeader>;
     readonly assertExecutorAvailable?: HostSessionCatalogCoordinatorOptions['assertExecutorAvailable'];
     readonly configureExecutor?: HostSessionCatalogCoordinatorOptions['configureExecutor'];
+    readonly isTurnBusy?: HostSessionCatalogCoordinatorOptions['isTurnBusy'];
     readonly retireExecutor?: HostSessionCatalogCoordinatorOptions['retireExecutor'];
   } = {},
 ) {
@@ -2250,6 +2254,7 @@ function createFixture(
       drains += 1;
     },
     ...(options.configureExecutor ? { configureExecutor: options.configureExecutor } : {}),
+    ...(options.isTurnBusy ? { isTurnBusy: options.isTurnBusy } : {}),
     ...(options.retireExecutor ? { retireExecutor: options.retireExecutor } : {}),
     ...(options.assertExecutorAvailable
       ? { assertExecutorAvailable: options.assertExecutorAvailable }
@@ -2806,4 +2811,167 @@ test('projects the archive time of an archived Session and drops one on an activ
   if ('kind' in stray) assert.fail('Expected a supported Session projection');
   assert.equal(stray.isArchived, false);
   assert.equal(Object.hasOwn(stray, 'archivedAt'), false);
+});
+
+for (const mode of ['auto', undefined])
+  test(`Runtime preserves the Agent-confirmed mode ${mode ?? '(removed)'} through Host persistence`, async () => {
+    const root = new Context();
+    const executors = new PluginExecutorService(root);
+    root
+      .extend({
+        maka: { rootId: 'profile', packageId: 'fixture', entryId: 'bridge', generation: 1 },
+      })
+      .executors.register({
+        id: 'remote',
+        execute: async () => ({ status: 'completed', text: '' }),
+        configureConversation: async () => ({ model: 'after', ...(mode ? { mode } : {}) }),
+      });
+    const fixture = createFixture({
+      header: {
+        backend: 'plugin-executor',
+        executorId: 'remote',
+        executorConfig: { model: 'before', mode: 'ask' },
+      },
+      configureExecutor: (header, configuration) =>
+        executors.configureConversation(header.id, 'remote', {
+          conversationKey: header.id,
+          cwd: header.cwd,
+          configuration,
+        }),
+    });
+    try {
+      const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+        {
+          sessionId: fixture.sessionId,
+          expectedRevision: fixture.revision(),
+          patch: { executorConfig: { model: 'after' } },
+        },
+        context,
+      );
+      assert.equal(outcome.ok, true, JSON.stringify(outcome));
+      assert.deepEqual(fixture.header().executorConfig, {
+        model: 'after',
+        ...(mode ? { mode } : {}),
+      });
+    } finally {
+      await root.fiber.dispose();
+    }
+  });
+
+for (const key of ['model', 'mode'] as const)
+  test(`unconfirmed explicit ${key} is rejected before persistence`, async () => {
+    const before = { model: 'before', mode: 'ask' };
+    const fixture = createFixture({
+      header: { backend: 'plugin-executor', executorId: 'remote', executorConfig: before },
+      configureExecutor: async () => before,
+    });
+    const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+      {
+        sessionId: fixture.sessionId,
+        expectedRevision: fixture.revision(),
+        patch: { executorConfig: key === 'model' ? { model: 'after' } : { mode: 'auto' } },
+      },
+      context,
+    );
+    assert.equal(outcome.ok, false);
+    assert.deepEqual(fixture.header().executorConfig, before);
+  });
+test('queued turn blocks configuration before a running turn exists', async () => {
+  let calls = 0;
+  const fixture = createFixture({
+    header: {
+      backend: 'plugin-executor',
+      executorId: 'remote',
+      executorConfig: { model: 'before', mode: 'ask' },
+    },
+    isTurnBusy: () => true,
+    configureExecutor: async () => {
+      calls++;
+    },
+  });
+  const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+    {
+      sessionId: fixture.sessionId,
+      expectedRevision: fixture.revision(),
+      patch: { executorConfig: { mode: 'auto' } },
+    },
+    context,
+  );
+  assert.equal(outcome.ok, false);
+  assert.equal(calls, 0);
+});
+test('creation validates the exact selected mode alongside its model', async () => {
+  let received: ExecutorConfiguration | undefined;
+  const fixture = createFixture({
+    assertExecutorAvailable: (_session, _executor, config) => {
+      received = config;
+      return config;
+    },
+  });
+  const outcome = await fixture.coordinator.handlers['session.create'](
+    {
+      sessionId: fixture.sessionId,
+      workspace: { kind: 'host_path', path: process.cwd() },
+      executorId: 'remote',
+      executorConfig: { model: 'chosen', mode: 'auto' },
+    },
+    context,
+  );
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  assert.deepEqual(received, { model: 'chosen', mode: 'auto' });
+});
+test('changing the mode changes creation request identity', async () => {
+  const fingerprints: string[] = [];
+  const fixture = createFixture({
+    stores: {
+      createStableSession: async (args) => {
+        fingerprints.push(args.requestFingerprint);
+        return { kind: 'existing', record: headerSnapshot(sessionHeader(args.sessionId, []), 1) };
+      },
+    },
+  });
+  for (const mode of ['ask', 'auto']) {
+    const outcome = await fixture.coordinator.handlers['session.create'](
+      {
+        sessionId: fixture.sessionId,
+        workspace: { kind: 'host_path', path: process.cwd() },
+        executorId: 'remote',
+        executorConfig: { model: 'chosen', mode },
+      },
+      context,
+    );
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  }
+  assert.equal(fingerprints.length, 2);
+  assert.notEqual(fingerprints[0], fingerprints[1]);
+});
+test('failed local commit restores a mode-only durable task', async () => {
+  const confirmed: ExecutorConfiguration[] = [];
+  let retired = false;
+  const fixture = createFixture({
+    header: { backend: 'plugin-executor', executorId: 'remote', executorConfig: { mode: 'ask' } },
+    configureExecutor: async (_header, config) => {
+      confirmed.push(config);
+      return config;
+    },
+    retireExecutor: async () => {
+      retired = true;
+    },
+    manager: {
+      transitionSessionConfiguration: async () => {
+        throw new SessionConfigurationTransitionError('operation_unavailable', 'Commit failed');
+      },
+    },
+  });
+  const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+    {
+      sessionId: fixture.sessionId,
+      expectedRevision: fixture.revision(),
+      patch: { executorConfig: { mode: 'auto' } },
+    },
+    context,
+  );
+  assert.equal(outcome.ok, false);
+  assert.deepEqual(confirmed, [{ mode: 'auto' }, { mode: 'ask' }]);
+  assert.equal(retired, false);
 });

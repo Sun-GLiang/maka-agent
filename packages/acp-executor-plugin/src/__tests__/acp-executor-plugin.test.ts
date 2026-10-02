@@ -2397,3 +2397,73 @@ function deferred<T>() {
   });
   return { promise, resolve };
 }
+
+test('restoration reasserts the saved mode even when the request only selects a model', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.hasMode = true;
+  protocol.supportsRestore = true;
+  const storage = durableState();
+  const make = () =>
+    new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      { createConnection: protocol.factory, state: storage.state },
+    );
+  const first = make();
+  let restored: AcpExecutor | undefined;
+  try {
+    assert.equal(
+      (
+        await first.execute(
+          { ...request('first'), configuration: { model: 'fast', mode: 'auto' } },
+          executorContext([]),
+        )
+      ).status,
+      'completed',
+    );
+    await first.acknowledgeExecution('session-a', 'turn-first');
+    await first.dispose();
+    protocol.selectedMode = 'ask';
+    restored = make();
+    await restored.configureConversation(
+      { conversationKey: 'session-a', cwd: process.cwd(), configuration: { model: 'fast' } },
+      new AbortController().signal,
+    );
+    assert.equal(
+      protocol.selectedMode,
+      'auto',
+      'resume must preserve the mode already acknowledged by the task',
+    );
+  } finally {
+    await restored?.dispose();
+    await first.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('draft discovery does not apply project-specific startup configuration', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const project = await realpath(fixture.root);
+  protocol.onSessionNew = (cwd) => {
+    if (cwd === project) protocol.selectedModel = 'fast';
+  };
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory },
+  );
+  try {
+    const result = await executor.discover({ cwd: project, signal: new AbortController().signal });
+    assert.equal(
+      result.currentModel,
+      'default',
+      'project-specific startup must not run during discovery',
+    );
+    assert.equal(protocol.sessionCwds.includes(project), false);
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});

@@ -283,3 +283,29 @@ test('repeated invalidations without refresh drain and join the latest revision'
     await catalog.dispose();
   }
 });
+
+test('ready catalog cache expires without a timer or caller refresh', async () => {
+  let calls = 0;
+  let now = 100000;
+  const original = Date.now;
+  const catalog = new AcpCatalog(
+    new AdmissionLimiter(1),
+    async () => {
+      calls++;
+      return entry('ready');
+    },
+    () => entry('unavailable', 'unavailable'),
+  );
+  try {
+    Date.now = () => now;
+    await catalog.get(signal());
+    await catalog.get(signal());
+    assert.equal(calls, 1);
+    now += 61000;
+    await catalog.get(signal());
+    assert.equal(calls, 2);
+  } finally {
+    Date.now = original;
+    await catalog.dispose();
+  }
+});
