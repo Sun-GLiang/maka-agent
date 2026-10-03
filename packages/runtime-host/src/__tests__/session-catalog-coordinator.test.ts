@@ -2522,7 +2522,7 @@ test('Agent-confirmed mode side effects are persisted with a model change', asyn
       executorConfig: { model: 'before', mode: 'ask' },
     },
     configureExecutor: async (_header, config) => {
-      assert.deepEqual(config, { model: 'after', mode: 'ask' });
+      assert.deepEqual(config, { model: 'after' });
       return { model: 'after', mode: 'auto' };
     },
   });
@@ -2546,7 +2546,7 @@ test('Agent-confirmed snapshots clear options removed by a model change', async 
       executorConfig: { model: 'before', mode: 'ask' },
     },
     configureExecutor: async (_header, config) => {
-      assert.deepEqual(config, { model: 'after', mode: 'ask' });
+      assert.deepEqual(config, { model: 'after' });
       return { model: 'after' };
     },
   });
@@ -2560,6 +2560,33 @@ test('Agent-confirmed snapshots clear options removed by a model change', async 
   );
   assert.equal(outcome.ok, true, JSON.stringify(outcome));
   assert.deepEqual(fixture.header().executorConfig, { model: 'after' });
+});
+
+test('an explicit mode remains required when a model changes', async () => {
+  const configuration = { model: 'after', mode: 'ask' };
+  let received: ExecutorConfiguration | undefined;
+  const fixture = createFixture({
+    header: {
+      backend: 'plugin-executor',
+      executorId: 'remote',
+      executorConfig: { model: 'before', mode: 'ask' },
+    },
+    configureExecutor: async (_header, config) => {
+      received = config;
+      throw new Error('Mode unavailable for the selected model');
+    },
+  });
+  const outcome = await fixture.coordinator.handlers['session.configuration.update'](
+    {
+      sessionId: fixture.sessionId,
+      expectedRevision: fixture.revision(),
+      patch: { executorConfig: configuration },
+    },
+    context,
+  );
+  assert.deepEqual(received, configuration);
+  assert.equal(outcome.ok, false);
+  assert.deepEqual(fixture.header().executorConfig, { model: 'before', mode: 'ask' });
 });
 
 test('Agent-confirmed snapshots clear removed models from both executor routes', async () => {

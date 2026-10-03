@@ -869,7 +869,11 @@ export class HostSessionCatalogCoordinator {
           try {
             const confirmed = await this.#configureExecutor(
               current.header,
-              configuration.executorConfig!,
+              // A model-only edit lets the Agent confirm mode side effects.
+              // Do not turn the previous mode into an explicit requirement.
+              input.patch.executorConfig.model && input.patch.executorConfig.mode === undefined
+                ? { model: input.patch.executorConfig.model }
+                : configuration.executorConfig!,
             );
             if (confirmed) {
               if (

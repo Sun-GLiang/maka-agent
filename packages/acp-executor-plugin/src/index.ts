@@ -872,14 +872,11 @@ export class AcpExecutor implements PluginExecutorProvider {
       ...target.filter(([key]) => key !== 'model'),
     ];
     let mutationAttempted = false;
-    const removed = new Set<string>();
     try {
       for (const [key, value] of ordered) {
         const option = acpOption(session.configOptions, key);
-        if (!option && changingModel && key === 'mode' && acpOption(before, key)) {
-          removed.add(key);
-          continue;
-        }
+        // Every supplied value is explicit, including saved task configuration.
+        // A model change cannot waive confirmation of a requested mode.
         validate(session.configOptions, key, value);
         if (!option) throw new Error('Validated ACP option disappeared');
         if (option.currentValue === value) continue;
@@ -898,10 +895,7 @@ export class AcpExecutor implements PluginExecutorProvider {
           );
       }
       if (
-        target.some(
-          ([key, value]) =>
-            !removed.has(key) && acpOption(session.configOptions, key)?.currentValue !== value,
-        )
+        target.some(([key, value]) => acpOption(session.configOptions, key)?.currentValue !== value)
       )
         throw new AcpRuntimeError(
           'Agent changed another selected configuration',

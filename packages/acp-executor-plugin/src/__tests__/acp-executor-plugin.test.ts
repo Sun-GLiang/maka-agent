@@ -1472,7 +1472,7 @@ test('confirmed configuration clears a mode removed by a model change', async ()
   }
 });
 
-test('a fresh Session confirms a model-only change that removes the saved mode', async () => {
+test('a fresh Session confirms a model-only change that removes the default mode', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
   protocol.hasMode = true;
@@ -1489,7 +1489,7 @@ test('a fresh Session confirms a model-only change that removes the saved mode',
         {
           conversationKey: 'session-a',
           cwd: process.cwd(),
-          configuration: { model: 'fast', mode: 'ask' },
+          configuration: { model: 'fast' },
         },
         new AbortController().signal,
       ),
@@ -1498,6 +1498,80 @@ test('a fresh Session confirms a model-only change that removes the saved mode',
     assert.equal(protocol.selectedModel, 'fast');
     assert.equal(storage.record().confirmedModel, 'fast');
     assert.equal(storage.record().confirmedMode, undefined);
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('an unavailable saved mode rejects a followup after Agent model drift', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.hasMode = true;
+  const storage = durableState();
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory, state: storage.state },
+  );
+  const configuration = { model: 'fast', mode: 'ask' };
+  try {
+    assert.equal(
+      (await executor.execute({ ...request('first'), configuration }, executorContext([]))).status,
+      'completed',
+    );
+    await executor.acknowledgeExecution('session-a', 'turn-first');
+    const confirmed = structuredClone(storage.record());
+    protocol.dropModeForModel = 'fast';
+    protocol.notifyConfiguration('default');
+    const result = await executor.execute(
+      { ...request('second'), configuration },
+      executorContext([]),
+    );
+    assert.equal(result.status, 'failed');
+    if (result.status === 'failed') assert.equal(result.code, 'acp_config_unavailable');
+    assert.equal(protocol.prompts, 1, 'an invalid saved mode cannot admit another prompt');
+    assert.deepEqual(
+      storage.record(),
+      confirmed,
+      'failed validation preserves the confirmed selection',
+    );
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('an explicit mode removed by a model change rolls back without clearing the saved selection', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.hasMode = true;
+  const storage = durableState();
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory, state: storage.state },
+  );
+  const input = { conversationKey: 'session-a', cwd: process.cwd() };
+  try {
+    await executor.configureConversation(
+      { ...input, configuration: { model: 'default', mode: 'ask' } },
+      new AbortController().signal,
+    );
+    const confirmed = structuredClone(storage.record());
+    protocol.dropModeForModel = 'fast';
+    await assert.rejects(
+      executor.configureConversation(
+        { ...input, configuration: { model: 'fast', mode: 'ask' } },
+        new AbortController().signal,
+      ),
+      { code: 'acp_config_unavailable' },
+    );
+    assert.equal(protocol.selectedModel, 'default');
+    assert.equal(protocol.selectedMode, 'ask');
+    assert.equal(protocol.prompts, 0);
+    assert.equal(protocol.disposals, 0, 'confirmed rollback keeps the retained Session');
+    assert.deepEqual(storage.record(), confirmed);
   } finally {
     await executor.dispose();
     await rm(fixture.root, { recursive: true, force: true });
@@ -2009,18 +2083,7 @@ function fakeProtocol(): {
           sessionId: 'acp-session',
           update: {
             sessionUpdate: 'config_option_update',
-            configOptions: [
-              {
-                type: 'select',
-                id: 'model',
-                name: 'Model',
-                currentValue: model,
-                options: [
-                  { value: 'default', name: 'Default' },
-                  { value: 'fast', name: 'Fast' },
-                ],
-              },
-            ],
+            configOptions: configOptions(),
           },
         } as never,
       });
