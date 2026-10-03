@@ -231,7 +231,7 @@ test('unmounting a pending mode selector releases the Composer configuration gat
   }
 });
 
-test('fixed executor controls send partial patches so Agent side effects can be confirmed', async () => {
+for (const fixed of [false, true]) test(`${fixed ? 'fixed' : 'draft'} executor model changes drop the previous model's mode`, async () => {
   const dom = installTranscriptDom();
   const selections: ExecutorSelection[] = [];
   const entry = {
@@ -251,7 +251,7 @@ test('fixed executor controls send partial patches so Agent side effects can be 
     await dom.render(<LocaleProvider locale="en"><ExecutorModelPicker
       catalog={[entry]}
       selection={selection}
-      fixed
+      fixed={fixed}
       onSelect={(next) => { if (next) selections.push(next); }}
       onSetup={() => {}} onRetry={() => {}} onNewTask={() => {}}
     /></LocaleProvider>);
@@ -291,6 +291,31 @@ test('fixed executor controls send partial patches so Agent side effects can be 
     await dom.cleanup();
   }
 });
+
+for (const readiness of ['ready', 'authentication_required', 'unavailable'] as const) {
+  test(`the ${readiness} catalog can be refreshed from the picker`, async () => {
+    const dom = installTranscriptDom();
+    let retries = 0;
+    const render = (loading = false) => dom.render(<LocaleProvider locale="en"><ExecutorModelPicker
+      catalog={[{ ...catalog[0]!, readiness }]} loading={loading}
+      selection={{ executorId: 'antigravity', configuration: { model: 'model-0' } }}
+      onSelect={() => assert.fail('refresh must not change the selection')}
+      onSetup={() => {}} onRetry={() => { retries++; }} onNewTask={() => {}}
+    /></LocaleProvider>);
+    const retry = () => [...dom.document.querySelectorAll('.maka-executor-picker-rail button')]
+      .find(button => button.textContent === 'Retry');
+    try {
+      await render();
+      await act(async () => dom.document.querySelector('.maka-executor-selector')!
+        .dispatchEvent(new dom.window.Event('click', { bubbles: true })));
+      assert.ok(retry());
+      await act(async () => retry()!.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
+      assert.equal(retries, 1);
+      await render(true);
+      assert.ok(retry()?.hasAttribute('disabled') || retry()?.getAttribute('aria-disabled') === 'true');
+    } finally { await dom.cleanup(); }
+  });
+}
 
 test('the picker shows a generic loading state until the executor catalog arrives', async () => {
   const dom = installTranscriptDom();
@@ -869,6 +894,25 @@ for (const initial of [undefined, 'flash-high', 'flash-mid']) test(`grouped exte
     await click([...dom.document.querySelectorAll('[role="option"]')].find(el => el.textContent?.includes('Unrecognized (High)')));
     assert.equal(selected.at(-1), 'opaque-unknown');
     assert.equal(thinking(), undefined, 'unknown models retain their row and have no invented levels');
+  } finally { await dom.cleanup(); }
+});
+
+test('changing draft thinking levels drops a mode tied to the previous exact model', async () => {
+  const dom = installTranscriptDom();
+  const selections: ExecutorSelection[] = [];
+  try {
+    await dom.render(<LocaleProvider locale="en"><ExecutorThinkingLevelSelector
+      catalog={groupedCatalog}
+      selection={{ executorId: 'antigravity', configuration: { model: 'flash-high', mode: 'ask' } }}
+      onSelect={next => { if (next) selections.push(next); }}
+      onSetup={() => {}} onRetry={() => {}} onNewTask={() => {}}
+    /></LocaleProvider>);
+    await act(async () => dom.document.querySelector('[aria-haspopup="listbox"]')!
+      .dispatchEvent(new dom.window.Event('click', { bubbles: true })));
+    const low = [...dom.document.querySelectorAll('[role="option"]')].find(row => row.textContent === 'Low');
+    assert.ok(low);
+    await act(async () => low.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
+    assert.deepEqual(selections, [{ executorId: 'antigravity', configuration: { model: 'flash-low' } }]);
   } finally { await dom.cleanup(); }
 });
 

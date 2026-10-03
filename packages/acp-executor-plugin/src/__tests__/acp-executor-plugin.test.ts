@@ -1504,38 +1504,122 @@ test('a fresh Session confirms a model-only change that removes the default mode
   }
 });
 
-test('an unavailable saved mode rejects a followup after Agent model drift', async () => {
+for (const drift of ['removed', 'replaced'] as const)
+  test(`a ${drift} saved mode rejects followups but permits explicit model-only recovery`, async () => {
+    const fixture = await executableFixture();
+    const protocol = fakeProtocol();
+    protocol.hasMode = true;
+    protocol.supportsRestore = true;
+    const storage = durableState();
+    const executor = new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      { createConnection: protocol.factory, state: storage.state },
+    );
+    const configuration = { model: 'fast', mode: 'ask' };
+    try {
+      assert.equal(
+        (await executor.execute({ ...request('first'), configuration }, executorContext([])))
+          .status,
+        'completed',
+      );
+      await executor.acknowledgeExecution('session-a', 'turn-first');
+      const confirmed = structuredClone(storage.record());
+      if (drift === 'removed') protocol.dropModeForModel = 'fast';
+      else protocol.modeValuesByModel = { fast: ['auto'] };
+      protocol.notifyConfiguration('default');
+      const result = await executor.execute(
+        { ...request('second'), configuration },
+        executorContext([]),
+      );
+      assert.equal(result.status, 'failed');
+      if (result.status === 'failed')
+        assert.equal(
+          result.code,
+          drift === 'removed' ? 'acp_config_unavailable' : 'acp_config_invalid',
+        );
+      assert.equal(protocol.prompts, 1, 'an invalid saved mode cannot admit another prompt');
+      assert.deepEqual(
+        storage.record(),
+        confirmed,
+        'failed validation preserves the confirmed selection',
+      );
+      const input = { conversationKey: 'session-a', cwd: process.cwd() };
+      assert.equal((await executor.inspectConversation(input)).readiness, 'restore_failed');
+      await assert.rejects(
+        executor.configureConversation({ ...input, configuration }, new AbortController().signal),
+      );
+      assert.deepEqual(
+        storage.record(),
+        confirmed,
+        'an explicit invalid mode cannot be waived by restoration',
+      );
+      const recovered = await executor.configureConversation(
+        { ...input, configuration: { model: 'fast' } },
+        new AbortController().signal,
+      );
+      assert.deepEqual(
+        recovered,
+        drift === 'removed' ? { model: 'fast' } : { model: 'fast', mode: 'auto' },
+      );
+      assert.equal((await executor.inspectConversation(input)).readiness, 'ready');
+      assert.equal(storage.record().confirmedMode, recovered.mode);
+      assert.equal(
+        (
+          await executor.execute(
+            { ...request('recovered'), configuration: recovered },
+            executorContext([]),
+          )
+        ).status,
+        'completed',
+      );
+      await executor.acknowledgeExecution('session-a', 'turn-recovered');
+      assert.equal(protocol.prompts, 2);
+      assert.equal(protocol.sessions, 1, 'recovery preserves the original external Session');
+    } finally {
+      await executor.dispose();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+test('a stale draft mode can recover the first prompt without creating another external Session', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
   protocol.hasMode = true;
+  protocol.supportsRestore = true;
+  protocol.dropModeForModel = 'fast';
   const storage = durableState();
   const executor = new AcpExecutor(
     adapter,
     { executable: fixture.executable },
-    { createConnection: protocol.factory, state: storage.state },
+    {
+      createConnection: protocol.factory,
+      state: storage.state,
+    },
   );
-  const configuration = { model: 'fast', mode: 'ask' };
+  const input = { conversationKey: 'session-a', cwd: process.cwd() };
   try {
-    assert.equal(
-      (await executor.execute({ ...request('first'), configuration }, executorContext([]))).status,
-      'completed',
-    );
-    await executor.acknowledgeExecution('session-a', 'turn-first');
-    const confirmed = structuredClone(storage.record());
-    protocol.dropModeForModel = 'fast';
-    protocol.notifyConfiguration('default');
     const result = await executor.execute(
-      { ...request('second'), configuration },
+      { ...request('first'), configuration: { model: 'fast', mode: 'ask' } },
       executorContext([]),
     );
     assert.equal(result.status, 'failed');
-    if (result.status === 'failed') assert.equal(result.code, 'acp_config_unavailable');
-    assert.equal(protocol.prompts, 1, 'an invalid saved mode cannot admit another prompt');
-    assert.deepEqual(
-      storage.record(),
-      confirmed,
-      'failed validation preserves the confirmed selection',
+    assert.equal(protocol.prompts, 0);
+    const inspected = await executor.inspectConversation(input);
+    assert.equal(inspected.readiness, 'restore_failed');
+    assert.equal(inspected.currentModel, 'fast');
+    assert.equal(inspected.supportsModeChange, false);
+    const configuration = await executor.configureConversation(
+      { ...input, configuration: { model: 'fast' } },
+      new AbortController().signal,
     );
+    assert.deepEqual(configuration, { model: 'fast' });
+    assert.equal(
+      (await executor.execute({ ...request('retry'), configuration }, executorContext([]))).status,
+      'completed',
+    );
+    assert.equal(protocol.sessions, 1);
+    assert.equal(protocol.prompts, 1);
   } finally {
     await executor.dispose();
     await rm(fixture.root, { recursive: true, force: true });

@@ -292,7 +292,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                 className="maka-executor-picker-entry maka-executor-picker-manage"
                 onClick={openSetup}
               />
-              {(props.error || browsed?.readiness === 'unavailable') && (
+              {(props.error || browsed?.readiness === 'unavailable' || browsed?.readiness === 'ready' || browsed?.readiness === 'authentication_required') && (
                 <Button
                   label={copy.retry}
                   variant="ghost"
@@ -332,7 +332,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                         : value.slice('model:'.length);
                       if (model !== undefined) return chooseModel({
                         model,
-                        ...(!props.fixed && props.selection?.executorId === browsed.id && props.selection.configuration.mode
+                        ...(!props.fixed && model === currentModel && props.selection?.executorId === browsed.id && props.selection.configuration.mode
                           ? { mode: props.selection.configuration.mode }
                           : {}),
                       });
@@ -416,7 +416,7 @@ export function ExecutorThinkingLevelSelector(props: ExecutorModelPickerProps) {
     disabled={props.disabled || entry.readiness !== 'ready' || (props.fixed && !entry.supportsModelChange)}
     onChange={async (level) => {
       const variant = group.variants.find(candidate => candidate.level === level);
-      if (variant) await props.onSelect({ executorId: entry.id, configuration: props.fixed
+      if (variant) await props.onSelect({ executorId: entry.id, configuration: props.fixed || variant.modelId !== model
         ? { model: variant.modelId }
         : { ...props.selection?.configuration, model: variant.modelId } });
     }}

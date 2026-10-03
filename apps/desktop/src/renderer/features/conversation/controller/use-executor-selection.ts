@@ -197,7 +197,7 @@ export function useExecutorSelection(input: {
     confirmed.previous?.mode === input.session?.executorConfig?.mode
       ? confirmed.configuration
       : {
-          ...(executorId && input.session?.model && input.session.model !== executorId
+          ...(input.sessionPending && executorId && input.session?.model && input.session.model !== executorId
             ? { model: input.session.model }
             : {}),
           ...input.session?.executorConfig,
@@ -280,10 +280,17 @@ export function useExecutorSelection(input: {
   const restore = async () => {
     if (!sessionId || !executorId) throw new Error('Executor Session is unavailable');
     if (inFlight.current === key) throw new Error('Executor configuration is pending');
-    const configuration = input.session?.executorConfig ?? {
+    let configuration = input.session?.executorConfig ?? {
       ...(inspected?.currentModel ? { model: inspected.currentModel } : {}),
       ...(inspected?.currentMode ? { mode: inspected.currentMode } : {}),
     };
+    // A failed restore exposes the last observed model capabilities. Let an
+    // explicit retry recover from a removed mode without weakening prompt validation.
+    if (inspected?.readiness === 'restore_failed' && configuration.model && configuration.mode &&
+      inspected.supportsModelChange && inspected.currentModel === configuration.model &&
+      (inspected.supportsModeChange === false || (inspected.supportsModeChange === true &&
+        !inspected.modes?.some(mode => mode.id === configuration.mode))))
+      configuration = { model: configuration.model };
     setSnapshot((previous) =>
       previous?.key === key
         ? {

@@ -670,25 +670,28 @@ export class AcpExecutor implements PluginExecutorProvider {
         owner.failed,
       ]);
       session.configOptions = restored.configOptions ?? [];
-      let restoredModel = currentAcpModel(session.configOptions);
-      let restoredMode = acpOption(session.configOptions, 'mode')?.currentValue;
+      const restoredModel = currentAcpModel(session.configOptions);
+      const restoredMode = acpOption(session.configOptions, 'mode')?.currentValue;
       if (
         (stored.confirmedModel && restoredModel !== stored.confirmedModel) ||
         (stored.confirmedMode && restoredMode !== stored.confirmedMode)
       ) {
-        await this.#applyInitialConfig(
+        const confirmed = await this.#applyInitialConfig(
           session,
           {
             ...(stored.confirmedModel ? { model: stored.confirmedModel } : {}),
             ...(stored.confirmedMode ? { mode: stored.confirmedMode } : {}),
           },
           startupSignal,
+          false,
+          // Only an explicit model-only configuration can recover a removed
+          // saved mode. Ordinary execution still requires the exact saved pair.
+          deferSelectedConfig && !!session.configuration?.model && !session.configuration.mode,
         );
-        restoredModel = currentAcpModel(session.configOptions);
-        restoredMode = acpOption(session.configOptions, 'mode')?.currentValue;
         if (
-          (stored.confirmedModel && restoredModel !== stored.confirmedModel) ||
-          (stored.confirmedMode && restoredMode !== stored.confirmedMode)
+          (confirmed.model && currentAcpModel(session.configOptions) !== confirmed.model) ||
+          (confirmed.mode &&
+            acpOption(session.configOptions, 'mode')?.currentValue !== confirmed.mode)
         )
           throw new AcpRuntimeError(
             'Restored Agent configuration differs from the saved task',
@@ -838,8 +841,9 @@ export class AcpExecutor implements PluginExecutorProvider {
     values: ExecutorConfiguration | Readonly<Record<string, string>>,
     signal: AbortSignal,
     restoreOnFailure = false,
-  ): Promise<void> {
-    const target = Object.entries(values).filter(
+    omitUnavailableMode = false,
+  ): Promise<Readonly<Record<string, string>>> {
+    let target = Object.entries(values).filter(
       (entry): entry is [string, string] => entry[1] !== undefined,
     );
     const before = session.configOptions;
@@ -865,6 +869,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     // A model change can add, remove or replace the mode option. Validate that
     // dependent option against the Agent's post-model response instead.
     for (const [key, value] of target) {
+      if (omitUnavailableMode && key === 'mode') continue;
       if (!changingModel || key === 'model') validate(before, key, value);
     }
     const ordered = [
@@ -875,8 +880,18 @@ export class AcpExecutor implements PluginExecutorProvider {
     try {
       for (const [key, value] of ordered) {
         const option = acpOption(session.configOptions, key);
-        // Every supplied value is explicit, including saved task configuration.
-        // A model change cannot waive confirmation of a requested mode.
+        if (
+          omitUnavailableMode &&
+          key === 'mode' &&
+          !option?.options
+            .flatMap((entry) => ('options' in entry ? entry.options : [entry]))
+            .some((entry) => entry.value === value)
+        ) {
+          target = target.filter(([candidate]) => candidate !== 'mode');
+          continue;
+        }
+        // Every remaining value requires confirmation. Outside explicit recovery,
+        // a model change cannot waive a requested or saved mode.
         validate(session.configOptions, key, value);
         if (!option) throw new Error('Validated ACP option disappeared');
         if (option.currentValue === value) continue;
@@ -902,6 +917,7 @@ export class AcpExecutor implements PluginExecutorProvider {
           'acp_config_unconfirmed',
         );
       await this.#persistConfirmedConfig(session);
+      return Object.fromEntries(target);
     } catch (error) {
       let restored = false;
       if (restoreOnFailure && !session.lost && !signal.aborted) {

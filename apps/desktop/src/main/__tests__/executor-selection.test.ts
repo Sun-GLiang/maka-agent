@@ -127,6 +127,8 @@ test('first send carries the selected catalog through inspection and Agent initi
     assert.equal(latest.entry?.supportsModelChange, false, 'a later configuration-only inspection keeps its real capabilities');
     observed = [discovered];
     await render({ ...session, executorConfig: undefined });
+    assert.equal(latest.selection?.configuration.model, 'default', 'a Host Session without explicit config follows inspection');
+    await render(session);
     assertDisplay();
     assert.ok(frames.slice(start).every(frame => frame.entry?.models.some(model => model.id === frame.selection?.configuration.model)), 'no committed frame loses its selected model metadata');
     observed = [{ ...discovered, models: [{ id: 'default', name: 'Default model' }], modelGroups: [], modes: [], supportsModeChange: false }];
@@ -144,6 +146,92 @@ test('first send carries the selected catalog through inspection and Agent initi
     for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); }
   }
 });
+
+test('a plugin without discovery accepts followups while pending local summaries retain their model', async () => {
+  const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
+  const values = { document, window, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true };
+  const originals = new Map(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const root = createRoot(document.getElementById('root')!);
+  let latest!: ReturnType<typeof useExecutorSelection>;
+  const services = {
+    subscribeChanges: () => () => {},
+    newTasks: { subscribeChanges: () => () => {} },
+    sessions: { getExecutorState: async () => [{ ...entry, models: [], supportsModelChange: false }] },
+  } as unknown as ConversationServices;
+  const session = { id: 'saved', executorId: 'external', model: 'workhub-default' } as SessionSummary;
+  function Probe(props: { sessionPending: boolean; session: SessionSummary }) {
+    latest = useExecutorSelection({ key: 'saved', ...props });
+    return null;
+  }
+  const render = async (sessionPending: boolean, value = session) => {
+    await act(async () => root.render(createElement(ConversationServicesProvider, {
+      services, children: createElement(Probe, { sessionPending, session: value }),
+    })));
+  };
+  try {
+    await render(true);
+    assert.equal(latest.selection?.configuration.model, 'workhub-default');
+    await render(false);
+    assert.deepEqual(latest.selection?.configuration, {});
+    assert.equal(executorSubmissionError({ executorSelection: latest.selection, executorEntry: latest.entry }, 0, 'en'), undefined);
+    await render(false, { ...session, executorConfig: { model: 'removed-model' } });
+    assert.match(executorSubmissionError({ executorSelection: latest.selection, executorEntry: latest.entry }, 0, 'en') ?? '', /no longer available/);
+  } finally {
+    await act(async () => root.unmount());
+    for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); }
+  }
+});
+
+for (const modeState of ['removed', 'replaced', 'valid', 'unknown-model', 'unknown-capability'] as const) {
+  test(`explicit restore recovers a ${modeState} mode only when inspection confirms its removal`, async () => {
+    const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
+    const values = { document, window, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true };
+    const originals = new Map(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+    for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+    const root = createRoot(document.getElementById('root')!);
+    let latest!: ReturnType<typeof useExecutorSelection>;
+    const configuration = { model: 'selected', mode: 'ask' };
+    const expected = modeState === 'removed' ? { model: 'selected' }
+      : modeState === 'replaced' ? { model: 'selected', mode: 'auto' } : configuration;
+    const writes: unknown[] = [];
+    let ready = false;
+    const services = {
+      subscribeChanges: () => () => {},
+      newTasks: { subscribeChanges: () => () => {} },
+      sessions: {
+        getExecutorState: async () => [{
+          ...entry, readiness: ready ? 'ready' : 'restore_failed',
+          currentModel: modeState === 'unknown-model' && !ready ? 'other' : 'selected',
+          // ACP inspection may retain a saved mode label despite losing the option.
+          modes: [{ id: modeState === 'replaced' ? 'auto' : 'ask', name: 'Mode' }],
+          supportsModeChange: modeState === 'unknown-capability' ? undefined : modeState !== 'removed',
+        }],
+        setExecutorModelConfiguration: async (_id: string, config: unknown) => {
+          writes.push(config);
+          ready = true;
+          return { ok: true, session: { executorConfig: expected } };
+        },
+      },
+    } as unknown as ConversationServices;
+    function Probe() {
+      latest = useExecutorSelection({ key: 'saved', session: { id: 'saved', executorId: 'external', executorConfig: configuration } as SessionSummary });
+      return null;
+    }
+    try {
+      await act(async () => root.render(createElement(ConversationServicesProvider, { services, children: createElement(Probe) })));
+      assert.equal(latest.entry?.readiness, 'restore_failed');
+      await act(async () => latest.restore());
+      assert.deepEqual(writes, [modeState === 'removed' || modeState === 'replaced' ? { model: 'selected' } : configuration]);
+      assert.deepEqual(latest.selection?.configuration, expected);
+      assert.equal(latest.entry?.readiness, 'ready');
+      assert.equal(executorSubmissionError({ executorSelection: latest.selection, executorEntry: latest.entry }, 0, 'en'), undefined);
+    } finally {
+      await act(async () => root.unmount());
+      for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); }
+    }
+  });
+}
 
 test('explicit restore confirms the saved model while preserving the current task', async () => {
   const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
