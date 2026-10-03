@@ -37,6 +37,7 @@ import {
   BROWSER_OBSERVATION_MAX_CHARS,
 } from './browser-observation.js';
 import { runBrowserTargetAction } from './browser-action.js';
+import { browserObservationPage } from './browser-observation-world.js';
 
 /**
  * Generic observe→act browser tools over OpenCLI's action transport:
@@ -243,7 +244,7 @@ export function buildBrowserSnapshotTool(): MakaTool<
             return { text: text.slice(0, BROWSER_OBSERVATION_MAX_CHARS) +
               (text.length > BROWSER_OBSERVATION_MAX_CHARS ? '\n(Tree clipped; prefer a scoped visible snapshot or browser_inspect.)' : ''), info };
           }
-          const observation = await page.evaluate<BrowserObservation>(browserObservationJs({
+          const observation = await (await browserObservationPage(page)).evaluate<BrowserObservation>(browserObservationJs({
             scope: selector, maxElements: maxElements ?? 60, start, context: true,
           }));
           return { text: JSON.stringify(observation), info };
@@ -276,7 +277,7 @@ export function buildBrowserInspectTool(): MakaTool<BrowserObservationOptions, s
         label: 'inspect',
         abortSignal,
         run: async (page, info) => ({
-          observation: await page.evaluate<BrowserObservation>(browserObservationJs(options)), info,
+          observation: await (await browserObservationPage(page)).evaluate<BrowserObservation>(browserObservationJs(options)), info,
         }),
       });
       if (result.kind === 'navigated') return navigationResult(result.url, result.requiresApproval);
@@ -517,7 +518,7 @@ export function buildBrowserExtractTool(): MakaTool<{ selector?: string; start?:
           );
           const url = (await page.getCurrentUrl?.()) ?? '';
           const diagnostics = !read || (read.matchCount ?? 1) !== 1
-            ? await page.evaluate<BrowserObservation>(browserObservationJs({
+            ? await (await browserObservationPage(page)).evaluate<BrowserObservation>(browserObservationJs({
               selector: read ? selector : undefined, visibleOnly: false, maxElements: 8,
             }))
             : undefined;

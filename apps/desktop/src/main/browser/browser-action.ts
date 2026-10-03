@@ -18,6 +18,7 @@
  */
 
 import type { IPage } from '@jackwener/opencli/types';
+import { browserObservationPage } from './browser-observation-world.js';
 import {
   BROWSER_ACTION_TARGET_CHANGED,
   browserActionValidationJs,
@@ -71,6 +72,7 @@ async function actOnBrowserTarget<T>(
 ): Promise<BrowserTargetActionResult<T>> {
   // Legacy numbered refs keep OpenCLI's shadow/iframe-aware resolver.
   if (/^\d+$/.test(ref)) return { outcome: await action(page, ref) };
+  page = await browserObservationPage(page);
   const observation = await page.evaluate<BrowserObservation>(browserObservationJs({
     selector: ref, visibleOnly: false, maxElements: 8,
   }));
@@ -86,7 +88,7 @@ async function actOnBrowserTarget<T>(
     }
     return { diagnostics: observation };
   }
-  const validation = browserActionValidationJs(candidate.ref, typing);
+  const validation = browserActionValidationJs(candidate.ref, typing, { hitTest: !typing });
   let pressedMouse: Record<string, unknown> | undefined;
   let invalidated = false;
   const checkedPage = new Proxy(page, {
@@ -130,6 +132,13 @@ async function actOnBrowserTarget<T>(
     },
   }) as IPage;
   try {
+    if (!typing) {
+      // Bring offscreen controls into view before enforcing hit-testing on every
+      // OpenCLI evaluation, including its DOM click fallback. Identity validation
+      // and scrolling share one JS turn; later layout changes stop the action.
+      await page.evaluate(`${browserActionValidationJs(candidate.ref)};
+        document.querySelector(${JSON.stringify(candidate.ref)}).scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });`);
+    }
     return { outcome: await action(checkedPage, candidate.ref) };
   } catch (error) {
     if (!(error instanceof Error) || !error.message.includes(BROWSER_ACTION_TARGET_CHANGED)) throw error;
@@ -140,7 +149,9 @@ async function actOnBrowserTarget<T>(
     if (pressedMouse && nativePage.cdp) {
       await nativePage.cdp('Input.dispatchMouseEvent', { ...pressedMouse, type: 'mouseReleased', x: -1, y: -1, clickCount: 0 });
     }
-    const diagnostics = await page.evaluate<BrowserObservation>(browserObservationJs({ maxElements: 12 }));
+    // Navigation may have destroyed the action's isolated context. Observe the
+    // current document for recovery, without retrying any mutation there.
+    const diagnostics = await (await browserObservationPage(page)).evaluate<BrowserObservation>(browserObservationJs({ maxElements: 12 }));
     diagnostics.error = 'The target changed, became hidden/disabled, was replaced, or lost native focus/hit-testing during the action.';
     return { diagnostics, stopped: true };
   }

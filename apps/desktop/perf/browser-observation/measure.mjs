@@ -52,6 +52,7 @@ const basePath = new URL('./browser/base-page.js', import.meta.resolve('@jackwen
 const { BasePage } = await import(basePath.href);
 const browser = await chromium.launch({ headless: true, ...(process.env.BROWSER_CHANNEL === 'chromium' ? {} : { channel: process.env.BROWSER_CHANNEL || 'chrome' }) });
 const page = await browser.newPage({ viewport: { width: 960, height: 720 } });
+const cdp = await page.context().newCDPSession(page);
 const repositories = label => Array.from({ length: 1000 }, (_, i) => `<a href="/repo/${label}/${i}">${label} repository ${i}</a>`).join('');
 const html = (await readFile(new URL('./fixture.html', import.meta.url), 'utf8'))
   .replace('__HIDDEN_REPOSITORIES__', repositories('css-hidden'))
@@ -59,6 +60,7 @@ const html = (await readFile(new URL('./fixture.html', import.meta.url), 'utf8')
   .replace('__OTHER_SUBMITS__', Array.from({ length: 4 }, (_, i) => `<button type="submit">Other submit ${i}</button>`).join(''));
 await page.route('https://fixture.test/**', route => route.fulfill({ contentType: 'text/html', body: html }));
 class FixturePage extends BasePage {
+  async cdp(method, params = {}) { return cdp.send(method, params); }
   async evaluate(js) { return page.evaluate(js); }
   async goto(url) { await page.goto(url); }
   async getCurrentUrl() { return page.url(); }

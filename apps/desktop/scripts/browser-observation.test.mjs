@@ -31,7 +31,7 @@ import { runBrowserObservationRegressions } from './browser-observation-regressi
 // Use unchanged OpenCLI with real native CDP mouse/keyboard transport, not a
 // fake click/fill implementation. No user profile, cookies or remote pages.
 const { CDPBasePage } = await import(new URL('./browser/base-page.js', import.meta.resolve('@jackwener/opencli')));
-let browser, page, cdp, afterEvaluate;
+let browser, page, cdp, afterEvaluate, afterCdp;
 const nativeCalls = [];
 class FixturePage extends CDPBasePage {
   async evaluate(js) {
@@ -43,7 +43,10 @@ class FixturePage extends CDPBasePage {
   async getCurrentUrl() { return page.url(); }
   async cdp(method, params = {}) {
     nativeCalls.push(method);
-    return cdp.send(method, params);
+    const result = await cdp.send(method, params);
+    if (method === 'Runtime.evaluate') await afterEvaluate?.(params.expression);
+    await afterCdp?.(method, params);
+    return result;
   }
 }
 const context = { sessionId: 'browser-regression', turnId: 'test', toolCallId: 'test', cwd: process.cwd(), abortSignal: new AbortController().signal, emitOutput() {} };
@@ -76,6 +79,7 @@ before(async () => {
 });
 beforeEach(async () => {
   afterEvaluate = undefined;
+  afterCdp = undefined;
   nativeCalls.length = 0;
   resetBrowserSessionsForTest();
   const leases = new BrowserOriginLeaseTracker(() => page.url());
@@ -268,4 +272,127 @@ test('explicit hidden labels and native control states are observable without ed
   assert.equal((await observe({ selector: '#selected', visibleOnly: false })).candidates[0].selected, true);
   assert.ok(!JSON.stringify(result).includes('PRIVATE_'));
   assert.match(await invoke(current.buildBrowserTypeTool(), { ref: '#readonly', text: 'changed', submit: true }), /No action taken/);
+});
+
+for (const marker of ['window.__resolved = matches[0]', 'retargeted']) {
+  test(`a new overlay blocks JS click fallback after ${marker}`, async () => {
+    await content('<button id="target" onclick="window.clicks++">Delete</button><script>window.clicks=0</script>');
+    mutateAfter(marker, () => page.evaluate(() => {
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;z-index:999;background:white';
+      document.body.append(overlay);
+    }));
+    assert.match(await invoke(current.buildBrowserClickTool(), { ref: '#target' }), /Action stopped/);
+    assert.equal(await page.evaluate('window.clicks'), 0);
+  });
+}
+
+for (const operation of ['click', 'type']) {
+  test(`page scripts cannot forge replacement identity for ${operation}`, async () => {
+    await content('<button id="target" onclick="window.clicks++">Delete</button><input id="field"><script>window.clicks=0</script>');
+    const selector = operation === 'click' ? '#target' : '#field';
+    const ref = (await observe({ selector })).candidates[0].ref;
+    await page.evaluate(selector => {
+      const original = document.querySelector(selector);
+      const replacement = original.cloneNode(true);
+      const id = original.getAttribute('data-maka-browser-ref');
+      const state = window.__makaBrowserObservationRefs ??= { refs: new WeakMap() };
+      state.refs.set(replacement, id);
+      original.replaceWith(replacement);
+    }, selector);
+    const output = await invoke(operation === 'click' ? current.buildBrowserClickTool() : current.buildBrowserTypeTool(), { ref, text: 'PRIVATE_TYPED' });
+    assert.match(output, /No action taken.*\n.*stale/s);
+    assert.equal(await page.evaluate('window.clicks'), 0);
+    assert.equal(await page.locator('#field').inputValue(), '');
+  });
+}
+
+test('snapshot omits editable headings and headings containing editors', async () => {
+  await content('<h1>Public title</h1><div contenteditable="true"><h2>PRIVATE_NESTED</h2></div><h2 contenteditable>PRIVATE_HEADING</h2><h3>Draft: <span contenteditable="plaintext-only">PRIVATE_CHILD</span></h3>');
+  const result = JSON.parse(await invoke(current.buildBrowserSnapshotTool(), {}));
+  assert.ok(result.context.includes('Public title'));
+  assert.ok(!JSON.stringify(result).includes('PRIVATE_'));
+});
+
+test('empty and plaintext-only editors are discoverable and fillable', async () => {
+  await content('<div contenteditable id="empty">PRIVATE_EMPTY</div><div contenteditable="plaintext-only" id="plain">PRIVATE_PLAIN</div><div contenteditable="false" id="noneditor">Ordinary text</div>');
+  const result = JSON.parse(await invoke(current.buildBrowserSnapshotTool(), {}));
+  assert.deepEqual(result.candidates.map(candidate => candidate.attributes.id), ['empty', 'plain']);
+  assert.ok(!JSON.stringify(result).includes('PRIVATE_'));
+  for (const candidate of result.candidates) {
+    assert.match(await invoke(current.buildBrowserTypeTool(), { ref: candidate.ref, text: '编辑器🙂' }), /Verified/);
+    assert.equal(await page.locator('#' + candidate.attributes.id).textContent(), '编辑器🙂');
+  }
+});
+
+for (const operation of ['click', 'type']) {
+  test(`a hostile MutationObserver cannot forge ${operation} identity mid-action`, async () => {
+    await content('<button id="target" onclick="window.clicks++">Delete</button><input id="field"><script>window.clicks=0;window.replacements=0</script>');
+    const selector = operation === 'click' ? '#target' : '#field';
+    const ref = (await observe({ selector })).candidates[0].ref;
+    assert.equal(await page.evaluate('typeof window.__makaBrowserObservationRefs'), 'undefined');
+    await page.evaluate(selector => {
+      // Forge both public attributes and the former main-world identity map
+      // as soon as OpenCLI marks its resolved target for native focus/scroll.
+      window.__makaBrowserObservationRefs = { refs: new WeakMap() };
+      const observer = new MutationObserver(records => {
+        if (!records.some(record => record.attributeName === 'data-opencli-cdp-target')) return;
+        observer.disconnect();
+        const original = document.querySelector(selector);
+        const replacement = original.cloneNode(true);
+        window.__makaBrowserObservationRefs.refs.set(replacement, original.getAttribute('data-maka-browser-ref'));
+        window.__resolved = replacement;
+        original.replaceWith(replacement);
+        window.replacements++;
+      });
+      observer.observe(document.querySelector(selector), { attributes: true });
+    }, selector);
+    const output = await invoke(operation === 'click' ? current.buildBrowserClickTool() : current.buildBrowserTypeTool(), { ref, text: 'PRIVATE_TYPED' });
+    assert.match(output, /Action stopped/);
+    assert.equal(await page.evaluate('window.replacements'), 1);
+    assert.equal(await page.evaluate('window.clicks'), 0);
+    assert.equal(await page.locator('#field').inputValue(), '');
+  });
+}
+
+test('main-world resolved-slot changes cannot redirect structured actions', async () => {
+  await content('<button id="target" onclick="window.target++">Target</button><button id="other" onclick="window.other++">Other</button><script>window.target=0;window.other=0</script>');
+  mutateAfter('window.__resolved = matches[0]', () => page.evaluate(() => { window.__resolved = document.querySelector('#other'); }));
+  assert.match(await invoke(current.buildBrowserClickTool(), { ref: '#target' }), /^Clicked/);
+  assert.equal(await page.evaluate('window.target'), 1);
+  assert.equal(await page.evaluate('window.other'), 0);
+});
+
+test('offscreen CSS controls scroll into view before guarded native clicks', async () => {
+  await content('<div style="height:2000px"></div><button id="target" onpointerdown="window.pointers++" onclick="window.clicks++">Target</button><script>window.clicks=0;window.pointers=0</script>');
+  assert.match(await invoke(current.buildBrowserClickTool(), { ref: '#target' }), /^Clicked/);
+  assert.equal(await page.evaluate('window.clicks'), 1);
+  assert.equal(await page.evaluate('window.pointers'), 1);
+});
+
+test('legacy numbered refs remain usable after structured observations and actions', async () => {
+  await content('<input id="field" aria-label="Title"><button id="target" onclick="window.clicks++">Target</button><script>window.clicks=0</script>');
+  const legacy = await invoke(current.buildBrowserSnapshotTool(), { source: 'opencli' });
+  const field = legacy.match(/\[(\d+)\].*id=field/)[1];
+  const target = legacy.match(/\[(\d+)\].*id=target/)[1];
+  await observe({});
+  assert.match(await invoke(current.buildBrowserClickTool(), { ref: '#target' }), /^Clicked/);
+  assert.match(await invoke(current.buildBrowserTypeTool(), { ref: `[${field}]`, text: 'Legacy🙂' }), /Verified/);
+  assert.match(await invoke(current.buildBrowserClickTool(), { ref: `[${target}]` }), /^Clicked/);
+  assert.equal(await page.locator('#field').inputValue(), 'Legacy🙂');
+  assert.equal(await page.evaluate('window.clicks'), 2);
+});
+
+
+test('navigation during pointer-down releases the mouse after the isolated context disappears', async () => {
+  await content('<button id="target">Navigate</button>');
+  afterCdp = async (method, params) => {
+    if (method !== 'Input.dispatchMouseEvent' || params.type !== 'mousePressed') return;
+    afterCdp = undefined;
+    await page.goto('https://fixture.test/next');
+  };
+  await invoke(current.buildBrowserClickTool(), { ref: '#target' });
+  await page.evaluate(() => { window.buttons = -1; document.onmousemove = e => { window.buttons = e.buttons; }; });
+  await page.mouse.move(200, 200);
+  assert.equal(await page.evaluate('window.buttons'), 0);
 });

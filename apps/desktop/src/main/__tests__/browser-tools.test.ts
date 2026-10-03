@@ -95,6 +95,12 @@ function createFakeBrowser(url: string): FakeBrowser {
 
 function makeFakePage(cfg: FakePageConfig, browser: FakeBrowser): IPage {
   return {
+    async cdp(this: IPage, method: string, params?: Record<string, unknown>) {
+      if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'test-frame' } } };
+      if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
+      if (method === 'Runtime.evaluate') return { result: { value: await this.evaluate(String(params?.expression)) } };
+      throw new Error(`Unexpected CDP method: ${method}`);
+    },
     getCurrentUrl: async () => browser.url || null,
     goto: async (url: string) => browser.navigate(cfg.afterGotoUrl ?? url),
     evaluate: async (js: string) => {

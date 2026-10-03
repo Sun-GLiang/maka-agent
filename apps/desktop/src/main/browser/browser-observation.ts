@@ -103,7 +103,7 @@ const elementChecksJs = `
 export function browserActionValidationJs(
   ref: string,
   typing = false,
-  native: { focus?: boolean; point?: { x: number; y: number }; targetCenter?: boolean } = {},
+  native: { focus?: boolean; point?: { x: number; y: number }; targetCenter?: boolean; hitTest?: boolean } = {},
 ): string {
   return `(() => {
   const ref = ${JSON.stringify(ref)};
@@ -129,9 +129,9 @@ export function browserActionValidationJs(
       throw new Error(${JSON.stringify(BROWSER_ACTION_TARGET_CHANGED)});
     }
   }
-  if (native.point) {
-    let { x, y } = native.point;
+  if (native.point || native.hitTest) {
     const rect = el.getBoundingClientRect();
+    let { x, y } = native.point || { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
     // OpenCLI may aim at a clickable ancestor's centre for an icon/text ref.
     // Keep native events on the bound child; they still bubble to that ancestor.
     if (native.targetCenter && !(x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)) {
@@ -150,14 +150,15 @@ export function browserActionValidationJs(
 
 /**
  * Inputs are JSON literals, never executable selector fragments. References use
- * a per-document nonce and a WeakMap: another inspection preserves them, while
+ * a per-document nonce and a WeakMap in browserObservationPage's isolated world:
+ * another inspection preserves them, while
  * reload/navigation cannot silently reuse them for unrelated elements.
  * Only reference attributes are written; no page controls or values are changed.
  */
 export function browserObservationJs(options: BrowserObservationOptions = {}): string {
   return `(() => {
   const options = ${JSON.stringify(options)};
-  const interactive = 'a[href],button,input:not([type="hidden"]),select,textarea,summary,[role="button"],[role="link"],[role="checkbox"],[role="radio"],[role="switch"],[role="slider"],[role="spinbutton"],[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="tab"],[role="textbox"],[role="combobox"],[contenteditable="true"]';
+  const interactive = 'a[href],button,input:not([type="hidden"]),select,textarea,summary,[role="button"],[role="link"],[role="checkbox"],[role="radio"],[role="switch"],[role="slider"],[role="spinbutton"],[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="tab"],[role="textbox"],[role="combobox"],[contenteditable="true"],[contenteditable=""],[contenteditable="plaintext-only"]';
   const selector = options.selector || interactive;
   const scope = options.scope || 'body';
   const maxElements = Math.max(1, Math.min(100, options.maxElements || 20));
@@ -184,6 +185,11 @@ export function browserObservationJs(options: BrowserObservationOptions = {}): s
   result.nextStart = end < result.matchCount ? end : null;
   ${elementChecksJs}
   const clean = (text) => String(text || '').replace(/\\s+/g, ' ').trim().slice(0, 120);
+  function containsEditor(el) {
+    return el.isContentEditable || el.matches('textarea,input,select') ||
+      Array.from(el.querySelectorAll('[contenteditable],textarea,input,select')).some(node =>
+        node.isContentEditable || node.matches('textarea,input,select'));
+  }
   function name(el) {
     const explicit = el.getAttribute('aria-label');
     if (explicit) return clean(explicit);
@@ -200,7 +206,7 @@ export function browserObservationJs(options: BrowserObservationOptions = {}): s
     // Submit/button/reset values are displayed action labels, not editable input values.
     if (el.matches('input[type="submit"],input[type="button"],input[type="reset"]')) return clean(el.value);
     return clean(el.getAttribute('placeholder') || el.getAttribute('alt') || el.getAttribute('title') ||
-      (el.isContentEditable || el.matches('input,textarea,select') ? '' : el.innerText));
+      (containsEditor(el) ? '' : el.innerText));
   }
   const stateKey = '__makaBrowserObservationRefs';
   if (!window[stateKey]) {
@@ -238,7 +244,7 @@ export function browserObservationJs(options: BrowserObservationOptions = {}): s
     const headings = root.querySelectorAll('h1,h2,h3,[role="heading"]');
     for (let index = 0; index < Math.min(headings.length, ${BROWSER_OBSERVATION_SCAN_LIMIT}); index++) {
       const el = headings[index];
-      if (visible(el)) result.context.push(clean(el.innerText));
+      if (visible(el) && !containsEditor(el)) result.context.push(clean(el.innerText));
       if (result.context.length >= 12) break;
     }
   }
