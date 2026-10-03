@@ -24,8 +24,7 @@ import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { ExecutorCatalogEntry } from '@maka/core/executor-catalog';
 import type { SessionSummary } from '@maka/core/session';
-import { useExecutorSelection, newTaskConfiguration, executorSubmissionError, ConversationServicesProvider, type ConversationServices } from '../../renderer/features/conversation/index.js';
-import { executorComposerProps } from '../../renderer/features/conversation/model/executor-composer.js';
+import { useExecutorSelection, newTaskConfiguration, executorSubmissionError, executorComposerProps, ConversationServicesProvider, type ConversationServices } from '../../renderer/features/conversation/index.js';
 
 const entry: ExecutorCatalogEntry = { id: 'external', displayName: 'External', readiness: 'ready', models: [{ id: 'selected', name: 'Selected' }], supportsAttachments: false, supportsModelChange: true };
 
