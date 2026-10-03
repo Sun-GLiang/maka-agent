@@ -24,7 +24,7 @@ import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { ExecutorCatalogEntry } from '@maka/core/executor-catalog';
 import type { SessionSummary } from '@maka/core/session';
-import { useExecutorSelection, newTaskConfiguration, executorSubmissionError, executorComposerProps, ConversationServicesProvider, type ConversationServices } from '../../renderer/features/conversation/index.js';
+import { useExecutorSelection, newTaskConfiguration, executorSubmissionError, executorComposerProps, createExecutorSessionActivator, ConversationServicesProvider, type ConversationServices } from '../../renderer/features/conversation/index.js';
 
 const entry: ExecutorCatalogEntry = { id: 'external', displayName: 'External', readiness: 'ready', models: [{ id: 'selected', name: 'Selected' }], supportsAttachments: false, supportsModelChange: true };
 
@@ -82,7 +82,17 @@ test('first send carries the selected catalog through inspection and Agent initi
     assert.equal(sending.executorPicker?.disabled, true, 'controls lock before Host admission');
     assert.equal(sending.sendBlocked, true, 'Session handoff cannot admit a duplicate first send');
     const localSession = { ...session, model: 'external', executorConfig: undefined };
-    latest.adoptSession(localSession);
+    const activation: string[] = [];
+    await createExecutorSessionActivator(latest, () => {
+      activation.push('commit');
+    }, selection => {
+      assert.equal(selection.section, 'sessions');
+      activation.push('navigation');
+    }, id => {
+      assert.equal(id, localSession.id);
+      activation.push('activate');
+    })(localSession);
+    assert.deepEqual(activation, ['commit', 'navigation', 'activate']);
     assert.equal(latest.entry?.displayName, 'External', 'adoption does not erase the still-visible draft');
     const start = frames.length;
     sessionPending = true;

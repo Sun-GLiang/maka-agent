@@ -24,6 +24,22 @@ import type { OrchestrationMode } from '@maka/core/orchestration';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { UiCatalog, UiLocale } from '@maka/core/ui-locale';
 import type { NewChatModel } from './shell-chat-model-selection.js';
+import type { SessionSummary } from '@maka/core/session';
+
+/** Adopt the submitted catalog before the locally created Session becomes visible. */
+export function createExecutorSessionActivator<Session extends SessionSummary>(
+  executor: { adoptSession(session: SessionSummary): void },
+  commitSession: (session: Session) => void,
+  selectNavigation: (selection: { section: 'sessions' }) => void,
+  activateSession: (sessionId: string) => void,
+): (session: Session) => Promise<void> {
+  return async session => {
+    executor.adoptSession(session);
+    commitSession(session);
+    selectNavigation({ section: 'sessions' });
+    activateSession(session.id);
+  };
+}
 
 export interface ExecutorSubmission {
   executorSelection?: ExecutorSelection;
