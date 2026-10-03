@@ -665,6 +665,7 @@ function AppShellContent({
     newTaskKey: currentNewTaskDraftKey,
     executorTarget: taskEntry.selectors.target,
     executorCwd: activeSession?.cwd ?? taskEntry.selectors.projectPath,
+    executorSessionPending: activeSession?.localState === 'pending',
     activationCandidate: modelSettingsOwnsComposerHost
       ? onboardingActivationCandidate
       : undefined,
@@ -1139,6 +1140,7 @@ function AppShellContent({
     isShellSurfaceOwnerActive,
     refreshSessions,
     activateSessionForFirstSend: async (session) => {
+      executor.adoptSession(session);
       commitSession(session);
       setNavSelection({ section: 'sessions' });
       setActiveId(session.id);
@@ -1854,7 +1856,7 @@ function AppShellContent({
                   allowAttachmentOnlySend={canStageComposerContext}
                   canStageContext={canStageComposerContext}
                   contextPickEnabled={contextPickEnabled}
-                  {...Conversation.executorComposerProps(executor, {activeId, turnActive, taskSubmissionHardBlocked, connectionCount: connections.length, onSetup: () => openSettingsSection('external-agents'), onNewTask: openNewTaskSurface})}
+                  {...Conversation.executorComposerProps(executor, {activeId, turnActive, sendPending: newTaskSendPending, taskSubmissionHardBlocked, connectionCount: connections.length, onSetup: () => openSettingsSection('external-agents'), onNewTask: openNewTaskSurface})}
                   activeSession={activeSessionForView}
                   {...{ executorTarget, onExecutorTargetChange }}
                   usageModel={activeModel}

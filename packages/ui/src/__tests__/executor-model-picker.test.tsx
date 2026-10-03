@@ -335,6 +335,43 @@ test('the picker shows a generic loading state until the executor catalog arrive
   }
 });
 
+test('pending Session inspection is not reported as a failed model change', async () => {
+  const dom = installTranscriptDom();
+  const render = (loading: boolean) => dom.render(
+    <LocaleProvider locale="zh-CN"><ExecutorModelPicker
+      catalog={[]} loading={loading}
+      selection={{ executorId: 'antigravity', configuration: { model: 'model-0' } }}
+      onSelect={() => {}} onSetup={() => {}} onRetry={() => {}} onNewTask={() => {}}
+    /></LocaleProvider>,
+  );
+  try {
+    await render(true);
+    assert.equal(dom.document.querySelector('.maka-executor-notice'), null);
+    await render(false);
+    assert.match(dom.document.querySelector('.maka-executor-notice')?.textContent ?? '', /当前不可用/u);
+    assert.doesNotMatch(dom.document.body.textContent ?? '', /模型切换失败/u);
+  } finally { await dom.cleanup(); }
+});
+
+test('first-send admission keeps the complete model, thinking and mode controls visible', async () => {
+  const dom = installTranscriptDom();
+  const known = { ...groupedCatalog[0]!, modes: [{ id: 'default', name: 'Default' }], currentMode: 'default', supportsModeChange: true };
+  try {
+    for (const phase of ['local-pending', 'initializing', 'running', 'settled']) {
+      await dom.render(<LocaleProvider locale="zh-CN"><ExecutorModelPicker
+        catalog={[{ ...known, supportsModelChange: phase !== 'initializing', supportsModeChange: phase !== 'initializing' }]}
+        selection={{ executorId: known.id, configuration: { model: 'flash-high', mode: 'default' } }}
+        fixed loading={phase === 'local-pending'} disabled={phase !== 'settled'}
+        onSelect={() => {}} onSetup={() => {}} onRetry={() => {}} onNewTask={() => {}}
+      /></LocaleProvider>);
+      assert.match(dom.document.querySelector('.maka-executor-selector')?.textContent ?? '', /Gemini 3\.8 Flash/u, phase);
+      assert.match(dom.document.querySelector('.maka-thinking-level-selector')?.textContent ?? '', /高/u, phase);
+      assert.ok([...dom.document.querySelectorAll('button')].some(button => button.textContent?.includes('模式: Default')), phase);
+      assert.equal(dom.document.querySelector('.maka-executor-notice'), null, phase);
+    }
+  } finally { await dom.cleanup(); }
+});
+
 test('failed Antigravity discovery closes the picker before opening external-agent settings', async () => {
   const dom = installTranscriptDom();
   let setupOpened = false;

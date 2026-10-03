@@ -28,6 +28,8 @@ export function useExecutorSelection(input: {
   target?: ConversationNewTaskTarget;
   cwd?: string;
   session?: SessionSummary;
+  /** Local creation has not yet materialized a Session on the Host. */
+  sessionPending?: boolean;
 }) {
   const services = useConversationServices();
   const [draft, setDraft] = useState<{ key: string; selection?: ExecutorSelection }>();
@@ -37,6 +39,7 @@ export function useExecutorSelection(input: {
     loading: boolean;
     error?: string;
   }>();
+  const handoff = useRef<typeof snapshot>(undefined);
   const [changingKey, setChangingKey] = useState<string>();
   const [confirmed, setConfirmed] = useState<{
     key: string;
@@ -75,17 +78,38 @@ export function useExecutorSelection(input: {
         return;
       }
       if (!sessionId && (!input.target || !input.cwd)) return;
-      setSnapshot((previous) => ({
-        key,
-        catalog: previous?.key === key ? previous.catalog : [],
-        loading: true,
-      }));
+      const inherited = handoff.current?.key === key ? handoff.current : undefined;
+      setSnapshot((previous) => {
+        const seed = previous?.key === key ? previous : inherited;
+        return { key, catalog: seed?.catalog ?? [], loading: true };
+      });
+      if (sessionId && input.sessionPending) return;
       try {
         const catalog = sessionId
           ? ((await services.sessions.getExecutorState?.(sessionId)) ?? [])
           : ((await services.newTasks.getExecutors?.(input.target!, input.cwd!, force)) ?? []);
         if (current.current === key && revision.current === attempt)
-          setSnapshot({ key, catalog, loading: false });
+          setSnapshot(previous => {
+            const seed = previous?.key === key ? previous : inherited;
+            return {
+              key, loading: false,
+              catalog: catalog.map(entry => {
+                const known = seed?.catalog.find(candidate => candidate.id === entry.id);
+                // Inspection can expose saved IDs while initialization or a
+                // configuration update is pending. Reuse this Session's known
+                // presentation, independently of its observed mode capability.
+                if (!known || known.readiness !== 'ready' || entry.readiness !== 'ready' ||
+                  entry.supportsModelChange || !entry.models.every(model => model.name === model.id))
+                  return entry;
+                return { ...entry, displayName: known.displayName, models: known.models,
+                  modelGroups: known.modelGroups,
+                  ...(!entry.supportsModeChange ? {
+                    modes: known.modes, currentMode: entry.currentMode ?? known.currentMode,
+                  } : {}),
+                };
+              }),
+            };
+          });
       } catch (error) {
         if (current.current === key && revision.current === attempt)
           setSnapshot({
@@ -109,6 +133,7 @@ export function useExecutorSelection(input: {
     key,
     sessionId,
     executorId,
+    input.sessionPending,
     input.session?.executorConfig?.model,
     input.session?.executorConfig?.mode,
     input.target?.hostId,
@@ -135,7 +160,7 @@ export function useExecutorSelection(input: {
       await refresh();
       if (!stopped) timer = setTimeout(() => void poll(), 3000);
     };
-    if (sessionId && executorId) void poll();
+    if (sessionId && executorId && !input.sessionPending) void poll();
     else void refresh();
     return () => {
       stopped = true;
@@ -147,17 +172,23 @@ export function useExecutorSelection(input: {
       unSession();
       clearTimeout(timer);
     };
-  }, [refresh, invalidate, services, sessionId, executorId, key]);
+  }, [refresh, invalidate, services, sessionId, executorId, key, input.sessionPending]);
   useEffect(() => {
     if (sessionId) setDraft(undefined);
   }, [sessionId]);
+  useEffect(() => {
+    // Retire a handoff only after its replacement has committed. A superseded
+    // request must not erase it before the next inspection can inherit it.
+    if (snapshot && handoff.current?.key === snapshot.key) handoff.current = undefined;
+  }, [snapshot]);
   useEffect(() => {
     if (confirmed?.key === key &&
       confirmed.configuration.model === input.session?.executorConfig?.model &&
       confirmed.configuration.mode === input.session?.executorConfig?.mode)
       setConfirmed(undefined);
   }, [key, confirmed, input.session?.executorConfig?.model, input.session?.executorConfig?.mode]);
-  const catalog = snapshot?.key === key ? snapshot.catalog : [];
+  const currentSnapshot = snapshot?.key === key ? snapshot : handoff.current?.key === key ? handoff.current : undefined;
+  const catalog = currentSnapshot?.catalog ?? [];
   const inspected = catalog.find(candidate => candidate.id === executorId);
   // The catalog describes observed Agent state. The saved Session config is the
   // selection that will be applied before the next prompt.
@@ -165,7 +196,12 @@ export function useExecutorSelection(input: {
     confirmed.previous?.model === input.session?.executorConfig?.model &&
     confirmed.previous?.mode === input.session?.executorConfig?.mode
       ? confirmed.configuration
-      : input.session?.executorConfig;
+      : {
+          ...(executorId && input.session?.model && input.session.model !== executorId
+            ? { model: input.session.model }
+            : {}),
+          ...input.session?.executorConfig,
+        };
   const selection = executorId
     ? { executorId, configuration: inspected?.readiness === 'ready'
         ? { ...(inspected.currentModel ? { model: inspected.currentModel } : {}),
@@ -230,6 +266,17 @@ export function useExecutorSelection(input: {
     }
   };
   const entry = catalog.find((candidate) => candidate.id === selection?.executorId);
+  const adoptSession = (session: SessionSummary) => {
+    if (sessionId || !selection || !entry || session.executorId !== selection.executorId) return;
+    // Only a submitted draft hands its catalog to the new Session. Navigation
+    // to another task must still inspect that task's own executor state.
+    revision.current++;
+    const initial = { ...entry,
+      currentModel: session.executorConfig?.model ?? selection.configuration.model ?? entry.currentModel,
+      currentMode: session.executorConfig?.mode ?? selection.configuration.mode ?? entry.currentMode,
+    };
+    handoff.current = { key: session.id, catalog: [initial], loading: true };
+  };
   const restore = async () => {
     if (!sessionId || !executorId) throw new Error('Executor Session is unavailable');
     if (inFlight.current === key) throw new Error('Executor configuration is pending');
@@ -256,8 +303,9 @@ export function useExecutorSelection(input: {
     select,
     restore,
     refresh,
+    adoptSession,
     changing: changingKey === key,
-    loading: snapshot?.key !== key || snapshot.loading,
-    error: snapshot?.key === key ? snapshot.error : undefined,
+    loading: !currentSnapshot || currentSnapshot.loading,
+    error: currentSnapshot?.error,
   };
 }

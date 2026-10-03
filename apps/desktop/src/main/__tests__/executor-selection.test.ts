@@ -25,8 +25,116 @@ import { createRoot } from 'react-dom/client';
 import type { ExecutorCatalogEntry } from '@maka/core/executor-catalog';
 import type { SessionSummary } from '@maka/core/session';
 import { useExecutorSelection, newTaskConfiguration, executorSubmissionError, ConversationServicesProvider, type ConversationServices } from '../../renderer/features/conversation/index.js';
+import { executorComposerProps } from '../../renderer/features/conversation/model/executor-composer.js';
 
 const entry: ExecutorCatalogEntry = { id: 'external', displayName: 'External', readiness: 'ready', models: [{ id: 'selected', name: 'Selected' }], supportsAttachments: false, supportsModelChange: true };
+
+test('first send carries the selected catalog through inspection and Agent initialization', async () => {
+  const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
+  const values = { document, window, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true };
+  const originals = new Map(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const root = createRoot(document.getElementById('root')!);
+  const discovered: ExecutorCatalogEntry = {
+    ...entry,
+    models: [{ id: 'selected', name: 'Gemini High' }, { id: 'low', name: 'Gemini Low' }, { id: 'default', name: 'Default model' }],
+    modelGroups: [{ id: 'gemini', name: 'Gemini', variants: [{ modelId: 'selected', level: 'high' }, { modelId: 'low', level: 'low' }] }],
+    modes: [{ id: 'default', name: 'Default' }], currentMode: 'default', supportsModeChange: true,
+    currentModel: 'default',
+  };
+  let latest!: ReturnType<typeof useExecutorSelection>;
+  const frames: Array<ReturnType<typeof useExecutorSelection>> = [];
+  let finishInspection!: (value: readonly ExecutorCatalogEntry[]) => void;
+  const pending = new Promise<readonly ExecutorCatalogEntry[]>(resolve => { finishInspection = resolve; });
+  let inspection = pending;
+  let observed: readonly ExecutorCatalogEntry[] | undefined;
+  let sessionPending = false;
+  let inspectionCalls = 0;
+  const services = {
+    subscribeChanges: () => () => {},
+    newTasks: { subscribeChanges: () => () => {}, getExecutors: async () => [discovered] },
+    sessions: { getExecutorState: () => {
+      inspectionCalls++;
+      if (sessionPending) throw new Error('Session not found');
+      return observed ? Promise.resolve(observed) : inspection;
+    } },
+  } as unknown as ConversationServices;
+  const session = { id: 'created', executorId: 'external', model: 'selected', executorConfig: { model: 'selected' } } as SessionSummary;
+  function Probe(props: { session?: SessionSummary }) {
+    latest = useExecutorSelection({ key: 'draft', cwd: '/fixture', target: { hostId: 'host', profileId: 'profile', projectId: null }, session: props.session, ...{ sessionPending } });
+    frames.push(latest);
+    return null;
+  }
+  const render = async (value?: SessionSummary) => {
+    await act(async () => root.render(createElement(ConversationServicesProvider, { services, children: createElement(Probe, { session: value }) })));
+  };
+  const assertDisplay = () => {
+    assert.equal(latest.selection?.configuration.model, 'selected');
+    assert.equal(latest.entry?.displayName, 'External');
+    assert.deepEqual(latest.entry?.modelGroups, discovered.modelGroups);
+    assert.deepEqual(latest.entry?.modes, discovered.modes);
+    assert.equal(latest.selection?.configuration.mode, 'default');
+    assert.equal(latest.error, undefined);
+  };
+  try {
+    await render();
+    await act(async () => latest.select({ executorId: 'external', configuration: { model: 'selected' } }));
+    const sending = executorComposerProps(latest, { activeId: undefined, turnActive: false, sendPending: true, taskSubmissionHardBlocked: false, connectionCount: 0, onSetup() {}, onNewTask() {} });
+    assert.equal(sending.executorPicker?.disabled, true, 'controls lock before Host admission');
+    assert.equal(sending.sendBlocked, true, 'Session handoff cannot admit a duplicate first send');
+    const localSession = { ...session, model: 'external', executorConfig: undefined };
+    latest.adoptSession(localSession);
+    assert.equal(latest.entry?.displayName, 'External', 'adoption does not erase the still-visible draft');
+    const start = frames.length;
+    sessionPending = true;
+    await render(localSession);
+    assert.equal(inspectionCalls, 0, 'a locally pending Session must not inspect a nonexistent Host Session');
+    assert.equal(latest.loading, true);
+    assertDisplay();
+    await act(async () => latest.refresh(true));
+    assert.equal(inspectionCalls, 0, 'catalog invalidations cannot bypass local admission');
+    assertDisplay();
+    sessionPending = false;
+    await render(session);
+    assert.equal(latest.loading, true);
+    assertDisplay();
+    await act(async () => {
+      finishInspection([{ ...entry, models: [{ id: 'selected', name: 'selected' }], currentModel: 'selected', supportsModelChange: false }]);
+      await pending;
+    });
+    assertDisplay();
+    assert.equal(latest.entry?.supportsModelChange, false, 'presentation does not invent Session capabilities');
+    observed = [{ ...entry, models: [{ id: 'selected', name: 'selected' }], currentModel: 'selected', supportsModelChange: false,
+      modes: discovered.modes, currentMode: 'default', supportsModeChange: true }];
+    await act(async () => latest.refresh());
+    assertDisplay();
+    assert.equal(latest.entry?.supportsModeChange, true, 'mode readiness does not erase pending model presentation');
+    observed = [discovered];
+    await act(async () => latest.refresh());
+    assertDisplay();
+    observed = [{ ...entry, models: [{ id: 'selected', name: 'selected' }], currentModel: 'selected', supportsModelChange: false }];
+    await act(async () => latest.refresh());
+    assertDisplay();
+    assert.equal(latest.entry?.supportsModelChange, false, 'a later configuration-only inspection keeps its real capabilities');
+    observed = [discovered];
+    await render({ ...session, executorConfig: undefined });
+    assertDisplay();
+    assert.ok(frames.slice(start).every(frame => frame.entry?.models.some(model => model.id === frame.selection?.configuration.model)), 'no committed frame loses its selected model metadata');
+    observed = [{ ...discovered, models: [{ id: 'default', name: 'Default model' }], modelGroups: [], modes: [], supportsModeChange: false }];
+    await act(async () => latest.refresh());
+    assert.deepEqual(latest.catalog, observed, 'an authoritative removal must not be hidden by known presentation');
+    observed = [{ ...entry, readiness: 'unavailable', models: [] }];
+    await act(async () => latest.refresh());
+    assert.equal(latest.entry?.readiness, 'unavailable', 'real failure replaces the initial presentation');
+    observed = undefined;
+    inspection = new Promise(() => {});
+    await render({ ...session, id: 'other-session' });
+    assert.equal(latest.entry, undefined, 'another Session cannot inherit the submitted draft catalog');
+  } finally {
+    await act(async () => root.unmount());
+    for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); }
+  }
+});
 
 test('explicit restore confirms the saved model while preserving the current task', async () => {
   const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');

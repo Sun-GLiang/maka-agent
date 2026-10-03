@@ -192,8 +192,8 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
     browsedId === props.selection?.executorId
       ? (props.selection?.configuration.model ?? browsed?.currentModel)
       : browsed?.currentModel;
-  const selectedUnavailable = !!props.selection && selected?.readiness !== 'ready';
-  const selectedInvalid = !!props.selection && !!selected && selected.readiness === 'ready' && (
+  const selectedUnavailable = !!props.selection && (selected ? selected.readiness !== 'ready' : !props.loading);
+  const selectedInvalid = !props.loading && !!props.selection && !!selected && selected.readiness === 'ready' && (
     (!!props.selection.configuration.model && !selected.models.some(model => model.id === props.selection!.configuration.model)) ||
     (!!props.selection.configuration.mode && !selected.modes?.some(mode => mode.id === props.selection!.configuration.mode))
   );
@@ -292,14 +292,16 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                 className="maka-executor-picker-entry maka-executor-picker-manage"
                 onClick={openSetup}
               />
-              <Button
-                label={copy.retry}
-                variant="ghost"
-                size="sm"
-                className="maka-executor-picker-entry"
-                isDisabled={props.loading}
-                onClick={props.onRetry}
-              />
+              {(props.error || browsed?.readiness === 'unavailable') && (
+                <Button
+                  label={copy.retry}
+                  variant="ghost"
+                  size="sm"
+                  className="maka-executor-picker-entry"
+                  isDisabled={props.loading}
+                  onClick={props.onRetry}
+                />
+              )}
             </nav>
             <section className="maka-executor-picker-models" aria-live="polite">
               {browsedId === NATIVE ? (
@@ -374,7 +376,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
       <ExecutorModeSelector {...props} disabled={props.disabled || selecting} onPendingChange={setModePending} />
       {(selectedUnavailable || selectedInvalid || props.error) && (
         <span role="status" className="maka-executor-notice">
-          {selected && selected.readiness !== 'ready' ? copy[selected.readiness] : selectedInvalid ? copy.invalid : copy.selectionFailed}
+          {selectedUnavailable ? (selected && selected.readiness !== 'ready' ? copy[selected.readiness] : copy.unavailable) : selectedInvalid ? copy.invalid : copy.selectionFailed}
           {selected?.readiness === 'restorable' || selected?.readiness === 'restore_failed' ? (
             <Button label={copy.restore} variant="ghost" size="sm" isDisabled={configurationPending || !props.onRestore} onClick={restore} />
           ) : selected?.readiness === 'history_only' || selected?.readiness === 'history_gap' ? (
