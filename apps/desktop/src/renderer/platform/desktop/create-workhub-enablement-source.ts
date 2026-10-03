@@ -16,10 +16,14 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+import type { MakaBridge } from '../../../preload/bridge-contract.js';
+import type { WorkHubEnablementSource } from '../../application/contracts/workhub-workspace/workhub-enablement.js';
 
-export {
-  deriveTaskReadinessNotice,
-  isTaskSubmissionHardBlocked,
-  resolveTaskReadinessModelTarget,
-  type TaskReadinessNotice,
-} from './features/conversation/index.js';
+export function createDesktopWorkHubEnablementSource(
+  bridge: { settings: Pick<MakaBridge['settings'], 'getClient' | 'subscribeClientChanged'> } = window.maka,
+): WorkHubEnablementSource {
+  return {
+    read: async () => (await bridge.settings.getClient()).workHub.enabled,
+    subscribeChanges: (handler) => bridge.settings.subscribeClientChanged(handler),
+  };
+}
