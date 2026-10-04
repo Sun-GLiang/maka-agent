@@ -1,0 +1,12 @@
+{
+  "name": "@maka/find-workspace-root",
+  "version": "1.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Synchronous workspace-root adapter for patch-package without micromatch/braces",
+  "type": "commonjs",
+  "main": "index.cjs",
+  "dependencies": {
+    "picomatch": "4.0.7"
+  }
+}

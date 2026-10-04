@@ -26,6 +26,17 @@ After a dependency upgrade, apply the still-needed edits to the new version
 before regenerating. The command records the installed files, not the old
 patch text.
 
+The root `overrides` replaces only patch-package's `find-yarn-workspace-root`
+with the repository-owned adapter in `scripts/npm-compat/find-workspace-root`.
+The upstream helper pulls in `micromatch` and `braces`; braces <=3.0.3 has no
+published fix for GHSA-vfj7-8cjw-p6xm. The adapter retains the synchronous
+workspace lookup contract using `picomatch` directly, without the vulnerable
+brace AST walkers. Patch creation and application still use patch-package 8.0.1.
+The direct local devDependency and `$find-yarn-workspace-root` override reference
+keep npm's file resolution anchored to the repository root. The adapter is
+tested by `node --test scripts/find-workspace-root.test.mjs` in CI.
+Remove the override once upstream ships a dependency chain without this advisory.
+
 Keep this directory small. Prefer product code that uses the dependency's
 published API; only patch for bugs that block shipping and cannot be worked
 around at the call site.

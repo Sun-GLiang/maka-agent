@@ -122,6 +122,7 @@
     "@electron/asar": "4.3.0",
     "@types/node": "^26.6.3",
     "esbuild": "^0.28.1",
+    "find-yarn-workspace-root": "file:scripts/npm-compat/find-workspace-root",
     "husky": "^9.1.7",
     "knip": "^6.38.0",
     "patch-package": "8.0.1",
@@ -134,6 +135,9 @@
     "node-pty@1.2.0-beta.15": true
   },
   "overrides": {
+    "patch-package": {
+      "find-yarn-workspace-root": "$find-yarn-workspace-root"
+    },
     "@ai-sdk/code-mode": {
       "run": "2.1.4"
     },
