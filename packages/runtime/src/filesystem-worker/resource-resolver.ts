@@ -21,7 +21,9 @@ import { realpath, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const FILESYSTEM_WORKER_BUNDLE_NAME = 'filesystem-worker.js';
+// Explicit ESM keeps Node startup independent of package.json outside the
+// bundle's sandbox grant, including when a parent package config is unreadable.
+export const FILESYSTEM_WORKER_BUNDLE_NAME = 'filesystem-worker.mjs';
 
 export type FilesystemWorkerResourceLocation =
   | { kind: 'runtime'; moduleUrl?: string }

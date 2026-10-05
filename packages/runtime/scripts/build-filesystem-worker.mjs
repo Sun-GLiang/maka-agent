@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const outfile = resolve(packageRoot, 'dist', 'workers', 'filesystem-worker.js');
+const outfile = resolve(packageRoot, 'dist', 'workers', 'filesystem-worker.mjs');
 const agentsCoreUtils = fileURLToPath(import.meta.resolve('@openai/agents-core/utils'));
 
 await mkdir(dirname(outfile), { recursive: true });
