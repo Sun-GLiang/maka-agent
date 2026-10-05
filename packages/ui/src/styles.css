@@ -631,29 +631,17 @@
   align-items: center;
   gap: var(--space-3);
 }
-.maka-markdown-image-actions button {
-  align-self: start;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  padding: var(--space-1) var(--space-2);
-  background: var(--background);
-  color: var(--foreground);
-  font: inherit;
-  cursor: pointer;
-}
-
 .maka-markdown-image-resource { display: inline-block; position: relative; max-width: 100%; }
 .maka-markdown-image-preview {
   display: inline-block;
   max-width: 100%;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-control);
-  background: transparent;
-  cursor: zoom-in;
-  overflow: hidden;
 }
-.maka-markdown-image-preview:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+/* Keep the image's natural dimensions; Astryx owns interaction and focus styling. */
+.maka-markdown-image-preview .astryx-button {
+  max-width: 100%;
+  height: auto;
+  padding: 0;
+}
 .maka-markdown-image-preview img { margin: 0; max-height: 480px; object-fit: contain; }
 .maka-markdown-image-loading { display: block; color: var(--muted-foreground); font-size: var(--maka-font-size-sm); }
 .maka-markdown-image-saving { display: block; color: var(--muted-foreground); font-size: var(--maka-font-size-sm); margin-block-start: var(--space-1); }

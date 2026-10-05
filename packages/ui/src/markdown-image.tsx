@@ -18,7 +18,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { useLightbox } from '@astryxdesign/core';
+import { Button, useLightbox } from '@astryxdesign/core';
 import { Link } from '@astryxdesign/core/Link';
 import { parseAttachmentResourceRef } from '@maka/core/attachments';
 import { useAttachmentImage } from './attachment-image.js';
@@ -55,7 +55,7 @@ function ImageResource(props: { src: string; alt: string }) {
     if (artifactId) image.retry(); else delivery.retry();
   };
   const sourceActions = <span className="maka-markdown-image-actions">
-    <button type="button" onClick={retry}>{copy.imageRetry}</button>
+    <Button variant="ghost" size="sm" label={copy.imageRetry} onClick={retry} />
     {remote && <Link href={props.src} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>}
   </span>;
   let message: string | undefined;
@@ -82,10 +82,12 @@ function DisplayImage(props: { src: string; alt: string; onError(): void }) {
   const lightbox = useLightbox({ media: { src: props.src, alt: props.alt }, hasZoom: true });
   return <>
     {!loaded && <span className="maka-markdown-image-loading" role="status">{copy.imageLoading}</span>}
-    <button type="button" className="maka-markdown-image-preview" aria-label={copy.imageExpand(props.alt)} onClick={() => lightbox.open()}>
-      <img src={props.src} alt={props.alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
-        className="maka-markdown-attachment-image" onLoad={() => setLoaded(true)} onError={props.onError} />
-    </button>
+    <span className="maka-markdown-image-preview">
+      <Button variant="ghost" label={copy.imageExpand(props.alt)} onClick={() => lightbox.open()}>
+        <img src={props.src} alt={props.alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
+          className="maka-markdown-attachment-image" onLoad={() => setLoaded(true)} onError={props.onError} />
+      </Button>
+    </span>
     {lightbox.isOpen && lightbox.element}
   </>;
 }
