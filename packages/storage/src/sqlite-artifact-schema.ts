@@ -23,7 +23,7 @@ import {
   isSafeRelativeArtifactPath,
 } from './artifact-metadata-codec.js';
 
-export const SQLITE_ARTIFACT_SCHEMA_VERSION = 3;
+export const SQLITE_ARTIFACT_SCHEMA_VERSION = 4;
 
 export function migrateSqliteArtifactDatabase(db: DatabaseSync): void {
   const columns = db.prepare('PRAGMA table_info(artifact_records)').all() as Array<{
@@ -78,6 +78,11 @@ export function migrateSqliteArtifactDatabase(db: DatabaseSync): void {
 
     CREATE UNIQUE INDEX IF NOT EXISTS artifact_records_relative_path
       ON artifact_records(relative_path);
+
+    CREATE INDEX IF NOT EXISTS artifact_image_delivery_lookup
+      ON artifact_records(session_id, json_extract(record_json, '$.turnId'),
+        json_extract(record_json, '$.imageDelivery.messageId'), json_extract(record_json, '$.imageDelivery.source'))
+      WHERE json_valid(record_json) AND json_type(record_json, '$.imageDelivery') = 'object';
 
     CREATE TABLE IF NOT EXISTS artifact_upgrade_orphan_paths (
       relative_path TEXT PRIMARY KEY

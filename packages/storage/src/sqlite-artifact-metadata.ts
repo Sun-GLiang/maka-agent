@@ -42,6 +42,28 @@ class SqliteArtifactMetadataRepository {
     this.#lease = acquireOperationalStateDatabase(resolve(workspaceRoot));
   }
 
+  findImageDelivery(
+    sessionId: string,
+    turnId: string,
+    messageId: string,
+    source: string,
+  ): ArtifactRecord | undefined {
+    this.assertOpen();
+    const rows = this.#lease.database
+      .prepare(`
+      SELECT record_json FROM artifact_records
+      WHERE session_id = ? AND json_valid(record_json)
+        AND json_type(record_json, '$.imageDelivery') = 'object'
+        AND json_extract(record_json, '$.turnId') = ?
+        AND json_extract(record_json, '$.imageDelivery.messageId') = ?
+        AND json_extract(record_json, '$.imageDelivery.source') = ?
+      ORDER BY CASE json_extract(record_json, '$.imageDelivery.status') WHEN 'pending' THEN 1 ELSE 0 END,
+        created_at DESC, artifact_id DESC LIMIT 1
+    `)
+      .all(sessionId, turnId, messageId, source) as Array<{ record_json: string }>;
+    return decodeRows(rows)[0];
+  }
+
   readAll(): ArtifactRecord[] {
     this.assertOpen();
     const rows = this.#lease.database

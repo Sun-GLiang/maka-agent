@@ -30,6 +30,15 @@ export interface SharedUiCopy {
   markdown: {
     invalidInternalLink: string;
     unsafeLink: string;
+    imageLoading: string;
+    imageSaving: string;
+    imageExpand: (alt: string) => string;
+    imageArchiveFailure: (reason: import('@maka/core/image-delivery').ImageDeliveryFailure) => string;
+    imageUnavailable: string;
+    imageLoadFailed: string;
+    imageUnsupported: string;
+    imageRetry: string;
+    imageOpen: string;
     taskList: string;
     table: string;
     checkbox: string;
@@ -125,6 +134,15 @@ const SHARED_UI_COPY = {
     markdown: {
       invalidInternalLink: '内部链接无效',
       unsafeLink: '链接不安全',
+      imageLoading: '正在加载图片…',
+      imageSaving: '正在保存图片…',
+      imageExpand: (alt) => alt ? `放大图片：${alt}` : '放大图片',
+      imageArchiveFailure: (reason) => reason === 'quota_exceeded' ? '图片未保存：存储配额已满。' : reason === 'too_large' ? '图片未保存：超过 2 MiB 自动保存上限。' : reason === 'not_allowed' ? '图片未保存：当前权限不允许读取。' : '图片未保存，原文件或链接失效后可能无法查看。',
+      imageUnavailable: '当前无法读取图片附件。',
+      imageLoadFailed: '图片加载失败，请重试。',
+      imageUnsupported: '此图片地址无法直接显示，请将图片作为会话附件发送。',
+      imageRetry: '重试',
+      imageOpen: '在浏览器中打开',
       taskList: '任务列表',
       table: '表格',
       checkbox: '复选框',
@@ -205,6 +223,15 @@ const SHARED_UI_COPY = {
     markdown: {
       invalidInternalLink: '內部連結無效',
       unsafeLink: '連結不安全',
+      imageLoading: '正在載入圖片…',
+      imageSaving: '正在儲存圖片…',
+      imageExpand: (alt) => alt ? `放大圖片：${alt}` : '放大圖片',
+      imageArchiveFailure: (reason) => reason === 'quota_exceeded' ? '圖片未儲存：儲存配額已滿。' : reason === 'too_large' ? '圖片未儲存：超過 2 MiB 自動儲存上限。' : reason === 'not_allowed' ? '圖片未儲存：目前權限不允許讀取。' : '圖片未儲存，原檔案或連結失效後可能無法查看。',
+      imageUnavailable: '目前無法讀取圖片附件。',
+      imageLoadFailed: '圖片載入失敗，請重試。',
+      imageUnsupported: '此圖片位址無法直接顯示，請將圖片作為對話附件傳送。',
+      imageRetry: '重試',
+      imageOpen: '在瀏覽器中開啟',
       taskList: '任務列表',
       table: '表格',
       checkbox: '核取方塊',
@@ -285,6 +312,15 @@ const SHARED_UI_COPY = {
     markdown: {
       invalidInternalLink: 'Invalid internal link',
       unsafeLink: 'Unsafe link',
+      imageLoading: 'Loading image…',
+      imageSaving: 'Saving image…',
+      imageExpand: (alt) => alt ? `Enlarge image: ${alt}` : 'Enlarge image',
+      imageArchiveFailure: (reason) => reason === 'quota_exceeded' ? 'Image not saved: storage quota reached.' : reason === 'too_large' ? 'Image not saved: exceeds the 2 MiB automatic save limit.' : reason === 'not_allowed' ? 'Image not saved: current permissions do not allow reading it.' : 'Image not saved. It may become unavailable if the original file or link expires.',
+      imageUnavailable: 'This image attachment is unavailable here.',
+      imageLoadFailed: 'Could not load the image. Try again.',
+      imageUnsupported: 'This image address cannot be displayed. Send the image as a chat attachment.',
+      imageRetry: 'Retry',
+      imageOpen: 'Open in browser',
       taskList: 'Task list',
       table: 'Table',
       checkbox: 'Checkbox',

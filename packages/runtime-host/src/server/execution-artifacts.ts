@@ -17,10 +17,16 @@
  * under the License.
  */
 
+import { DEFAULT_IMAGE_ARCHIVE_LIMITS } from '@maka/core/image-delivery';
 import { createHash } from 'node:crypto';
 import { open, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { MAX_ATTACHMENT_BYTES } from '@maka/core/attachments';
+import {
+  ARTIFACT_IMAGE_PREVIEW_MAX_BYTES,
+  normalizeArtifactImagePreviewMime,
+} from '@maka/core/artifacts';
+import type { BuildBuiltinToolsOptions } from '@maka/runtime/builtin-tools';
 import {
   createToolResultArchiveCapability,
   type ToolResultArchiveCapability,
@@ -35,13 +41,17 @@ import type { ToolResultArchiveEvidenceReader } from '@maka/core/tool-result-arc
 import { type ToolArtifactRecorderInput } from '@maka/runtime/tool-artifacts';
 import type { ToolResultArchiveReaderInput } from '@maka/runtime/context-budget';
 import { type ToolResultArchiveResourceReadInput } from '@maka/runtime/tool-result-archive-resource';
-import type { InteractiveArtifactStoreWriter } from '@maka/storage/artifact-stores';
+import {
+  ImageArchiveQuotaError,
+  type InteractiveArtifactStoreWriter,
+} from '@maka/storage/artifact-stores';
 import type { SessionManagerDeps } from '@maka/runtime/session-manager';
 import type { SessionAdmissionGate } from './session-admission-gate.js';
 import type { SessionPresenceReader } from './session-presence.js';
 
 export interface HostExecutionArtifactServices {
   recordToolArtifacts(event: ToolArtifactRecorderInput): Promise<void>;
+  publishImage: NonNullable<BuildBuiltinToolsOptions['publishImage']>;
   publishChildWorkspacePatch: NonNullable<SessionManagerDeps['publishChildWorkspacePatch']>;
   /**
    * New archives use the Session ledger. Legacy Artifact refs are retained as
@@ -56,12 +66,13 @@ export function createHostExecutionArtifactServices(input: {
   sessionAdmission: SessionAdmissionGate;
   sessions: SessionPresenceReader;
   archiveEvidence?: ToolResultArchiveEvidenceReader;
+  imageArchiveLimits?: import('@maka/core/image-delivery').ImageArchiveLimits;
 }): HostExecutionArtifactServices {
   const runWrite = async <T>(operation: () => Promise<T>): Promise<T> => {
     try {
       return await operation();
     } catch (error) {
-      input.requestDrain();
+      if (!(error instanceof ImageArchiveQuotaError)) input.requestDrain();
       throw error;
     }
   };
@@ -118,6 +129,37 @@ export function createHostExecutionArtifactServices(input: {
   };
   const services: HostExecutionArtifactServices = {
     recordToolArtifacts,
+    publishImage: async (image) => {
+      const mimeType = normalizeArtifactImagePreviewMime(image.mimeType);
+      if (!mimeType || image.bytes.byteLength > ARTIFACT_IMAGE_PREVIEW_MAX_BYTES)
+        throw new Error(
+          'Image cannot be displayed in chat; use a PNG/JPEG/GIF/WebP of at most 2 MiB.',
+        );
+      const id = `published_image_${createHash('sha256')
+        .update(JSON.stringify([image.sessionId, image.turnId, image.toolCallId]))
+        .digest('hex')}`;
+      const artifact = await publish({
+        id,
+        sessionId: image.sessionId,
+        turnId: image.turnId,
+        name: image.name,
+        kind: 'image',
+        content: image.bytes,
+        mimeType,
+        source: 'tool_result_projection',
+        summary: 'Published chat image',
+        imageDelivery: {
+          messageId: image.toolCallId,
+          source: `published:${image.toolCallId}`,
+          status: 'ready',
+          contentSha256: createHash('sha256').update(image.bytes).digest('hex'),
+        },
+        imageArchiveLimits: input.imageArchiveLimits ?? DEFAULT_IMAGE_ARCHIVE_LIMITS,
+      });
+      if (!artifact)
+        throw new Error('The session was removed before the image could be published.');
+      return { kind: 'session_file', sessionId: image.sessionId, relativePath: artifact.id };
+    },
     publishChildWorkspacePatch: async ({ sessionId, turnId, binding, patch }) => {
       const artifact = await publish({
         id: subagentWritebackArtifactId(sessionId, turnId),

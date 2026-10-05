@@ -29,6 +29,8 @@
  * product-specific trust boundaries around that renderer.
  */
 
+import { MarkdownImage } from './markdown-image.js';
+import { ImageMessageScope } from './image-delivery.js';
 import { useCallback, useContext, useRef, type ReactNode } from 'react';
 import {
   Markdown as AstryxMarkdown,
@@ -51,8 +53,6 @@ import {
   MarkdownMath,
   prepareMarkdownMath,
 } from './markdown-math.js';
-import { parseAttachmentResourceRef } from '@maka/core/attachments';
-import { useAttachmentImageSource } from './attachment-image.js';
 
 const BASE_MARKDOWN_COMPONENTS = {
   link: MarkdownLink,
@@ -144,6 +144,7 @@ const MARKDOWN_COMPONENTS = {
 
 export function MarkdownBody(props: {
   text: string;
+  imageIdentity?: { turnId: string; messageId: string };
   streaming?: boolean;
   settledText?: string;
   density?: 'default' | 'compact';
@@ -162,46 +163,48 @@ export function MarkdownBody(props: {
     : MARKDOWN_COMPONENTS[density];
 
   return (
-    <div
-      data-maka-contract="markdown"
-      data-maka-script={hasHanProse(props.text) ? 'han' : undefined}
-      // Migration-only identity wrapper. `display: contents` gives the
-      // contract harness a stable declared subtree without adding a layout
-      // box or interfering with Astryx's document root.
-      style={{ display: 'contents' }}
-    >
-      <AstryxMarkdown
-        autolink="gfm"
-        // Markdown holds no reading measure; the container it lands in does.
-        //
-        // Astryx caps prose at 680px by default but renders a supplied
-        // `components.code` bare — no spacing, no width, no alignment. Maka
-        // always supplies one, so any container that leans on the default gets
-        // prose at 680 and code blocks at whatever the container is: two right
-        // edges, which is the defect this whole change exists to remove. One
-        // authority per column, and it is the container.
-        contentWidth="100%"
-        // Chosen by the caller, and defaulting to document rhythm.
-        //
-        // The transcript passes `compact`: Astryx's default heading spacing
-        // assumes a page with a handful of sections, while an agent turn
-        // emits headings every few lines, so the default margins push each
-        // one into its own visual slab. That is the same argument that
-        // flattens transcript heading SIZES in styles/chat-message.css — and
-        // that rule is scoped to `.maka-turn` precisely because the other
-        // caller, the Daily Review panel, renders a report, which is a
-        // document. Hardcoding `compact` here contradicted that scoping: the
-        // review kept full heading sizes but got transcript block spacing,
-        // the one combination neither half of the argument asks for.
-        density={density}
-        components={components}
-        isStreaming={props.streaming}
-        settledText={props.settledText}
-        transformSource={transformMathSource}
+    <ImageMessageScope.Provider value={props.imageIdentity}>
+      <div
+        data-maka-contract="markdown"
+        data-maka-script={hasHanProse(props.text) ? 'han' : undefined}
+        // Migration-only identity wrapper. `display: contents` gives the
+        // contract harness a stable declared subtree without adding a layout
+        // box or interfering with Astryx's document root.
+        style={{ display: 'contents' }}
       >
-        {budgetedText}
-      </AstryxMarkdown>
-    </div>
+        <AstryxMarkdown
+          autolink="gfm"
+          // Markdown holds no reading measure; the container it lands in does.
+          //
+          // Astryx caps prose at 680px by default but renders a supplied
+          // `components.code` bare — no spacing, no width, no alignment. Maka
+          // always supplies one, so any container that leans on the default gets
+          // prose at 680 and code blocks at whatever the container is: two right
+          // edges, which is the defect this whole change exists to remove. One
+          // authority per column, and it is the container.
+          contentWidth="100%"
+          // Chosen by the caller, and defaulting to document rhythm.
+          //
+          // The transcript passes `compact`: Astryx's default heading spacing
+          // assumes a page with a handful of sections, while an agent turn
+          // emits headings every few lines, so the default margins push each
+          // one into its own visual slab. That is the same argument that
+          // flattens transcript heading SIZES in styles/chat-message.css — and
+          // that rule is scoped to `.maka-turn` precisely because the other
+          // caller, the Daily Review panel, renders a report, which is a
+          // document. Hardcoding `compact` here contradicted that scoping: the
+          // review kept full heading sizes but got transcript block spacing,
+          // the one combination neither half of the argument asks for.
+          density={density}
+          components={components}
+          isStreaming={props.streaming}
+          settledText={props.settledText}
+          transformSource={transformMathSource}
+        >
+          {budgetedText}
+        </AstryxMarkdown>
+      </div>
+    </ImageMessageScope.Provider>
   );
 }
 
@@ -269,37 +272,6 @@ function MarkdownCode(props: {
       />
     </div>
   );
-}
-
-function MarkdownImage(props: { src: string; alt: string }) {
-  const attachment = parseAttachmentResourceRef(props.src);
-  const attachmentSrc = useAttachmentImageSource(
-    attachment ? { artifactId: attachment.artifactId } : undefined,
-  );
-  if (attachment) {
-    if (!attachmentSrc) return <span>[{props.alt}]</span>;
-    return (
-      <img
-        className="maka-markdown-attachment-image"
-        src={attachmentSrc}
-        alt={props.alt}
-      />
-    );
-  }
-  if (!isSafeMarkdownImageUrl(props.src)) return <span>[{props.alt}]</span>;
-  // Remote images can be badges or sentence-level icons, so preserve Maka's
-  // existing inline presentation. Session attachments above are content
-  // previews and deliberately own a block presentation instead.
-  return <img src={props.src} alt={props.alt} style={{ display: 'inline-block' }} />;
-}
-
-function isSafeMarkdownImageUrl(url: string): boolean {
-  try {
-    const protocol = new URL(url).protocol;
-    return protocol === 'http:' || protocol === 'https:';
-  } catch {
-    return false;
-  }
 }
 
 /**

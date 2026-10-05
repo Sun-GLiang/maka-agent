@@ -56,6 +56,7 @@ export interface WorkHubServices extends WorkHubWorkspaceServices {
     model: string;
   }): Promise<void>;
   readonly attachments: ComposerAttachmentService;
+  resolveImageDelivery?: (sessionId: string, request: import('@maka/core/image-delivery').ImageDeliveryRequest) => Promise<import('@maka/core/image-delivery').ImageDeliveryResult>;
   readAttachmentBytes(sessionId: string, artifactId: string): Promise<ArtifactBinaryReadResult>;
   prepareAttachments(sessionId: string, items: Array<{ approvalId: string; name: string; mimeType?: string } | { file: File }>): Promise<AttachmentRef[]>;
   listActiveInteractions(sessionId: string): Promise<import('@maka/core/events').ActiveInteractionRequestEvent[]>;
