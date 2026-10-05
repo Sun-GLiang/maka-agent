@@ -20,7 +20,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { ImageDeliveryRequest, ImageDeliveryResult } from '@maka/core/image-delivery';
 export type ResolveImageDelivery = (sessionId: string, request: ImageDeliveryRequest) => Promise<ImageDeliveryResult>;
-export const ImageMessageScope = createContext<{ turnId: string; messageId: string } | undefined>(undefined);
+export const ImageMessageScope = createContext<{ turnId: string; messageId: string; streaming?: boolean } | undefined>(undefined);
 const DeliveryContext = createContext<{ resolve(request: ImageDeliveryRequest): Promise<ImageDeliveryResult> } | undefined>(undefined);
 export function ImageDeliveryProvider(props: { sessionId: string; resolve?: ResolveImageDelivery; children: ReactNode }) {
   const value = useMemo(() => {
@@ -50,18 +50,20 @@ export function useImageDelivery(source: string, enabled: boolean) {
   const context = useContext(DeliveryContext);
   const [attempt, setAttempt] = useState(0);
   const identity = useMemo(() => context && scope?.turnId && scope.messageId && enabled
-    ? { context, turnId: scope.turnId, messageId: scope.messageId, source, attempt } : undefined,
-    [context, scope?.turnId, scope?.messageId, source, attempt, enabled]);
+    ? { context, turnId: scope.turnId, messageId: scope.messageId, streaming: scope.streaming === true, source, attempt } : undefined,
+    [context, scope?.turnId, scope?.messageId, scope?.streaming, source, attempt, enabled]);
   const [settled, setSettled] = useState<{ identity: typeof identity; result: ImageDeliveryResult }>();
   const retry = useCallback(() => setAttempt(a => a + 1), []);
   useEffect(() => {
     if (!identity) return;
-    let cancelled = false; let timer: ReturnType<typeof setTimeout> | undefined; let delay = 500;
+    let cancelled = false; let timer: ReturnType<typeof setTimeout> | undefined; let delay = 500; let unavailableRetries = 0;
     const query = async (retry: boolean) => {
       const result = await identity.context.resolve({ turnId: identity.turnId, messageId: identity.messageId, source: identity.source, ...(retry ? { retry: true } : {}) });
       if (cancelled) return;
       setSettled({ identity, result });
-      if (result.status === 'pending') {
+      // Canonical text can lag the displayed stream. Retry briefly after settlement,
+      // but do not poll permanently unsupported sources forever.
+      if (result.status === 'pending' || result.status === 'unavailable' && (identity.streaming || unavailableRetries++ < 3)) {
         timer = setTimeout(() => { void query(false); }, delay); delay = Math.min(5000, delay * 2);
       }
     };

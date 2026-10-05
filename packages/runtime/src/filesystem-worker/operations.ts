@@ -124,7 +124,9 @@ export async function executeFilesystemOperation(
         'read',
         operationBoundary,
       );
-      const file = await readWorkspaceFile(path).catch((error: unknown) => {
+      const file = await readWorkspaceFile(path, {
+        ...(operation.imagePurpose ? { imagePurpose: operation.imagePurpose } : {}),
+      }).catch((error: unknown) => {
         throw operationError(
           'filesystem_error',
           error instanceof Error ? error.message : 'File could not be read.',

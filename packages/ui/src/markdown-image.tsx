@@ -18,7 +18,8 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Button, useLightbox } from '@astryxdesign/core';
+import { Button, IconButton, useLightbox } from '@astryxdesign/core';
+import { Maximize2 } from './icons.js';
 import { Link } from '@astryxdesign/core/Link';
 import { parseAttachmentResourceRef } from '@maka/core/attachments';
 import { useAttachmentImage } from './attachment-image.js';
@@ -83,10 +84,11 @@ function DisplayImage(props: { src: string; alt: string; onError(): void }) {
   return <>
     {!loaded && <span className="maka-markdown-image-loading" role="status">{copy.imageLoading}</span>}
     <span className="maka-markdown-image-preview">
-      <Button variant="ghost" label={copy.imageExpand(props.alt)} onClick={() => lightbox.open()}>
-        <img src={props.src} alt={props.alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
+      <img src={props.src} alt={props.alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
           className="maka-markdown-attachment-image" onLoad={() => setLoaded(true)} onError={props.onError} />
-      </Button>
+      <span className="maka-markdown-image-expand">
+        <IconButton icon={<Maximize2 size={16} />} size="sm" label={copy.imageExpand(props.alt)} onClick={() => lightbox.open()} />
+      </span>
     </span>
     {lightbox.isOpen && lightbox.element}
   </>;

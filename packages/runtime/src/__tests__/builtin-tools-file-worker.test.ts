@@ -74,7 +74,7 @@ describe('builtin file tools use the sandboxed worker', () => {
             emitOutput() {},
           },
         ),
-      /requires a PNG/,
+      /not a supported.*PNG/,
     );
     assert.equal(published, 0);
   });
@@ -664,7 +664,11 @@ test('chat image reader uses the managed Read boundary and never falls back to h
       execute: async (input) => {
         calls++;
         assert.deepEqual(input.executionBoundary, executionBoundary);
-        assert.deepEqual(input.operation, { kind: 'read', path: 'private.png' });
+        assert.deepEqual(input.operation, {
+          kind: 'read',
+          path: 'private.png',
+          imagePurpose: 'chat',
+        });
         throw new Error('sandbox permission refused');
       },
     },

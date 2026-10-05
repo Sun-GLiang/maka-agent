@@ -33,6 +33,7 @@ import {
 } from '@maka/storage/artifact-stores';
 import type { SessionAdmissionGate } from './session-admission-gate.js';
 import { chatImageSources } from './chat-image-markdown.js';
+import { abortable } from '../client/wait-for-ready.js';
 import {
   checkedChatImage,
   downloadChatImage,
@@ -239,7 +240,9 @@ export class ChatImageDeliveryService {
     try {
       const path = localImagePath(source);
       if (path !== undefined)
-        image = checkedChatImage((await this.ports.readLocalImage(sessionId, path, signal)).bytes);
+        image = checkedChatImage(
+          (await abortable(() => this.ports.readLocalImage(sessionId, path, signal), signal)).bytes,
+        );
       else {
         try {
           image = await (this.ports.download ?? downloadChatImage)(source, signal);
@@ -326,6 +329,11 @@ function deliveryKey(i: DeliveryIdentity): string {
 function failureReason(error: unknown, source: string): ImageDeliveryFailure {
   if (error instanceof ImageSourceError) return error.reason;
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (
+    code === 'ERR_IMAGE_TOO_LARGE' ||
+    (error instanceof Error && /exceeds.*(?:MiB|MB)/i.test(error.message))
+  )
+    return 'too_large';
   if (error instanceof Error && /supported raster|requires a PNG|not.*image/i.test(error.message))
     return 'unsupported_mime';
   if (code === 'ENOENT' || code === 'ENOTDIR') return 'not_found';
