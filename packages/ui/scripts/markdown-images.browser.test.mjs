@@ -120,7 +120,9 @@ test('remote image loads automatically under the actual desktop CSP, without sen
     assert.equal(await page.getByRole('button', { name: 'Load image', exact: true }).count(), 0);
     await loaded(page);
     assert.deepEqual(requests, [{ path: '/image.png', referer: undefined }]);
-    assert.equal(await page.getByRole('status').count(), 0);
+    // Astryx Button keeps an empty live region for asynchronous actions.
+    await page.getByText('Loading image…', { exact: true }).waitFor({ state: 'hidden' });
+    assert.equal(await page.getByRole('status').filter({ hasText: /\S/ }).count(), 0);
   } finally { await page.close(); }
 });
 
@@ -185,7 +187,9 @@ test('a new remote image previews during archival and switches to saved bytes af
     await page.getByText('Saving image…').waitFor();
     assert.equal(requests.length, 1);
     await page.waitForFunction(() => [...document.images].some(img=>img.src.startsWith('data:image/png;') && img.naturalWidth===1));
-    assert.equal(await page.getByRole('status').count(), 0);
+    await page.getByText('Loading image…', { exact: true }).waitFor({ state: 'hidden' });
+    await page.getByText('Saving image…', { exact: true }).waitFor({ state: 'hidden' });
+    assert.equal(await page.getByRole('status').filter({ hasText: /\S/ }).count(), 0);
     assert.equal(await page.evaluate(() => window.deliveryQueries), 2);
     assert.equal(requests.length, 1);
   } finally { await page.close(); }
