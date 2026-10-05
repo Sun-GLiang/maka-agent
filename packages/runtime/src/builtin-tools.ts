@@ -326,7 +326,7 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
             executionFacts,
             impl: async ({ path }: { path: string }, ctx: MakaToolContext) => {
               const result = await filesystem.execute({
-                operation: { kind: 'read', path },
+                operation: { kind: 'read', path, imagePurpose: 'chat' },
                 ...filesystemCall(ctx),
               });
               if (

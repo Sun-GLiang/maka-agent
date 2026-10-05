@@ -25,7 +25,10 @@ import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { openInteractiveArtifactStoreForWrite } from '@maka/storage/artifact-stores';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
-import { ChatImageDeliveryService } from '../server/chat-image-delivery.js';
+import {
+  ChatImageDeliveryService,
+  type ChatImageDeliveryPorts,
+} from '../server/chat-image-delivery.js';
 import { chatImageSources } from '../server/chat-image-markdown.js';
 import { checkedChatImage, downloadChatImage } from '../server/chat-image-source.js';
 import { IMAGE_DELIVERY_OPERATION_SPECS } from '../protocol/image-delivery.js';
@@ -40,7 +43,10 @@ const REQUEST = {
   messageId: 'message-1',
   source: '/tmp/image.png',
 };
-async function fixture(limits?: { sessionBytes: number; workspaceBytes: number }) {
+async function fixture(
+  limits?: { sessionBytes: number; workspaceBytes: number },
+  readLocalImage?: ChatImageDeliveryPorts['readLocalImage'],
+) {
   const root = await mkdtemp(join(tmpdir(), 'maka-image-delivery-'));
   const owner = await tryAcquireInteractiveRootOwner(
     await resolveStorageRoot({ path: root, kind: 'interactive' }),
@@ -59,8 +65,9 @@ async function fixture(limits?: { sessionBytes: number; workspaceBytes: number }
     limits,
     isPresent: async () => present,
     readMessage: async (i) => messages.get(i.messageId),
-    readLocalImage: async (_sessionId, path) => {
+    readLocalImage: async (sessionId, path, signal) => {
       reads++;
+      if (readLocalImage) return readLocalImage(sessionId, path, signal);
       return checkedChatImage(await readFile(path));
     },
     acquireResidency: () => {
@@ -98,6 +105,43 @@ async function fixture(limits?: { sessionBytes: number; workspaceBytes: number }
     },
   };
 }
+
+test('Host drain releases both capture slots even when a source reader ignores cancellation', {
+  timeout: 2000,
+}, async () => {
+  const f = await fixture(undefined, () => new Promise(() => {}));
+  try {
+    observe(f.service, '/tmp/blocked-1.png');
+    observe(f.service, '/tmp/blocked-2.png', 'session-1', 'message-2');
+    while (f.reads < 2) await new Promise((resolve) => setImmediate(resolve));
+    await f.service.close();
+    assert.equal(f.leases, 0);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    await f.close();
+  }
+});
+test('a stalled local source expires within its read budget and can be retried', {
+  timeout: 15000,
+}, async () => {
+  let reads = 0;
+  const f = await fixture(undefined, async () => {
+    if (++reads === 1) return new Promise(() => {});
+    return checkedChatImage(PNG);
+  });
+  try {
+    observe(f.service, REQUEST.source);
+    await f.service.waitForIdle();
+    assert.deepEqual(await f.service.resolve(REQUEST), { status: 'failed', reason: 'read_failed' });
+    assert.equal(f.leases, 0);
+    assert.equal((await f.service.resolve({ ...REQUEST, retry: true })).status, 'pending');
+    await f.service.waitForIdle();
+    assert.equal((await f.service.resolve(REQUEST)).status, 'ready');
+    assert.deepEqual(f.errors, []);
+  } finally {
+    await f.close();
+  }
+});
 function observe(
   service: ChatImageDeliveryService,
   source: string,

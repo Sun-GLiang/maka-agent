@@ -37,7 +37,10 @@ export function createImageFileReader(
   });
   return async (input: Omit<FilesystemExecuteInput, 'operation'> & { path: string }) => {
     const { path, ...context } = input;
-    const result = await filesystem.execute({ ...context, operation: { kind: 'read', path } });
+    const result = await filesystem.execute({
+      ...context,
+      operation: { kind: 'read', path, imagePurpose: 'chat' },
+    });
     if (result.kind !== 'read_image') throw new Error('Not a supported raster image');
     return { bytes: result.bytes, mimeType: result.mimeType };
   };

@@ -58,23 +58,31 @@ before(async () => {
       import {SessionAttachmentProvider} from './packages/ui/dist/attachment-image.js';
       import './apps/desktop/src/renderer/styles.css';
       const mode=new URLSearchParams(location.search).get('case') || 'remote';
-      let reads=0; window.imageReads=0; window.deliveryQueries=0;
+      let reads=0; window.imageReads=0; window.deliveryQueries=0; window.deliveryReady=false;
+      const race=mode.endsWith('-race');
       const text=mode==='attachment' ? '![Screenshot](maka://runtime/attachments/image-1)' :
-        mode==='local' || mode==='local-saved' ? '![Screenshot](/tmp/private.png)' :
+        mode==='local' || mode==='local-saved' || race ? '![Screenshot](/tmp/private.png)' :
         '![Screenshot](${imageUrl}/'+(mode==='retry' ? 'retry.png' : 'image.png')+')';
-      createRoot(document.getElementById('root')).render(
+      const root=createRoot(document.getElementById('root'));
+      const readBytes=async()=>{
+        reads++; window.imageReads=reads; return mode==='attachment' && reads===1 ? {ok:false,reason:'read_failed'} :
+          {ok:true,base64:'${png.toString('base64')}',mimeType:'image/png'};
+      };
+      const resolveDelivery=mode.endsWith('saved') || mode==='saving' || race ? async()=>{
+        window.deliveryQueries++;
+        if(race) return window.deliveryReady ? {status:'ready',artifactId:'saved-image'} : {status:'unavailable'};
+        await new Promise(resolve=>setTimeout(resolve,100));
+        return mode==='saving' && window.deliveryQueries===1 ? {status:'pending'} : {status:'ready',artifactId:'saved-image'};
+      } : undefined;
+      const render=(streaming=race)=>root.render(
         React.createElement(Theme,{theme:makaTheme,mode:'light'},
           React.createElement(LocaleProvider,{locale:'en'},
-            React.createElement(SessionAttachmentProvider,{sessionId:'session',readBytes:async()=>{
-              reads++; window.imageReads=reads; return mode==='attachment' && reads===1 ? {ok:false,reason:'read_failed'} :
-                {ok:true,base64:'${png.toString('base64')}',mimeType:'image/png'};
-            }},React.createElement(ImageDeliveryProvider,{sessionId:'session',resolve:mode.endsWith('saved') || mode==='saving' ? async()=>{
-              window.deliveryQueries++;
-              await new Promise(resolve=>setTimeout(resolve,100));
-              return mode==='saving' && window.deliveryQueries===1 ? {status:'pending'} : {status:'ready',artifactId:'saved-image'};
-            } : undefined},
+            React.createElement(SessionAttachmentProvider,{sessionId:'session',readBytes},
+              React.createElement(ImageDeliveryProvider,{sessionId:'session',resolve:resolveDelivery},
               React.createElement('div',{style:mode==='offscreen' ? {paddingTop:'2500px'} : {}},
-                React.createElement(MarkdownBody,{text,imageIdentity:{turnId:'turn',messageId:'message'}})))))));
+                React.createElement(MarkdownBody,{text,streaming,settledText:race ? text : undefined,imageIdentity:{turnId:'turn',messageId:'message'}})))))));
+      window.finishStream=()=>render(false);
+      render();
     `, resolveDir: root, loader: 'js' },
     bundle: true, write: false, outdir: '/virtual', format: 'iife',
     loader: { '.woff2': 'dataurl', '.woff': 'dataurl', '.ttf': 'dataurl', '.svg': 'dataurl' },
@@ -194,3 +202,21 @@ test('a new remote image previews during archival and switches to saved bytes af
     assert.equal(requests.length, 1);
   } finally { await page.close(); }
 });
+
+for (const scenario of ['streaming-race', 'settled-race']) {
+  test(`${scenario}: an unavailable live source recovers in place once Host archival completes`, async () => {
+    const page = await pageFor(scenario);
+    try {
+      await page.waitForFunction(() => window.deliveryQueries === 1);
+      if (scenario === 'settled-race') {
+        await page.evaluate(() => window.finishStream());
+        await page.waitForFunction(() => window.deliveryQueries >= 2);
+      }
+      await page.evaluate(() => { window.deliveryReady = true; });
+      await loaded(page);
+      assert.equal(await page.evaluate(() => window.imageReads), 1);
+      assert.match(await page.locator('img').getAttribute('src'), /^data:image\/png;base64,/);
+      assert.equal(await page.locator('img').count(), 1);
+    } finally { await page.close(); }
+  });
+}
