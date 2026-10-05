@@ -163,7 +163,7 @@ export function MarkdownBody(props: {
     : MARKDOWN_COMPONENTS[density];
 
   return (
-    <ImageMessageScope.Provider value={props.imageIdentity}>
+    <ImageMessageScope.Provider value={props.imageIdentity ? { ...props.imageIdentity, streaming: props.streaming } : undefined}>
       <div
         data-maka-contract="markdown"
         data-maka-script={hasHanProse(props.text) ? 'han' : undefined}
