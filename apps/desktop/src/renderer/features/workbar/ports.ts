@@ -158,6 +158,7 @@ export interface WorkbarArtifactsService {
 }
 
 export interface WorkbarAttachmentsService {
+  resolveImage?: (sessionId: string, request: import('@maka/core/image-delivery').ImageDeliveryRequest) => Promise<import('@maka/core/image-delivery').ImageDeliveryResult>;
   readBytes(sessionId: string, artifactId: string): Promise<ArtifactBinaryReadResult>;
   pickFiles(): Promise<
     | {

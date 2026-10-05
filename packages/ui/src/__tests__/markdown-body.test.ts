@@ -436,7 +436,7 @@ it('keeps non-allowlisted external schemes inert', () => {
 });
 
 it('never loads non-allowlisted Markdown image sources', () => {
-  const markup = renderToStaticMarkup(createElement(MarkdownBody, {
+  const markup = renderImageMarkdown({
     text: [
       '![standalone](file:///Users/example/.ssh/id_rsa)',
       '',
@@ -448,7 +448,7 @@ it('never loads non-allowlisted Markdown image sources', () => {
       '',
       '[avatar]: file:///Users/example/private.png',
     ].join('\n'),
-  }));
+  });
 
   assert.doesNotMatch(markup, /<img\b/);
   assert.doesNotMatch(markup, /\bsrc="(?:file|custom):/);
@@ -464,9 +464,9 @@ it('does not treat navigation and communication schemes as image resources', () 
     'maka://runtime/attachments/not-an-artifact',
     'mailto:user@example.com',
   ]) {
-    const markup = renderToStaticMarkup(createElement(MarkdownBody, {
+    const markup = renderImageMarkdown({
       text: `![not-an-image](${src})`,
-    }));
+    });
 
     assert.doesNotMatch(markup, /<img\b/, src);
     assert.doesNotMatch(markup, /\bsrc=/, src);
@@ -474,13 +474,30 @@ it('does not treat navigation and communication schemes as image resources', () 
 });
 
 it('shows an attachment placeholder when no session reader is installed', () => {
-  const markup = renderToStaticMarkup(createElement(MarkdownBody, {
+  const markup = renderImageMarkdown({
     text: '![preview](maka://runtime/attachments/attachment-123)',
-  }));
+  });
 
-  assert.match(markup, />\[preview\]</);
+  assert.match(markup, />preview</);
+  assert.match(markup, /This image attachment is unavailable here/);
   assert.doesNotMatch(markup, /maka:\/\/runtime\/attachments/);
   assert.doesNotMatch(markup, /<img\b/);
+});
+
+function renderImageMarkdown(props: { text: string }) {
+  return renderToStaticMarkup(createElement(LocaleProvider, {
+    locale: 'en',
+    children: createElement(MarkdownBody, props),
+  }));
+}
+
+it('renders remote images automatically with lazy decoding and no referrer', () => {
+  const markup = renderImageMarkdown({ text: '![preview](https://example.com/image.png)' });
+  assert.match(markup, /<img\b/);
+  assert.match(markup, /src="https:\/\/example\.com\/image\.png"/);
+  assert.match(markup, /loading="lazy"/);
+  assert.match(markup, /referrerPolicy="no-referrer"|referrerpolicy="no-referrer"/);
+  assert.doesNotMatch(markup, /Load image|rel="preload"/);
 });
 
 it('defers Mermaid fences beyond the per-Markdown automatic diagram budget', () => {

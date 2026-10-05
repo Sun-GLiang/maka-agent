@@ -87,6 +87,7 @@ export function registerRuntimeHostArtifactsIpc(
       return result;
     },
   );
+  deps.ipcMain.handle('attachments:resolveImage', (_event, sessionId: string, request: import('@maka/core/image-delivery').ImageDeliveryRequest) => deps.client.resolveImageDelivery(sessionId, request));
   registerRuntimeHostAttachmentPreviewIpc(deps);
   const materializePresentationArtifact = async (
     sessionId: string,

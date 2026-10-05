@@ -613,6 +613,51 @@
   margin-block: var(--space-3) var(--space-4);
 }
 
+.maka-markdown-image-placeholder {
+  display: inline-flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-surface);
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+.maka-markdown-image-caption { color: var(--foreground); }
+.maka-markdown-image-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+.maka-markdown-image-actions button {
+  align-self: start;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: var(--space-1) var(--space-2);
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  cursor: pointer;
+}
+
+.maka-markdown-image-resource { display: inline-block; position: relative; max-width: 100%; }
+.maka-markdown-image-preview {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  cursor: zoom-in;
+  overflow: hidden;
+}
+.maka-markdown-image-preview:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.maka-markdown-image-preview img { margin: 0; max-height: 480px; object-fit: contain; }
+.maka-markdown-image-loading { display: block; color: var(--muted-foreground); font-size: var(--maka-font-size-sm); }
+.maka-markdown-image-saving { display: block; color: var(--muted-foreground); font-size: var(--maka-font-size-sm); margin-block-start: var(--space-1); }
+
 /* Markdown code renderers are custom components so Mermaid can be loaded only
    for settled Mermaid fences. Astryx skips its own spacing wrapper when
    `components.code` is set, so the custom block sits directly in the document

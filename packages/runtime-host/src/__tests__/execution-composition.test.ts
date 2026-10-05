@@ -4423,3 +4423,101 @@ function routingDecisionForAction(
     candidateRef: action.proposal.candidateRef,
   };
 }
+
+test('production Host automatically archives assistant Markdown images and serves them after source deletion', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const source = join(root, 'delivery.png');
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    await writeFile(source, png);
+    const captured = await createCapturedExecutionComposition(owner, {
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            yield {
+              type: 'text_complete',
+              id: 'delivery-text-event',
+              turnId: input.turnId,
+              ts: Date.now(),
+              messageId: 'delivered-message',
+              text: `![Screenshot](<${source}>)`,
+            };
+            yield {
+              type: 'complete',
+              id: 'delivery-complete-event',
+              turnId: input.turnId,
+              ts: Date.now(),
+              stopReason: 'end_turn',
+            };
+          }
+        })(context),
+      context: {
+        retainUntilProcessExit: () => undefined,
+        requestDrain: () => assert.fail('image delivery must not drain Host'),
+      },
+    });
+    try {
+      const session = await captured.manager.createSession({
+        cwd: root,
+        llmConnectionId: FAKE_CONNECTION_ID,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'bypass',
+      });
+      const context = {
+        hostEpoch: 'execution-composition-test',
+        connectionId: 'image-client',
+        principal: 'local_os_user',
+        acquireResidency: () => ({ release() {} }),
+      };
+      const started = await captured.composition.handlers['turn.start'](
+        {
+          sessionId: session.id,
+          turnId: 'image-delivery-turn',
+          content: { text: 'deliver screenshot' },
+        },
+        context,
+      );
+      assert.equal(started.ok, true, JSON.stringify(started));
+      const request = {
+        sessionId: session.id,
+        turnId: 'image-delivery-turn',
+        messageId: 'delivered-message',
+        source,
+      };
+      let artifactId: string | undefined;
+      await waitFor(async () => {
+        const result = await captured.composition.handlers['artifact.image.resolve'](
+          request,
+          context,
+        );
+        assert.equal(result.ok, true, JSON.stringify(result));
+        if (result.ok && result.result.status === 'ready') artifactId = result.result.artifactId;
+        return !!artifactId;
+      }, 5000);
+      await rm(source);
+      const replay = await captured.composition.handlers['artifact.image.resolve'](
+        request,
+        context,
+      );
+      assert.deepEqual(replay, { ok: true, result: { status: 'ready', artifactId } });
+      const binary = await captured.composition.handlers['artifact.query'](
+        { sessionId: session.id, kind: 'read_binary', artifactId: artifactId! },
+        context,
+      );
+      assert.equal(binary.ok, true, JSON.stringify(binary));
+      if (binary.ok && binary.result.kind === 'binary' && binary.result.preview.ok)
+        assert.equal(binary.result.preview.base64, png.toString('base64'));
+      const forged = await captured.composition.handlers['artifact.image.resolve'](
+        { ...request, source: '/tmp/private.png' },
+        context,
+      );
+      assert.deepEqual(forged, { ok: true, result: { status: 'unavailable' } });
+    } finally {
+      captured.composition.beginDrain();
+      await captured.composition.close();
+    }
+  });
+});

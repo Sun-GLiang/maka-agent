@@ -752,6 +752,7 @@ export const TurnView = memo(function TurnView(props: {
                     key={`processing-${item.id}`}
                     activityObserved={props.activityObserved}
                     entries={item.children}
+                    turnId={turn.turnId}
                     running={!!props.liveStreaming}
                     statusRow={
                       index === activityProcessIndex && hasLiveStatus
@@ -767,6 +768,7 @@ export const TurnView = memo(function TurnView(props: {
                     key={timelineEntryKey(item, index)}
                     activityObserved={props.activityObserved}
                     item={item}
+                    turnId={turn.turnId}
                     onStreamingSettled={props.liveStreaming?.onStreamingSettled}
                     onOpenLinkedSession={props.onOpenLinkedSession}
                     initialLiveContent={props.liveStreaming?.initialLiveContent}
@@ -1288,7 +1290,7 @@ export function ModelProviderRetryIndicator(props: { retry: LiveProviderRetry })
  */
 type AssistantAnswerPhase = 'historical' | 'streaming' | 'settled';
 
-type AssistantAnswerBubbleProps =
+type AssistantAnswerBubbleProps = { imageIdentity?: { turnId: string; messageId: string } } & (
   | { text: string; phase: 'historical'; interrupted?: true }
   | {
       text: string;
@@ -1299,7 +1301,7 @@ type AssistantAnswerBubbleProps =
       truncated?: boolean;
       /** Called once when this answer's stream closes. */
       onSettled?: () => void;
-    };
+    });
 
 /**
  * The assistant's answer, in every state it can be in.
@@ -1346,6 +1348,7 @@ const AssistantAnswerBubble = memo(function AssistantAnswerBubble(props: Assista
     >
       <Markdown
         text={props.text}
+        imageIdentity={props.imageIdentity}
         streaming={props.phase === 'streaming'}
         settledText={settledText}
         // Names the surface, and not exclusively: the desktop Artifact
@@ -1399,6 +1402,7 @@ function timelineEntryKey(item: TurnTimelineItem, index: number): string {
 
 /** Render one timeline entry: reasoning disclosure / answer bubble / tool group. */
 const TurnTimelineEntry = memo(function TurnTimelineEntry(props: {
+  turnId?: string;
   activityObserved?: boolean;
   item: Exclude<TurnTimelineItem, { kind: 'user' }>;
   onStreamingSettled?: (messageId?: string) => void;
@@ -1426,9 +1430,10 @@ const TurnTimelineEntry = memo(function TurnTimelineEntry(props: {
     );
   }
   // Same component either way — a type swap here would remount the answer.
-  if (item.live !== true) return <AssistantAnswerBubble text={item.text} interrupted={item.interrupted} phase="historical" />;
+  if (item.live !== true) return <AssistantAnswerBubble imageIdentity={props.turnId ? { turnId: props.turnId, messageId: item.messageId } : undefined} text={item.text} interrupted={item.interrupted} phase="historical" />;
   return (
     <AssistantAnswerBubble
+      imageIdentity={props.turnId ? { turnId: props.turnId, messageId: item.messageId } : undefined}
       text={item.text}
       interrupted={item.interrupted}
       phase={item.complete === true ? 'settled' : 'streaming'}
@@ -1450,6 +1455,7 @@ const TurnTimelineEntry = memo(function TurnTimelineEntry(props: {
  * owns no chrome — keep the plain process label.
  */
 const ProcessingBlock = memo(function ProcessingBlock(props: {
+  turnId?: string;
   activityObserved?: boolean;
   entries: FoldedTimelineChild[];
   running: boolean;
@@ -1502,6 +1508,7 @@ const ProcessingBlock = memo(function ProcessingBlock(props: {
             key={timelineEntryKey(entry, index)}
             activityObserved={open && props.activityObserved !== false}
             item={entry}
+            turnId={props.turnId}
             onStreamingSettled={props.onStreamingSettled}
             onOpenLinkedSession={props.onOpenLinkedSession}
             initialLiveContent={props.initialLiveContent}
