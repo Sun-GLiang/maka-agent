@@ -17,15 +17,22 @@
  * under the License.
  */
 
-import type { ComponentProps } from 'react';
-import { PlanChatView } from './plan-surfaces.js';
-import { useComposerStaging } from './composer-staging-context.js';
-import { useComposerStagingServices } from '../staging-services.js';
-
-/** Transcript attachment reads come from the injected attachment port, never from the caller. */
-export function StagedQuoteChatView(props: Omit<ComponentProps<typeof PlanChatView>,
-  'handleRef' | 'pendingQuotes' | 'onQuoteAnnotationSubmit' | 'onReadAttachmentBytes' | 'onResolveImageDelivery'>) {
-  const staging = useComposerStaging();
-  const { readBytes, resolveImage } = useComposerStagingServices();
-  return <PlanChatView {...props} {...staging.chatViewQuoteProps} onReadAttachmentBytes={readBytes} onResolveImageDelivery={resolveImage} />;
+import { Marked } from 'marked';
+const parser = new Marked({ gfm: true });
+/** Parse actual Markdown nodes, excluding code, HTML and incomplete destinations. */
+export function chatImageSources(text: string): string[] {
+  if (!text.includes('![') || text.length > 1024 * 1024) return [];
+  const sources = new Set<string>();
+  parser.walkTokens(parser.lexer(text), (token) => {
+    if (token.type !== 'image') return;
+    const source = token.href;
+    if (
+      source.length > 0 &&
+      source.length <= 4096 &&
+      !/[\u0000-\u001f\u007f]/.test(source) &&
+      !source.startsWith('maka:')
+    )
+      sources.add(source);
+  });
+  return [...sources].slice(0, 64);
 }

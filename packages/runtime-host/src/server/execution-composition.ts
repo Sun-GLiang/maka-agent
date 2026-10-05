@@ -17,6 +17,9 @@
  * under the License.
  */
 
+import { createImageFileReader } from '@maka/runtime/image-file-reader';
+import { ChatImageDeliveryService } from './chat-image-delivery.js';
+import { checkedChatImage } from './chat-image-source.js';
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
 import { createWorkHubInspectionTool } from './workhub-inspection-tool.js';
 import { createJevRoutingModel } from './jev-routing-model.js';
@@ -312,6 +315,7 @@ export interface CreateExecutionRuntimeHostCompositionOptions {
   readonly bootstrapRuntimePolicy?: boolean;
   readonly skillHomeDirectory?: string;
   readonly projectDirectoryRoots?: readonly PublishedProjectDirectoryRoot[];
+  readonly imageArchiveLimits?: import('@maka/core/image-delivery').ImageArchiveLimits;
 }
 
 export interface ExecutionRuntimeHostCompositionDependencies {
@@ -364,6 +368,7 @@ export async function createExecutionRuntimeHostComposition(
   let sessionEffects: HostSessionEffectCoordinator | undefined;
   let promptSuggestions: HostPromptSuggestionCoordinator | undefined;
   let memoryExtraction: HostMemoryExtractionCoordinator | undefined;
+  let imageDelivery: ChatImageDeliveryService | undefined;
   let unsubscribeTranscriptChanges: (() => void) | undefined;
   let unsubscribeRuntimeEventCommits: (() => void) | undefined;
   let transcriptReader: SessionTranscriptReader | undefined;
@@ -566,11 +571,87 @@ export async function createExecutionRuntimeHostComposition(
     });
     archiveEvidence = await openToolResultArchiveEvidenceReader(context.owner.lease);
     const executionArtifacts = createHostExecutionArtifactServices({
+      ...(options.imageArchiveLimits ? { imageArchiveLimits: options.imageArchiveLimits } : {}),
       archiveEvidence,
       artifacts: openedArtifactStore,
       requestDrain: context.requestDrain,
       sessionAdmission,
       sessions: stores.sessionStore,
+    });
+    const localImageReader = createImageFileReader({
+      ...(filesystemWorker ? { filesystemWorker } : {}),
+    });
+    imageDelivery = new ChatImageDeliveryService({
+      artifacts: openedArtifactStore,
+      ...(options.imageArchiveLimits ? { limits: options.imageArchiveLimits } : {}),
+      admission: sessionAdmission,
+      isPresent: async (sessionId) =>
+        (await stores.sessionStore.probeSessionRemoval(sessionId)).kind === 'present',
+      acquireResidency: () => context.acquireResidency('chat-image-delivery'),
+      persistenceFailed: (error) => {
+        console.warn('[runtime-host] Image delivery persistence failed', error);
+        context.requestDrain();
+      },
+      readLocalImage: async (sessionId, path, abortSignal) => {
+        const [header, boundary] = await Promise.all([
+          stores.sessionStore.readHeaderSnapshot(sessionId),
+          stores.sessionStore.readExecutionBoundary(sessionId),
+        ]);
+        const result = await localImageReader({
+          path,
+          cwd: header.cwd,
+          permissionMode: header.permissionMode,
+          executionBoundary: boundary,
+          abortSignal,
+        });
+        return checkedChatImage(result.bytes);
+      },
+      readMessage: async (identity) => {
+        await requireSessionManager(manager).ensureTranscriptLedgerForRead(identity.sessionId);
+        const [turn] = await stores.runtimeEventStore.readTranscriptTurns(identity.sessionId, {
+          turnId: identity.turnId,
+        });
+        if (!turn) return undefined;
+        for (
+          let position = turn.firstOrdinal, runs = 0;
+          position <= turn.lastOrdinal && runs < 16;
+          runs++
+        ) {
+          const found = await stores.runtimeEventStore.readTranscriptRun(
+            identity.sessionId,
+            {
+              direction: 'newer',
+              throughOrdinal: turn.lastOrdinal,
+              position,
+              maxEvents: 4096,
+              maxBytes: 16 * 1024 * 1024,
+              maxRecordBytes: 8 * 1024 * 1024,
+            },
+            (run, events) => {
+              let text: string | undefined;
+              for (const { event } of events) {
+                if (
+                  event.partial ||
+                  event.turnId !== identity.turnId ||
+                  event.role !== 'model' ||
+                  event.content?.kind !== 'text'
+                )
+                  continue;
+                if (
+                  (event.refs?.storedMessageId ?? event.refs?.providerEventId ?? event.id) ===
+                  identity.messageId
+                )
+                  text = event.content.text;
+              }
+              return { text, next: run.lastOrdinal + 1 };
+            },
+          );
+          if (!found) break;
+          if (found.text !== undefined) return found.text;
+          position = found.next;
+        }
+        return undefined;
+      },
     });
     // Shared with recall's material fetch, so a file brought in from another
     // Session is answered by the same reader that answers one stored here.
@@ -578,6 +659,7 @@ export async function createExecutionRuntimeHostComposition(
       artifactStore: openedArtifactStore,
     });
     const builtinTools = {
+      publishImage: executionArtifacts.publishImage,
       shellRuns: runtimeResources,
       runtimeResources,
       attachmentResources,
@@ -1774,6 +1856,7 @@ export async function createExecutionRuntimeHostComposition(
       stores.sessionStore,
       Date.now,
       context.sessionAccessAuthority,
+      imageDelivery,
     );
     rootCoordinator = new RootTurnCoordinator(
       manager,
@@ -1852,6 +1935,7 @@ export async function createExecutionRuntimeHostComposition(
           return undefined;
         }
       },
+      (sessionId, event) => imageDelivery?.observe(sessionId, event),
     );
     const coordinator = rootCoordinator;
     const pluginModel = createHostPluginModel({
@@ -3135,6 +3219,7 @@ export async function createExecutionRuntimeHostComposition(
           () => workspaceExecution?.beginDrain(),
           () => runtimeResources?.beginDrain(),
           () => messages.beginDrain(),
+          () => imageDelivery?.beginDrain(),
           () => interactions.beginDrain(),
           () => sessionEffects?.beginDrain(),
           () => promptSuggestions?.beginDrain(),
@@ -3147,6 +3232,7 @@ export async function createExecutionRuntimeHostComposition(
             await rootCloseTask;
           },
           () => workHubResults?.coordinator.close(),
+          () => imageDelivery?.close(),
           () => runtimeResources?.close(),
           () => workspaceExecution?.close(),
           () => sessionEffects?.close(),
@@ -3329,6 +3415,7 @@ export async function createExecutionRuntimeHostComposition(
     }
     goalExecutions?.beginDrain();
     try {
+      await imageDelivery?.close();
       await workspaceExecution?.close();
     } catch (closeError) {
       errors.push(closeError);

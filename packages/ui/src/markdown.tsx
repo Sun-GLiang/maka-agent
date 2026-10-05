@@ -55,6 +55,7 @@ const MarkdownBody = lazy(() => import('./markdown-body.js').then((m) => ({ defa
 
 export function Markdown(props: {
   text: string;
+  imageIdentity?: { turnId: string; messageId: string };
   streaming?: boolean;
   settledText?: string;
   /** Block rhythm. Transcript turns pass `compact`; documents leave it. */
@@ -78,6 +79,7 @@ export function Markdown(props: {
     >
       <MarkdownBody
         text={safeText}
+        imageIdentity={props.imageIdentity}
         streaming={streaming}
         settledText={safeSettledText}
         density={props.density}
