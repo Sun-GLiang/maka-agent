@@ -18,8 +18,10 @@
  */
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Button, IconButton, Spinner, useLightbox } from '@astryxdesign/core';
-import { Maximize2 } from './icons.js';
+import { Button, IconButton, Spinner, Tooltip, useLightbox } from '@astryxdesign/core';
+import { createMarkdownPlugin, type MarkdownExtensionNode } from '@astryxdesign/core/Markdown/plugins';
+import type { MarkdownAstNode, MarkdownAstRoot } from '@astryxdesign/core/Markdown';
+import { Maximize2, RotateCw, AlertTriangle } from './icons.js';
 import { Link } from '@astryxdesign/core/Link';
 import { parseAttachmentResourceRef } from '@maka/core/attachments';
 import { useAttachmentImage } from './attachment-image.js';
@@ -29,17 +31,52 @@ import { useUiLocale } from './locale-context.js';
 import { createMarkdownImageSourceResolver } from './markdown-image-source.js';
 
 const ImageSourceContext = createContext<(source: string) => string>((source) => source);
+
+type PlacedImage = MarkdownExtensionNode<'maka-images', 'image', { src: string; alt: string; inline: boolean }>;
+// Placement comes from Markdown structure before bytes arrive. Never change a
+// message's geometry in response to network/decode timing or archive resolution.
+export const MARKDOWN_IMAGE_PLUGINS = [createMarkdownPlugin<'maka-images', PlacedImage>({
+  name: 'maka-images', apiVersion: 1,
+  transform(document, context) {
+    if (!context.source.includes('![')) return document;
+    const rewrite = (node: MarkdownAstNode, inline = false, phrasing = false): MarkdownAstNode => {
+      if (node.type === 'image') return {
+        type: 'extension', plugin: 'maka-images', name: 'image',
+        display: phrasing ? 'inline' : 'block',
+        data: { src: node.url, alt: node.alt, inline },
+      } satisfies PlacedImage;
+      if (!('children' in node)) return node;
+      const childInline = node.type === 'paragraph' ? !isSingleImage(node.children)
+        : node.type === 'heading' || node.type === 'tableCell' ? true : inline;
+      const childPhrasing = ['paragraph', 'heading', 'tableCell', 'link', 'strong', 'emphasis', 'delete'].includes(node.type);
+      return { ...node, children: node.children.map(child => rewrite(child, childInline, childPhrasing)) } as MarkdownAstNode;
+    };
+    return rewrite(document) as MarkdownAstRoot<MarkdownExtensionNode>;
+  },
+  renderers: { image: {
+    render: ({ node }) => <MarkdownImage {...node.data} />,
+    toText: node => node.data.alt,
+  } },
+})];
+
+function isSingleImage(nodes: readonly MarkdownAstNode[]): boolean {
+  const meaningful = nodes.filter(node => node.type !== 'text' || node.value.trim());
+  if (meaningful.length !== 1) return false;
+  const node = meaningful[0]!;
+  return node.type === 'image' || (['link', 'strong', 'emphasis', 'delete'].includes(node.type)
+    && 'children' in node && isSingleImage(node.children));
+}
 export function MarkdownImageSourceProvider(props: { text: string; children: ReactNode }) {
   const resolve = useMemo(() => createMarkdownImageSourceResolver(props.text), [props.text]);
   return <ImageSourceContext.Provider value={resolve}>{props.children}</ImageSourceContext.Provider>;
 }
 
 /** Presentation only: Host resolves local addresses and archives; UI receives artifact identities. */
-export function MarkdownImage(props: { src: string; alt: string }) {
+export function MarkdownImage(props: { src: string; alt: string; inline?: boolean }) {
   const source = useContext(ImageSourceContext)(props.src);
-  return <ImageResource key={source} src={source} alt={props.alt} />;
+  return <ImageResource key={source} src={source} alt={props.alt} inline={props.inline} />;
 }
-function ImageResource(props: { src: string; alt: string }) {
+function ImageResource(props: { src: string; alt: string; inline?: boolean }) {
   const copy = getSharedUiCopy(useUiLocale()).markdown;
   const anchor = useRef<HTMLSpanElement>(null);
   const [visible, setVisible] = useState(typeof IntersectionObserver === 'undefined');
@@ -55,8 +92,6 @@ function ImageResource(props: { src: string; alt: string }) {
   const artifactId = explicit?.artifactId ?? (delivery.status === 'ready' ? delivery.artifactId : undefined);
   const image = useAttachmentImage(visible && artifactId ? { artifactId } : undefined);
   const [failedSource, setFailedSource] = useState<string>();
-  // Keep measured badge geometry across URL-to-attachment switches and retries.
-  const [compactSize, setCompactSize] = useState<{ width: number; height: number }>();
   const [attempt, setAttempt] = useState(0);
   const remote = isWebImage(props.src);
   const source = artifactId ? image.src : visible && remote && (!delivery.available || delivery.checked) ? props.src : undefined;
@@ -78,35 +113,44 @@ function ImageResource(props: { src: string; alt: string }) {
     : explicit && image.status === 'unavailable' ? copy.imageUnavailable
     : delivery.status === 'failed' ? copy.imageArchiveFailure(delivery.reason)
     : delivery.status === 'pending' || artifactId ? copy.imageLoading : copy.imageUnsupported;
-  const hasFrame = (!visible || !!source || !!artifactId || delivery.status === 'pending') && !(compactSize && failed);
-  return <span ref={anchor} className={`maka-markdown-image-resource${hasFrame ? compactSize ? ' maka-markdown-image-compact' : ' maka-markdown-image-frame' : ''}`}
-    style={hasFrame && compactSize ? { minWidth: compactSize.width, minHeight: compactSize.height } : undefined}
+  const hasFrame = props.inline || !visible || !!source || !!artifactId || delivery.status === 'pending';
+  return <span ref={anchor} className={`maka-markdown-image-resource${hasFrame ? props.inline ? ' maka-markdown-image-inline' : ' maka-markdown-image-frame' : ''}`}
     data-maka-image-state={message ? failed ? 'failed' : 'loading' : 'ready'}>
-    {message ? <span className="maka-markdown-image-placeholder">
+    {message && props.inline ? <Tooltip content={message}>
+      <span className="maka-markdown-image-placeholder" role="status" aria-label={message}>
+        {failed || delivery.status === 'failed'
+          ? <IconButton icon={<RotateCw size={14} />} size="sm" label={copy.imageRetry} onClick={retry} />
+          : delivery.status === 'unavailable' && visible
+            ? <AlertTriangle size={14} aria-hidden="true" /> : <Spinner size="sm" shade="subtle" aria-hidden="true" />}
+      </span>
+    </Tooltip> : message ? <span className="maka-markdown-image-placeholder">
       {props.alt && <span className="maka-markdown-image-caption">{props.alt}</span>}
       <span role="status">{hasFrame && !failed && delivery.status !== 'failed' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
       {(failed || delivery.status === 'failed') && sourceActions}
-    </span> : source && <DisplayImage key={`${source}\0${attempt}`} src={source} alt={props.alt} compactSize={compactSize} onError={() => setFailedSource(source)}
-      onLoad={(width, height) => setCompactSize(width <= 320 && height <= 64 ? { width, height } : undefined)} />}
-    {!explicit && delivery.status === 'pending' && remote && source && <span className="maka-markdown-image-saving" role="status">{copy.imageSaving}</span>}
-    {!explicit && delivery.status === 'failed' && remote && source && !failed && <span className="maka-markdown-image-saving" role="status">
+    </span> : source && <DisplayImage key={`${source}\0${attempt}`} src={source} alt={props.alt} onError={() => setFailedSource(source)} />}
+    {!explicit && delivery.status === 'pending' && remote && source && (props.inline ? <Tooltip content={copy.imageSaving}>
+      <span className="maka-markdown-image-saving" role="status" aria-label={copy.imageSaving}><Spinner size="sm" aria-hidden="true" /></span>
+    </Tooltip> : <span className="maka-markdown-image-saving" role="status">{copy.imageSaving}</span>)}
+    {!explicit && delivery.status === 'failed' && remote && source && !failed && (props.inline ? <Tooltip content={copy.imageArchiveFailure(delivery.reason)}>
+      <span className="maka-markdown-image-saving" role="status" aria-label={copy.imageArchiveFailure(delivery.reason)}>
+        <IconButton icon={<AlertTriangle size={14} />} size="sm" label={copy.imageRetry} onClick={retry} />
+      </span>
+    </Tooltip> : <span className="maka-markdown-image-saving" role="status">
       {copy.imageArchiveFailure(delivery.reason)} {sourceActions}
-    </span>}
+    </span>)}
   </span>;
 }
-function DisplayImage(props: { src: string; alt: string; compactSize?: { width: number; height: number }; onError(): void; onLoad(width: number, height: number): void }) {
+function DisplayImage(props: { src: string; alt: string; onError(): void }) {
   const copy = getSharedUiCopy(useUiLocale()).markdown;
   const [loaded, setLoaded] = useState(false);
   const lightbox = useLightbox({ media: { src: props.src, alt: props.alt }, hasZoom: true });
   return <>
-    <span className="maka-markdown-image-preview" style={props.compactSize ? { width: props.compactSize.width, height: props.compactSize.height } : undefined}>
-      {!loaded && <span className="maka-markdown-image-loading" role="status"><Spinner size="sm" shade="subtle" aria-hidden="true" /> {copy.imageLoading}</span>}
+    <span className="maka-markdown-image-preview">
+      {!loaded && <span className="maka-markdown-image-loading" role="status" aria-label={copy.imageLoading}><Spinner size="sm" shade="subtle" aria-hidden="true" /> <span className="maka-markdown-image-loading-label">{copy.imageLoading}</span></span>}
       <img src={props.src} alt={props.alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
-          className="maka-markdown-attachment-image" onLoad={event => {
-            setLoaded(true); props.onLoad(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight);
-          }} onError={props.onError} />
+          className="maka-markdown-attachment-image" onLoad={() => setLoaded(true)} onError={props.onError} />
       {loaded && <span className="maka-markdown-image-expand">
-        <IconButton icon={<Maximize2 size={16} />} size="sm" label={copy.imageExpand(props.alt)} onClick={() => lightbox.open()} />
+        <IconButton icon={<Maximize2 size={16} />} size="sm" label={copy.imageExpand(props.alt)} onClick={event => { event.preventDefault(); event.stopPropagation(); lightbox.open(); }} />
       </span>}
     </span>
     {lightbox.isOpen && lightbox.element}

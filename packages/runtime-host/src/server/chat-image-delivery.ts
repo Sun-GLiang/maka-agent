@@ -262,12 +262,13 @@ export class ChatImageDeliveryService {
         try {
           image = await abortable(() => this.ports.readLocalImage(sessionId, path, signal), signal);
         } catch (error) {
-          // Keep literal percent filenames authoritative. Only a missing path
-          // gets one decoding attempt, through the same Read boundary and budget.
+          // Keep readable literal percent filenames authoritative. An encoded cwd
+          // can look outside the workspace before decoding, so both missing and
+          // denied candidates get one retry through the same Read boundary/budget.
           const decoded = decodedLocalImagePath(source);
           if (
             signal.aborted ||
-            failureReason(error, source) !== 'not_found' ||
+            !['not_found', 'not_allowed'].includes(failureReason(error, source)) ||
             decoded === undefined
           )
             throw error;

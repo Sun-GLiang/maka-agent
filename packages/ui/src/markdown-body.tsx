@@ -29,7 +29,7 @@
  * product-specific trust boundaries around that renderer.
  */
 
-import { MarkdownImage, MarkdownImageSourceProvider } from './markdown-image.js';
+import { MarkdownImage, MarkdownImageSourceProvider, MARKDOWN_IMAGE_PLUGINS } from './markdown-image.js';
 import { ImageMessageScope } from './image-delivery.js';
 import { useCallback, useContext, useRef, type ReactNode } from 'react';
 import {
@@ -198,6 +198,7 @@ export function MarkdownBody(props: {
             // the one combination neither half of the argument asks for.
             density={density}
             components={components}
+            plugins={MARKDOWN_IMAGE_PLUGINS}
             isStreaming={props.streaming}
             settledText={props.settledText}
             transformSource={transformMathSource}
