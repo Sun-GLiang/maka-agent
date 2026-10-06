@@ -23,7 +23,11 @@ import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { ARTIFACT_IMAGE_PREVIEW_MAX_BYTES } from '@maka/core/artifacts';
-import { ImageFileError, validateImageBytes } from '@maka/runtime/image-file';
+import {
+  ImageFileError,
+  imageFileFailureReason,
+  validateImageBytes,
+} from '@maka/runtime/image-file';
 import type { ImageDeliveryFailure } from '@maka/core/image-delivery';
 export class ImageSourceError extends Error {
   constructor(readonly reason: ImageDeliveryFailure) {
@@ -39,9 +43,7 @@ export function checkedChatImage(bytes: Uint8Array): ChatImageBytes {
     return validateImageBytes(bytes, 'chat');
   } catch (error) {
     if (!(error instanceof ImageFileError)) throw error;
-    throw new ImageSourceError(
-      error.code === 'ERR_IMAGE_TOO_LARGE' ? 'too_large' : 'unsupported_mime',
-    );
+    throw new ImageSourceError(imageFileFailureReason(error));
   }
 }
 export function localImagePath(source: string): string | undefined {

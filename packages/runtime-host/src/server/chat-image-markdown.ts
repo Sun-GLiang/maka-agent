@@ -17,22 +17,12 @@
  * under the License.
  */
 
-import { Marked } from 'marked';
-const parser = new Marked({ gfm: true });
-/** Parse actual Markdown nodes, excluding code, HTML and incomplete destinations. */
+import { isImageDeliverySource } from '@maka/core/image-delivery';
+import { markdownImageSources } from '@maka/core/image-markdown';
+
+/** Capture policy excludes explicit attachments and limits jobs per message. */
 export function chatImageSources(text: string): string[] {
-  if (!text.includes('![') || text.length > 1024 * 1024) return [];
-  const sources = new Set<string>();
-  parser.walkTokens(parser.lexer(text), (token) => {
-    if (token.type !== 'image') return;
-    const source = token.href;
-    if (
-      source.length > 0 &&
-      source.length <= 4096 &&
-      !/[\u0000-\u001f\u007f]/.test(source) &&
-      !source.startsWith('maka:')
-    )
-      sources.add(source);
-  });
-  return [...sources].slice(0, 64);
+  return markdownImageSources(text)
+    .filter((source) => isImageDeliverySource(source) && !source.startsWith('maka:'))
+    .slice(0, 64);
 }

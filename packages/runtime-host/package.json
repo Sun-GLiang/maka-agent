@@ -37,7 +37,6 @@
     "@maka/core": "0.1.0",
     "@maka/runtime": "0.1.0",
     "@maka/storage": "0.1.0",
-    "marked": "^18.0.11",
     "systeminformation": "^5.33.13",
     "ws": "^8.21.3",
     "yaml": "^2.9.1",

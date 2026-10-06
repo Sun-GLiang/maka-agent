@@ -1,0 +1,5 @@
+{
+  "epoch": 206,
+  "files": ["packages/runtime-host/src/protocol/image-delivery.ts"],
+  "reason": "Shares the existing 512-character identity bound and 4096-character non-empty, control-free source validation with the core image delivery contract. Accepted and rejected request values, validation order, frame keys, output decoding and protocol errors are unchanged."
+}

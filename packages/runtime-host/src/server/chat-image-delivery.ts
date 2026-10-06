@@ -22,7 +22,7 @@ import { ImageFileReadError } from '@maka/runtime/image-file-reader';
 import type { CompleteEvent, TextCompleteEvent, TextDeltaEvent } from '@maka/core/events';
 import { foldAssistantDelta } from '@maka/core/events';
 import {
-  DEFAULT_IMAGE_ARCHIVE_LIMITS,
+  IMAGE_MARKDOWN_MAX_LENGTH,
   type ImageArchiveLimits,
   type ImageDeliveryRequest,
   type ImageDeliveryResult,
@@ -34,6 +34,7 @@ import {
 } from '@maka/storage/artifact-stores';
 import type { SessionAdmissionGate } from './session-admission-gate.js';
 import { chatImageSources } from './chat-image-markdown.js';
+import { readyChatImageArtifact } from './chat-image-artifact.js';
 import { abortable } from '../client/wait-for-ready.js';
 import {
   downloadChatImage,
@@ -102,7 +103,7 @@ export class ChatImageDeliveryService {
       if (!folded) return;
       stream.text += folded.tail;
     }
-    if (stream.text.length > 1024 * 1024) {
+    if (stream.text.length > IMAGE_MARKDOWN_MAX_LENGTH) {
       clearTimeout(stream.timer);
       this.#streams.delete(key);
       return;
@@ -297,19 +298,17 @@ export class ChatImageDeliveryService {
       return;
     }
     try {
-      await publish({
-        ...base,
-        id: `chat_image_result_${deliveryKey(identity)}`,
-        kind: 'image',
-        content: image.bytes,
-        mimeType: image.mimeType,
-        imageDelivery: {
+      await publish(
+        readyChatImageArtifact({
+          id: `chat_image_result_${deliveryKey(identity)}`,
+          sessionId,
+          turnId,
+          name: base.name,
           ...metadata,
-          status: 'ready',
-          contentSha256: createHash('sha256').update(image.bytes).digest('hex'),
-        },
-        imageArchiveLimits: this.ports.limits ?? DEFAULT_IMAGE_ARCHIVE_LIMITS,
-      });
+          image,
+          limits: this.ports.limits,
+        }),
+      );
     } catch (error) {
       if (!(error instanceof ImageArchiveQuotaError)) throw error;
       await publish({
