@@ -28,7 +28,7 @@ import {
   imageFileFailureReason,
   validateImageBytes,
 } from '@maka/runtime/image-file';
-import type { ImageDeliveryFailure } from '@maka/core/image-delivery';
+import { isImageDeliverySource, type ImageDeliveryFailure } from '@maka/core/image-delivery';
 export class ImageSourceError extends Error {
   constructor(readonly reason: ImageDeliveryFailure) {
     super(reason);
@@ -58,6 +58,19 @@ export function localImagePath(source: string): string | undefined {
   if (/^[a-z][a-z0-9+.-]*:/i.test(source) && !/^[a-z]:[\\/]/i.test(source))
     throw new ImageSourceError('not_allowed');
   return source;
+}
+
+/** A missing literal path may be a URL-encoded Markdown destination. File URLs
+ * already went through fileURLToPath; never decode them a second time. */
+export function decodedLocalImagePath(source: string): string | undefined {
+  if (source.startsWith('file:') || /^https?:/i.test(source)) return undefined;
+  try {
+    const decoded = decodeURIComponent(source);
+    return decoded !== source && isImageDeliverySource(decoded) ? decoded : undefined;
+  } catch {
+    // A literal percent sign or incomplete escape is a valid filesystem name.
+    return undefined;
+  }
 }
 /** Pin DNS at connection time and check each redirect; never send cookies, auth or referer. */
 export async function downloadChatImage(
