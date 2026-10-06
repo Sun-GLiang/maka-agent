@@ -266,6 +266,57 @@ test('encoded local Markdown images are archived under the original source and r
   }
 });
 
+test('encoded project roots are retried through the same workspace boundary', async () => {
+  const reader = createImageFileReader();
+  const paths: string[] = [];
+  const f = await fixture(undefined, (_session, path, abortSignal) => {
+    paths.push(path);
+    return reader({ path, cwd: join(f.root, 'My Project 中文'), abortSignal });
+  });
+  try {
+    const directory = join(f.root, 'My Project 中文');
+    await mkdir(directory);
+    const path = join(directory, 'image.png');
+    await writeFile(path, PNG);
+    const source = `${f.root}/${encodeURIComponent('My Project 中文')}/image.png`;
+    observe(f.service, source);
+    await f.service.waitForIdle();
+    assert.equal((await f.service.resolve({ ...REQUEST, source })).status, 'ready');
+    assert.deepEqual(paths, [source, path]);
+    await rm(path);
+    assert.equal((await f.service.resolve({ ...REQUEST, source })).status, 'ready');
+    assert.equal(paths.length, 2);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    await f.close();
+  }
+});
+
+test('decoding a denied source cannot grant access outside the Read boundary', async () => {
+  const reader = createImageFileReader();
+  const paths: string[] = [];
+  const f = await fixture(undefined, (_session, path, abortSignal) => {
+    paths.push(path);
+    return reader({ path, cwd: join(f.root, 'workspace'), abortSignal });
+  });
+  try {
+    await mkdir(join(f.root, 'workspace'));
+    const path = join(f.root, 'private image.png');
+    await writeFile(path, PNG);
+    const source = `${f.root}/private%20image.png`;
+    observe(f.service, source);
+    await f.service.waitForIdle();
+    assert.deepEqual(await f.service.resolve({ ...REQUEST, source }), {
+      status: 'failed',
+      reason: 'not_allowed',
+    });
+    assert.deepEqual(paths, [source, path]);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    await f.close();
+  }
+});
+
 test('literal percent filenames retain precedence and file URLs are decoded only once', async () => {
   const paths: string[] = [];
   const reader = createImageFileReader();
@@ -292,8 +343,8 @@ test('literal percent filenames retain precedence and file URLs are decoded only
   }
 });
 
-test('encoded local fallback preserves filesystem denial and validation failures', async () => {
-  for (const reason of ['not_allowed', 'too_large', 'unsupported_mime', 'read_failed'] as const) {
+test('encoded local fallback preserves validation and non-path read failures', async () => {
+  for (const reason of ['too_large', 'unsupported_mime', 'read_failed'] as const) {
     const paths: string[] = [];
     const f = await fixture(undefined, async (_session, path) => {
       paths.push(path);
