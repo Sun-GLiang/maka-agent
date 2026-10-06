@@ -30,6 +30,7 @@ import { chromium } from '@playwright/test';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64');
+const badge = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAFAAAAAUCAYAAAAa2LrXAAAATklEQVR4nO3OsQ0AIAzAsJ7O5/QIhsgSg3fPnLnfgzygywO6PKDLA7o8oMsDujygywO6PKDLA7o8oMsDujygywO6PKDLA7o8oMsDujyAW5KWWkgoVkkSAAAAAElFTkSuQmCC', 'base64');
 let appServer, imageServer, browser, appUrl, imageUrl;
 let requests = [], failedOnce = false;
 let releaseImage;
@@ -42,11 +43,14 @@ before(async () => {
   imageServer = createServer((req, res) => {
     requests.push({ path: req.url, referer: req.headers.referer });
     if (req.url === '/delayed.png') {
-      void delayedImage.then(() => { res.setHeader('Content-Type', 'image/png'); res.end(png); });
+      void delayedImage.then(() => { res.setHeader('Content-Type', 'image/png'); res.end(screenshot); });
       return;
     }
     if (req.url === '/screenshot.png') {
       res.setHeader('Content-Type', 'image/png'); res.end(screenshot); return;
+    }
+    if (req.url === '/badge.png') {
+      res.setHeader('Content-Type', 'image/png'); res.end(badge); return;
     }
     if (req.url === '/retry.png' && !failedOnce) {
       failedOnce = true;
@@ -59,6 +63,9 @@ before(async () => {
   await new Promise(resolve => imageServer.listen(0, '127.0.0.1', resolve));
   imageUrl = `http://127.0.0.1:${imageServer.address().port}`;
   const destinations = {
+    'badge-remote': `Build ![Badge](${imageUrl}/badge.png) passing.`,
+    'badge-saved': `Build ![Badge](${imageUrl}/badge.png) passing.`,
+    'badge-saving': `Build ![Badge](${imageUrl}/badge.png) passing.`,
     'angle-saved': '![Screenshot](</tmp/my image.png>)',
     'title-saved': `![Screenshot](${imageUrl}/image.png "Screenshot title")`,
     'escaped-saved': String.raw`![Screenshot](/tmp/a\(1\).png)`,
@@ -100,16 +107,16 @@ before(async () => {
       const readBytes=async()=>{
         if(mode==='geometry-saved') await fetch('/release-attachment');
         reads++; window.imageReads=reads; return (mode==='attachment' || mode==='read-retry-saved') && reads===1 ? {ok:false,reason:'read_failed'} :
-          {ok:true,base64:mode==='corrupt-saved' && !window.deliveryRetries ? 'iVBORw0KGgo=' : '${png.toString('base64')}',mimeType:'image/png'};
+          {ok:true,base64:mode.startsWith('badge-') ? '${badge.toString('base64')}' : mode==='geometry-saved' ? '${screenshot.toString('base64')}' : mode==='corrupt-saved' && !window.deliveryRetries ? 'iVBORw0KGgo=' : '${png.toString('base64')}',mimeType:'image/png'};
       };
-      const resolveDelivery=mode.endsWith('saved') || mode==='saving' || race ? async(_session,request)=>{
+      const resolveDelivery=mode.endsWith('saved') || mode.endsWith('saving') || race ? async(_session,request)=>{
         window.deliveryQueries++;
         window.deliverySource=request.source;
         if(canonicalSources[mode] && !canonicalSources[mode].includes(request.source)) return {status:'unavailable'};
         if(request.retry) window.deliveryRetries++;
         if(race) return window.deliveryReady ? {status:'ready',artifactId:'saved-image'} : {status:'unavailable'};
         await new Promise(resolve=>setTimeout(resolve,100));
-        return mode==='saving' && window.deliveryQueries===1 ? {status:'pending'} : {status:'ready',artifactId:'saved-image'};
+        return mode.endsWith('saving') && window.deliveryQueries===1 ? {status:'pending'} : {status:'ready',artifactId:'saved-image'};
       } : undefined;
       const render=(streaming=race)=>root.render(
         React.createElement(Theme,{theme:makaTheme,mode:'light'},
@@ -234,7 +241,8 @@ for (const scenario of ['remote-saved', 'local-saved']) {
       assert.equal(await page.evaluate(() => window.imageReads), 1);
       assert.equal(await page.locator('img').count(), 1);
       assert.match(await page.locator('img').getAttribute('src'), /^data:image\/png;base64,/);
-      await page.getByRole('button', { name: 'Enlarge image: Screenshot', exact: true }).click();
+      await page.getByRole('button', { name: 'Enlarge image: Screenshot', exact: true }).focus();
+      await page.keyboard.press('Enter');
       await page.waitForFunction(() => document.images.length > 1);
     } finally { await page.close(); }
   });
@@ -310,7 +318,7 @@ for (const scenario of ['geometry-remote', 'geometry-saved']) {
       await page.getByText('Loading image…', { exact: true }).waitFor();
       const before = await page.getByText('Following paragraph', { exact: true }).boundingBox();
       if (scenario === 'geometry-remote') releaseImage(); else releaseAttachment();
-      await loaded(page);
+      await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth > 1));
       await page.getByText('Loading image…', { exact: true }).waitFor({ state: 'hidden' });
       const after = await page.getByText('Following paragraph', { exact: true }).boundingBox();
       assert.equal(after.y, before.y);
@@ -348,3 +356,38 @@ test('image frames fit narrow viewports without distorting screenshots or limiti
     assert.equal(await page.getByRole('dialog').locator('img').getAttribute('src'), await page.locator('.maka-markdown-image-preview > img').getAttribute('src'));
   } finally { await page.close(); }
 });
+
+for (const scenario of ['badge-remote', 'badge-saved', 'badge-saving']) {
+  test(`${scenario}: a badge keeps its intrinsic size and surrounding text on one line`, async () => {
+    requests = [];
+    const page = await pageFor(scenario);
+    try {
+      await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth === 80));
+      if (scenario === 'badge-saving') {
+        await page.waitForFunction(() => [...document.images].some(image => image.src.startsWith('data:') && image.naturalWidth === 80));
+      }
+      const geometry = await page.locator('.maka-markdown-image-resource').evaluate(element => {
+        const box = element.getBoundingClientRect();
+        const paragraph = element.closest('[role="paragraph"]');
+        const textBoxes = [...paragraph.childNodes].filter(node => node.nodeType === Node.TEXT_NODE && node.textContent.trim()).map(node => {
+          const range = document.createRange(); range.selectNodeContents(node);
+          return range.getBoundingClientRect().y;
+        });
+        return { width: box.width, height: box.height, textBoxes };
+      });
+      assert.equal(geometry.width, 80);
+      assert.equal(geometry.height, 20);
+      assert.equal(geometry.textBoxes.length, 2);
+      assert.equal(geometry.textBoxes[0], geometry.textBoxes[1]);
+      if (scenario === 'badge-saved') assert.deepEqual(requests, []);
+      if (scenario === 'badge-remote') {
+        await page.locator('.maka-markdown-image-preview').hover();
+        await page.getByRole('button', { name: 'Enlarge image: Badge', exact: true }).click();
+      } else {
+        await page.getByRole('button', { name: 'Enlarge image: Badge', exact: true }).focus();
+        await page.keyboard.press('Enter');
+      }
+      await page.getByRole('dialog').waitFor();
+    } finally { await page.close(); }
+  });
+}
