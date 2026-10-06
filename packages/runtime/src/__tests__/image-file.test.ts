@@ -28,7 +28,10 @@ import { LocalWorkspaceExecutor } from '../workspace-executor.js';
 import { executeFilesystemOperation } from '../filesystem-worker/operations.js';
 import { MAX_READ_IMAGE_BYTES } from '@maka/core/attachments';
 import { ARTIFACT_IMAGE_PREVIEW_MAX_BYTES } from '@maka/core/artifacts';
-import { createImageFileReader } from '../image-file-reader.js';
+import { createImageFileReader, ImageFileReadError } from '../image-file-reader.js';
+import { FilesystemWorkerClientError } from '../filesystem-worker/client.js';
+import { executeFilesystemWorkerRequest } from '../filesystem-worker/operations.js';
+import { FILESYSTEM_WORKER_PROTOCOL_VERSION } from '../filesystem-worker/protocol.js';
 import { buildBuiltinTools } from '../builtin-tools.js';
 
 const ONE_PIXEL_PNG = Buffer.from(
@@ -40,6 +43,77 @@ const WIDE_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAACgAAAAABCAYAAAASePczAAAAIUlEQVR4nO3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAIA7AygBAAEQnI5pAAAAAElFTkSuQmCC',
   'base64',
 );
+
+test('chat reader preserves structured Worker failures independently of message wording', async () => {
+  for (const [reason, expected] of [
+    ['not_found', 'not_found'],
+    ['filesystem_denied', 'not_allowed'],
+    ['path_denied', 'not_allowed'],
+    ['sandbox_denied', 'not_allowed'],
+    ['image_too_large', 'too_large'],
+    ['invalid_image', 'unsupported_mime'],
+    ['worker_io_incomplete', 'read_failed'],
+  ] as const) {
+    const reader = createImageFileReader({
+      filesystemWorker: {
+        execute: async () => {
+          throw new FilesystemWorkerClientError({
+            reason,
+            stage: 'operation',
+            message: '读取失败',
+          });
+        },
+      },
+    });
+    await assert.rejects(
+      reader({ path: 'image.png', cwd: process.cwd() }),
+      (error: unknown) => error instanceof ImageFileReadError && error.reason === expected,
+    );
+  }
+});
+
+test('chat reader preserves local missing paths and workspace boundary denials', async (t) => {
+  const cwd = await realpath(await mkdtemp(join(tmpdir(), 'maka-chat-read-errors-')));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const reader = createImageFileReader();
+  await assert.rejects(
+    reader({ path: 'missing.png', cwd }),
+    (error: unknown) => error instanceof ImageFileReadError && error.reason === 'not_found',
+  );
+  await assert.rejects(
+    reader({ path: join(cwd, '..', 'outside.png'), cwd }),
+    (error: unknown) => error instanceof ImageFileReadError && error.reason === 'not_allowed',
+  );
+});
+
+test('Worker transports typed image validation failures instead of generic filesystem errors', async (t) => {
+  const cwd = await realpath(await mkdtemp(join(tmpdir(), 'maka-chat-image-wire-')));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const path = join(cwd, 'image.png');
+  for (const [content, expected] of [
+    [ONE_PIXEL_PNG.subarray(0, 8), 'invalid_image'],
+    [Buffer.alloc(ARTIFACT_IMAGE_PREVIEW_MAX_BYTES + 1), 'image_too_large'],
+  ] as const) {
+    await writeFile(path, content);
+    const response = await executeFilesystemWorkerRequest({
+      version: FILESYSTEM_WORKER_PROTOCOL_VERSION,
+      requestId: 'read-image',
+      operation: { kind: 'read', cwd, path, imagePurpose: 'chat' },
+      operationBoundary: {
+        filesystem: { entries: [{ path: cwd, access: 'read', scope: 'subtree' }] },
+      },
+      expectedTarget: {
+        enforcementPath: path,
+        access: 'read',
+        scope: 'exact',
+        targetType: 'file',
+        identity: 'unchecked',
+      },
+    });
+    assert.equal(response.ok, false);
+    if (!response.ok) assert.equal(response.error.code, expected);
+  }
+});
 
 for (const route of ['workspace', 'worker'] as const) {
   test(`${route} chat reads admit wide screenshots without relaxing ordinary Read`, async (t) => {

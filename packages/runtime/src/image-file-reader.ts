@@ -23,6 +23,56 @@ import {
   type FilesystemExecuteInput,
 } from './filesystem-executor.js';
 import { createLocalWorkspaceExecutor } from './workspace-executor.js';
+import { ImageFileError } from './image-file.js';
+import { FilesystemWorkerClientError } from './filesystem-worker/client.js';
+import { SandboxCommandError } from './sandbox/errors.js';
+
+type ImageFileReadFailure =
+  | 'not_found'
+  | 'not_allowed'
+  | 'too_large'
+  | 'unsupported_mime'
+  | 'read_failed';
+/** Normalizes filesystem backends at the image reader boundary. */
+export class ImageFileReadError extends Error {
+  constructor(
+    readonly reason: ImageFileReadFailure,
+    cause?: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : `Image read failed: ${reason}`, { cause });
+    this.name = 'ImageFileReadError';
+  }
+}
+
+function readFailure(error: unknown): ImageFileReadFailure {
+  if (error instanceof ImageFileError)
+    return error.code === 'ERR_IMAGE_TOO_LARGE' ? 'too_large' : 'unsupported_mime';
+  if (error instanceof SandboxCommandError) return 'not_allowed';
+  const code =
+    error instanceof FilesystemWorkerClientError
+      ? error.reason
+      : (error as NodeJS.ErrnoException | undefined)?.code;
+  switch (code) {
+    case 'image_too_large':
+      return 'too_large';
+    case 'invalid_image':
+      return 'unsupported_mime';
+    case 'ENOENT':
+    case 'ENOTDIR':
+    case 'not_found':
+      return 'not_found';
+    case 'EACCES':
+    case 'EPERM':
+    case 'filesystem_denied':
+    case 'path_denied':
+    case 'sandbox_denied':
+    case 'sandbox_required':
+    case 'sandbox_boundary_required':
+      return 'not_allowed';
+    default:
+      return 'read_failed';
+  }
+}
 /** The same filesystem boundary as Read, without model snapshots or tool execution. */
 export function createImageFileReader(
   options: Pick<
@@ -37,11 +87,15 @@ export function createImageFileReader(
   });
   return async (input: Omit<FilesystemExecuteInput, 'operation'> & { path: string }) => {
     const { path, ...context } = input;
-    const result = await filesystem.execute({
-      ...context,
-      operation: { kind: 'read', path, imagePurpose: 'chat' },
-    });
-    if (result.kind !== 'read_image') throw new Error('Not a supported raster image');
+    const result = await filesystem
+      .execute({
+        ...context,
+        operation: { kind: 'read', path, imagePurpose: 'chat' },
+      })
+      .catch((error: unknown) => {
+        throw new ImageFileReadError(readFailure(error), error);
+      });
+    if (result.kind !== 'read_image') throw new ImageFileReadError('unsupported_mime');
     return { bytes: result.bytes, mimeType: result.mimeType };
   };
 }

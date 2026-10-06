@@ -38,6 +38,15 @@ export interface WorkspaceFileReadOptions {
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
 export type ImageMimeType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
 
+export class ImageFileError extends Error {
+  constructor(
+    readonly code: 'ERR_IMAGE_TOO_LARGE' | 'ERR_INVALID_IMAGE',
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export function isSupportedImagePath(path: string): boolean {
   return IMAGE_EXTENSIONS.has(extname(path).toLowerCase());
 }
@@ -86,7 +95,11 @@ export function validateImageBytes(
   if (bytes.length > (purpose === 'chat' ? ARTIFACT_IMAGE_PREVIEW_MAX_BYTES : MAX_READ_IMAGE_BYTES))
     throw imageTooLargeError(purpose);
   const mimeType = sniffImageMime(bytes);
-  if (!mimeType) throw new Error('Image content is not a supported PNG, JPEG, GIF, or WebP file.');
+  if (!mimeType)
+    throw new ImageFileError(
+      'ERR_INVALID_IMAGE',
+      'Image content is not a supported PNG, JPEG, GIF, or WebP file.',
+    );
   const dimensions = imageDimensionsFromData(bytes);
   if (
     !dimensions ||
@@ -97,7 +110,10 @@ export function validateImageBytes(
     dimensions.width <= 0 ||
     dimensions.height <= 0
   ) {
-    throw new Error('Image dimensions could not be read; verify the image file is valid.');
+    throw new ImageFileError(
+      'ERR_INVALID_IMAGE',
+      'Image dimensions could not be read; verify the image file is valid.',
+    );
   }
   if (purpose === 'model' && Math.max(dimensions.width, dimensions.height) > MAX_MODEL_IMAGE_EDGE) {
     throw new Error(
@@ -108,13 +124,11 @@ export function validateImageBytes(
 }
 
 function imageTooLargeError(purpose: 'model' | 'chat' = 'model'): Error {
-  return Object.assign(
-    new Error(
-      purpose === 'chat'
-        ? 'Image exceeds the 2 MiB chat preview limit; resize it before publishing.'
-        : READ_IMAGE_TOO_LARGE_MESSAGE,
-    ),
-    { code: 'ERR_IMAGE_TOO_LARGE' },
+  return new ImageFileError(
+    'ERR_IMAGE_TOO_LARGE',
+    purpose === 'chat'
+      ? 'Image exceeds the 2 MiB chat preview limit; resize it before publishing.'
+      : READ_IMAGE_TOO_LARGE_MESSAGE,
   );
 }
 

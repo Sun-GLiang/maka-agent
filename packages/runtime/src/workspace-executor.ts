@@ -561,9 +561,12 @@ function assertInsideCwd(
   label: string,
 ): string {
   if (!isPathInside(root, candidate)) {
-    throw new Error(
-      `${label} path must stay inside session cwd ${JSON.stringify(root)}; ` +
-        `received ${JSON.stringify(inputPath)}, which resolves to ${JSON.stringify(candidate)}.`,
+    throw Object.assign(
+      new Error(
+        `${label} path must stay inside session cwd ${JSON.stringify(root)}; ` +
+          `received ${JSON.stringify(inputPath)}, which resolves to ${JSON.stringify(candidate)}.`,
+      ),
+      { code: 'EACCES' },
     );
   }
   return candidate;

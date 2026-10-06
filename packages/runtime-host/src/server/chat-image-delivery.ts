@@ -18,6 +18,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { ImageFileReadError } from '@maka/runtime/image-file-reader';
 import type { CompleteEvent, TextCompleteEvent, TextDeltaEvent } from '@maka/core/events';
 import { foldAssistantDelta } from '@maka/core/events';
 import {
@@ -35,7 +36,6 @@ import type { SessionAdmissionGate } from './session-admission-gate.js';
 import { chatImageSources } from './chat-image-markdown.js';
 import { abortable } from '../client/wait-for-ready.js';
 import {
-  checkedChatImage,
   downloadChatImage,
   ImageSourceError,
   localImagePath,
@@ -138,7 +138,8 @@ export class ChatImageDeliveryService {
       identity.source,
     );
     const metadata = record?.imageDelivery;
-    if (metadata?.status === 'ready') return { status: 'ready', artifactId: record!.id };
+    if (metadata?.status === 'ready' && !identity.retry)
+      return { status: 'ready', artifactId: record!.id };
     if (metadata?.status === 'failed' && !identity.retry)
       return { status: 'failed', reason: metadata.reason! };
     if (this.#jobs.has(deliveryKey(identity))) return { status: 'pending' };
@@ -149,14 +150,21 @@ export class ChatImageDeliveryService {
       if (text === undefined || !chatImageSources(text).includes(identity.source))
         return { status: 'unavailable' };
     }
-    if (metadata?.status === 'failed') {
-      await this.ports.admission.runOrJoin(identity.sessionId, () =>
-        this.ports.artifacts.deleteOwnedArtifactInSession(
+    if (metadata?.status === 'failed' || metadata?.status === 'ready') {
+      return this.ports.admission.runOrJoin(identity.sessionId, async () => {
+        if (this.#closed) return { status: 'unavailable' };
+        if (this.#jobs.has(deliveryKey(identity))) return { status: 'pending' };
+        if (this.#jobs.size >= 128) return { status: 'failed', reason: 'queue_full' };
+        await this.ports.artifacts.deleteOwnedArtifactInSession(
           identity.sessionId,
           record!.id,
           'tool_result_projection',
-        ),
-      );
+        );
+        // Capture outlives this admission and takes its own write admissions.
+        return this.ports.admission.detach(() => this.#enqueue(identity))
+          ? { status: 'pending' }
+          : { status: 'failed', reason: 'queue_full' };
+      });
     }
     return this.#enqueue(identity)
       ? { status: 'pending' }
@@ -216,6 +224,7 @@ export class ChatImageDeliveryService {
     );
     if (existing?.imageDelivery?.status !== 'pending' && existing) return;
     const metadata = { messageId, source };
+    const pendingId = existing?.id ?? `chat_image_request_${deliveryKey(identity)}`;
     const base = {
       sessionId,
       turnId,
@@ -226,10 +235,18 @@ export class ChatImageDeliveryService {
       this.ports.admission.runOrJoin(sessionId, async () => {
         if (this.#abort.signal.aborted || !(await this.ports.isPresent(sessionId))) return;
         await this.ports.artifacts.create(input);
+        // Retain a pending request only until a terminal record is durable.
+        // A crash between these writes still replays the terminal record.
+        if (input.imageDelivery?.status !== 'pending')
+          await this.ports.artifacts.deleteOwnedArtifactInSession(
+            sessionId,
+            pendingId,
+            'tool_result_projection',
+          );
       });
     await publish({
       ...base,
-      id: `chat_image_request_${deliveryKey(identity)}`,
+      id: pendingId,
       kind: 'file',
       content: '',
       imageDelivery: { ...metadata, status: 'pending' },
@@ -240,9 +257,7 @@ export class ChatImageDeliveryService {
     try {
       const path = localImagePath(source);
       if (path !== undefined)
-        image = checkedChatImage(
-          (await abortable(() => this.ports.readLocalImage(sessionId, path, signal), signal)).bytes,
-        );
+        image = await abortable(() => this.ports.readLocalImage(sessionId, path, signal), signal);
       else {
         try {
           image = await (this.ports.download ?? downloadChatImage)(source, signal);
@@ -328,20 +343,9 @@ function deliveryKey(i: DeliveryIdentity): string {
 }
 function failureReason(error: unknown, source: string): ImageDeliveryFailure {
   if (error instanceof ImageSourceError) return error.reason;
+  if (error instanceof ImageFileReadError) return error.reason;
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  if (
-    code === 'ERR_IMAGE_TOO_LARGE' ||
-    (error instanceof Error && /exceeds.*(?:MiB|MB)/i.test(error.message))
-  )
-    return 'too_large';
-  if (error instanceof Error && /supported raster|requires a PNG|not.*image/i.test(error.message))
-    return 'unsupported_mime';
   if (code === 'ENOENT' || code === 'ENOTDIR') return 'not_found';
-  if (
-    code === 'EACCES' ||
-    code === 'EPERM' ||
-    (error instanceof Error && /sandbox|outside|permission/i.test(error.message))
-  )
-    return 'not_allowed';
+  if (code === 'EACCES' || code === 'EPERM') return 'not_allowed';
   return /^https?:/i.test(source) ? 'download_failed' : 'read_failed';
 }
