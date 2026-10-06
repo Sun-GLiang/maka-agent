@@ -32,10 +32,22 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64');
 let appServer, imageServer, browser, appUrl, imageUrl;
 let requests = [], failedOnce = false;
+let releaseImage;
+let releaseAttachment;
+const delayedImage = new Promise(resolve => { releaseImage = resolve; });
+const delayedAttachment = new Promise(resolve => { releaseAttachment = resolve; });
 
 before(async () => {
+  const screenshot = await readFile(new URL('../../../docs/images/pr/chat-image-delivery/after.png', import.meta.url));
   imageServer = createServer((req, res) => {
     requests.push({ path: req.url, referer: req.headers.referer });
+    if (req.url === '/delayed.png') {
+      void delayedImage.then(() => { res.setHeader('Content-Type', 'image/png'); res.end(png); });
+      return;
+    }
+    if (req.url === '/screenshot.png') {
+      res.setHeader('Content-Type', 'image/png'); res.end(screenshot); return;
+    }
     if (req.url === '/retry.png' && !failedOnce) {
       failedOnce = true;
       res.writeHead(404).end();
@@ -46,6 +58,25 @@ before(async () => {
   });
   await new Promise(resolve => imageServer.listen(0, '127.0.0.1', resolve));
   imageUrl = `http://127.0.0.1:${imageServer.address().port}`;
+  const destinations = {
+    'angle-saved': '![Screenshot](</tmp/my image.png>)',
+    'title-saved': `![Screenshot](${imageUrl}/image.png "Screenshot title")`,
+    'escaped-saved': String.raw`![Screenshot](/tmp/a\(1\).png)`,
+    'reference-saved': '![Screenshot][picture]\n\n[picture]: </tmp/my "image".png>',
+    'attachment-title': '![Screenshot](maka://runtime/attachments/image-1 "Screenshot title")',
+    'geometry-remote': `![Screenshot](${imageUrl}/delayed.png)\n\nFollowing paragraph`,
+    'geometry-saved': '![Screenshot](/tmp/private.png)\n\nFollowing paragraph',
+    'streaming-angle-race': '![Screenshot](</tmp/my image.png>)',
+    screenshot: `![Screenshot](${imageUrl}/screenshot.png)`,
+  };
+  const canonicalSources = {
+    'angle-saved': ['/tmp/my image.png'],
+    'title-saved': [`${imageUrl}/image.png`],
+    'escaped-saved': ['/tmp/a(1).png'],
+    'reference-saved': ['/tmp/my "image".png'],
+    'geometry-saved': ['/tmp/private.png'],
+    'streaming-angle-race': ['/tmp/my image.png'],
+  };
   const bundle = await build({
     stdin: { contents: `
       import React from 'react';
@@ -58,18 +89,23 @@ before(async () => {
       import {SessionAttachmentProvider} from './packages/ui/dist/attachment-image.js';
       import './apps/desktop/src/renderer/styles.css';
       const mode=new URLSearchParams(location.search).get('case') || 'remote';
+      const destinations=${JSON.stringify(destinations)};
+      const canonicalSources=${JSON.stringify(canonicalSources)};
       let reads=0; window.imageReads=0; window.deliveryQueries=0; window.deliveryReady=false; window.deliveryRetries=0;
       const race=mode.endsWith('-race');
-      const text=mode==='attachment' ? '![Screenshot](maka://runtime/attachments/image-1)' :
+      const text=destinations[mode] ?? (mode==='attachment' ? '![Screenshot](maka://runtime/attachments/image-1)' :
         mode==='local' || mode==='local-saved' || race ? '![Screenshot](/tmp/private.png)' :
-        '![Screenshot](${imageUrl}/'+(mode==='retry' ? 'retry.png' : 'image.png')+')';
+        '![Screenshot](${imageUrl}/'+(mode==='retry' ? 'retry.png' : 'image.png')+')');
       const root=createRoot(document.getElementById('root'));
       const readBytes=async()=>{
+        if(mode==='geometry-saved') await fetch('/release-attachment');
         reads++; window.imageReads=reads; return (mode==='attachment' || mode==='read-retry-saved') && reads===1 ? {ok:false,reason:'read_failed'} :
           {ok:true,base64:mode==='corrupt-saved' && !window.deliveryRetries ? 'iVBORw0KGgo=' : '${png.toString('base64')}',mimeType:'image/png'};
       };
       const resolveDelivery=mode.endsWith('saved') || mode==='saving' || race ? async(_session,request)=>{
         window.deliveryQueries++;
+        window.deliverySource=request.source;
+        if(canonicalSources[mode] && !canonicalSources[mode].includes(request.source)) return {status:'unavailable'};
         if(request.retry) window.deliveryRetries++;
         if(race) return window.deliveryReady ? {status:'ready',artifactId:'saved-image'} : {status:'unavailable'};
         await new Promise(resolve=>setTimeout(resolve,100));
@@ -94,6 +130,7 @@ before(async () => {
   const index = await readFile(new URL('../../../apps/desktop/src/renderer/index.html', import.meta.url), 'utf8');
   const csp = index.match(/http-equiv="Content-Security-Policy"\s+content="([^"]+)"/)[1];
   appServer = createServer((req, res) => {
+    if (req.url === '/release-attachment') { void delayedAttachment.then(() => res.end()); return; }
     if (req.url === '/app.js') { res.setHeader('Content-Type', 'text/javascript'); res.end(js); }
     else if (req.url === '/app.css') { res.setHeader('Content-Type', 'text/css'); res.end(css); }
     else {
@@ -107,6 +144,7 @@ before(async () => {
 });
 
 after(async () => {
+  releaseImage(); releaseAttachment();
   await browser?.close();
   for (const server of [appServer, imageServer]) if (server) await new Promise(resolve => server.close(resolve));
 });
@@ -231,7 +269,7 @@ test('a new remote image previews during archival and switches to saved bytes af
   } finally { await page.close(); }
 });
 
-for (const scenario of ['streaming-race', 'settled-race']) {
+for (const scenario of ['streaming-race', 'settled-race', 'streaming-angle-race']) {
   test(`${scenario}: an unavailable live source recovers in place once Host archival completes`, async () => {
     const page = await pageFor(scenario);
     try {
@@ -248,3 +286,65 @@ for (const scenario of ['streaming-race', 'settled-race']) {
     } finally { await page.close(); }
   });
 }
+
+for (const scenario of ['angle-saved', 'title-saved', 'escaped-saved', 'reference-saved', 'attachment-title']) {
+  test(`${scenario}: standard Markdown destinations resolve to saved bytes without origin requests`, async () => {
+    requests = [];
+    const page = await pageFor(scenario);
+    try {
+      await loaded(page);
+      assert.match(await page.locator('img').getAttribute('src'), /^data:image\/png;base64,/);
+      assert.deepEqual(requests, []);
+      assert.equal(await page.evaluate(() => window.imageReads), 1);
+      if (scenario !== 'attachment-title') {
+        assert.equal(await page.evaluate(() => window.deliveryQueries), 1);
+      }
+    } finally { await page.close(); }
+  });
+}
+
+for (const scenario of ['geometry-remote', 'geometry-saved']) {
+  test(`${scenario}: loading and ready images preserve the position of subsequent content`, async () => {
+    const page = await pageFor(scenario);
+    try {
+      await page.getByText('Loading image…', { exact: true }).waitFor();
+      const before = await page.getByText('Following paragraph', { exact: true }).boundingBox();
+      if (scenario === 'geometry-remote') releaseImage(); else releaseAttachment();
+      await loaded(page);
+      await page.getByText('Loading image…', { exact: true }).waitFor({ state: 'hidden' });
+      const after = await page.getByText('Following paragraph', { exact: true }).boundingBox();
+      assert.equal(after.y, before.y);
+    } finally {
+      if (scenario === 'geometry-remote') releaseImage(); else releaseAttachment();
+      await page.close();
+    }
+  });
+}
+
+test('image frames fit narrow viewports without distorting screenshots or limiting the enlarged preview', async () => {
+  const page = await pageFor('screenshot');
+  try {
+    await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth > 1));
+    for (const width of [720, 360]) {
+      await page.setViewportSize({ width, height: 600 });
+      const geometry = await page.locator('.maka-markdown-image-preview img').evaluate(image => {
+        const frame = image.closest('.maka-markdown-image-frame').getBoundingClientRect();
+        const box = image.getBoundingClientRect();
+        return { frame: { x: frame.x, y: frame.y, right: frame.right, bottom: frame.bottom },
+          box: { x: box.x, y: box.y, right: box.right, bottom: box.bottom, width: box.width, height: box.height },
+          ratio: image.naturalWidth / image.naturalHeight };
+      });
+      assert.ok(Math.abs(geometry.box.width / geometry.box.height - geometry.ratio) < 0.01);
+      assert.ok(geometry.box.x >= geometry.frame.x && geometry.box.right <= geometry.frame.right + 1);
+      assert.ok(geometry.box.y >= geometry.frame.y && geometry.box.bottom <= geometry.frame.bottom + 1);
+      assert.ok(geometry.frame.right <= width);
+    }
+    await page.getByRole('button', { name: 'Enlarge image: Screenshot', exact: true }).click();
+    await page.waitForFunction(() => document.images.length > 1);
+    assert.equal(await page.locator('.maka-markdown-image-preview > img').count(), 1);
+    const dialog = await page.getByRole('dialog').boundingBox();
+    const frame = await page.locator('.maka-markdown-image-frame').boundingBox();
+    assert.ok(dialog.height > frame.height);
+    assert.equal(await page.getByRole('dialog').locator('img').getAttribute('src'), await page.locator('.maka-markdown-image-preview > img').getAttribute('src'));
+  } finally { await page.close(); }
+});
