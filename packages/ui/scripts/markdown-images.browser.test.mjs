@@ -26,6 +26,7 @@ import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { crc32, deflateSync } from 'node:zlib';
 import { build } from 'esbuild';
 import { chromium } from '@playwright/test';
 
@@ -39,8 +40,33 @@ let releaseAttachment;
 const delayedImage = new Promise(resolve => { releaseImage = resolve; });
 const delayedAttachment = new Promise(resolve => { releaseAttachment = resolve; });
 
+// Keep the screenshot's original dimensions without committing evidence images.
+function screenshotFixture() {
+  const width = 900, height = 730;
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4);
+  header[8] = 8; header[9] = 2; // 8-bit RGB.
+  const stride = 1 + width * 3;
+  const pixels = Buffer.alloc(stride * height, 220);
+  for (let row = 0; row < height; row++) {
+    pixels.fill(row < height / 2 ? 120 : 220, row * stride, (row + 1) * stride);
+    pixels[row * stride] = 0; // PNG filter: None.
+  }
+  const chunk = (type, data) => {
+    const result = Buffer.alloc(data.length + 12);
+    result.writeUInt32BE(data.length, 0); result.write(type, 4, 'ascii');
+    data.copy(result, 8);
+    result.writeUInt32BE(crc32(result.subarray(4, data.length + 8)), data.length + 8);
+    return result;
+  };
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk('IHDR', header), chunk('IDAT', deflateSync(pixels)), chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
 before(async () => {
-  const screenshot = await readFile(new URL('../../../docs/images/pr/chat-image-delivery/after.png', import.meta.url));
+  const screenshot = screenshotFixture();
   imageServer = createServer((req, res) => {
     requests.push({ path: req.url, referer: req.headers.referer });
     if (req.url === '/delayed.png') {
