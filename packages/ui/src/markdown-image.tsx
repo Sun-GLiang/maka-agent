@@ -55,6 +55,8 @@ function ImageResource(props: { src: string; alt: string }) {
   const artifactId = explicit?.artifactId ?? (delivery.status === 'ready' ? delivery.artifactId : undefined);
   const image = useAttachmentImage(visible && artifactId ? { artifactId } : undefined);
   const [failedSource, setFailedSource] = useState<string>();
+  // Keep measured badge geometry across URL-to-attachment switches and retries.
+  const [compactSize, setCompactSize] = useState<{ width: number; height: number }>();
   const [attempt, setAttempt] = useState(0);
   const remote = isWebImage(props.src);
   const source = artifactId ? image.src : visible && remote && (!delivery.available || delivery.checked) ? props.src : undefined;
@@ -76,28 +78,33 @@ function ImageResource(props: { src: string; alt: string }) {
     : explicit && image.status === 'unavailable' ? copy.imageUnavailable
     : delivery.status === 'failed' ? copy.imageArchiveFailure(delivery.reason)
     : delivery.status === 'pending' || artifactId ? copy.imageLoading : copy.imageUnsupported;
-  const hasFrame = !visible || !!source || !!artifactId || delivery.status === 'pending';
-  return <span ref={anchor} className={`maka-markdown-image-resource${hasFrame ? ' maka-markdown-image-frame' : ''}`} data-maka-image-state={message ? failed ? 'failed' : 'loading' : 'ready'}>
+  const hasFrame = (!visible || !!source || !!artifactId || delivery.status === 'pending') && !(compactSize && failed);
+  return <span ref={anchor} className={`maka-markdown-image-resource${hasFrame ? compactSize ? ' maka-markdown-image-compact' : ' maka-markdown-image-frame' : ''}`}
+    style={hasFrame && compactSize ? { minWidth: compactSize.width, minHeight: compactSize.height } : undefined}
+    data-maka-image-state={message ? failed ? 'failed' : 'loading' : 'ready'}>
     {message ? <span className="maka-markdown-image-placeholder">
       {props.alt && <span className="maka-markdown-image-caption">{props.alt}</span>}
       <span role="status">{hasFrame && !failed && delivery.status !== 'failed' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
       {(failed || delivery.status === 'failed') && sourceActions}
-    </span> : source && <DisplayImage key={`${source}\0${attempt}`} src={source} alt={props.alt} onError={() => setFailedSource(source)} />}
+    </span> : source && <DisplayImage key={`${source}\0${attempt}`} src={source} alt={props.alt} compactSize={compactSize} onError={() => setFailedSource(source)}
+      onLoad={(width, height) => setCompactSize(width <= 320 && height <= 64 ? { width, height } : undefined)} />}
     {!explicit && delivery.status === 'pending' && remote && source && <span className="maka-markdown-image-saving" role="status">{copy.imageSaving}</span>}
     {!explicit && delivery.status === 'failed' && remote && source && !failed && <span className="maka-markdown-image-saving" role="status">
       {copy.imageArchiveFailure(delivery.reason)} {sourceActions}
     </span>}
   </span>;
 }
-function DisplayImage(props: { src: string; alt: string; onError(): void }) {
+function DisplayImage(props: { src: string; alt: string; compactSize?: { width: number; height: number }; onError(): void; onLoad(width: number, height: number): void }) {
   const copy = getSharedUiCopy(useUiLocale()).markdown;
   const [loaded, setLoaded] = useState(false);
   const lightbox = useLightbox({ media: { src: props.src, alt: props.alt }, hasZoom: true });
   return <>
-    <span className="maka-markdown-image-preview">
+    <span className="maka-markdown-image-preview" style={props.compactSize ? { width: props.compactSize.width, height: props.compactSize.height } : undefined}>
       {!loaded && <span className="maka-markdown-image-loading" role="status"><Spinner size="sm" shade="subtle" aria-hidden="true" /> {copy.imageLoading}</span>}
       <img src={props.src} alt={props.alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
-          className="maka-markdown-attachment-image" onLoad={() => setLoaded(true)} onError={props.onError} />
+          className="maka-markdown-attachment-image" onLoad={event => {
+            setLoaded(true); props.onLoad(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight);
+          }} onError={props.onError} />
       {loaded && <span className="maka-markdown-image-expand">
         <IconButton icon={<Maximize2 size={16} />} size="sm" label={copy.imageExpand(props.alt)} onClick={() => lightbox.open()} />
       </span>}

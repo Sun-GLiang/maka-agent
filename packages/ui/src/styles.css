@@ -639,7 +639,9 @@
   width: 640px;
   aspect-ratio: 4 / 3;
 }
-.maka-markdown-image-frame > .maka-markdown-image-placeholder {
+.maka-markdown-image-compact { display: inline-flex; align-items: center; vertical-align: middle; }
+.maka-markdown-image-frame > .maka-markdown-image-placeholder,
+.maka-markdown-image-compact > .maka-markdown-image-placeholder {
   position: absolute;
   inset: 0;
   align-items: center;
@@ -653,10 +655,21 @@
   align-items: center;
   justify-content: center;
 }
+.maka-markdown-image-compact > .maka-markdown-image-preview { position: relative; flex-shrink: 0; }
 .maka-markdown-image-expand {
   position: absolute;
   inset-block-end: var(--space-2);
   inset-inline-end: var(--space-2);
+}
+/* Badge controls remain keyboard reachable without covering the badge at rest. */
+.maka-markdown-image-compact .maka-markdown-image-expand {
+  inset: auto 0 0 auto;
+  opacity: 0;
+  pointer-events: none;
+}
+.maka-markdown-image-compact:is(:hover, :focus-within) .maka-markdown-image-expand {
+  opacity: 1;
+  pointer-events: auto;
 }
 .maka-markdown-image-preview img { margin: 0; max-height: 100%; max-width: 100%; object-fit: contain; }
 .maka-markdown-image-loading {
@@ -679,6 +692,10 @@
   border-radius: var(--radius-surface);
   color: var(--muted-foreground);
   font-size: var(--maka-font-size-sm);
+}
+.maka-markdown-image-compact > .maka-markdown-image-saving {
+  position: static;
+  max-width: none;
 }
 
 /* Markdown code renderers are custom components so Mermaid can be loaded only
