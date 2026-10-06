@@ -22,11 +22,8 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { sniffAttachmentMimeType } from '@maka/core/attachments';
-import {
-  ARTIFACT_IMAGE_PREVIEW_MAX_BYTES,
-  normalizeArtifactImagePreviewMime,
-} from '@maka/core/artifacts';
+import { ARTIFACT_IMAGE_PREVIEW_MAX_BYTES } from '@maka/core/artifacts';
+import { ImageFileError, validateImageBytes } from '@maka/runtime/image-file';
 import type { ImageDeliveryFailure } from '@maka/core/image-delivery';
 export class ImageSourceError extends Error {
   constructor(readonly reason: ImageDeliveryFailure) {
@@ -38,15 +35,14 @@ export interface ChatImageBytes {
   readonly mimeType: string;
 }
 export function checkedChatImage(bytes: Uint8Array): ChatImageBytes {
-  if (bytes.byteLength > ARTIFACT_IMAGE_PREVIEW_MAX_BYTES) throw new ImageSourceError('too_large');
-  const mimeType = sniffAttachmentMimeType(bytes);
-  if (
-    !mimeType ||
-    !normalizeArtifactImagePreviewMime(mimeType) ||
-    !['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mimeType)
-  )
-    throw new ImageSourceError('unsupported_mime');
-  return { bytes, mimeType };
+  try {
+    return validateImageBytes(bytes, 'chat');
+  } catch (error) {
+    if (!(error instanceof ImageFileError)) throw error;
+    throw new ImageSourceError(
+      error.code === 'ERR_IMAGE_TOO_LARGE' ? 'too_large' : 'unsupported_mime',
+    );
+  }
 }
 export function localImagePath(source: string): string | undefined {
   if (/^https?:/i.test(source)) return undefined;

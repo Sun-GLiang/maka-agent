@@ -251,6 +251,8 @@ export const FilesystemWorkerErrorCodeSchema = z.enum([
   'grep_unavailable',
   'sandbox_denied',
   'filesystem_denied',
+  'image_too_large',
+  'invalid_image',
   'filesystem_error',
   // The worker may have applied the mutation before it lost the ability to
   // report back (e.g. it wrote the file then the post-write identity check

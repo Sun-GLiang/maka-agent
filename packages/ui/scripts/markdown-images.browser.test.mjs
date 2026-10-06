@@ -58,18 +58,19 @@ before(async () => {
       import {SessionAttachmentProvider} from './packages/ui/dist/attachment-image.js';
       import './apps/desktop/src/renderer/styles.css';
       const mode=new URLSearchParams(location.search).get('case') || 'remote';
-      let reads=0; window.imageReads=0; window.deliveryQueries=0; window.deliveryReady=false;
+      let reads=0; window.imageReads=0; window.deliveryQueries=0; window.deliveryReady=false; window.deliveryRetries=0;
       const race=mode.endsWith('-race');
       const text=mode==='attachment' ? '![Screenshot](maka://runtime/attachments/image-1)' :
         mode==='local' || mode==='local-saved' || race ? '![Screenshot](/tmp/private.png)' :
         '![Screenshot](${imageUrl}/'+(mode==='retry' ? 'retry.png' : 'image.png')+')';
       const root=createRoot(document.getElementById('root'));
       const readBytes=async()=>{
-        reads++; window.imageReads=reads; return mode==='attachment' && reads===1 ? {ok:false,reason:'read_failed'} :
-          {ok:true,base64:'${png.toString('base64')}',mimeType:'image/png'};
+        reads++; window.imageReads=reads; return (mode==='attachment' || mode==='read-retry-saved') && reads===1 ? {ok:false,reason:'read_failed'} :
+          {ok:true,base64:mode==='corrupt-saved' && !window.deliveryRetries ? 'iVBORw0KGgo=' : '${png.toString('base64')}',mimeType:'image/png'};
       };
-      const resolveDelivery=mode.endsWith('saved') || mode==='saving' || race ? async()=>{
+      const resolveDelivery=mode.endsWith('saved') || mode==='saving' || race ? async(_session,request)=>{
         window.deliveryQueries++;
+        if(request.retry) window.deliveryRetries++;
         if(race) return window.deliveryReady ? {status:'ready',artifactId:'saved-image'} : {status:'unavailable'};
         await new Promise(resolve=>setTimeout(resolve,100));
         return mode==='saving' && window.deliveryQueries===1 ? {status:'pending'} : {status:'ready',artifactId:'saved-image'};
@@ -155,6 +156,33 @@ test('attachment read failure recovers in place, and local paths explain how to 
     await page.getByText('This image address cannot be displayed. Send the image as a chat attachment.').waitFor();
     assert.equal(await page.locator('img').count(), 0);
     assert.equal(await page.getByRole('button', { name: 'Load image' }).count(), 0);
+  } finally { await page.close(); }
+});
+
+test('a saved image decode failure invalidates both caches and recaptures its source on retry', async () => {
+  const page = await pageFor('corrupt-saved');
+  try {
+    await page.getByText('Could not load the image. Try again.').waitFor();
+    assert.equal(await page.evaluate(() => window.imageReads), 1);
+    await page.getByRole('button', { name: 'Retry', exact: true }).click();
+    await page.waitForFunction(() => [...document.images].some(img => img.src.startsWith('data:image/png;') && img.naturalWidth === 1));
+    assert.equal(await page.evaluate(() => window.deliveryRetries), 1);
+    assert.equal(await page.evaluate(() => window.deliveryQueries), 2);
+    assert.equal(await page.evaluate(() => window.imageReads), 2);
+  } finally { await page.close(); }
+});
+
+test('a transient saved attachment read retries its bytes without invalidating archival or touching origin', async () => {
+  requests = [];
+  const page = await pageFor('read-retry-saved');
+  try {
+    await page.getByText('Could not load the image. Try again.').waitFor();
+    await page.getByRole('button', { name: 'Retry', exact: true }).click();
+    await loaded(page);
+    assert.equal(await page.evaluate(() => window.deliveryRetries), 0);
+    assert.equal(await page.evaluate(() => window.deliveryQueries), 1);
+    assert.equal(await page.evaluate(() => window.imageReads), 2);
+    assert.deepEqual(requests, []);
   } finally { await page.close(); }
 });
 
