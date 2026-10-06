@@ -19,12 +19,13 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, writeFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
-import { createImageFileReader } from '@maka/runtime/image-file-reader';
+import { createImageFileReader, ImageFileReadError } from '@maka/runtime/image-file-reader';
 import { FilesystemWorkerClientError } from '@maka/runtime/filesystem-worker';
 import { openInteractiveArtifactStoreForWrite } from '@maka/storage/artifact-stores';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
@@ -234,6 +235,137 @@ test('automatically saves a local delivery without any UI request; deletion and 
     await f.close();
   }
 });
+test('encoded local Markdown images are archived under the original source and replay after deletion', async () => {
+  const reader = createImageFileReader();
+  const f = await fixture(undefined, (_session, path, abortSignal) =>
+    reader({ path, cwd: f.root, abortSignal }),
+  );
+  try {
+    const directory = join(f.root, 'My Project');
+    await mkdir(directory);
+    for (const name of ['screen shot.png', '截图.png', 'literal%20name.png']) {
+      const path = join(directory, name);
+      const source = `${f.root}/My%20Project/${encodeURIComponent(name)}`;
+      await writeFile(path, PNG);
+      observe(f.service, source);
+      await f.service.waitForIdle();
+      await rm(path);
+      const result = await f.service.resolve({ ...REQUEST, source });
+      assert.equal(result.status, 'ready', source);
+      if (result.status !== 'ready') continue;
+      const bytes = await f.authority.store.readBinaryInSession(
+        REQUEST.sessionId,
+        result.artifactId,
+      );
+      assert.equal(bytes.ok, true);
+      if (bytes.ok) assert.equal(bytes.base64, PNG.toString('base64'));
+    }
+    assert.deepEqual(f.errors, []);
+  } finally {
+    await f.close();
+  }
+});
+
+test('literal percent filenames retain precedence and file URLs are decoded only once', async () => {
+  const paths: string[] = [];
+  const reader = createImageFileReader();
+  const f = await fixture(undefined, (_session, path, abortSignal) => {
+    paths.push(path);
+    return reader({ path, cwd: f.root, abortSignal });
+  });
+  try {
+    for (const name of ['literal%20name.png', '100%.png', 'invalid%E4.png']) {
+      const path = join(f.root, name);
+      await writeFile(path, PNG);
+      if (name.includes('%20')) await writeFile(path.replace('%20', ' '), 'wrong source');
+      for (const source of [path, pathToFileURL(path).href]) {
+        paths.length = 0;
+        observe(f.service, source);
+        await f.service.waitForIdle();
+        assert.equal((await f.service.resolve({ ...REQUEST, source })).status, 'ready', source);
+        assert.deepEqual(paths, [path]);
+      }
+    }
+    assert.deepEqual(f.errors, []);
+  } finally {
+    await f.close();
+  }
+});
+
+test('encoded local fallback preserves filesystem denial and validation failures', async () => {
+  for (const reason of ['not_allowed', 'too_large', 'unsupported_mime', 'read_failed'] as const) {
+    const paths: string[] = [];
+    const f = await fixture(undefined, async (_session, path) => {
+      paths.push(path);
+      throw new ImageFileReadError(reason);
+    });
+    try {
+      const source = '/tmp/My%20Project/image.png';
+      observe(f.service, source);
+      await f.service.waitForIdle();
+      assert.deepEqual(await f.service.resolve({ ...REQUEST, source }), {
+        status: 'failed',
+        reason,
+      });
+      assert.deepEqual(paths, [source]);
+      assert.deepEqual(f.errors, []);
+    } finally {
+      await f.close();
+    }
+  }
+});
+
+test('decoded local images still pass through the Read workspace boundary', async () => {
+  const reader = createImageFileReader();
+  const paths: string[] = [];
+  const f = await fixture(undefined, (_session, path, abortSignal) => {
+    paths.push(path);
+    return reader({ path, cwd: join(f.root, 'workspace'), abortSignal });
+  });
+  try {
+    await mkdir(join(f.root, 'workspace'));
+    await writeFile(join(f.root, 'private image.png'), PNG);
+    const source = '%2e%2e/private%20image.png';
+    observe(f.service, source);
+    await f.service.waitForIdle();
+    assert.deepEqual(await f.service.resolve({ ...REQUEST, source }), {
+      status: 'failed',
+      reason: 'not_allowed',
+    });
+    assert.deepEqual(paths, [source, '../private image.png']);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    await f.close();
+  }
+});
+
+test('missing encoded sources never double-decode file URLs or retry invalid escapes', async () => {
+  for (const source of [
+    'file:///tmp/missing%2520image.png',
+    '/tmp/missing%.png',
+    '/tmp/missing%E4.png',
+    '/tmp/missing%00.png',
+  ]) {
+    const paths: string[] = [];
+    const f = await fixture(undefined, async (_session, path) => {
+      paths.push(path);
+      throw new ImageFileReadError('not_found');
+    });
+    try {
+      observe(f.service, source);
+      await f.service.waitForIdle();
+      assert.deepEqual(await f.service.resolve({ ...REQUEST, source }), {
+        status: 'failed',
+        reason: 'not_found',
+      });
+      assert.equal(paths.length, 1, source);
+      assert.deepEqual(f.errors, []);
+    } finally {
+      await f.close();
+    }
+  }
+});
+
 test('remote delivery is downloaded once, remains replayable after the origin server disappears, and sends no credentials/referrer', async () => {
   const f = await fixture();
   let requests = 0;

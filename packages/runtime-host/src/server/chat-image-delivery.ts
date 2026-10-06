@@ -38,6 +38,7 @@ import { readyChatImageArtifact } from './chat-image-artifact.js';
 import { abortable } from '../client/wait-for-ready.js';
 import {
   downloadChatImage,
+  decodedLocalImagePath,
   ImageSourceError,
   localImagePath,
   type ChatImageBytes,
@@ -257,9 +258,25 @@ export class ChatImageDeliveryService {
     let image: ChatImageBytes;
     try {
       const path = localImagePath(source);
-      if (path !== undefined)
-        image = await abortable(() => this.ports.readLocalImage(sessionId, path, signal), signal);
-      else {
+      if (path !== undefined) {
+        try {
+          image = await abortable(() => this.ports.readLocalImage(sessionId, path, signal), signal);
+        } catch (error) {
+          // Keep literal percent filenames authoritative. Only a missing path
+          // gets one decoding attempt, through the same Read boundary and budget.
+          const decoded = decodedLocalImagePath(source);
+          if (
+            signal.aborted ||
+            failureReason(error, source) !== 'not_found' ||
+            decoded === undefined
+          )
+            throw error;
+          image = await abortable(
+            () => this.ports.readLocalImage(sessionId, decoded, signal),
+            signal,
+          );
+        }
+      } else {
         try {
           image = await (this.ports.download ?? downloadChatImage)(source, signal);
         } catch (error) {
