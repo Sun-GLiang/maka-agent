@@ -632,21 +632,54 @@
   gap: var(--space-3);
 }
 .maka-markdown-image-resource { display: inline-block; position: relative; max-width: 100%; }
+/* Source resolution and decoding share one responsive frame. Transient status
+   overlays never add a row or move the transcript when they disappear. */
+.maka-markdown-image-frame {
+  display: block;
+  width: 640px;
+  aspect-ratio: 4 / 3;
+}
+.maka-markdown-image-frame > .maka-markdown-image-placeholder {
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+}
 .maka-markdown-image-preview {
-  display: inline-block;
-  position: relative;
-  min-inline-size: var(--space-10);
-  min-block-size: var(--space-10);
-  max-width: 100%;
+  display: flex;
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
 }
 .maka-markdown-image-expand {
   position: absolute;
   inset-block-end: var(--space-2);
   inset-inline-end: var(--space-2);
 }
-.maka-markdown-image-preview img { margin: 0; max-height: 480px; object-fit: contain; }
-.maka-markdown-image-loading { display: block; color: var(--muted-foreground); font-size: var(--maka-font-size-sm); }
-.maka-markdown-image-saving { display: block; color: var(--muted-foreground); font-size: var(--maka-font-size-sm); margin-block-start: var(--space-1); }
+.maka-markdown-image-preview img { margin: 0; max-height: 100%; max-width: 100%; object-fit: contain; }
+.maka-markdown-image-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  color: var(--muted-foreground);
+  font-size: var(--maka-font-size-sm);
+}
+.maka-markdown-image-saving {
+  position: absolute;
+  inset-inline-start: var(--space-2);
+  inset-block-end: var(--space-2);
+  max-width: calc(100% - var(--space-10));
+  padding: var(--space-1) var(--space-2);
+  background: var(--background);
+  border-radius: var(--radius-surface);
+  color: var(--muted-foreground);
+  font-size: var(--maka-font-size-sm);
+}
 
 /* Markdown code renderers are custom components so Mermaid can be loaded only
    for settled Mermaid fences. Astryx skips its own spacing wrapper when

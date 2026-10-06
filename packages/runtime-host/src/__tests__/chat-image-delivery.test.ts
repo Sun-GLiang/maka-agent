@@ -178,6 +178,8 @@ test('parses real Markdown image nodes, including references and balanced destin
   const text = [
     '![one](</tmp/a (1).png>)',
     '![two][pic]',
+    '![titled](https://example.com/titled.png "Screenshot title")',
+    String.raw`![escaped](/tmp/a\(1\).png)`,
     '',
     '[pic]: https://example.com/a.png',
     '`![code](/tmp/secret.png)`',
@@ -187,7 +189,12 @@ test('parses real Markdown image nodes, including references and balanced destin
     '<img src="/tmp/html.png">',
     '![incomplete](https://example.com/',
   ].join('\n');
-  assert.deepEqual(chatImageSources(text), ['/tmp/a (1).png', 'https://example.com/a.png']);
+  assert.deepEqual(chatImageSources(text), [
+    '/tmp/a (1).png',
+    'https://example.com/a.png',
+    'https://example.com/titled.png',
+    '/tmp/a(1).png',
+  ]);
 });
 test('automatically saves a local delivery without any UI request; deletion and Host restart do not break replay', async () => {
   const f = await fixture();
