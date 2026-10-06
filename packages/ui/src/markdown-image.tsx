@@ -53,7 +53,10 @@ function ImageResource(props: { src: string; alt: string }) {
   const failed = !!source && failedSource === source || !!artifactId && image.status === 'failed';
   const retry = () => {
     setFailedSource(undefined); setAttempt(a => a + 1);
-    if (artifactId) image.retry(); else delivery.retry();
+    if (artifactId) image.retry();
+    // A transient byte-read failure retries the saved attachment. Only a
+    // browser decode failure invalidates automatic capture and rereads origin.
+    if (!artifactId || (!explicit && source && failedSource === source)) delivery.retry();
   };
   const sourceActions = <span className="maka-markdown-image-actions">
     <Button variant="ghost" size="sm" label={copy.imageRetry} onClick={retry} />

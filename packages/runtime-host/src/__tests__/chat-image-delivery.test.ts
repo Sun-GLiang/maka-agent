@@ -23,6 +23,9 @@ import { mkdtemp, readFile, writeFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
+import { createImageFileReader } from '@maka/runtime/image-file-reader';
+import { FilesystemWorkerClientError } from '@maka/runtime/filesystem-worker';
 import { openInteractiveArtifactStoreForWrite } from '@maka/storage/artifact-stores';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import {
@@ -46,6 +49,7 @@ const REQUEST = {
 async function fixture(
   limits?: { sessionBytes: number; workspaceBytes: number },
   readLocalImage?: ChatImageDeliveryPorts['readLocalImage'],
+  beforeCreate?: (input: Parameters<ChatImageDeliveryPorts['artifacts']['create']>[0]) => void,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'maka-image-delivery-'));
   const owner = await tryAcquireInteractiveRootOwner(
@@ -60,7 +64,14 @@ async function fixture(
   const messages = new Map<string, string>();
   let present = true;
   const service = new ChatImageDeliveryService({
-    artifacts: authority.store,
+    artifacts: {
+      create: async (input) => {
+        beforeCreate?.(input);
+        return authority.store.create(input);
+      },
+      findImageDelivery: authority.store.findImageDelivery,
+      deleteOwnedArtifactInSession: authority.store.deleteOwnedArtifactInSession,
+    },
     admission: new SessionAdmissionGate(),
     limits,
     isPresent: async () => present,
@@ -265,6 +276,212 @@ test('transient failure is persisted and is retried only on an explicit request'
     assert.equal((await f.service.resolve({ ...REQUEST, source })).status, 'ready');
     assert.equal(f.reads, 2);
   } finally {
+    await f.close();
+  }
+});
+
+test('truncated HTTP images are rejected, and an explicit retry archives the repaired source', async () => {
+  const f = await fixture();
+  let content = PNG.subarray(0, 8);
+  let requests = 0;
+  const server = createServer((_req, res) => {
+    requests++;
+    res.setHeader('Content-Type', 'image/png');
+    res.end(content);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const source = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`;
+  const identity = { ...REQUEST, source };
+  try {
+    observe(f.service, source);
+    await f.service.waitForIdle();
+    assert.deepEqual(await f.service.resolve(identity), {
+      status: 'failed',
+      reason: 'unsupported_mime',
+    });
+    assert.equal(requests, 1);
+    const failed = await f.authority.store.listPage(REQUEST.sessionId, { offset: 0, limit: 10 });
+    assert.equal(failed.total, 1);
+    assert.equal(failed.records[0]?.imageDelivery?.status, 'failed');
+    content = PNG;
+    assert.equal((await f.service.resolve({ ...identity, retry: true })).status, 'pending');
+    await f.service.waitForIdle();
+    const ready = await f.service.resolve(identity);
+    assert.equal(ready.status, 'ready');
+    assert.equal(requests, 2);
+    if (ready.status === 'ready') {
+      const bytes = await f.authority.store.readBinaryInSession(
+        identity.sessionId,
+        ready.artifactId,
+      );
+      assert.ok(bytes.ok);
+      if (bytes.ok) assert.equal(bytes.base64, PNG.toString('base64'));
+    }
+    assert.equal(
+      (await f.authority.store.listPage(identity.sessionId, { offset: 0, limit: 10 })).total,
+      1,
+    );
+    assert.deepEqual(f.errors, []);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await f.close();
+  }
+});
+
+test('explicit decode retries replace a legacy ready image and share concurrent capture', async () => {
+  const f = await fixture();
+  let requests = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const server = createServer((_req, res) => {
+    requests++;
+    void gate.then(() => {
+      res.setHeader('Content-Type', 'image/png');
+      res.end(PNG);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const source = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`;
+  const identity = { ...REQUEST, source };
+  try {
+    const broken = PNG.subarray(0, 8);
+    await f.authority.store.create({
+      id: 'legacy-image',
+      sessionId: identity.sessionId,
+      turnId: identity.turnId,
+      kind: 'image',
+      name: 'chat-image',
+      source: 'tool_result_projection',
+      content: broken,
+      mimeType: 'image/png',
+      imageDelivery: {
+        messageId: identity.messageId,
+        source,
+        status: 'ready',
+        contentSha256: createHash('sha256').update(broken).digest('hex'),
+      },
+    });
+    assert.deepEqual(await f.service.resolve(identity), {
+      status: 'ready',
+      artifactId: 'legacy-image',
+    });
+    assert.equal(requests, 0);
+    const retries = await Promise.all([
+      f.service.resolve({ ...identity, retry: true }),
+      f.service.resolve({ ...identity, retry: true }),
+    ]);
+    assert.deepEqual(retries, [{ status: 'pending' }, { status: 'pending' }]);
+    release();
+    await f.service.waitForIdle();
+    const ready = await f.service.resolve(identity);
+    assert.equal(ready.status, 'ready');
+    assert.equal(requests, 1);
+    const page = await f.authority.store.listPage(identity.sessionId, { offset: 0, limit: 10 });
+    assert.equal(page.total, 1);
+    assert.equal(page.records[0]?.sizeBytes, PNG.length);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    release();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await f.close();
+  }
+});
+
+test('Worker read errors retain their image delivery reasons in persisted failures', async () => {
+  for (const [reason, expected] of [
+    ['not_found', 'not_found'],
+    ['filesystem_denied', 'not_allowed'],
+    ['image_too_large', 'too_large'],
+    ['invalid_image', 'unsupported_mime'],
+  ] as const) {
+    const reader = createImageFileReader({
+      filesystemWorker: {
+        execute: async () => {
+          throw new FilesystemWorkerClientError({
+            reason,
+            stage: 'operation',
+            message: '读取失败',
+          });
+        },
+      },
+    });
+    const f = await fixture(undefined, (_session, path, abortSignal) =>
+      reader({ path, cwd: process.cwd(), abortSignal }),
+    );
+    try {
+      observe(f.service, REQUEST.source);
+      await f.service.waitForIdle();
+      assert.deepEqual(await f.service.resolve(REQUEST), { status: 'failed', reason: expected });
+      assert.deepEqual(f.errors, []);
+    } finally {
+      await f.close();
+    }
+  }
+});
+
+test('pending capture survives persistence failure and is removed only after a durable terminal record', async () => {
+  let failPublication = true;
+  const f = await fixture(
+    undefined,
+    async () => checkedChatImage(PNG),
+    (input) => {
+      if (failPublication && input.imageDelivery?.status === 'ready')
+        throw new Error('publication failed');
+    },
+  );
+  try {
+    observe(f.service, REQUEST.source);
+    await f.service.waitForIdle();
+    const pending = await f.authority.store.listPage(REQUEST.sessionId, { offset: 0, limit: 10 });
+    assert.equal(pending.total, 1);
+    assert.equal(pending.records[0]?.imageDelivery?.status, 'pending');
+    assert.equal(f.errors.length, 1);
+    failPublication = false;
+    assert.equal((await f.service.resolve(REQUEST)).status, 'pending');
+    await f.service.waitForIdle();
+    const ready = await f.authority.store.listPage(REQUEST.sessionId, { offset: 0, limit: 10 });
+    assert.equal(ready.total, 1);
+    assert.equal(ready.records[0]?.imageDelivery?.status, 'ready');
+    assert.equal(f.errors.length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a conversation copied during capture resumes and cleans its copied pending record', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const f = await fixture(undefined, async () => {
+    await gate;
+    return checkedChatImage(PNG);
+  });
+  try {
+    observe(f.service, REQUEST.source);
+    while (!f.reads) await new Promise<void>((resolve) => setImmediate(resolve));
+    await f.authority.store.copyConversationArtifacts({
+      sourceSessionId: REQUEST.sessionId,
+      targetSessionId: 'session-copy',
+      turnIds: [REQUEST.turnId],
+    });
+    const copied = { ...REQUEST, sessionId: 'session-copy' };
+    assert.equal((await f.service.resolve(copied)).status, 'pending');
+    release();
+    await f.service.waitForIdle();
+    for (const sessionId of [REQUEST.sessionId, copied.sessionId]) {
+      const page = await f.authority.store.listPage(sessionId, { offset: 0, limit: 10 });
+      assert.equal(page.total, 1);
+      assert.equal(page.records[0]?.imageDelivery?.status, 'ready');
+      const bytes = await f.authority.store.readBinaryInSession(sessionId, page.records[0]!.id);
+      assert.ok(bytes.ok);
+      if (bytes.ok) assert.equal(bytes.base64, PNG.toString('base64'));
+    }
+    assert.deepEqual(f.errors, []);
+  } finally {
+    release();
     await f.close();
   }
 });

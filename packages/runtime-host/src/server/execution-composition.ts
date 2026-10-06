@@ -19,7 +19,6 @@
 
 import { createImageFileReader } from '@maka/runtime/image-file-reader';
 import { ChatImageDeliveryService } from './chat-image-delivery.js';
-import { checkedChatImage } from './chat-image-source.js';
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
 import { createWorkHubInspectionTool } from './workhub-inspection-tool.js';
 import { createJevRoutingModel } from './jev-routing-model.js';
@@ -604,7 +603,7 @@ export async function createExecutionRuntimeHostComposition(
           executionBoundary: boundary,
           abortSignal,
         });
-        return checkedChatImage(result.bytes);
+        return result;
       },
       readMessage: async (identity) => {
         await requireSessionManager(manager).ensureTranscriptLedgerForRead(identity.sessionId);
