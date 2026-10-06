@@ -39,7 +39,10 @@ import {
   waitForUsableRenderer,
 } from './verify-packaged-app.mjs';
 import { waitForInstalledProductVersion } from './verify-windows-autoupdate.mjs';
-import { verifyPackagedWindowsSandboxLifecycle } from './verify-windows-x64.mjs';
+import {
+  verifyPackagedWindowsApp,
+  verifyPackagedWindowsSandboxLifecycle,
+} from './verify-windows-x64.mjs';
 import {
   WINDOWS_SANDBOX_DEFERRED_HARDENING,
   WINDOWS_SANDBOX_PHASE4_MATRIX,
@@ -66,6 +69,27 @@ import {
 const temporaryRoots = [];
 const delay = (milliseconds) =>
   new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+
+it('verifies the pinned upgrade baseline using its original worker filename', async () => {
+  const required = [];
+  const resourcesVerified = new Error('resources verified');
+  await assert.rejects(
+    () =>
+      verifyPackagedWindowsApp('installed', {
+        artifactContract: 'upgrade-baseline',
+        requirePath: async (path) => {
+          required.push(path);
+          if (path.endsWith('filesystem-worker.mjs')) throw new Error(`MISSING ${path}`);
+        },
+        forbidPath: async () => {},
+        readMachine: async () => {
+          throw resourcesVerified;
+        },
+      }),
+    (error) => error === resourcesVerified,
+  );
+  assert.ok(required.includes(join('installed', 'resources', 'workers', 'filesystem-worker.js')));
+});
 
 it('pins every Phase 4 adversarial category to executable evidence', async () => {
   assert.deepEqual(WINDOWS_SANDBOX_PHASE4_MATRIX.map(({ category }) => category).sort(), [

@@ -245,6 +245,7 @@ test('the upgrade baseline keeps the Git absence rule while relaxing newer resou
     requireCanonicalIcon: false,
     requireAppIconCatalog: false,
     requireDirectPeerArtifact: false,
+    filesystemWorkerFilename: 'filesystem-worker.js',
   });
 
   // A pinned baseline may predate any of these; none of them may be demanded
@@ -257,6 +258,8 @@ test('the upgrade baseline keeps the Git absence rule while relaxing newer resou
   ]) {
     assert.equal(required.includes(path), false);
   }
+  assert.equal(required.includes(join('resources', 'workers', 'filesystem-worker.js')), true);
+  assert.equal(required.includes(join('resources', 'workers', 'filesystem-worker.mjs')), false);
   // Git is not one of them: no published build still carries it.
   for (const path of [
     join('resources', 'git'),
@@ -857,6 +860,18 @@ describe('assertPackagedResources', () => {
     if (path === absent) throw new Error(`MISSING ${path}`);
   };
   const forbidPath = async () => {};
+
+  test('a current build requires the ESM worker even when the legacy worker is present', async () => {
+    await assert.rejects(
+      () =>
+        assertPackagedResources(resources, {
+          requirePath: requirePathMissing(join(resources, 'workers', 'filesystem-worker.mjs')),
+          forbidPath,
+          requireWindowsSandbox: false,
+        }),
+      /MISSING .*filesystem-worker\.mjs/,
+    );
+  });
 
   test('a current build must carry the canonical icon', async () => {
     await assert.rejects(

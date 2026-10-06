@@ -107,16 +107,22 @@ async function fixture(
 }
 
 test('Host drain releases both capture slots even when a source reader ignores cancellation', {
-  timeout: 2000,
-}, async () => {
+  timeout: 15000,
+}, async (t) => {
   const f = await fixture(undefined, () => new Promise(() => {}));
   try {
     observe(f.service, '/tmp/blocked-1.png');
     observe(f.service, '/tmp/blocked-2.png', 'session-1', 'message-2');
     while (f.reads < 2) await new Promise((resolve) => setImmediate(resolve));
-    await f.service.close();
-    assert.equal(f.leases, 0);
-    assert.deepEqual(f.errors, []);
+    await t.test(
+      'drain stays bounded after both readers have started',
+      { timeout: 2000 },
+      async () => {
+        await f.service.close();
+        assert.equal(f.leases, 0);
+        assert.deepEqual(f.errors, []);
+      },
+    );
   } finally {
     await f.close();
   }

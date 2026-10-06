@@ -1053,13 +1053,15 @@ export async function assertPackagedResources(
     // Current Desktop builds ship the direct-peer Client addon beside its Rust
     // notices. Upgrade baselines may predate both resources.
     requireDirectPeerArtifact = true,
+    // The pinned Windows upgrade baseline shipped the worker with a .js suffix.
+    filesystemWorkerFilename = 'filesystem-worker.mjs',
   } = {},
 ) {
   const required = [
     'app.asar',
     'bundled-tools.json',
     ...(requireCanonicalIcon ? [join('assets', 'icon.png')] : []),
-    join('workers', 'filesystem-worker.mjs'),
+    join('workers', filesystemWorkerFilename),
     ...(requireDirectPeerArtifact
       ? [
           join('runtime-host-peer', 'maka_runtime_host_peer.node'),
