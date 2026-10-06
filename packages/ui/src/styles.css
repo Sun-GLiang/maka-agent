@@ -632,16 +632,24 @@
   gap: var(--space-3);
 }
 .maka-markdown-image-resource { display: inline-block; position: relative; max-width: 100%; }
-/* Source resolution and decoding share one responsive frame. Transient status
-   overlays never add a row or move the transcript when they disappear. */
+/* The conversation owns the width (up to the 800px reading measure). A preview
+   fits that column, but cannot consume more than 60% of a short viewport.
+   Markdown placement, not decoded dimensions, fixes the loading/ready box. */
 .maka-markdown-image-frame {
   display: block;
-  width: 640px;
-  aspect-ratio: 4 / 3;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  max-height: min(480px, 60vh);
 }
-.maka-markdown-image-compact { display: inline-flex; align-items: center; vertical-align: middle; }
+/* Six text ems leave room for a typical badge; one inherited line keeps it in
+   the prose rhythm. Scale down wider images and use the lightbox for detail. */
+.maka-markdown-image-inline {
+  width: 6em;
+  height: 1lh;
+  vertical-align: middle;
+}
 .maka-markdown-image-frame > .maka-markdown-image-placeholder,
-.maka-markdown-image-compact > .maka-markdown-image-placeholder {
+.maka-markdown-image-inline .maka-markdown-image-placeholder {
   position: absolute;
   inset: 0;
   align-items: center;
@@ -655,19 +663,20 @@
   align-items: center;
   justify-content: center;
 }
-.maka-markdown-image-compact > .maka-markdown-image-preview { position: relative; flex-shrink: 0; }
+.maka-markdown-image-inline .maka-markdown-image-placeholder { padding: 0; }
+.maka-markdown-image-inline .maka-markdown-image-loading-label { display: none; }
 .maka-markdown-image-expand {
   position: absolute;
   inset-block-end: var(--space-2);
   inset-inline-end: var(--space-2);
 }
 /* Badge controls remain keyboard reachable without covering the badge at rest. */
-.maka-markdown-image-compact .maka-markdown-image-expand {
+.maka-markdown-image-inline .maka-markdown-image-expand {
   inset: auto 0 0 auto;
   opacity: 0;
   pointer-events: none;
 }
-.maka-markdown-image-compact:is(:hover, :focus-within) .maka-markdown-image-expand {
+.maka-markdown-image-inline:is(:hover, :focus-within) .maka-markdown-image-expand {
   opacity: 1;
   pointer-events: auto;
 }
@@ -693,9 +702,10 @@
   color: var(--muted-foreground);
   font-size: var(--maka-font-size-sm);
 }
-.maka-markdown-image-compact > .maka-markdown-image-saving {
-  position: static;
-  max-width: none;
+.maka-markdown-image-inline .maka-markdown-image-saving {
+  inset: auto auto 0 0;
+  max-width: 100%;
+  padding: 0;
 }
 
 /* Markdown code renderers are custom components so Mermaid can be loaded only
