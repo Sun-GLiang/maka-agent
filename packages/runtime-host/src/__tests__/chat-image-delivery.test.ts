@@ -36,6 +36,8 @@ import { chatImageSources } from '../server/chat-image-markdown.js';
 import { checkedChatImage, downloadChatImage } from '../server/chat-image-source.js';
 import { IMAGE_DELIVERY_OPERATION_SPECS } from '../protocol/image-delivery.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
+import { createHostExecutionArtifactServices } from '../server/execution-artifacts.js';
+import { isImageDeliveryMetadata, isImageDeliverySource } from '@maka/core/image-delivery';
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
   'base64',
@@ -616,6 +618,102 @@ test('completed turns release unfinished stream slots without archiving partial 
     await f.service.waitForIdle();
     assert.equal(f.reads, 1);
     assert.equal((await f.service.resolve({ ...REQUEST, source })).status, 'ready');
+  } finally {
+    await f.close();
+  }
+});
+
+test('capture, wire and stored metadata share source limits while retaining boundary policies', () => {
+  const decode = IMAGE_DELIVERY_OPERATION_SPECS['artifact.image.resolve'].decodeInput;
+  const source = '/' + 'a'.repeat(4095);
+  assert.deepEqual(chatImageSources(`![x](<${source}>)`), [source]);
+  assert.equal(decode({ ...REQUEST, source, messageId: 'm'.repeat(512) }).source, source);
+  assert.throws(() => decode({ ...REQUEST, messageId: 'm'.repeat(513) }));
+  for (const source of ['', '/' + 'a'.repeat(4096), '/tmp/a\x01.png', '/tmp/a\x7f.png']) {
+    assert.equal(isImageDeliverySource(source), false);
+    assert.equal(isImageDeliveryMetadata({ messageId: 'm', source, status: 'pending' }), false);
+    assert.throws(() => decode({ ...REQUEST, source }));
+    assert.deepEqual(chatImageSources(`![x](<${source}>)`), []);
+  }
+  // Explicit attachment refs belong to UI resolution, not automatic source capture.
+  assert.deepEqual(chatImageSources('![x](maka://runtime/attachments/image-1)'), []);
+  assert.equal(
+    isImageDeliveryMetadata({ messageId: 'm\x01', source: REQUEST.source, status: 'pending' }),
+    true,
+  );
+  assert.throws(() => decode({ ...REQUEST, messageId: 'm\x01' }));
+  assert.equal(
+    chatImageSources(Array.from({ length: 70 }, (_, i) => `![x](/tmp/${i}.png)`).join('\n')).length,
+    64,
+  );
+});
+
+test('local and downloaded invalid image bytes retain identical failure reasons', async () => {
+  const f = await fixture();
+  try {
+    for (const [bytes, reason] of [
+      [PNG.subarray(0, 8), 'unsupported_mime'],
+      [new Uint8Array(2 * 1024 * 1024 + 1), 'too_large'],
+    ] as const) {
+      assert.throws(
+        () => checkedChatImage(bytes),
+        (error: unknown) => error instanceof Error && 'reason' in error && error.reason === reason,
+      );
+      const source = join(f.root, 'invalid.png');
+      await writeFile(source, bytes);
+      await assert.rejects(
+        createImageFileReader()({ path: source, cwd: f.root }),
+        (error: unknown) => error instanceof Error && 'reason' in error && error.reason === reason,
+      );
+    }
+  } finally {
+    await f.close();
+  }
+});
+
+test('automatic capture and PublishImage share content quota without merging their identities', async () => {
+  const limits = { sessionBytes: PNG.length, workspaceBytes: PNG.length };
+  const f = await fixture(limits, async () => checkedChatImage(PNG));
+  try {
+    observe(f.service, REQUEST.source);
+    await f.service.waitForIdle();
+    const automatic = await f.service.resolve(REQUEST);
+    assert.equal(automatic.status, 'ready');
+    if (automatic.status !== 'ready') return;
+    const services = createHostExecutionArtifactServices({
+      artifacts: f.authority.store,
+      sessionAdmission: new SessionAdmissionGate(),
+      sessions: { probeSessionRemoval: async () => ({ kind: 'present' }) },
+      imageArchiveLimits: limits,
+      requestDrain: () => assert.fail('shared bytes must not exceed quota or drain'),
+    });
+    const explicit = await services.publishImage({
+      sessionId: REQUEST.sessionId,
+      turnId: REQUEST.turnId,
+      toolCallId: 'publish-call',
+      name: 'published.png',
+      bytes: PNG,
+      mimeType: 'image/png',
+    });
+    assert.notEqual(explicit.relativePath, automatic.artifactId);
+    const captured = (await f.authority.store.getInSession(REQUEST.sessionId, automatic.artifactId))
+      .record!;
+    const published = (
+      await f.authority.store.getInSession(REQUEST.sessionId, explicit.relativePath)
+    ).record!;
+    assert.equal(captured.imageDelivery?.contentSha256, published.imageDelivery?.contentSha256);
+    assert.equal(captured.imageDelivery?.source, REQUEST.source);
+    assert.equal(published.imageDelivery?.source, 'published:publish-call');
+    assert.equal(published.imageDelivery?.messageId, 'publish-call');
+    assert.equal(published.summary, 'Published chat image');
+    assert.equal(
+      (await stat(join(f.root, 'artifacts', captured.relativePath))).ino,
+      (await stat(join(f.root, 'artifacts', published.relativePath))).ino,
+    );
+    const page = await f.authority.store.listPage(REQUEST.sessionId, { offset: 0, limit: 10 });
+    assert.equal(page.total, 2);
+    assert.ok(page.records.every((record) => record.imageDelivery?.status === 'ready'));
+    assert.deepEqual(f.errors, []);
   } finally {
     await f.close();
   }

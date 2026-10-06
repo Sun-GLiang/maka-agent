@@ -23,7 +23,7 @@ import {
   type FilesystemExecuteInput,
 } from './filesystem-executor.js';
 import { createLocalWorkspaceExecutor } from './workspace-executor.js';
-import { ImageFileError } from './image-file.js';
+import { ImageFileError, imageFileFailureReason } from './image-file.js';
 import { FilesystemWorkerClientError } from './filesystem-worker/client.js';
 import { SandboxCommandError } from './sandbox/errors.js';
 
@@ -45,8 +45,7 @@ export class ImageFileReadError extends Error {
 }
 
 function readFailure(error: unknown): ImageFileReadFailure {
-  if (error instanceof ImageFileError)
-    return error.code === 'ERR_IMAGE_TOO_LARGE' ? 'too_large' : 'unsupported_mime';
+  if (error instanceof ImageFileError) return imageFileFailureReason(error);
   if (error instanceof SandboxCommandError) return 'not_allowed';
   const code =
     error instanceof FilesystemWorkerClientError

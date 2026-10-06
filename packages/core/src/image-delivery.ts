@@ -18,6 +18,18 @@
  */
 
 /** Client-safe delivery contract. No filesystem or networking capabilities live here. */
+export const IMAGE_DELIVERY_IDENTITY_MAX_LENGTH = 512;
+export const IMAGE_DELIVERY_SOURCE_MAX_LENGTH = 4096;
+/** JavaScript string length, shared by stream capture and Markdown consumers. */
+export const IMAGE_MARKDOWN_MAX_LENGTH = 1024 * 1024;
+export function isImageDeliverySource(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= IMAGE_DELIVERY_SOURCE_MAX_LENGTH &&
+    !/[\x00-\x1f\x7f]/.test(value)
+  );
+}
 export const IMAGE_DELIVERY_FAILURES = [
   'not_found',
   'not_allowed',
@@ -65,17 +77,14 @@ export function isImageDeliveryMetadata(value: unknown): value is ImageDeliveryM
     ) &&
     typeof v.messageId === 'string' &&
     v.messageId.length > 0 &&
-    v.messageId.length <= 512 &&
-    typeof v.source === 'string' &&
-    v.source.length > 0 &&
-    v.source.length <= 4096 &&
+    v.messageId.length <= IMAGE_DELIVERY_IDENTITY_MAX_LENGTH &&
+    isImageDeliverySource(v.source) &&
     ['pending', 'ready', 'failed'].includes(String(v.status)) &&
     (v.reason === undefined ||
       IMAGE_DELIVERY_FAILURES.includes(v.reason as ImageDeliveryFailure)) &&
     (v.contentSha256 === undefined ||
       (typeof v.contentSha256 === 'string' && /^[a-f0-9]{64}$/.test(v.contentSha256))) &&
     (v.status === 'failed' ? v.reason !== undefined : v.reason === undefined) &&
-    (v.status === 'ready' ? v.contentSha256 !== undefined : v.contentSha256 === undefined) &&
-    !/[\x00-\x1f\x7f]/.test(v.source as string)
+    (v.status === 'ready' ? v.contentSha256 !== undefined : v.contentSha256 === undefined)
   );
 }

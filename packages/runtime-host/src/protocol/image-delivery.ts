@@ -19,6 +19,8 @@
 
 import {
   IMAGE_DELIVERY_FAILURES,
+  IMAGE_DELIVERY_IDENTITY_MAX_LENGTH,
+  isImageDeliverySource,
   type ImageDeliveryRequest,
   type ImageDeliveryResult,
 } from '@maka/core/image-delivery';
@@ -67,11 +69,16 @@ export const IMAGE_DELIVERY_OPERATION_SPECS = {
       };
       if (v.retry !== undefined && typeof v.retry !== 'boolean')
         throw invalidProtocolFrame('Invalid image retry flag');
+      const source = (s: unknown) => {
+        if (!isImageDeliverySource(s))
+          throw invalidProtocolFrame('Invalid image delivery identity');
+        return s;
+      };
       return {
         sessionId: requireEntityId(v.sessionId, 'sessionId'),
-        turnId: text(v.turnId, 512),
-        messageId: text(v.messageId, 512),
-        source: text(v.source, 4096),
+        turnId: text(v.turnId, IMAGE_DELIVERY_IDENTITY_MAX_LENGTH),
+        messageId: text(v.messageId, IMAGE_DELIVERY_IDENTITY_MAX_LENGTH),
+        source: source(v.source),
         ...(v.retry === true ? { retry: true } : {}),
       };
     },
