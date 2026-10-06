@@ -47,6 +47,11 @@ export class ImageFileError extends Error {
   }
 }
 
+/** Translate validated image failures without changing backend/transport errors. */
+export function imageFileFailureReason(error: ImageFileError): 'too_large' | 'unsupported_mime' {
+  return error.code === 'ERR_IMAGE_TOO_LARGE' ? 'too_large' : 'unsupported_mime';
+}
+
 export function isSupportedImagePath(path: string): boolean {
   return IMAGE_EXTENSIONS.has(extname(path).toLowerCase());
 }

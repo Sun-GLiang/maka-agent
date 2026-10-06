@@ -17,9 +17,11 @@
  * under the License.
  */
 
-import { Lexer, Marked } from 'marked';
-
-const parser = new Marked({ gfm: true });
+import {
+  IMAGE_DELIVERY_SOURCE_MAX_LENGTH,
+  IMAGE_MARKDOWN_MAX_LENGTH,
+} from '@maka/core/image-delivery';
+import { markdownImageSources, parseMarkdownImageDestination } from '@maka/core/image-markdown';
 
 /** Astryx can pass destination syntax through its image slot. Resolve it with
  * the Host's Markdown parser, without changing the text rendered or stored.
@@ -28,22 +30,17 @@ const parser = new Marked({ gfm: true });
 export function createMarkdownImageSourceResolver(text: string): (source: string) => string {
   let canonicalSources: Set<string> | undefined;
   return (source) => {
-    if (!/[<>"'\\\s&]/.test(source) || source.length > 4096 || text.length > 1024 * 1024)
+    if (
+      !/[<>"'\\\s&]/.test(source) ||
+      source.length > IMAGE_DELIVERY_SOURCE_MAX_LENGTH ||
+      text.length > IMAGE_MARKDOWN_MAX_LENGTH
+    )
       return source;
-    if (!canonicalSources) {
-      const sources = new Set<string>();
-      parser.walkTokens(parser.lexer(text), (token) => {
-        if (token.type === 'image') sources.add(token.href);
-      });
-      canonicalSources = sources;
-    }
+    canonicalSources ??= new Set(markdownImageSources(text));
     // Reference destinations already arrive without brackets/title syntax.
     // Preserve a canonical path containing literal quotes or whitespace.
     if (canonicalSources.has(source)) return source;
-    const markdown = `![](${source})`;
-    const [token] = Lexer.lexInline(markdown, { gfm: true });
-    return token?.type === 'image' && token.raw === markdown && canonicalSources.has(token.href)
-      ? token.href
-      : source;
+    const destination = parseMarkdownImageDestination(source);
+    return destination !== undefined && canonicalSources.has(destination) ? destination : source;
   };
 }

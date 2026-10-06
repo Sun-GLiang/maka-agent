@@ -17,7 +17,6 @@
  * under the License.
  */
 
-import { DEFAULT_IMAGE_ARCHIVE_LIMITS } from '@maka/core/image-delivery';
 import { createHash } from 'node:crypto';
 import { open, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
@@ -48,6 +47,7 @@ import {
 import type { SessionManagerDeps } from '@maka/runtime/session-manager';
 import type { SessionAdmissionGate } from './session-admission-gate.js';
 import type { SessionPresenceReader } from './session-presence.js';
+import { readyChatImageArtifact } from './chat-image-artifact.js';
 
 export interface HostExecutionArtifactServices {
   recordToolArtifacts(event: ToolArtifactRecorderInput): Promise<void>;
@@ -138,24 +138,19 @@ export function createHostExecutionArtifactServices(input: {
       const id = `published_image_${createHash('sha256')
         .update(JSON.stringify([image.sessionId, image.turnId, image.toolCallId]))
         .digest('hex')}`;
-      const artifact = await publish({
-        id,
-        sessionId: image.sessionId,
-        turnId: image.turnId,
-        name: image.name,
-        kind: 'image',
-        content: image.bytes,
-        mimeType,
-        source: 'tool_result_projection',
-        summary: 'Published chat image',
-        imageDelivery: {
+      const artifact = await publish(
+        readyChatImageArtifact({
+          id,
+          sessionId: image.sessionId,
+          turnId: image.turnId,
+          name: image.name,
           messageId: image.toolCallId,
           source: `published:${image.toolCallId}`,
-          status: 'ready',
-          contentSha256: createHash('sha256').update(image.bytes).digest('hex'),
-        },
-        imageArchiveLimits: input.imageArchiveLimits ?? DEFAULT_IMAGE_ARCHIVE_LIMITS,
-      });
+          image: { bytes: image.bytes, mimeType },
+          summary: 'Published chat image',
+          limits: input.imageArchiveLimits,
+        }),
+      );
       if (!artifact)
         throw new Error('The session was removed before the image could be published.');
       return { kind: 'session_file', sessionId: image.sessionId, relativePath: artifact.id };
