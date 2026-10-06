@@ -17,8 +17,8 @@
  * under the License.
  */
 
-import { useEffect, useRef, useState } from 'react';
-import { Button, IconButton, useLightbox } from '@astryxdesign/core';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Button, IconButton, Spinner, useLightbox } from '@astryxdesign/core';
 import { Maximize2 } from './icons.js';
 import { Link } from '@astryxdesign/core/Link';
 import { parseAttachmentResourceRef } from '@maka/core/attachments';
@@ -26,10 +26,18 @@ import { useAttachmentImage } from './attachment-image.js';
 import { useImageDelivery } from './image-delivery.js';
 import { getSharedUiCopy } from './shared-ui-copy.js';
 import { useUiLocale } from './locale-context.js';
+import { createMarkdownImageSourceResolver } from './markdown-image-source.js';
+
+const ImageSourceContext = createContext<(source: string) => string>((source) => source);
+export function MarkdownImageSourceProvider(props: { text: string; children: ReactNode }) {
+  const resolve = useMemo(() => createMarkdownImageSourceResolver(props.text), [props.text]);
+  return <ImageSourceContext.Provider value={resolve}>{props.children}</ImageSourceContext.Provider>;
+}
 
 /** Presentation only: Host resolves local addresses and archives; UI receives artifact identities. */
 export function MarkdownImage(props: { src: string; alt: string }) {
-  return <ImageResource key={props.src} {...props} />;
+  const source = useContext(ImageSourceContext)(props.src);
+  return <ImageResource key={source} src={source} alt={props.alt} />;
 }
 function ImageResource(props: { src: string; alt: string }) {
   const copy = getSharedUiCopy(useUiLocale()).markdown;
@@ -68,10 +76,11 @@ function ImageResource(props: { src: string; alt: string }) {
     : explicit && image.status === 'unavailable' ? copy.imageUnavailable
     : delivery.status === 'failed' ? copy.imageArchiveFailure(delivery.reason)
     : delivery.status === 'pending' || artifactId ? copy.imageLoading : copy.imageUnsupported;
-  return <span ref={anchor} className="maka-markdown-image-resource" data-maka-image-state={message ? failed ? 'failed' : 'loading' : 'ready'}>
+  const hasFrame = !visible || !!source || !!artifactId || delivery.status === 'pending';
+  return <span ref={anchor} className={`maka-markdown-image-resource${hasFrame ? ' maka-markdown-image-frame' : ''}`} data-maka-image-state={message ? failed ? 'failed' : 'loading' : 'ready'}>
     {message ? <span className="maka-markdown-image-placeholder">
       {props.alt && <span className="maka-markdown-image-caption">{props.alt}</span>}
-      <span role="status">{message}</span>
+      <span role="status">{hasFrame && !failed && delivery.status !== 'failed' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
       {(failed || delivery.status === 'failed') && sourceActions}
     </span> : source && <DisplayImage key={`${source}\0${attempt}`} src={source} alt={props.alt} onError={() => setFailedSource(source)} />}
     {!explicit && delivery.status === 'pending' && remote && source && <span className="maka-markdown-image-saving" role="status">{copy.imageSaving}</span>}
@@ -85,13 +94,13 @@ function DisplayImage(props: { src: string; alt: string; onError(): void }) {
   const [loaded, setLoaded] = useState(false);
   const lightbox = useLightbox({ media: { src: props.src, alt: props.alt }, hasZoom: true });
   return <>
-    {!loaded && <span className="maka-markdown-image-loading" role="status">{copy.imageLoading}</span>}
     <span className="maka-markdown-image-preview">
+      {!loaded && <span className="maka-markdown-image-loading" role="status"><Spinner size="sm" shade="subtle" aria-hidden="true" /> {copy.imageLoading}</span>}
       <img src={props.src} alt={props.alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
           className="maka-markdown-attachment-image" onLoad={() => setLoaded(true)} onError={props.onError} />
-      <span className="maka-markdown-image-expand">
+      {loaded && <span className="maka-markdown-image-expand">
         <IconButton icon={<Maximize2 size={16} />} size="sm" label={copy.imageExpand(props.alt)} onClick={() => lightbox.open()} />
-      </span>
+      </span>}
     </span>
     {lightbox.isOpen && lightbox.element}
   </>;
