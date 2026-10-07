@@ -30,7 +30,6 @@ export function ImageDeliveryProvider(props: { sessionId: string; resolve?: Reso
     const ready = new Map<string, ImageDeliveryResult>();
     return { resolve(request: ImageDeliveryRequest) {
       const key = JSON.stringify([request.turnId, request.messageId, request.source]);
-      if (request.retry) ready.delete(key);
       const cached = ready.get(key); if (cached) return Promise.resolve(cached);
       const running = pending.get(key); if (running) return running;
       const job = resolve(props.sessionId, request).catch((): ImageDeliveryResult => ({ status: 'failed', reason: 'read_failed' }));
@@ -77,5 +76,5 @@ export function useImageDelivery(source: string, enabled: boolean) {
   }, [identity, attempt]);
   const result: ImageDeliveryResult = !identity ? { status: 'unavailable' }
     : settled?.identity === identity ? settled.result : { status: 'pending' };
-  return { ...result, retry, confirmRemote, available: !!identity, checked: settled?.identity === identity };
+  return { ...result, retry, confirmRemote, available: !!identity };
 }

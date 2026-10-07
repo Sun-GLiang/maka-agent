@@ -1,0 +1,5 @@
+{
+  "epoch": 210,
+  "files": ["packages/runtime-host/src/protocol/image-delivery.ts"],
+  "reason": "At epoch 210, replace duplicate image request validation with the core validator and existing shaped-record codec. Required and optional fields, identity/source bounds, control-character rejection, error codes, normalized boolean flags and output codecs remain unchanged. Differential checks against the epoch-210 implementation preserve all 443 tested input outcomes; no field or operation is added or removed."
+}

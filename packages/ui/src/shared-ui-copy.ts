@@ -31,7 +31,6 @@ export interface SharedUiCopy {
     invalidInternalLink: string;
     unsafeLink: string;
     imageLoading: string;
-    imageSaving: string;
     imageRemoteConsent: string;
     imageLoad: string;
     imageExpand: (alt: string) => string;
@@ -137,7 +136,6 @@ const SHARED_UI_COPY = {
       invalidInternalLink: '内部链接无效',
       unsafeLink: '链接不安全',
       imageLoading: '正在加载图片…',
-      imageSaving: '正在保存图片…',
       imageRemoteConsent: '远程图片需要授权加载，图片来源会收到请求。',
       imageLoad: '加载图片',
       imageExpand: (alt) => alt ? `放大图片：${alt}` : '放大图片',
@@ -237,7 +235,6 @@ const SHARED_UI_COPY = {
       invalidInternalLink: '內部連結無效',
       unsafeLink: '連結不安全',
       imageLoading: '正在載入圖片…',
-      imageSaving: '正在儲存圖片…',
       imageRemoteConsent: '遠端圖片需要授權載入，圖片來源會收到請求。',
       imageLoad: '載入圖片',
       imageExpand: (alt) => alt ? `放大圖片：${alt}` : '放大圖片',
@@ -337,7 +334,6 @@ const SHARED_UI_COPY = {
       invalidInternalLink: 'Invalid internal link',
       unsafeLink: 'Unsafe link',
       imageLoading: 'Loading image…',
-      imageSaving: 'Saving image…',
       imageRemoteConsent: 'Load this remote image only if you trust its source. Loading sends a request to that source.',
       imageLoad: 'Load image',
       imageExpand: (alt) => alt ? `Enlarge image: ${alt}` : 'Enlarge image',
