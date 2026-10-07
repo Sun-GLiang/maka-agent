@@ -34,6 +34,7 @@ import {
   type ImageDeliveryFailure,
 } from '@maka/core/image-delivery';
 import { abortable } from '../client/wait-for-ready.js';
+import { usesFetchProxy } from '@maka/runtime/network/scoped-fetch-transport';
 export class ImageSourceError extends Error {
   constructor(readonly reason: ImageDeliveryFailure) {
     super(reason);
@@ -81,6 +82,7 @@ export function decodedLocalImagePath(source: string): string | undefined {
 export async function downloadChatImage(
   source: string,
   signal: AbortSignal,
+  options: { readonly fetch?: typeof globalThis.fetch } = {},
 ): Promise<ChatImageBytes> {
   let url = new URL(source);
   for (let redirect = 0; redirect <= 3; redirect++) {
@@ -88,49 +90,68 @@ export async function downloadChatImage(
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
       throw new ImageSourceError('not_allowed');
     const host = url.hostname.replace(/^\[|\]$/g, '');
+    // Fake DNS addresses are routing handles for a named destination, never
+    // authority to load a literal private address or a local/metadata hostname.
+    const namedHost = !isIP(host) && publicHostname(host);
+    if (!isIP(host) && !namedHost) throw new ImageSourceError('not_allowed');
     const addresses = isIP(host)
       ? [{ address: host, family: isIP(host) }]
       : await abortable(() => lookup(host, { all: true }), signal);
-    if (!addresses.length || addresses.some((a) => !publicAddress(a.address)))
+    if (
+      !addresses.length ||
+      addresses.some((a) => !publicAddress(a.address) && !(namedHost && fakeAddress(a.address)))
+    )
       throw new ImageSourceError('not_allowed');
     const target = addresses[0]!;
-    const response = await new Promise<import('node:http').IncomingMessage>((resolve, reject) => {
-      const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(
-        url,
-        {
-          signal,
-          headers: { accept: 'image/png,image/jpeg,image/webp,image/gif' },
-          lookup: (_host, options, callback) =>
-            options.all ? callback(null, [target]) : callback(null, target.address, target.family),
-        },
-        resolve,
-      );
-      req.on('error', reject);
-      req.end();
-    });
-    if ([301, 302, 303, 307, 308].includes(response.statusCode ?? 0) && response.headers.location) {
-      response.destroy();
-      const next = new URL(response.headers.location, url);
+    const headers = { accept: 'image/png,image/jpeg,image/webp,image/gif' };
+    const proxyFetch =
+      options.fetch && usesFetchProxy(options.fetch, url) ? options.fetch : undefined;
+    const response = proxyFetch
+      ? proxyImageResponse(
+          await proxyFetch(url, { signal, headers, redirect: 'manual', credentials: 'omit' }),
+        )
+      : directImageResponse(
+          await new Promise<import('node:http').IncomingMessage>((resolve, reject) => {
+            const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(
+              url,
+              {
+                signal,
+                headers,
+                lookup: (_host, options, callback) =>
+                  options.all
+                    ? callback(null, [target])
+                    : callback(null, target.address, target.family),
+              },
+              resolve,
+            );
+            req.on('error', reject);
+            req.end();
+          }),
+        );
+    const location = response.header('location');
+    if ([301, 302, 303, 307, 308].includes(response.status) && location) {
+      await response.close();
+      const next = new URL(location, url);
       if (url.protocol === 'https:' && next.protocol !== 'https:')
         throw new ImageSourceError('not_allowed');
       url = next;
       continue;
     }
-    if (response.statusCode !== 200) {
-      response.destroy();
+    if (response.status !== 200) {
+      await response.close();
       throw new ImageSourceError('download_failed');
     }
-    const length = Number(response.headers['content-length']);
+    const length = Number(response.header('content-length'));
     if (length > ARTIFACT_IMAGE_PREVIEW_MAX_BYTES) {
-      response.destroy();
+      await response.close();
       throw new ImageSourceError('too_large');
     }
     const chunks: Buffer[] = [];
     let size = 0;
-    for await (const chunk of response) {
+    for await (const chunk of response.chunks) {
       size += chunk.length;
       if (size > ARTIFACT_IMAGE_PREVIEW_MAX_BYTES) {
-        response.destroy();
+        await response.close();
         throw new ImageSourceError('too_large');
       }
       chunks.push(Buffer.from(chunk));
@@ -138,6 +159,68 @@ export async function downloadChatImage(
     return checkedChatImage(Buffer.concat(chunks, size));
   }
   throw new ImageSourceError('download_failed');
+}
+interface ImageResponse {
+  readonly status: number;
+  readonly chunks: AsyncIterable<Uint8Array>;
+  header(name: string): string | undefined;
+  close(): void | Promise<void>;
+}
+function directImageResponse(response: import('node:http').IncomingMessage): ImageResponse {
+  return {
+    status: response.statusCode ?? 0,
+    chunks: response,
+    header: (name) => {
+      const value = response.headers[name];
+      return typeof value === 'string' ? value : undefined;
+    },
+    close: () => {
+      response.destroy();
+    },
+  };
+}
+function proxyImageResponse(response: Response): ImageResponse {
+  return {
+    status: response.status,
+    header: (name) => response.headers.get(name) ?? undefined,
+    close: async () => {
+      await response.body?.cancel().catch(() => {});
+    },
+    chunks: (async function* () {
+      const reader = response.body?.getReader();
+      if (!reader) return;
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          yield chunk.value;
+        }
+      } finally {
+        await reader.cancel().catch(() => {});
+        reader.releaseLock();
+      }
+    })(),
+  };
+}
+function publicHostname(host: string): boolean {
+  const name = host.toLowerCase().replace(/\.$/, '');
+  return (
+    name.includes('.') &&
+    !/(^|\.)(localhost|local|lan|internal|home|arpa|test|invalid)$/.test(name) &&
+    ![
+      'metadata.google.internal',
+      'metadata.goog',
+      'metadata.tencentyun.com',
+      'instance-data.ec2.internal',
+    ].includes(name)
+  );
+}
+function fakeAddress(address: string): boolean {
+  if (isIP(address) === 4) return /^198\.(18|19)\./.test(address);
+  if (isIP(address) !== 6) return false;
+  // RFC 5180's benchmarking prefix is also used by VPN fake DNS for IPv6.
+  const normalized = new URL(`http://[${address}]`).hostname;
+  return /^\[2001:2:(?::|0:)/i.test(normalized);
 }
 function publicAddress(address: string): boolean {
   if (isIP(address) === 4) {
@@ -155,5 +238,5 @@ function publicAddress(address: string): boolean {
     );
   }
   // Only global-unicast IPv6 is eligible. Mapped IPv4/ULA/link-local are excluded.
-  return /^[23][0-9a-f]{3}:/i.test(address);
+  return /^[23][0-9a-f]{3}:/i.test(address) && !fakeAddress(address);
 }

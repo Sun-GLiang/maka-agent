@@ -174,7 +174,7 @@ before(async () => {
         window.deliverySources.push(request.source);
         if(canonicalSources[mode] && !canonicalSources[mode].includes(request.source)) return {status:'unavailable'};
         if(request.retry) window.deliveryRetries++;
-        if(mode==='restricted') return {status:'failed',reason:'not_allowed'};
+        if(mode==='privacy') return {status:'failed',reason:'not_allowed'};
         if(mode==='signed-failed') return {status:'failed',reason:'download_failed'};
         if(!seeded) {
           if(!request.loadRemote) return {status:'requires_confirmation'};
@@ -253,32 +253,25 @@ async function loaded(page) {
   await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth === 1));
 }
 
-test('a remote image sends no request until clicked, then renders Host-owned bytes', async () => {
+test('a remote image loads automatically and renders Host-owned bytes', async () => {
   requests = [];
   const page = await pageFor('remote');
   try {
-    await page.getByRole('button', { name: 'Load image', exact: true }).waitFor();
-    assert.deepEqual(requests, []);
-    assert.equal(await page.locator('img').count(), 0);
-    await page.getByRole('button', { name: 'Load image', exact: true }).click();
     await loaded(page);
+    assert.equal(await page.getByRole('button', { name: 'Load image', exact: true }).count(), 0);
     assert.deepEqual(requests, [{ path: '/image.png', referer: undefined }]);
     assert.match(await page.locator('img').getAttribute('src'), /^data:/);
   } finally { await page.close(); }
 });
 
-test('remote consent belongs to one message, even when the next message reuses its URL', async () => {
+test('each message automatically resolves its own remote image identity', async () => {
   requests = [];
   const page = await pageFor('remote');
   try {
-    await page.getByRole('button', { name: 'Load image', exact: true }).click();
     await loaded(page);
     assert.equal(requests.length, 1);
     await page.evaluate(() => window.nextMessage());
-    await page.getByRole('button', { name: 'Load image', exact: true }).waitFor();
-    assert.equal(await page.locator('img').count(), 0);
-    assert.equal(requests.length, 1);
-    await page.getByRole('button', { name: 'Load image', exact: true }).click();
+    await page.waitForFunction(() => window.deliveryQueries >= 2);
     await loaded(page);
     assert.equal(requests.length, 2);
   } finally { await page.close(); }
@@ -333,22 +326,20 @@ test('redacting only image alt text does not disable a safe destination', async 
   requests = [];
   const page = await pageFor('secret-alt');
   try {
-    await page.getByRole('button', {name: 'Load image', exact: true}).waitFor();
     assert.doesNotMatch(await page.locator('body').innerText(), /alt-secret/);
-    await page.getByRole('button', {name: 'Load image', exact: true}).click();
     await loaded(page);
     assert.equal(requests.length, 1);
   } finally { await page.close(); }
 });
 
-test('network-restricted images show denial before any load click and can recheck permissions', async () => {
+test('application privacy policy prevents automatic image loading and can be rechecked', async () => {
   requests = [];
-  const page = await pageFor('restricted');
+  const page = await pageFor('privacy');
   try {
-    await page.getByText('Image not saved: current permissions do not allow reading it or using the network.', {exact: true}).waitFor();
+    await page.getByText('Image not saved: permissions, network settings, or the source address block loading.', {exact: true}).waitFor();
     assert.equal(await page.getByRole('button', {name: 'Load image', exact: true}).count(), 0);
     await page.getByRole('button', {name: 'Retry', exact: true}).click();
-    await page.getByText('Image not saved: current permissions do not allow reading it or using the network.', {exact: true}).waitFor();
+    await page.getByText('Image not saved: permissions, network settings, or the source address block loading.', {exact: true}).waitFor();
     await page.getByText('Open in browser', {exact: true}).waitFor();
     assert.deepEqual(requests, []);
   } finally { await page.close(); }
@@ -387,7 +378,6 @@ test('failed remote image has a working retry control instead of a broken image 
   failedOnce = false;
   const page = await pageFor('retry');
   try {
-    await page.getByRole('button', { name: 'Load image', exact: true }).click();
     await page.getByText('Image not saved: download failed. Try again.').waitFor();
     assert.equal(await page.locator('img').count(), 0);
     await page.getByRole('button', { name: 'Retry', exact: true }).click();
@@ -514,9 +504,6 @@ test('offscreen image performs no image request until it approaches the viewport
     assert.deepEqual(requests, []);
     assert.equal(await page.locator('img').count(), 0);
     await page.locator('[data-maka-image-state]').scrollIntoViewIfNeeded();
-    await page.getByRole('button', { name: 'Load image', exact: true }).waitFor();
-    assert.deepEqual(requests, []);
-    await page.getByRole('button', { name: 'Load image', exact: true }).click();
     await loaded(page);
     assert.deepEqual(requests, [{ path: '/image.png', referer: undefined }]);
   } finally { await page.close(); }
@@ -576,7 +563,6 @@ for (const scenario of ['geometry-remote', 'geometry-saved']) {
   test(`${scenario}: loading and ready images preserve the position of subsequent content`, async () => {
     const page = await pageFor(scenario);
     try {
-      if (scenario === 'geometry-remote') await page.getByRole('button', { name: 'Load image', exact: true }).click();
       await page.getByText('Loading image…', { exact: true }).waitFor();
       const before = await page.getByText('Following paragraph', { exact: true }).boundingBox();
       if (scenario === 'geometry-remote') releaseImage(); else releaseAttachment();
@@ -594,7 +580,6 @@ for (const scenario of ['geometry-remote', 'geometry-saved']) {
 test('image frames fit narrow viewports without distorting screenshots or limiting the enlarged preview', async () => {
   const page = await pageFor('screenshot');
   try {
-    await page.getByRole('button', { name: 'Load image', exact: true }).click();
     await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth > 1));
     for (const width of [720, 360]) {
       await page.setViewportSize({ width, height: 600 });

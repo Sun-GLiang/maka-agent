@@ -43,6 +43,15 @@ export interface ConnectionEffectFetchTransport {
 
 export type ProxiedFetchProxy = ConnectionEffectProxySnapshot;
 
+/** Use the same immutable route decision when a caller also owns a pinned direct connection. */
+export function usesFetchProxy(fetch: typeof globalThis.fetch, url: URL): boolean {
+  const proxy = Object.getOwnPropertyDescriptor(fetch, FETCH_PROXY_SNAPSHOT)?.value as
+    | ProxySettings
+    | null
+    | undefined;
+  return !!proxy?.enabled && !matchesBypassList(url.hostname, proxy.bypassList);
+}
+
 export interface ProxiedFetchTransport {
   readonly fetch: typeof globalThis.fetch;
   close(): Promise<void>;

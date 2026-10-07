@@ -20,7 +20,9 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { createServer } from 'node:http';
+import http, { createServer } from 'node:http';
+import dns from 'node:dns/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import {
   TOOL_BOUNDARY_PROTOCOL_V1,
@@ -4522,7 +4524,7 @@ test('production Host automatically archives assistant Markdown images and serve
   });
 });
 
-test('production Host never downloads remote Markdown images in restricted session modes', async () => {
+test('production Host rejects loopback image destinations even when a restricted-session client permits media loading', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     let requests = 0;
     const server = createServer((_request, response) => {
@@ -4582,7 +4584,13 @@ test('production Host never downloads remote Markdown images in restricted sessi
           ).ok,
           true,
         );
-        const request = { sessionId: session.id, turnId, messageId: `message-${turnId}`, source };
+        const request = {
+          sessionId: session.id,
+          turnId,
+          messageId: `message-${turnId}`,
+          source,
+          loadRemote: true,
+        };
         await waitFor(async () => {
           const result = await captured.composition.handlers['artifact.image.resolve'](
             request,
@@ -4607,4 +4615,133 @@ test('production Host never downloads remote Markdown images in restricted sessi
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+});
+
+test('production Host loads visible remote media independently of agent sandbox networking and respects app privacy', async (t) => {
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  let requests = 0;
+  const server = createServer((_request, response) => {
+    requests++;
+    response.end(png);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
+  const realRequest = http.request;
+  t.mock.method(dns, 'lookup', async (host: string) => {
+    assert.equal(host, 'image.example');
+    return [{ address: '198.18.0.2', family: 4 }];
+  });
+  t.mock.method(
+    http,
+    'request',
+    (
+      url: URL,
+      options: import('node:http').RequestOptions,
+      callback: (response: import('node:http').IncomingMessage) => void,
+    ) => {
+      assert.equal(url.hostname, 'image.example');
+      assert.ok(options.lookup);
+      options.lookup(url.hostname, { all: true }, (error, addresses) => {
+        assert.equal(error, null);
+        assert.deepEqual(addresses, [{ address: '198.18.0.2', family: 4 }]);
+      });
+      return realRequest(
+        new URL(url.pathname, origin),
+        { ...options, lookup: undefined },
+        callback,
+      );
+    },
+  );
+  syncBuiltinESMExports();
+  try {
+    await withCompositionRoot(async ({ root, owner }) => {
+      const captured = await createCapturedExecutionComposition(owner, {
+        primaryBackendFactory: (context) =>
+          new (class extends FakeBackend {
+            override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+              yield {
+                type: 'text_complete',
+                id: `text-${input.turnId}`,
+                turnId: input.turnId,
+                ts: Date.now(),
+                messageId: `message-${input.turnId}`,
+                text: `![](http://image.example/${input.turnId}.png)`,
+              };
+              yield {
+                type: 'complete',
+                id: `complete-${input.turnId}`,
+                turnId: input.turnId,
+                ts: Date.now(),
+                stopReason: 'end_turn',
+              };
+            }
+          })(context),
+      });
+      const context = {
+        hostEpoch: 'execution-composition-test',
+        connectionId: 'image-client',
+        principal: 'local_os_user',
+        acquireResidency: () => ({ release() {} }),
+      };
+      try {
+        for (const [permissionMode, privacy] of [
+          ['explore', false],
+          ['ask', false],
+          ['bypass', true],
+        ] as const) {
+          const policy = await captured.composition.handlers['runtime.policy.query']({}, context);
+          assert.ok(policy.ok);
+          const changed = await captured.composition.handlers['runtime.policy.mutate'](
+            {
+              expectedRevision: policy.result.revision,
+              operation: { kind: 'set_privacy', value: { incognitoActive: privacy } },
+            },
+            context,
+          );
+          assert.ok(changed.ok);
+          const session = await captured.manager.createSession({
+            cwd: root,
+            llmConnectionId: FAKE_CONNECTION_ID,
+            llmConnectionSlug: 'fake',
+            model: 'fake-model',
+            permissionMode,
+          });
+          const turnId = `media-${permissionMode}`;
+          const started = await captured.composition.handlers['turn.start'](
+            { sessionId: session.id, turnId, content: { text: 'display image' } },
+            context,
+          );
+          assert.ok(started.ok, JSON.stringify(started));
+          const request = {
+            sessionId: session.id,
+            turnId,
+            messageId: `message-${turnId}`,
+            source: `http://image.example/${turnId}.png`,
+            loadRemote: true,
+          };
+          await waitFor(async () => {
+            const result = await captured.composition.handlers['artifact.image.resolve'](
+              request,
+              context,
+            );
+            assert.ok(result.ok);
+            return privacy
+              ? result.result.status === 'failed' && result.result.reason === 'not_allowed'
+              : result.result.status === 'ready';
+          }, 5000);
+        }
+        assert.equal(requests, 2, 'privacy mode must not issue a third media request');
+      } finally {
+        captured.composition.beginDrain();
+        await captured.composition.close();
+      }
+    });
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

@@ -31,10 +31,8 @@ export interface SharedUiCopy {
     invalidInternalLink: string;
     unsafeLink: string;
     imageLoading: string;
-    imageRemoteConsent: string;
     imageRemoteRedacted: string;
     imageRemoteUnavailable: string;
-    imageLoad: string;
     imageExpand: (alt: string) => string;
     imageArchiveFailure: (reason: import('@maka/core/image-delivery').ImageDeliveryFailure) => string;
     imageUnavailable: string;
@@ -138,15 +136,13 @@ const SHARED_UI_COPY = {
       invalidInternalLink: '内部链接无效',
       unsafeLink: '链接不安全',
       imageLoading: '正在加载图片…',
-      imageRemoteConsent: '远程图片需要授权加载，图片来源会收到请求。',
       imageRemoteRedacted: '图片地址含已隐藏的敏感信息，无法加载或在浏览器中打开。',
       imageRemoteUnavailable: '此处无法加载远程图片，可在浏览器中打开。',
-      imageLoad: '加载图片',
       imageExpand: (alt) => alt ? `放大图片：${alt}` : '放大图片',
       imageArchiveFailure: (reason) => ({
         quota_exceeded: '图片未保存：存储配额已满（每个会话 100 MiB，工作区 1 GiB）。删除不再需要的会话可释放空间，仅归档不会释放。',
         too_large: '图片未保存：超过自动保存的大小或像素上限。',
-        not_allowed: '图片未保存：当前权限不允许读取或联网。',
+        not_allowed: '图片未保存：当前权限、联网设置或来源地址不允许加载。',
         not_found: '图片未保存：原文件已不存在。',
         unsupported_mime: '图片未保存：不是支持的有效图片。',
         download_failed: '图片未保存：下载失败，请重试。',
@@ -239,15 +235,13 @@ const SHARED_UI_COPY = {
       invalidInternalLink: '內部連結無效',
       unsafeLink: '連結不安全',
       imageLoading: '正在載入圖片…',
-      imageRemoteConsent: '遠端圖片需要授權載入，圖片來源會收到請求。',
       imageRemoteRedacted: '圖片位址含已隱藏的敏感資訊，無法載入或在瀏覽器中開啟。',
       imageRemoteUnavailable: '此處無法載入遠端圖片，可在瀏覽器中開啟。',
-      imageLoad: '載入圖片',
       imageExpand: (alt) => alt ? `放大圖片：${alt}` : '放大圖片',
       imageArchiveFailure: (reason) => ({
         quota_exceeded: '圖片未儲存：儲存配額已滿（每個對話 100 MiB，工作區 1 GiB）。刪除不再需要的對話可釋放空間，僅封存不會釋放。',
         too_large: '圖片未儲存：超過自動儲存的大小或像素上限。',
-        not_allowed: '圖片未儲存：目前權限不允許讀取或連線。',
+        not_allowed: '圖片未儲存：目前權限、連線設定或來源位址不允許載入。',
         not_found: '圖片未儲存：原檔案已不存在。',
         unsupported_mime: '圖片未儲存：不是支援的有效圖片。',
         download_failed: '圖片未儲存：下載失敗，請重試。',
@@ -340,15 +334,13 @@ const SHARED_UI_COPY = {
       invalidInternalLink: 'Invalid internal link',
       unsafeLink: 'Unsafe link',
       imageLoading: 'Loading image…',
-      imageRemoteConsent: 'Load this remote image only if you trust its source. Loading sends a request to that source.',
       imageRemoteRedacted: 'The image address contains hidden sensitive information. Loading and opening it are disabled.',
       imageRemoteUnavailable: 'Remote images cannot be loaded here. You can open this image in your browser.',
-      imageLoad: 'Load image',
       imageExpand: (alt) => alt ? `Enlarge image: ${alt}` : 'Enlarge image',
       imageArchiveFailure: (reason) => ({
         quota_exceeded: 'Image not saved: storage quota reached (100 MiB per session, 1 GiB per workspace). Delete unneeded sessions to free space; archiving does not free space.',
         too_large: 'Image not saved: exceeds the automatic save size or pixel limit.',
-        not_allowed: 'Image not saved: current permissions do not allow reading it or using the network.',
+        not_allowed: 'Image not saved: permissions, network settings, or the source address block loading.',
         not_found: 'Image not saved: the original file no longer exists.',
         unsupported_mime: 'Image not saved: not a supported valid image.',
         download_failed: 'Image not saved: download failed. Try again.',
