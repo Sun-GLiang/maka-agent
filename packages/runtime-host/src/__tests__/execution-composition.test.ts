@@ -4588,7 +4588,9 @@ test('production Host never downloads remote Markdown images in restricted sessi
             request,
             context,
           );
-          return result.ok && result.result.status === 'requires_confirmation';
+          return (
+            result.ok && result.result.status === 'failed' && result.result.reason === 'not_allowed'
+          );
         }, 5000);
         assert.deepEqual(
           await captured.composition.handlers['artifact.image.resolve'](

@@ -807,6 +807,10 @@ test('remote capture requires a user action and current network authority, inclu
     assert.equal(downloads, 0);
     assert.deepEqual(await f.service.resolve(identity), { status: 'requires_confirmation' });
     f.allowRemote(false);
+    assert.deepEqual(await f.service.resolve(identity), {
+      status: 'failed',
+      reason: 'not_allowed',
+    });
     assert.deepEqual(await f.service.resolve({ ...identity, loadRemote: true }), {
       status: 'failed',
       reason: 'not_allowed',
