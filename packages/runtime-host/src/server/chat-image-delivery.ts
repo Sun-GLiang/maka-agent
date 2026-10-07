@@ -48,7 +48,6 @@ interface DeliveryIdentity extends ImageDeliveryRequest {
   readonly sessionId: string;
 }
 interface DeliveryJob {
-  readonly identity: DeliveryIdentity;
   readonly done: Promise<void>;
   run(): Promise<void>;
   cancel(): void;
@@ -160,7 +159,6 @@ export class ChatImageDeliveryService {
       settle();
     };
     const job: DeliveryJob = {
-      identity,
       done,
       cancel: finish,
       run: async () => {
@@ -201,6 +199,7 @@ export class ChatImageDeliveryService {
     );
     if (existing?.imageDelivery?.status !== 'pending' && existing) return;
     const metadata = { messageId, source };
+    const resultId = `chat_image_result_${deliveryKey(identity)}`;
     const pendingId = existing?.id ?? `chat_image_request_${deliveryKey(identity)}`;
     const base = {
       sessionId,
@@ -225,6 +224,14 @@ export class ChatImageDeliveryService {
           if (error instanceof ImageArchiveQuotaError) throw error;
           throw new ImagePersistenceError('Image persistence failed', { cause: error });
         }
+      });
+    const publishFailure = (reason: ImageDeliveryFailure) =>
+      publish({
+        ...base,
+        id: resultId,
+        kind: 'file',
+        content: '',
+        imageDelivery: { ...metadata, status: 'failed', reason },
       });
     await publish({
       ...base,
@@ -267,36 +274,20 @@ export class ChatImageDeliveryService {
       }
     } catch (error) {
       if (this.#abort.signal.aborted) return;
-      await publish({
-        ...base,
-        id: `chat_image_result_${deliveryKey(identity)}`,
-        kind: 'file',
-        content: '',
-        imageDelivery: { ...metadata, status: 'failed', reason: failureReason(error, source) },
-      });
+      await publishFailure(failureReason(error, source));
       return;
     } finally {
       clearTimeout(deadline);
     }
     if (this.#abort.signal.aborted) return;
     if (signal.aborted) {
-      await publish({
-        ...base,
-        id: `chat_image_result_${deliveryKey(identity)}`,
-        kind: 'file',
-        content: '',
-        imageDelivery: {
-          ...metadata,
-          status: 'failed',
-          reason: failureReason(signal.reason, source),
-        },
-      });
+      await publishFailure(failureReason(signal.reason, source));
       return;
     }
     try {
       await publish(
         readyChatImageArtifact({
-          id: `chat_image_result_${deliveryKey(identity)}`,
+          id: resultId,
           sessionId,
           turnId,
           name: base.name,
@@ -307,13 +298,7 @@ export class ChatImageDeliveryService {
       );
     } catch (error) {
       if (!(error instanceof ImageArchiveQuotaError)) throw error;
-      await publish({
-        ...base,
-        id: `chat_image_result_${deliveryKey(identity)}`,
-        kind: 'file',
-        content: '',
-        imageDelivery: { ...metadata, status: 'failed', reason: 'quota_exceeded' },
-      });
+      await publishFailure('quota_exceeded');
     }
   }
   beginDrain(): void {
@@ -341,5 +326,5 @@ function failureReason(error: unknown, source: string): ImageDeliveryFailure {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   if (code === 'ENOENT' || code === 'ENOTDIR') return 'not_found';
   if (code === 'EACCES' || code === 'EPERM') return 'not_allowed';
-  return /^https?:/i.test(source) ? 'download_failed' : 'read_failed';
+  return isRemoteImageSource(source) ? 'download_failed' : 'read_failed';
 }

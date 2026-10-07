@@ -28,7 +28,12 @@ import {
   imageFileFailureReason,
   validateImageBytes,
 } from '@maka/runtime/image-file';
-import { isImageDeliverySource, type ImageDeliveryFailure } from '@maka/core/image-delivery';
+import {
+  isImageDeliverySource,
+  isRemoteImageSource,
+  type ImageDeliveryFailure,
+} from '@maka/core/image-delivery';
+import { abortable } from '../client/wait-for-ready.js';
 export class ImageSourceError extends Error {
   constructor(readonly reason: ImageDeliveryFailure) {
     super(reason);
@@ -47,7 +52,7 @@ export function checkedChatImage(bytes: Uint8Array): ChatImageBytes {
   }
 }
 export function localImagePath(source: string): string | undefined {
-  if (/^https?:/i.test(source)) return undefined;
+  if (isRemoteImageSource(source)) return undefined;
   if (source.startsWith('file:')) {
     try {
       return fileURLToPath(source);
@@ -63,7 +68,7 @@ export function localImagePath(source: string): string | undefined {
 /** A missing literal path may be a URL-encoded Markdown destination. File URLs
  * already went through fileURLToPath; never decode them a second time. */
 export function decodedLocalImagePath(source: string): string | undefined {
-  if (source.startsWith('file:') || /^https?:/i.test(source)) return undefined;
+  if (source.startsWith('file:') || isRemoteImageSource(source)) return undefined;
   try {
     const decoded = decodeURIComponent(source);
     return decoded !== source && isImageDeliverySource(decoded) ? decoded : undefined;
@@ -91,7 +96,7 @@ export async function downloadChatImage(
       !!loopbackOrigin && url.origin === loopbackOrigin && (host === '127.0.0.1' || host === '::1');
     const addresses = isIP(host)
       ? [{ address: host, family: isIP(host) }]
-      : await abortableLookup(host, signal);
+      : await abortable(() => lookup(host, { all: true }), signal);
     if (!addresses.length || (!literalLoopback && addresses.some((a) => !publicAddress(a.address))))
       throw new ImageSourceError('not_allowed');
     const target = addresses[0]!;
@@ -157,15 +162,4 @@ function publicAddress(address: string): boolean {
   }
   // Only global-unicast IPv6 is eligible. Mapped IPv4/ULA/link-local are excluded.
   return /^[23][0-9a-f]{3}:/i.test(address);
-}
-
-function abortableLookup(host: string, signal: AbortSignal) {
-  signal.throwIfAborted();
-  return new Promise<import('node:dns').LookupAddress[]>((resolve, reject) => {
-    const abort = () => reject(signal.reason);
-    signal.addEventListener('abort', abort, { once: true });
-    void lookup(host, { all: true })
-      .then(resolve, reject)
-      .finally(() => signal.removeEventListener('abort', abort));
-  });
 }

@@ -24,6 +24,7 @@ import type { MarkdownAstNode, MarkdownAstRoot } from '@astryxdesign/core/Markdo
 import { Maximize2, RotateCw, AlertTriangle } from './icons.js';
 import { Link } from '@astryxdesign/core/Link';
 import { parseAttachmentResourceRef } from '@maka/core/attachments';
+import { isRemoteImageSource } from '@maka/core/image-delivery';
 import { useAttachmentImage } from './attachment-image.js';
 import { useImageDelivery } from './image-delivery.js';
 import { getSharedUiCopy } from './shared-ui-copy.js';
@@ -99,7 +100,7 @@ function ImageResource(props: { src: string; alt: string; inline?: boolean }) {
   const image = useAttachmentImage(visible && artifactId ? { artifactId } : undefined);
   const [failedSource, setFailedSource] = useState<string>();
   const [attempt, setAttempt] = useState(0);
-  const remote = isWebImage(props.src);
+  const remote = isRemoteImageSource(props.src);
   const source = artifactId ? image.src : undefined;
   const failed = !!source && failedSource === source || !!artifactId && image.status === 'failed';
   const retry = () => {
@@ -139,16 +140,6 @@ function ImageResource(props: { src: string; alt: string; inline?: boolean }) {
       {delivery.available && <Button variant="ghost" size="sm" label={copy.imageLoad} onClick={delivery.confirmRemote} />}
       <Link href={props.src} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>
     </span>}
-    {!explicit && delivery.status === 'pending' && remote && source && (props.inline ? <Tooltip content={copy.imageSaving}>
-      <span className="maka-markdown-image-saving" role="status" aria-label={copy.imageSaving}><Spinner size="sm" aria-hidden="true" /></span>
-    </Tooltip> : <span className="maka-markdown-image-saving" role="status">{copy.imageSaving}</span>)}
-    {!explicit && delivery.status === 'failed' && remote && source && !failed && (props.inline ? <Tooltip content={copy.imageArchiveFailure(delivery.reason)}>
-      <span className="maka-markdown-image-saving" role="status" aria-label={copy.imageArchiveFailure(delivery.reason)}>
-        <IconButton icon={<AlertTriangle size={14} />} size="sm" label={copy.imageRetry} onClick={retry} />
-      </span>
-    </Tooltip> : <span className="maka-markdown-image-saving" role="status">
-      {copy.imageArchiveFailure(delivery.reason)} {sourceActions}
-    </span>)}
   </span>;
 }
 function DisplayImage(props: { src: string; alt: string; onError(): void }) {
@@ -166,7 +157,4 @@ function DisplayImage(props: { src: string; alt: string; onError(): void }) {
     </span>
     {lightbox.isOpen && lightbox.element}
   </>;
-}
-function isWebImage(source: string): boolean {
-  try { return ['http:', 'https:'].includes(new URL(source).protocol); } catch { return false; }
 }
