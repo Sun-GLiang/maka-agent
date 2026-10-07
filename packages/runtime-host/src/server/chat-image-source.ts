@@ -81,24 +81,17 @@ export function decodedLocalImagePath(source: string): string | undefined {
 export async function downloadChatImage(
   source: string,
   signal: AbortSignal,
-  options: { readonly loopbackOrigin?: string } = {},
 ): Promise<ChatImageBytes> {
   let url = new URL(source);
-  // Test fixtures alone pass loopbackOrigin; production callers must omit it.
-  // The fixture grant is pinned to its original exact origin, so redirects
-  // cannot acquire it or reach a different local port.
-  const loopbackOrigin = url.origin === options.loopbackOrigin ? options.loopbackOrigin : undefined;
   for (let redirect = 0; redirect <= 3; redirect++) {
     signal.throwIfAborted();
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
       throw new ImageSourceError('not_allowed');
     const host = url.hostname.replace(/^\[|\]$/g, '');
-    const literalLoopback =
-      !!loopbackOrigin && url.origin === loopbackOrigin && (host === '127.0.0.1' || host === '::1');
     const addresses = isIP(host)
       ? [{ address: host, family: isIP(host) }]
       : await abortable(() => lookup(host, { all: true }), signal);
-    if (!addresses.length || (!literalLoopback && addresses.some((a) => !publicAddress(a.address))))
+    if (!addresses.length || addresses.some((a) => !publicAddress(a.address)))
       throw new ImageSourceError('not_allowed');
     const target = addresses[0]!;
     const response = await new Promise<import('node:http').IncomingMessage>((resolve, reject) => {

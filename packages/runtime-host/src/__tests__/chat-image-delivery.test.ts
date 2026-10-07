@@ -18,12 +18,15 @@
  */
 
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import { mkdtemp, mkdir, readFile, writeFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createServer } from 'node:http';
+import http, { createServer, type RequestOptions, type IncomingMessage } from 'node:http';
+import https from 'node:https';
+import dns from 'node:dns/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { createImageFileReader, ImageFileReadError } from '@maka/runtime/image-file-reader';
 import { FilesystemWorkerClientError } from '@maka/runtime/filesystem-worker';
@@ -43,6 +46,46 @@ const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
   'base64',
 );
+// Mock only Node's DNS/transport boundary. The production downloader still
+// checks public addresses, pins DNS, follows redirects and validates HTTP bytes.
+// Top-level tests in this file run serially; restore the ESM bindings at teardown.
+function publicImageOrigin(t: TestContext, localSource: string, protocol = 'http:'): string {
+  const local = new URL(localSource);
+  const source = new URL(localSource);
+  source.hostname = 'image.example';
+  source.protocol = protocol;
+  const request = http.request;
+  t.mock.method(dns, 'lookup', async (host: string) => {
+    assert.equal(host, source.hostname);
+    return [{ address: '93.184.216.34', family: 4 }];
+  });
+  const transport = (
+    url: URL,
+    options: RequestOptions,
+    callback: (res: IncomingMessage) => void,
+  ) => {
+    assert.equal(url.origin, source.origin);
+    assert.ok(options.lookup);
+    options.lookup(url.hostname, { all: true }, (error, addresses) => {
+      assert.equal(error, null);
+      assert.deepEqual(addresses, [{ address: '93.184.216.34', family: 4 }]);
+    });
+    return request(
+      new URL(url.pathname + url.search, local),
+      { ...options, lookup: undefined },
+      callback,
+    );
+  };
+  t.mock.method(http, 'request', transport);
+  t.mock.method(https, 'request', transport);
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  return source.href;
+}
+
 const REQUEST = {
   sessionId: 'session-1',
   turnId: 'turn-1',
@@ -65,7 +108,6 @@ async function fixture(
   const errors: unknown[] = [];
   const presentationErrors: unknown[] = [];
   let remoteAllowed = true;
-  let loopbackOrigin: string | undefined;
   let reads = 0;
   let leases = 0;
   const messages = new Map<string, string>();
@@ -83,8 +125,7 @@ async function fixture(
     limits,
     sourceReadTimeoutMs: 1000,
     canLoadRemote: async () => remoteAllowed,
-    download:
-      download ?? ((source, signal) => downloadChatImage(source, signal, { loopbackOrigin })),
+    download: download ?? downloadChatImage,
     isPresent: async () => present,
     readMessage: async (i) => messages.get(i.messageId),
     readLocalImage: async (sessionId, path, signal) => {
@@ -113,9 +154,6 @@ async function fixture(
     presentationErrors,
     allowRemote(value: boolean) {
       remoteAllowed = value;
-    },
-    trustRemoteOrigin(source: string) {
-      loopbackOrigin = new URL(source).origin;
     },
     get reads() {
       return reads;
@@ -427,7 +465,7 @@ test('missing encoded sources never double-decode file URLs or retry invalid esc
   }
 });
 
-test('remote delivery is downloaded once, remains replayable after the origin server disappears, and sends no credentials/referrer', async () => {
+test('remote delivery is downloaded once, remains replayable after the origin server disappears, and sends no credentials/referrer', async (t) => {
   const f = await fixture();
   let requests = 0;
   const server = createServer((req, res) => {
@@ -439,9 +477,11 @@ test('remote delivery is downloaded once, remains replayable after the origin se
     res.end(PNG);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const source = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`;
+  const source = publicImageOrigin(
+    t,
+    `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`,
+  );
   try {
-    f.trustRemoteOrigin(source);
     f.messages.set(REQUEST.messageId, `![Screenshot](${source})`);
     observe(f.service, source);
     await f.service.waitForIdle();
@@ -499,7 +539,7 @@ test('transient failure is persisted and is retried only on an explicit request'
   }
 });
 
-test('truncated HTTP images are rejected, and an explicit retry archives the repaired source', async () => {
+test('truncated HTTP images are rejected, and an explicit retry archives the repaired source', async (t) => {
   const f = await fixture();
   let content = PNG.subarray(0, 8);
   let requests = 0;
@@ -509,10 +549,12 @@ test('truncated HTTP images are rejected, and an explicit retry archives the rep
     res.end(content);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const source = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`;
+  const source = publicImageOrigin(
+    t,
+    `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`,
+  );
   const identity = { ...REQUEST, source, loadRemote: true };
   try {
-    f.trustRemoteOrigin(source);
     f.messages.set(REQUEST.messageId, `![Screenshot](${source})`);
     await f.service.resolve(identity);
     await f.service.waitForIdle();
@@ -750,7 +792,7 @@ test('copying a conversation carries delivery provenance and saved bytes; it doe
     await f.close();
   }
 });
-test('source readers reject oversized payloads, unsafe MIME and redirects to private networks', async () => {
+test('source readers reject oversized payloads, unsafe MIME and redirects to private networks', async (t) => {
   assert.throws(() => checkedChatImage(Buffer.alloc(2 * 1024 * 1024 + 1)), /too_large/);
   assert.throws(() => checkedChatImage(Buffer.from('<svg/>')), /unsupported_mime/);
   const server = createServer((_req, res) => {
@@ -759,17 +801,104 @@ test('source readers reject oversized payloads, unsafe MIME and redirects to pri
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
-    const source = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/redirect`;
-    await assert.rejects(
-      downloadChatImage(source, AbortSignal.timeout(2000), {
-        loopbackOrigin: new URL(source).origin,
-      }),
-      /not_allowed/,
+    const source = publicImageOrigin(
+      t,
+      `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/redirect`,
     );
+    await assert.rejects(downloadChatImage(source, AbortSignal.timeout(2000)), /not_allowed/);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+test('HTTP download enforces header/stream limits, redirect budget and cancellation', async (t) => {
+  const server = createServer((req, res) => {
+    if (req.url === '/length') {
+      res.writeHead(200, { 'content-length': 2 * 1024 * 1024 + 1 });
+      res.end();
+    } else if (req.url === '/stream') {
+      res.writeHead(200);
+      res.write(Buffer.alloc(2 * 1024 * 1024 + 1));
+      res.end();
+    } else if (req.url === '/redirect') {
+      res.writeHead(302, { location: '/redirect' });
+      res.end();
+    } else if (req.url === '/stalled') {
+      // Keep the response open until the downloader's cancellation closes it.
+    } else {
+      res.writeHead(503);
+      res.end();
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const source = publicImageOrigin(
+    t,
+    `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/`,
+  );
+  try {
+    for (const [path, reason] of [
+      ['length', 'too_large'],
+      ['stream', 'too_large'],
+      ['redirect', 'download_failed'],
+      ['unavailable', 'download_failed'],
+    ]) {
+      await assert.rejects(
+        downloadChatImage(source + path, AbortSignal.timeout(2000)),
+        new RegExp(reason),
+      );
+    }
+    await assert.rejects(downloadChatImage(source + 'stalled', AbortSignal.timeout(50)), {
+      name: 'AbortError',
+    });
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('HTTPS download cannot redirect to HTTP', async (t) => {
+  let requests = 0;
+  const server = createServer((_req, res) => {
+    requests++;
+    res.writeHead(302, { location: 'http://image.example/image.png' });
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const source = publicImageOrigin(
+    t,
+    `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/`,
+    'https:',
+  );
+  try {
+    await assert.rejects(downloadChatImage(source, AbortSignal.timeout(2000)), /not_allowed/);
+    assert.equal(requests, 1);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('DNS answers containing any private address are denied before a request', async (t) => {
+  const answers = [
+    { address: '93.184.216.34', family: 4 },
+    { address: '127.0.0.1', family: 4 },
+  ];
+  const lookup = t.mock.method(dns, 'lookup', async () => answers);
+  const request = t.mock.method(http, 'request', () => {
+    assert.fail('unsafe DNS must not reach transport');
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(
+      downloadChatImage('http://image.example/image.png', AbortSignal.timeout(1000)),
+      /not_allowed/,
+    );
+    assert.equal(lookup.mock.callCount(), 1);
+    assert.equal(request.mock.callCount(), 0);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
 test('resolver codec rejects excess fields and noncanonical artifact identities', () => {
   const spec = IMAGE_DELIVERY_OPERATION_SPECS['artifact.image.resolve'];
   assert.deepEqual(spec.decodeInput(REQUEST), REQUEST);
@@ -906,7 +1035,7 @@ test('a Markdown parser failure stays in presentation and subsequent images stil
   }
 });
 
-test('loopback is denied before GET and a served-origin grant cannot follow another local port', async () => {
+test('loopback is denied before GET, including redirects from a public origin', async (t) => {
   let hits = 0;
   const target = createServer((_req, res) => {
     hits++;
@@ -919,16 +1048,23 @@ test('loopback is denied before GET and a served-origin grant cannot follow anot
     res.end();
   });
   await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve));
-  const source = `http://127.0.0.1:${(origin.address() as import('node:net').AddressInfo).port}/redirect`;
   try {
-    for (const url of [targetUrl, 'http://[::1]:80/image.png'])
-      await assert.rejects(downloadChatImage(url, AbortSignal.timeout(1000)), /not_allowed/);
+    // An untyped caller passing the former fixture option cannot grant access.
     await assert.rejects(
-      downloadChatImage(source, AbortSignal.timeout(1000), {
-        loopbackOrigin: new URL(source).origin,
-      }),
+      Reflect.apply(downloadChatImage, undefined, [
+        targetUrl,
+        AbortSignal.timeout(1000),
+        { loopbackOrigin: new URL(targetUrl).origin },
+      ]),
       /not_allowed/,
     );
+    const source = publicImageOrigin(
+      t,
+      `http://127.0.0.1:${(origin.address() as import('node:net').AddressInfo).port}/redirect`,
+    );
+    for (const url of [targetUrl, 'http://[::1]:80/image.png'])
+      await assert.rejects(downloadChatImage(url, AbortSignal.timeout(1000)), /not_allowed/);
+    await assert.rejects(downloadChatImage(source, AbortSignal.timeout(1000)), /not_allowed/);
     assert.equal(hits, 0);
   } finally {
     await Promise.all(
