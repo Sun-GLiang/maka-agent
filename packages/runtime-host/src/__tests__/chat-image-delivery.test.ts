@@ -38,6 +38,7 @@ import {
 } from '../server/chat-image-delivery.js';
 import { chatImageSources } from '../server/chat-image-markdown.js';
 import { checkedChatImage, downloadChatImage } from '../server/chat-image-source.js';
+import { createProxiedFetchTransport } from '@maka/runtime/network/scoped-fetch-transport';
 import { IMAGE_DELIVERY_OPERATION_SPECS } from '../protocol/image-delivery.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import { createHostExecutionArtifactServices } from '../server/execution-artifacts.js';
@@ -49,7 +50,12 @@ const PNG = Buffer.from(
 // Mock only Node's DNS/transport boundary. The production downloader still
 // checks public addresses, pins DNS, follows redirects and validates HTTP bytes.
 // Top-level tests in this file run serially; restore the ESM bindings at teardown.
-function publicImageOrigin(t: TestContext, localSource: string, protocol = 'http:'): string {
+function publicImageOrigin(
+  t: TestContext,
+  localSource: string,
+  protocol = 'http:',
+  address = '93.184.216.34',
+): string {
   const local = new URL(localSource);
   const source = new URL(localSource);
   source.hostname = 'image.example';
@@ -57,7 +63,7 @@ function publicImageOrigin(t: TestContext, localSource: string, protocol = 'http
   const request = http.request;
   t.mock.method(dns, 'lookup', async (host: string) => {
     assert.equal(host, source.hostname);
-    return [{ address: '93.184.216.34', family: 4 }];
+    return [{ address, family: address.includes(':') ? 6 : 4 }];
   });
   const transport = (
     url: URL,
@@ -68,7 +74,7 @@ function publicImageOrigin(t: TestContext, localSource: string, protocol = 'http
     assert.ok(options.lookup);
     options.lookup(url.hostname, { all: true }, (error, addresses) => {
       assert.equal(error, null);
-      assert.deepEqual(addresses, [{ address: '93.184.216.34', family: 4 }]);
+      assert.deepEqual(addresses, [{ address, family: address.includes(':') ? 6 : 4 }]);
     });
     return request(
       new URL(url.pathname + url.search, local),
@@ -905,6 +911,196 @@ test('DNS answers containing any private address are denied before a request', a
   }
 });
 
+for (const address of ['198.18.0.2', '198.19.255.254', '2001:2::6', '2001:2:0:1::2']) {
+  test(`named images load through VPN fake DNS ${address} with pinned lookup`, async (t) => {
+    const server = createServer((_req, res) => res.end(PNG));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const local = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`;
+      const source = publicImageOrigin(t, local, 'https:', address);
+      assert.deepEqual(
+        await downloadChatImage(source, AbortSignal.timeout(2000)),
+        checkedChatImage(PNG),
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+}
+
+test('fake DNS never authorizes literal private addresses, local names or mixed private answers', async (t) => {
+  let answers = [{ address: '198.18.0.2', family: 4 }];
+  t.mock.method(dns, 'lookup', async () => answers);
+  const request = t.mock.method(http, 'request', () =>
+    assert.fail('blocked source reached transport'),
+  );
+  syncBuiltinESMExports();
+  try {
+    for (const source of [
+      'http://198.18.0.2/a.png',
+      'http://198.19.0.2/a.png',
+      'http://[2001:2::6]/a.png',
+      'http://localhost/a.png',
+      'http://localhost./a.png',
+      'http://app.localhost/a.png',
+      'http://router.lan/a.png',
+      'http://server.local/a.png',
+      'http://metadata.google.internal/a.png',
+      'http://metadata.goog/a.png',
+    ]) {
+      await assert.rejects(downloadChatImage(source, AbortSignal.timeout(1000)), /not_allowed/);
+    }
+    for (const address of ['127.0.0.1', '192.168.1.2', '169.254.169.254', '::1']) {
+      answers = [
+        { address: '198.18.0.2', family: 4 },
+        { address, family: address.includes(':') ? 6 : 4 },
+      ];
+      await assert.rejects(
+        downloadChatImage('http://image.example/a.png', AbortSignal.timeout(1000)),
+        /not_allowed/,
+      );
+    }
+    assert.equal(request.mock.callCount(), 0);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
+test('a configured HTTP proxy receives the original hostname despite fake DNS and checks redirects and limits', async (t) => {
+  const tunnels: string[] = [];
+  const imageRequests: string[] = [];
+  const server = createServer((request, response) => {
+    imageRequests.push(
+      `${request.method} ${request.url} HTTP/1.1\r\n${request.rawHeaders.map((value, index) => (index % 2 ? `${value}\r\n` : `${value}: `)).join('')}`,
+    );
+    const path = new URL(request.url!, 'http://image.example').pathname;
+    if (path === '/redirect')
+      response.writeHead(302, { location: 'http://127.0.0.1/private' }).end();
+    else if (path === '/length') response.writeHead(200, { 'content-length': 2097153 }).end();
+    else if (path === '/stream') {
+      response.writeHead(200);
+      response.write(Buffer.alloc(2097153));
+      response.end();
+    } else if (path === '/loop') response.writeHead(302, { location: '/loop' }).end();
+    else if (path === '/stalled') {
+      /* Abort must close this unfinished response. */
+    } else response.writeHead(200, { 'content-type': 'image/png', connection: 'close' }).end(PNG);
+  });
+  server.on('connect', (request, socket) => {
+    tunnels.push(request.url!);
+    socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+    let data = '';
+    socket.on('data', (chunk) => {
+      data += chunk.toString();
+      if (!data.includes('\r\n\r\n')) return;
+      imageRequests.push(data);
+      const path = data.split(' ')[1];
+      if (path === '/redirect')
+        socket.end(
+          'HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/private\r\nContent-Length: 0\r\n\r\n',
+        );
+      else if (path === '/length') socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2097153\r\n\r\n');
+      else if (path === '/stream')
+        socket.end(
+          Buffer.concat([
+            Buffer.from('HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n200001\r\n'),
+            Buffer.alloc(2097153),
+            Buffer.from('\r\n0\r\n\r\n'),
+          ]),
+        );
+      else if (path === '/loop')
+        socket.end('HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n');
+      else if (path === '/stalled') {
+        /* The caller cancels this tunnel. */
+      } else
+        socket.end(
+          Buffer.concat([
+            Buffer.from(
+              `HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: ${PNG.length}\r\nConnection: close\r\n\r\n`,
+            ),
+            PNG,
+          ]),
+        );
+      data = '';
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.mock.method(dns, 'lookup', async (host: string) => {
+    assert.equal(host, 'image.example');
+    return [{ address: '198.18.0.2', family: 4 }];
+  });
+  syncBuiltinESMExports();
+  const transport = createProxiedFetchTransport({
+    enabled: true,
+    type: 'http',
+    host: '127.0.0.1',
+    port: (server.address() as import('node:net').AddressInfo).port,
+    bypassList: [],
+  });
+  try {
+    const options = { fetch: transport.fetch };
+    assert.deepEqual(
+      await downloadChatImage('http://image.example/image.png', AbortSignal.timeout(2000), options),
+      checkedChatImage(PNG),
+    );
+    await assert.rejects(
+      downloadChatImage('http://image.example/redirect', AbortSignal.timeout(2000), options),
+      /not_allowed/,
+    );
+    await assert.rejects(
+      downloadChatImage('http://image.example/length', AbortSignal.timeout(2000), options),
+      /too_large/,
+    );
+    await assert.rejects(
+      downloadChatImage('http://image.example/stream', AbortSignal.timeout(2000), options),
+      /too_large/,
+    );
+    await assert.rejects(
+      downloadChatImage('http://image.example/loop', AbortSignal.timeout(2000), options),
+      /download_failed/,
+    );
+    await assert.rejects(
+      downloadChatImage('http://image.example/stalled', AbortSignal.timeout(50), options),
+      { name: 'TimeoutError' },
+    );
+    assert.ok(tunnels.every((target) => target === 'image.example:80'));
+    assert.equal(imageRequests.length, 9);
+    assert.ok(imageRequests.every((request) => /host: image\.example/i.test(request)));
+    assert.ok(
+      imageRequests.every((request) => !/198\.18|cookie:|authorization:|referer:/i.test(request)),
+    );
+  } finally {
+    await transport.close();
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('proxy bypass preserves the checked and pinned direct image connection', async (t) => {
+  const server = createServer((_req, res) => res.end(PNG));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const transport = createProxiedFetchTransport({
+    enabled: true,
+    type: 'http',
+    host: '127.0.0.1',
+    port: 1,
+    bypassList: ['image.example'],
+  });
+  try {
+    const local = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`;
+    const source = publicImageOrigin(t, local, 'http:', '198.18.0.2');
+    assert.deepEqual(
+      await downloadChatImage(source, AbortSignal.timeout(2000), { fetch: transport.fetch }),
+      checkedChatImage(PNG),
+    );
+  } finally {
+    await transport.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test('resolver codec rejects excess fields and noncanonical artifact identities', () => {
   const spec = IMAGE_DELIVERY_OPERATION_SPECS['artifact.image.resolve'];
   assert.deepEqual(spec.decodeInput(REQUEST), REQUEST);
@@ -921,7 +1117,7 @@ test('resolver codec rejects excess fields and noncanonical artifact identities'
   assert.throws(() => spec.decodeOutput({ status: 'requires_confirmation', source: '/private' }));
 });
 
-test('remote capture requires a user action and current network authority, including on retry', async () => {
+test('remote capture requires client display authority and application network access, including on retry', async () => {
   let downloads = 0;
   const f = await fixture(undefined, undefined, undefined, async () => {
     downloads++;
@@ -973,7 +1169,7 @@ test('remote capture requires a user action and current network authority, inclu
   }
 });
 
-test('failed remote downloads issue one request and require explicit retry consent', async () => {
+test('failed remote downloads issue one request and require a client retry', async () => {
   let downloads = 0;
   const f = await fixture(undefined, undefined, undefined, async () => {
     downloads++;

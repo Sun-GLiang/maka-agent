@@ -19,6 +19,7 @@
 
 import { createImageFileReader } from '@maka/runtime/image-file-reader';
 import { ChatImageDeliveryService } from './chat-image-delivery.js';
+import { downloadChatImage, ImageSourceError } from './chat-image-source.js';
 import { createGenesisExecutionBoundary } from '@maka/core/sandbox-boundary';
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
 import { createWorkHubInspectionTool } from './workhub-inspection-tool.js';
@@ -592,16 +593,26 @@ export async function createExecutionRuntimeHostComposition(
       presentationFailed: (error) => {
         console.warn('[runtime-host] Image presentation failed', error);
       },
-      canLoadRemote: async (sessionId) => {
-        const [header, stored] = await Promise.all([
-          stores.sessionStore.readHeaderSnapshot(sessionId),
-          stores.sessionStore.readExecutionBoundary(sessionId),
-        ]);
-        const boundary = stored ?? createGenesisExecutionBoundary(header.permissionMode);
-        return (
-          boundary.kind === 'bypass' ||
-          (boundary.kind === 'managed' && boundary.profile.network.kind === 'enabled')
+      // Transcript media belongs to the application's outbound policy, rather
+      // than the agent's subprocess sandbox. Privacy mode still blocks capture.
+      canLoadRemote: async () => {
+        const resolved = await runtimePolicyStores.operations.resolveHostOutboundExecution();
+        return resolved.kind === 'ready';
+      },
+      download: async (source, signal) => {
+        const resolved = await runtimePolicyStores.operations.resolveHostOutboundExecution();
+        if (resolved.kind !== 'ready') throw new ImageSourceError('not_allowed');
+        const proxy = toRuntimePolicyProxy(
+          resolved.networkProxy,
+          resolved.secretMaterial.networkProxy?.secret,
         );
+        if (!proxy) return downloadChatImage(source, signal);
+        const transport = createProxiedFetchTransport(proxy);
+        try {
+          return await downloadChatImage(source, signal, { fetch: transport.fetch });
+        } finally {
+          await transport.close();
+        }
       },
       readLocalImage: async (sessionId, path, abortSignal) => {
         const [header, boundary] = await Promise.all([
