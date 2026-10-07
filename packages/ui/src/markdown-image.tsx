@@ -21,7 +21,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type R
 import { Button, IconButton, Spinner, Tooltip, useLightbox } from '@astryxdesign/core';
 import { createMarkdownPlugin, type MarkdownExtensionNode } from '@astryxdesign/core/Markdown/plugins';
 import type { MarkdownAstNode, MarkdownAstRoot } from '@astryxdesign/core/Markdown';
-import { Maximize2, RotateCw, AlertTriangle } from './icons.js';
+import { RotateCw, AlertTriangle } from './icons.js';
 import { Link } from '@astryxdesign/core/Link';
 import { parseAttachmentResourceRef } from '@maka/core/attachments';
 import { isRemoteImageSource } from '@maka/core/image-delivery';
@@ -158,14 +158,23 @@ function DisplayImage(props: { src: string; alt: string; onError(): void }) {
   const copy = getSharedUiCopy(useUiLocale()).markdown;
   const [loaded, setLoaded] = useState(false);
   const lightbox = useLightbox({ media: { src: props.src, alt: props.alt }, hasZoom: true });
+  const trigger = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (lightbox.isOpen) return () => trigger.current?.focus();
+  }, [lightbox.isOpen]);
   return <>
-    <span className="maka-markdown-image-preview">
+    <span ref={trigger} className="maka-markdown-image-preview maka-markdown-image-trigger"
+        role="button" tabIndex={loaded ? 0 : -1} aria-label={copy.imageExpand(props.alt)}
+        aria-haspopup="dialog" aria-disabled={!loaded}
+        onClick={event => { event.preventDefault(); event.stopPropagation(); if (loaded) lightbox.open(); }}
+        onKeyDown={event => {
+          if (loaded && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault(); event.stopPropagation(); lightbox.open();
+          }
+        }}>
       {!loaded && <span className="maka-markdown-image-loading" role="status" aria-label={copy.imageLoading}><Spinner size="sm" shade="subtle" aria-hidden="true" /> <span className="maka-markdown-image-loading-label">{copy.imageLoading}</span></span>}
       <img src={props.src} alt={props.alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
           className="maka-markdown-attachment-image" onLoad={() => setLoaded(true)} onError={props.onError} />
-      {loaded && <span className="maka-markdown-image-expand">
-        <IconButton icon={<Maximize2 size={16} />} size="sm" label={copy.imageExpand(props.alt)} onClick={event => { event.preventDefault(); event.stopPropagation(); lightbox.open(); }} />
-      </span>}
     </span>
     {lightbox.isOpen && lightbox.element}
   </>;

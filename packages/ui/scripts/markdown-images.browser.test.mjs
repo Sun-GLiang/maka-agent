@@ -98,6 +98,7 @@ before(async () => {
     'badge-strip': `![Badge](${imageUrl}/badge.png) ![Badge](${imageUrl}/badge.png)`,
     'layout-main': `## Image delivery\n\nBuild ![Badge](${imageUrl}/badge.png) passing.\n\n![Screenshot](${imageUrl}/screenshot.png)\n\nFollowing paragraph stays in place.`,
     'layout-side': `## Image delivery\n\nBuild ![Badge](${imageUrl}/badge.png) passing.\n\n![Screenshot](${imageUrl}/screenshot.png)\n\nFollowing paragraph stays in place.`,
+    'screenshot-saved': '![Screenshot](/tmp/screenshot.png)',
     'angle-saved': '![Screenshot](</tmp/my image.png>)',
     'title-saved': `![Screenshot](${imageUrl}/image.png "Screenshot title")`,
     'escaped-saved': String.raw`![Screenshot](/tmp/a\(1\).png)`,
@@ -163,7 +164,7 @@ before(async () => {
         if(mode.startsWith('badge-')) await fetch('/badge-attachment');
         if(mode==='geometry-saved') await fetch('/release-attachment');
         reads++; window.imageReads=reads; return (mode==='attachment' || mode==='read-retry-saved') && reads===1 ? {ok:false,reason:'read_failed'} :
-          {ok:true,base64:mode.startsWith('badge-') || artifactId.endsWith('badge.png') ? '${badge.toString('base64')}' : mode==='geometry-saved' || artifactId.endsWith('screenshot.png') ? '${screenshot.toString('base64')}' : mode.endsWith('corrupt-saved') && reads===1 ? 'iVBORw0KGgo=' : '${png.toString('base64')}',mimeType:'image/png'};
+          {ok:true,base64:mode.startsWith('badge-') || artifactId.endsWith('badge.png') ? '${badge.toString('base64')}' : mode==='geometry-saved' || mode==='screenshot-saved' || artifactId.endsWith('screenshot.png') ? '${screenshot.toString('base64')}' : mode.endsWith('corrupt-saved') && reads===1 ? 'iVBORw0KGgo=' : '${png.toString('base64')}',mimeType:'image/png'};
       };
       const preview=mode==='preview' || mode==='signed-preview' || mode==='local';
       const seeded=mode.endsWith('saved') || mode.endsWith('saving') || race || mode.startsWith('badge-') || mode.startsWith('layout-');
@@ -456,6 +457,54 @@ for (const scenario of ['remote-saved', 'local-saved']) {
     } finally { await page.close(); }
   });
 }
+for (const scenario of ['local-saved', 'remote-saved', 'badge-saved', 'screenshot-saved']) {
+  test(`${scenario}: clicking the image itself opens the enlarged preview`, async () => {
+    requests = [];
+    const page = await pageFor(scenario);
+    try {
+      const image = page.locator('.maka-markdown-image-preview img');
+      await image.waitFor();
+      await image.evaluate(image => image.decode());
+      assert.equal(await page.locator('.maka-markdown-image-expand').count(), 0);
+      assert.equal(await page.getByRole('button', { name: /^Enlarge image:/ }).count(), 1);
+      const source = await image.getAttribute('src');
+      const url = page.url();
+      await image.hover();
+      assert.equal(await image.evaluate(element => getComputedStyle(element).cursor), 'default');
+      const evidence = scenario === 'screenshot-saved' && process.env.MAKA_IMAGE_LAYOUT_EVIDENCE_DIR;
+      if (evidence) {
+        await mkdir(evidence, { recursive: true });
+        await page.screenshot({ path: join(evidence, 'click-image-ready.png'), fullPage: true });
+      }
+      await image.click();
+      const dialog = page.getByRole('dialog');
+      await dialog.waitFor();
+      assert.equal(await dialog.locator('img').getAttribute('src'), source);
+      if (evidence) await page.screenshot({ path: join(evidence, 'click-image-enlarged.png'), fullPage: true });
+      assert.equal(page.url(), url);
+      assert.deepEqual(requests, []);
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({ state: 'hidden' });
+    } finally { await page.close(); }
+  });
+}
+
+for (const key of ['Enter', 'Space']) {
+  test(`the image itself supports keyboard enlargement with ${key}`, async () => {
+    const page = await pageFor('local-saved');
+    try {
+      await loaded(page);
+      const trigger = page.locator('.maka-markdown-image-trigger');
+      await trigger.focus();
+      await page.keyboard.press(key);
+      await page.getByRole('dialog').waitFor();
+      await page.keyboard.press('Escape');
+      await page.getByRole('dialog').waitFor({ state: 'hidden' });
+      await page.waitForFunction(() => document.activeElement?.classList.contains('maka-markdown-image-trigger'));
+    } finally { await page.close(); }
+  });
+}
+
 test('offscreen image performs no image request until it approaches the viewport', async () => {
   requests = [];
   const page = await pageFor('offscreen');
@@ -558,16 +607,16 @@ test('image frames fit narrow viewports without distorting screenshots or limiti
       });
       assert.ok(Math.abs(geometry.box.width / geometry.box.height - geometry.ratio) < 0.01);
       assert.ok(geometry.box.x >= geometry.frame.x && geometry.box.right <= geometry.frame.right + 1);
-      assert.ok(geometry.box.y >= geometry.frame.y && geometry.box.bottom <= geometry.frame.bottom + 1);
+      assert.ok(geometry.box.y >= geometry.frame.y && geometry.box.bottom <= geometry.frame.bottom + 1, JSON.stringify(geometry));
       assert.ok(geometry.frame.right <= width);
     }
     await page.getByRole('button', { name: 'Enlarge image: Screenshot', exact: true }).click();
     await page.waitForFunction(() => document.images.length > 1);
-    assert.equal(await page.locator('.maka-markdown-image-preview > img').count(), 1);
+    assert.equal(await page.locator('.maka-markdown-image-preview img').count(), 1);
     const dialog = await page.getByRole('dialog').boundingBox();
     const frame = await page.locator('.maka-markdown-image-frame').boundingBox();
     assert.ok(dialog.height > frame.height);
-    assert.equal(await page.getByRole('dialog').locator('img').getAttribute('src'), await page.locator('.maka-markdown-image-preview > img').getAttribute('src'));
+    assert.equal(await page.getByRole('dialog').locator('img').getAttribute('src'), await page.locator('.maka-markdown-image-preview img').getAttribute('src'));
   } finally { await page.close(); }
 });
 
