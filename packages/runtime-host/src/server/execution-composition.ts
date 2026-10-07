@@ -595,6 +595,8 @@ export async function createExecutionRuntimeHostComposition(
       },
       // Transcript media belongs to the application's outbound policy, rather
       // than the agent's subprocess sandbox. Privacy mode still blocks capture.
+      // Model-authored URLs can carry encoded data even when WebFetch is disabled;
+      // automatic media loading is not a Session network or DLP boundary.
       canLoadRemote: async () => {
         const resolved = await runtimePolicyStores.operations.resolveHostOutboundExecution();
         return resolved.kind === 'ready';
@@ -2881,6 +2883,7 @@ export async function createExecutionRuntimeHostComposition(
     });
     const executionInspect = new HostExecutionInspectCoordinator(stores);
     const sessionRevisions = new HostSessionRevisionCoordinator({
+      ...(options.imageArchiveLimits ? { imageArchiveLimits: options.imageArchiveLimits } : {}),
       stores,
       artifacts: openedArtifactStore,
       sessionTodo: sessionTodoStore,

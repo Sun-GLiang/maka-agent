@@ -78,7 +78,9 @@ export function decodedLocalImagePath(source: string): string | undefined {
     return undefined;
   }
 }
-/** Pin DNS at connection time and check each redirect; never send cookies, auth or referer. */
+/** Pin direct DNS and check each redirect; never send cookies, auth or referer.
+ * A configured proxy resolves the original hostname and is trusted to enforce
+ * its own egress boundary; local DNS checks cannot pin the proxy's destination. */
 export async function downloadChatImage(
   source: string,
   signal: AbortSignal,
@@ -92,6 +94,8 @@ export async function downloadChatImage(
     const host = url.hostname.replace(/^\[|\]$/g, '');
     // Fake DNS addresses are routing handles for a named destination, never
     // authority to load a literal private address or a local/metadata hostname.
+    // This compatibility exception assumes trusted VPN/TUN routing: a fake-IP
+    // answer alone does not prove that the eventual destination is public.
     const namedHost = !isIP(host) && publicHostname(host);
     if (!isIP(host) && !namedHost) throw new ImageSourceError('not_allowed');
     const addresses = isIP(host)

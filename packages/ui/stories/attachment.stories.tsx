@@ -165,7 +165,7 @@ function imageDeliveryStory(result: ImageDeliveryResult): Story {
         const image = canvasElement.querySelector('.maka-markdown-image-resource');
         if (!image) throw new Error('assistant image has not mounted');
         if (result.status === 'ready') expect(image.querySelector('img')?.getAttribute('src')).toMatch(/^data:/);
-        else if (result.status === 'requires_confirmation') expect(image.textContent).toContain('Load image');
+        else if (result.status === 'requires_confirmation') expect(image.textContent).toContain('Remote images cannot be loaded here');
         else if (result.status === 'failed') expect(image.textContent).toContain('download failed');
         else expect(image.textContent).toContain('Loading image');
       });
@@ -173,8 +173,8 @@ function imageDeliveryStory(result: ImageDeliveryResult): Story {
   };
 }
 
-// Real path: assistant chat bubble → remote image awaits the user's Load image action.
-export const AssistantImageConsent = imageDeliveryStory({ status: 'requires_confirmation' });
+// Real path: assistant chat bubble → an older Host cannot deliver the remote image.
+export const AssistantImageUnavailable = imageDeliveryStory({ status: 'requires_confirmation' });
 // Real path: assistant chat bubble → Host is saving bytes; the image remains a placeholder.
 export const AssistantImageSaving = imageDeliveryStory({ status: 'pending' });
 // Real path: assistant chat bubble → saved attachment is read through the production byte reader.

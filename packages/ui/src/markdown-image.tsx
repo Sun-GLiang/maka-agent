@@ -155,24 +155,22 @@ function DisplayImage(props: { src: string; alt: string; onError(): void }) {
   const copy = getSharedUiCopy(useUiLocale()).markdown;
   const [loaded, setLoaded] = useState(false);
   const lightbox = useLightbox({ media: { src: props.src, alt: props.alt }, hasZoom: true });
-  const trigger = useRef<HTMLSpanElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (lightbox.isOpen) return () => trigger.current?.focus();
   }, [lightbox.isOpen]);
+  const content = <>
+    {!loaded && <span className="maka-markdown-image-loading" role="status" aria-label={copy.imageLoading}><Spinner size="sm" shade="subtle" aria-hidden="true" /> <span className="maka-markdown-image-loading-label">{copy.imageLoading}</span></span>}
+    <img src={props.src} alt={props.alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
+        className="maka-markdown-attachment-image" onLoad={() => setLoaded(true)} onError={props.onError} />
+  </>;
   return <>
-    <span ref={trigger} className="maka-markdown-image-preview maka-markdown-image-trigger"
-        role="button" tabIndex={loaded ? 0 : -1} aria-label={copy.imageExpand(props.alt)}
-        aria-haspopup="dialog" aria-disabled={!loaded}
-        onClick={event => { event.preventDefault(); event.stopPropagation(); if (loaded) lightbox.open(); }}
-        onKeyDown={event => {
-          if (loaded && (event.key === 'Enter' || event.key === ' ')) {
-            event.preventDefault(); event.stopPropagation(); lightbox.open();
-          }
-        }}>
-      {!loaded && <span className="maka-markdown-image-loading" role="status" aria-label={copy.imageLoading}><Spinner size="sm" shade="subtle" aria-hidden="true" /> <span className="maka-markdown-image-loading-label">{copy.imageLoading}</span></span>}
-      <img src={props.src} alt={props.alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
-          className="maka-markdown-attachment-image" onLoad={() => setLoaded(true)} onError={props.onError} />
-    </span>
+    <Button ref={trigger} variant="ghost" className="maka-markdown-image-preview maka-markdown-image-trigger"
+        label={copy.imageExpand(props.alt)} aria-haspopup="dialog" isDisabled={!loaded}
+        style={{ width: '100%', height: '100%', padding: 0, background: 'transparent' }}
+        onClick={event => { event.preventDefault(); event.stopPropagation(); if (loaded) lightbox.open(); }}>
+      {content}
+    </Button>
     {lightbox.isOpen && lightbox.element}
   </>;
 }

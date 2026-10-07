@@ -41,6 +41,31 @@ export function planImageArchive(
   const digest =
     input.imageDelivery?.status === 'ready' ? input.imageDelivery.contentSha256 : undefined;
   const size = Buffer.byteLength(input.content);
+  assertImageArchiveQuota(records, { ...input, sizeBytes: size });
+  const sameContent = digest
+    ? records.find(
+        (r) =>
+          r.imageDelivery?.status === 'ready' &&
+          r.imageDelivery.contentSha256 === digest &&
+          r.sizeBytes === size,
+      )
+    : undefined;
+  return { digest, sameContent };
+}
+
+/** Checked under the Artifact writer lock before publishing captured or copied images. */
+export function assertImageArchiveQuota(
+  records: readonly ArtifactRecord[],
+  input: {
+    sessionId: string;
+    sizeBytes: number;
+    imageDelivery?: ImageDeliveryMetadata;
+    imageArchiveLimits?: ImageArchiveLimits;
+  },
+): void {
+  const digest =
+    input.imageDelivery?.status === 'ready' ? input.imageDelivery.contentSha256 : undefined;
+  const size = input.sizeBytes;
   const limits = input.imageArchiveLimits;
   if (digest && limits) {
     if (
@@ -62,13 +87,4 @@ export function planImageArchive(
     )
       throw new ImageArchiveQuotaError();
   }
-  const sameContent = digest
-    ? records.find(
-        (r) =>
-          r.imageDelivery?.status === 'ready' &&
-          r.imageDelivery.contentSha256 === digest &&
-          r.sizeBytes === size,
-      )
-    : undefined;
-  return { digest, sameContent };
 }
