@@ -86,7 +86,7 @@ export class ChatImageDeliveryService {
     )
       return;
     // Reference destinations can grow during streaming. Only settled text
-    // grants capture, and remote sources always require an explicit action.
+    // grants local capture. Remote media loads only when a client displays it.
     try {
       for (const source of chatImageSources(event.text)) {
         if (isRemoteImageSource(source)) continue;

@@ -19,6 +19,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { ImageDeliveryRequest, ImageDeliveryResult } from '@maka/core/image-delivery';
+import { isRemoteImageSource } from '@maka/core/image-delivery';
 export type ResolveImageDelivery = (sessionId: string, request: ImageDeliveryRequest) => Promise<ImageDeliveryResult>;
 export const ImageMessageScope = createContext<{ turnId: string; messageId: string; streaming?: boolean } | undefined>(undefined);
 const DeliveryContext = createContext<{ resolve(request: ImageDeliveryRequest): Promise<ImageDeliveryResult> } | undefined>(undefined);
@@ -45,19 +46,17 @@ export function ImageDeliveryProvider(props: { sessionId: string; resolve?: Reso
   }, [props.resolve, props.sessionId]);
   return <DeliveryContext.Provider value={value}>{props.children}</DeliveryContext.Provider>;
 }
-export function useImageDelivery(source: string, enabled: boolean) {
+export function useImageDelivery(source: string, enabled: boolean, allowRemote: boolean) {
   const scope = useContext(ImageMessageScope);
   const context = useContext(DeliveryContext);
   const [attempt, setAttempt] = useState(0);
-  const consentKey = JSON.stringify([scope?.turnId, scope?.messageId, source]);
-  const [consent, setConsent] = useState<{ context: typeof context; key: string }>();
-  const loadRemote = consent?.context === context && consent?.key === consentKey;
+  // Saved images can resolve even when display redaction forbids a source fetch.
+  const loadRemote = allowRemote && isRemoteImageSource(source);
   const identity = useMemo(() => context && scope?.turnId && scope.messageId && enabled
     ? { context, turnId: scope.turnId, messageId: scope.messageId, streaming: scope.streaming === true, source, attempt, loadRemote } : undefined,
     [context, scope?.turnId, scope?.messageId, scope?.streaming, source, attempt, loadRemote, enabled]);
   const [settled, setSettled] = useState<{ identity: typeof identity; result: ImageDeliveryResult }>();
   const retry = useCallback(() => setAttempt(a => a + 1), []);
-  const confirmRemote = useCallback(() => setConsent({ context, key: consentKey }), [context, consentKey]);
   useEffect(() => {
     if (!identity) return;
     let cancelled = false; let timer: ReturnType<typeof setTimeout> | undefined; let delay = 500; let unavailableRetries = 0;
@@ -76,5 +75,5 @@ export function useImageDelivery(source: string, enabled: boolean) {
   }, [identity, attempt]);
   const result: ImageDeliveryResult = !identity ? { status: 'unavailable' }
     : settled?.identity === identity ? settled.result : { status: 'pending' };
-  return { ...result, retry, confirmRemote, available: !!identity };
+  return { ...result, retry, available: !!identity };
 }

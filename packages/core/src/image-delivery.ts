@@ -68,7 +68,7 @@ export interface ImageDeliveryRequest {
   readonly messageId: string;
   readonly source: string;
   readonly retry?: boolean;
-  /** Explicit user action; the Host must also allow networking for this session. */
+  /** Client permits remote media loading; the Host also checks application outbound policy. */
   readonly loadRemote?: boolean;
 }
 export type ImageDeliveryResult =

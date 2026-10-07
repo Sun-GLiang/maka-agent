@@ -99,7 +99,7 @@ function ImageResource(props: { src: string; redacted: boolean; alt: string; inl
     observer.observe(anchor.current); return () => observer.disconnect();
   }, [visible]);
   const explicit = parseAttachmentResourceRef(props.src);
-  const delivery = useImageDelivery(props.src, visible && !explicit);
+  const delivery = useImageDelivery(props.src, visible && !explicit, !props.redacted);
   const artifactId = explicit?.artifactId ?? (delivery.status === 'ready' ? delivery.artifactId : undefined);
   const image = useAttachmentImage(visible && artifactId ? { artifactId } : undefined);
   const [failedSource, setFailedSource] = useState<string>();
@@ -122,15 +122,13 @@ function ImageResource(props: { src: string; redacted: boolean; alt: string; inl
   </span>;
   let message: string | undefined;
   const remotePlaceholder = visible && remote && !artifactId;
-  const needsConsent = remotePlaceholder && !hiddenRemote && delivery.status === 'requires_confirmation';
-  const remoteUnavailable = remotePlaceholder && !hiddenRemote && !delivery.available;
-  const remoteNotice = remotePlaceholder && (hiddenRemote || remoteUnavailable || needsConsent || remoteBlocked);
+  const remoteUnavailable = remotePlaceholder && !hiddenRemote && (!delivery.available || delivery.status === 'requires_confirmation');
+  const remoteNotice = remotePlaceholder && (hiddenRemote || remoteUnavailable || remoteBlocked);
   if (failed) message = copy.imageLoadFailed;
   else if (!source) message = !visible ? copy.imageLoading
     : explicit && image.status === 'unavailable' ? copy.imageUnavailable
     : remotePlaceholder && hiddenRemote ? copy.imageRemoteRedacted
     : remoteUnavailable ? copy.imageRemoteUnavailable
-    : needsConsent ? copy.imageRemoteConsent
     : delivery.status === 'failed' ? copy.imageArchiveFailure(delivery.reason)
     : delivery.status === 'pending' || artifactId ? copy.imageLoading : copy.imageUnsupported;
   const hasFrame = props.inline || !visible || !!source || !!artifactId || delivery.status === 'pending';
@@ -148,8 +146,7 @@ function ImageResource(props: { src: string; redacted: boolean; alt: string; inl
       <span role="status">{hasFrame && !failed && !remoteNotice && delivery.status !== 'failed' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
       {(failed || delivery.status === 'failed') && sourceActions}
     </span> : source && <DisplayImage key={`${source}\0${attempt}`} src={source} alt={props.alt} onError={() => setFailedSource(source)} />}
-    {(needsConsent || remoteUnavailable) && <span className="maka-markdown-image-actions">
-      {needsConsent && <Button variant="ghost" size="sm" label={copy.imageLoad} onClick={delivery.confirmRemote} />}
+    {remoteUnavailable && <span className="maka-markdown-image-actions">
       <Link href={props.src} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>
     </span>}
   </span>;
