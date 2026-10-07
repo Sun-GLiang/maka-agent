@@ -32,6 +32,8 @@ export interface SharedUiCopy {
     unsafeLink: string;
     imageLoading: string;
     imageRemoteConsent: string;
+    imageRemoteRedacted: string;
+    imageRemoteUnavailable: string;
     imageLoad: string;
     imageExpand: (alt: string) => string;
     imageArchiveFailure: (reason: import('@maka/core/image-delivery').ImageDeliveryFailure) => string;
@@ -137,6 +139,8 @@ const SHARED_UI_COPY = {
       unsafeLink: '链接不安全',
       imageLoading: '正在加载图片…',
       imageRemoteConsent: '远程图片需要授权加载，图片来源会收到请求。',
+      imageRemoteRedacted: '图片地址含已隐藏的敏感信息，无法加载或在浏览器中打开。',
+      imageRemoteUnavailable: '此处无法加载远程图片，可在浏览器中打开。',
       imageLoad: '加载图片',
       imageExpand: (alt) => alt ? `放大图片：${alt}` : '放大图片',
       imageArchiveFailure: (reason) => ({
@@ -236,6 +240,8 @@ const SHARED_UI_COPY = {
       unsafeLink: '連結不安全',
       imageLoading: '正在載入圖片…',
       imageRemoteConsent: '遠端圖片需要授權載入，圖片來源會收到請求。',
+      imageRemoteRedacted: '圖片位址含已隱藏的敏感資訊，無法載入或在瀏覽器中開啟。',
+      imageRemoteUnavailable: '此處無法載入遠端圖片，可在瀏覽器中開啟。',
       imageLoad: '載入圖片',
       imageExpand: (alt) => alt ? `放大圖片：${alt}` : '放大圖片',
       imageArchiveFailure: (reason) => ({
@@ -335,6 +341,8 @@ const SHARED_UI_COPY = {
       unsafeLink: 'Unsafe link',
       imageLoading: 'Loading image…',
       imageRemoteConsent: 'Load this remote image only if you trust its source. Loading sends a request to that source.',
+      imageRemoteRedacted: 'The image address contains hidden sensitive information. Loading and opening it are disabled.',
+      imageRemoteUnavailable: 'Remote images cannot be loaded here. You can open this image in your browser.',
       imageLoad: 'Load image',
       imageExpand: (alt) => alt ? `Enlarge image: ${alt}` : 'Enlarge image',
       imageArchiveFailure: (reason) => ({
