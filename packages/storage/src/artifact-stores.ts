@@ -160,6 +160,9 @@ function createWriterFacade(
       const acceptedInput: ConversationArtifactCopyInput = Object.freeze({
         ...input,
         turnIds: Object.freeze([...input.turnIds]),
+        ...(input.imageArchiveLimits
+          ? { imageArchiveLimits: Object.freeze({ ...input.imageArchiveLimits }) }
+          : {}),
         ...(input.includeArtifactIds
           ? { includeArtifactIds: Object.freeze([...input.includeArtifactIds]) }
           : {}),
