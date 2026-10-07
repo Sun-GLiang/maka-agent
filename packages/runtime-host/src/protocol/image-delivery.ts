@@ -61,6 +61,9 @@ export const IMAGE_DELIVERY_OPERATION_SPECS = {
         ...(Object.hasOwn(requireRecord(value, 'image delivery request'), 'retry')
           ? ['retry']
           : []),
+        ...(Object.hasOwn(requireRecord(value, 'image delivery request'), 'loadRemote')
+          ? ['loadRemote']
+          : []),
       ]);
       const text = (s: unknown, max: number) => {
         if (typeof s !== 'string' || !s.length || s.length > max || /[\u0000-\u001f\u007f]/.test(s))
@@ -69,6 +72,8 @@ export const IMAGE_DELIVERY_OPERATION_SPECS = {
       };
       if (v.retry !== undefined && typeof v.retry !== 'boolean')
         throw invalidProtocolFrame('Invalid image retry flag');
+      if (v.loadRemote !== undefined && typeof v.loadRemote !== 'boolean')
+        throw invalidProtocolFrame('Invalid remote image load flag');
       const source = (s: unknown) => {
         if (!isImageDeliverySource(s))
           throw invalidProtocolFrame('Invalid image delivery identity');
@@ -80,11 +85,16 @@ export const IMAGE_DELIVERY_OPERATION_SPECS = {
         messageId: text(v.messageId, IMAGE_DELIVERY_IDENTITY_MAX_LENGTH),
         source: source(v.source),
         ...(v.retry === true ? { retry: true } : {}),
+        ...(v.loadRemote === true ? { loadRemote: true } : {}),
       };
     },
     decodeOutput(value) {
       const v = requireRecord(value, 'image delivery result');
-      if (v.status === 'pending' || v.status === 'unavailable') {
+      if (
+        v.status === 'pending' ||
+        v.status === 'unavailable' ||
+        v.status === 'requires_confirmation'
+      ) {
         requireExactRecord(v, 'image delivery status', ['status']);
         return { status: v.status };
       }

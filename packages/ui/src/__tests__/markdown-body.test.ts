@@ -502,13 +502,9 @@ function renderImageMarkdown(props: { text: string }) {
   }));
 }
 
-it('renders remote images automatically with lazy decoding and no referrer', () => {
+it('keeps remote URLs out of image elements until a Host archive is available', () => {
   const markup = renderImageMarkdown({ text: '![preview](https://example.com/image.png)' });
-  assert.match(markup, /<img\b/);
-  assert.match(markup, /src="https:\/\/example\.com\/image\.png"/);
-  assert.match(markup, /loading="lazy"/);
-  assert.match(markup, /referrerPolicy="no-referrer"|referrerpolicy="no-referrer"/);
-  assert.doesNotMatch(markup, /Load image|rel="preload"/);
+  assert.doesNotMatch(markup, /<img\b|rel="preload"/);
 });
 
 it('defers Mermaid fences beyond the per-Markdown automatic diagram budget', () => {

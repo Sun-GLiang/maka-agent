@@ -4521,3 +4521,88 @@ test('production Host automatically archives assistant Markdown images and serve
     }
   });
 });
+
+test('production Host never downloads remote Markdown images in restricted session modes', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    let requests = 0;
+    const server = createServer((_request, response) => {
+      requests++;
+      response.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const source = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/secret.png`;
+    const captured = await createCapturedExecutionComposition(owner, {
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            yield {
+              type: 'text_complete',
+              id: `text-${input.turnId}`,
+              turnId: input.turnId,
+              ts: Date.now(),
+              messageId: `message-${input.turnId}`,
+              text: `![](${source})`,
+            };
+            yield {
+              type: 'complete',
+              id: `complete-${input.turnId}`,
+              turnId: input.turnId,
+              ts: Date.now(),
+              stopReason: 'end_turn',
+            };
+          }
+        })(context),
+      context: {
+        retainUntilProcessExit: () => undefined,
+        requestDrain: () => assert.fail('remote images must not drain Host'),
+      },
+    });
+    try {
+      for (const permissionMode of ['explore', 'ask'] as const) {
+        const session = await captured.manager.createSession({
+          cwd: root,
+          llmConnectionId: FAKE_CONNECTION_ID,
+          llmConnectionSlug: 'fake',
+          model: 'fake-model',
+          permissionMode,
+        });
+        const context = {
+          hostEpoch: 'execution-composition-test',
+          connectionId: 'image-client',
+          principal: 'local_os_user',
+          acquireResidency: () => ({ release() {} }),
+        };
+        const turnId = `remote-${permissionMode}`;
+        assert.equal(
+          (
+            await captured.composition.handlers['turn.start'](
+              { sessionId: session.id, turnId, content: { text: 'deliver image' } },
+              context,
+            )
+          ).ok,
+          true,
+        );
+        const request = { sessionId: session.id, turnId, messageId: `message-${turnId}`, source };
+        await waitFor(async () => {
+          const result = await captured.composition.handlers['artifact.image.resolve'](
+            request,
+            context,
+          );
+          return result.ok && result.result.status === 'requires_confirmation';
+        }, 5000);
+        assert.deepEqual(
+          await captured.composition.handlers['artifact.image.resolve'](
+            { ...request, loadRemote: true },
+            context,
+          ),
+          { ok: true, result: { status: 'failed', reason: 'not_allowed' } },
+        );
+      }
+      assert.equal(requests, 0);
+    } finally {
+      captured.composition.beginDrain();
+      await captured.composition.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});

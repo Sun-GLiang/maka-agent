@@ -100,23 +100,24 @@ function ImageResource(props: { src: string; alt: string; inline?: boolean }) {
   const [failedSource, setFailedSource] = useState<string>();
   const [attempt, setAttempt] = useState(0);
   const remote = isWebImage(props.src);
-  const source = artifactId ? image.src : visible && remote && (!delivery.available || delivery.checked) ? props.src : undefined;
+  const source = artifactId ? image.src : undefined;
   const failed = !!source && failedSource === source || !!artifactId && image.status === 'failed';
   const retry = () => {
     setFailedSource(undefined); setAttempt(a => a + 1);
     if (artifactId) image.retry();
-    // A transient byte-read failure retries the saved attachment. Only a
-    // browser decode failure invalidates automatic capture and rereads origin.
-    if (!artifactId || (!explicit && source && failedSource === source)) delivery.retry();
+    if (!artifactId) delivery.retry();
   };
   const sourceActions = <span className="maka-markdown-image-actions">
     <Button variant="ghost" size="sm" label={copy.imageRetry} onClick={retry} />
     {remote && <Link href={props.src} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>}
   </span>;
   let message: string | undefined;
+  const needsConsent = visible && remote && !artifactId &&
+    (delivery.status === 'requires_confirmation' || !delivery.available);
   if (failed) message = copy.imageLoadFailed;
   else if (!source) message = !visible ? copy.imageLoading
     : explicit && image.status === 'unavailable' ? copy.imageUnavailable
+    : needsConsent ? copy.imageRemoteConsent
     : delivery.status === 'failed' ? copy.imageArchiveFailure(delivery.reason)
     : delivery.status === 'pending' || artifactId ? copy.imageLoading : copy.imageUnsupported;
   const hasFrame = props.inline || !visible || !!source || !!artifactId || delivery.status === 'pending';
@@ -126,14 +127,18 @@ function ImageResource(props: { src: string; alt: string; inline?: boolean }) {
       <span className="maka-markdown-image-placeholder" role="status" aria-label={message}>
         {failed || delivery.status === 'failed'
           ? <IconButton icon={<RotateCw size={14} />} size="sm" label={copy.imageRetry} onClick={retry} />
-          : delivery.status === 'unavailable' && visible
+          : needsConsent || delivery.status === 'unavailable' && visible
             ? <AlertTriangle size={14} aria-hidden="true" /> : <Spinner size="sm" shade="subtle" aria-hidden="true" />}
       </span>
     </Tooltip> : message ? <span className="maka-markdown-image-placeholder">
       {props.alt && <span className="maka-markdown-image-caption">{props.alt}</span>}
-      <span role="status">{hasFrame && !failed && delivery.status !== 'failed' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
+      <span role="status">{hasFrame && !failed && !needsConsent && delivery.status !== 'failed' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
       {(failed || delivery.status === 'failed') && sourceActions}
     </span> : source && <DisplayImage key={`${source}\0${attempt}`} src={source} alt={props.alt} onError={() => setFailedSource(source)} />}
+    {needsConsent && <span className="maka-markdown-image-actions">
+      {delivery.available && <Button variant="ghost" size="sm" label={copy.imageLoad} onClick={delivery.confirmRemote} />}
+      <Link href={props.src} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>
+    </span>}
     {!explicit && delivery.status === 'pending' && remote && source && (props.inline ? <Tooltip content={copy.imageSaving}>
       <span className="maka-markdown-image-saving" role="status" aria-label={copy.imageSaving}><Spinner size="sm" aria-hidden="true" /></span>
     </Tooltip> : <span className="maka-markdown-image-saving" role="status">{copy.imageSaving}</span>)}

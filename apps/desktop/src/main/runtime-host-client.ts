@@ -862,7 +862,7 @@ export class DesktopRuntimeHostClient {
   }
 
   resolveImageDelivery(sessionId: string, request: import('@maka/core/image-delivery').ImageDeliveryRequest): Promise<import('@maka/core/image-delivery').ImageDeliveryResult> {
-    return this.request('artifact.image.resolve', { sessionId, ...request });
+    return this.request('artifact.image.resolve', { ...request, sessionId });
   }
 
   async listArtifacts(sessionId: string): Promise<ArtifactProjection[]> {
