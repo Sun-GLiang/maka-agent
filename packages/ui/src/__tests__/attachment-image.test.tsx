@@ -29,6 +29,8 @@ import {
 } from '../attachment-image.js';
 import { LocaleProvider } from '../locale-context.js';
 import { MarkdownBody } from '../markdown-body.js';
+import { Markdown } from '../markdown.js';
+import { ImageDeliveryProvider } from '../image-delivery.js';
 import type { TurnViewModel } from '../materialize.js';
 
 const originalGlobals = {
@@ -81,6 +83,39 @@ async function renderAttachmentMarkdown(text: string, readBytes: ReadAttachmentB
   });
   return { container, root };
 }
+
+test('the complete Markdown entry resolves original signed and hashed destinations after redacting display text', async () => {
+  const sources = [
+    'https://example.com/image.png?token=first-secret',
+    'https://example.com/image.png?token=second-secret',
+    `/tmp/${'a'.repeat(48)}.png`,
+  ];
+  const { container, root } = domRoot();
+  const requested: string[] = [];
+  await act(async () => {
+    root.render(
+      <LocaleProvider locale="en">
+        <SessionAttachmentProvider sessionId="session-1" readBytes={async () => ({ ok: true, base64: 'aW1n', mimeType: 'image/png' })}>
+          <ImageDeliveryProvider sessionId="session-1" resolve={async (sessionId, request) => {
+            assert.equal(sessionId, 'session-1');
+            assert.equal(request.turnId, 'turn-1');
+            assert.equal(request.messageId, 'message-1');
+            requested.push(request.source);
+            assert.ok(sources.includes(request.source));
+            return { status: 'ready', artifactId: `saved-${sources.indexOf(request.source)}` };
+          }}>
+            <Markdown text={sources.map(source => `![Screenshot](${source})`).join('\n\n') + '\n\nAuthorization: Bearer prose-secret'} imageIdentity={{ turnId: 'turn-1', messageId: 'message-1' }} />
+          </ImageDeliveryProvider>
+        </SessionAttachmentProvider>
+      </LocaleProvider>,
+    );
+  });
+  await act(async () => { await import('../markdown-body.js'); });
+  assert.deepEqual(requested, sources);
+  assert.equal(container.querySelectorAll('img').length, sources.length);
+  for (const image of container.querySelectorAll('img')) assert.equal(image.getAttribute('src'), 'data:image/png;base64,aW1n');
+  assert.doesNotMatch(container.textContent ?? '', /first-secret|second-secret|prose-secret|a{48}/);
+});
 
 const TURN_WITH_IMAGE: TurnViewModel = {
   turnId: 'turn-1',
