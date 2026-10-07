@@ -380,6 +380,17 @@ it('redacts secrets before even the lazy Markdown fallback reaches the rendered 
   assert.match(markup, /&lt;redacted&gt;/);
 });
 
+it('keeps signed image destinations out of the lazy fallback and rendered prose', () => {
+  const text = '![Screenshot](https://example.com/image.png?token=image-secret)\n\nAuthorization: Bearer prose-secret';
+  for (const markup of [
+    renderToStaticMarkup(createElement(Markdown, { text })),
+    renderToStaticMarkup(createElement(MarkdownBody, { text, redact: true })),
+  ]) {
+    assert.doesNotMatch(markup, /image-secret|prose-secret/);
+    assert.match(markup, /&lt;redacted&gt;/);
+  }
+});
+
 
 
 it('preserves allowlisted Maka navigation links through sanitization', () => {

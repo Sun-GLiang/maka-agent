@@ -31,7 +31,8 @@
 
 import { MarkdownImage, MarkdownImageSourceProvider, MARKDOWN_IMAGE_PLUGINS } from './markdown-image.js';
 import { ImageMessageScope } from './image-delivery.js';
-import { useCallback, useContext, useRef, type ReactNode } from 'react';
+import { useCallback, useContext, useMemo, useRef, type ReactNode } from 'react';
+import { redactMarkdownImages } from './markdown-image-redaction.js';
 import {
   Markdown as AstryxMarkdown,
   type MarkdownComponents,
@@ -144,6 +145,8 @@ const MARKDOWN_COMPONENTS = {
 
 export function MarkdownBody(props: {
   text: string;
+  /** The lazy entry redacts its fallback; the body also preserves image identities. */
+  redact?: boolean;
   imageIdentity?: { turnId: string; messageId: string };
   streaming?: boolean;
   settledText?: string;
@@ -154,7 +157,11 @@ export function MarkdownBody(props: {
     (source: string) => prepareMarkdownMath(source, mathCache.current),
     [],
   );
-  const budgetedText = props.streaming ? props.text : applyMermaidRenderBudget(props.text);
+  const presentation = useMemo(() => props.redact
+    ? redactMarkdownImages(props.text, props.settledText)
+    : { text: props.text, settledText: props.settledText, sources: undefined },
+  [props.redact, props.text, props.settledText]);
+  const budgetedText = props.streaming ? presentation.text : applyMermaidRenderBudget(presentation.text);
   const density = props.density ?? 'default';
   const components = props.streaming
     ? density === 'compact'
@@ -163,7 +170,7 @@ export function MarkdownBody(props: {
     : MARKDOWN_COMPONENTS[density];
 
   return (
-    <MarkdownImageSourceProvider text={budgetedText}>
+    <MarkdownImageSourceProvider text={budgetedText} sources={presentation.sources}>
       <ImageMessageScope.Provider value={props.imageIdentity ? { ...props.imageIdentity, streaming: props.streaming } : undefined}>
         <div
           data-maka-contract="markdown"
@@ -200,7 +207,7 @@ export function MarkdownBody(props: {
             components={components}
             plugins={MARKDOWN_IMAGE_PLUGINS}
             isStreaming={props.streaming}
-            settledText={props.settledText}
+            settledText={presentation.settledText}
             transformSource={transformMathSource}
           >
             {budgetedText}
