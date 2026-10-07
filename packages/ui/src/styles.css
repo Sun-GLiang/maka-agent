@@ -665,20 +665,11 @@
 }
 .maka-markdown-image-inline .maka-markdown-image-placeholder { padding: 0; }
 .maka-markdown-image-inline .maka-markdown-image-loading-label { display: none; }
-.maka-markdown-image-expand {
-  position: absolute;
-  inset-block-end: var(--space-2);
-  inset-inline-end: var(--space-2);
-}
-/* Badge controls remain keyboard reachable without covering the badge at rest. */
-.maka-markdown-image-inline .maka-markdown-image-expand {
-  inset: auto 0 0 auto;
-  opacity: 0;
-  pointer-events: none;
-}
-.maka-markdown-image-inline:is(:hover, :focus-within) .maka-markdown-image-expand {
-  opacity: 1;
-  pointer-events: auto;
+/* The image is the lightbox trigger, including keyboard and touch activation. */
+.maka-markdown-image-trigger { cursor: default; }
+.maka-markdown-image-trigger:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-width));
 }
 .maka-markdown-image-preview img { margin: 0; max-height: 100%; max-width: 100%; object-fit: contain; }
 .maka-markdown-image-loading {
