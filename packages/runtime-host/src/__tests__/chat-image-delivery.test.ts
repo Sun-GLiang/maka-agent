@@ -53,6 +53,7 @@ async function fixture(
   limits?: { sessionBytes: number; workspaceBytes: number },
   readLocalImage?: ChatImageDeliveryPorts['readLocalImage'],
   beforeCreate?: (input: Parameters<ChatImageDeliveryPorts['artifacts']['create']>[0]) => void,
+  download?: ChatImageDeliveryPorts['download'],
 ) {
   const root = await mkdtemp(join(tmpdir(), 'maka-image-delivery-'));
   const owner = await tryAcquireInteractiveRootOwner(
@@ -62,6 +63,9 @@ async function fixture(
   const store = await openInteractiveArtifactStoreForWrite(owner.lease);
   const authority = { store, close: () => store.close() };
   const errors: unknown[] = [];
+  const presentationErrors: unknown[] = [];
+  let remoteAllowed = true;
+  let loopbackOrigin: string | undefined;
   let reads = 0;
   let leases = 0;
   const messages = new Map<string, string>();
@@ -77,6 +81,10 @@ async function fixture(
     },
     admission: new SessionAdmissionGate(),
     limits,
+    sourceReadTimeoutMs: 1000,
+    canLoadRemote: async () => remoteAllowed,
+    download:
+      download ?? ((source, signal) => downloadChatImage(source, signal, { loopbackOrigin })),
     isPresent: async () => present,
     readMessage: async (i) => messages.get(i.messageId),
     readLocalImage: async (sessionId, path, signal) => {
@@ -93,6 +101,7 @@ async function fixture(
       };
     },
     persistenceFailed: (error) => errors.push(error),
+    presentationFailed: (error) => presentationErrors.push(error),
   });
   return {
     root,
@@ -101,6 +110,13 @@ async function fixture(
     service,
     messages,
     errors,
+    presentationErrors,
+    allowRemote(value: boolean) {
+      remoteAllowed = value;
+    },
+    trustRemoteOrigin(source: string) {
+      loopbackOrigin = new URL(source).origin;
+    },
     get reads() {
       return reads;
     },
@@ -431,7 +447,18 @@ test('remote delivery is downloaded once, remains replayable after the origin se
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const source = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`;
   try {
+    f.trustRemoteOrigin(source);
+    f.messages.set(REQUEST.messageId, `![Screenshot](${source})`);
     observe(f.service, source);
+    await f.service.waitForIdle();
+    assert.equal(requests, 0);
+    assert.deepEqual(await f.service.resolve({ ...REQUEST, source }), {
+      status: 'requires_confirmation',
+    });
+    assert.equal(
+      (await f.service.resolve({ ...REQUEST, source, loadRemote: true })).status,
+      'pending',
+    );
     await f.service.waitForIdle();
     assert.deepEqual(f.errors, []);
     assert.equal((await f.service.resolve({ ...REQUEST, source })).status, 'ready');
@@ -489,9 +516,11 @@ test('truncated HTTP images are rejected, and an explicit retry archives the rep
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const source = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`;
-  const identity = { ...REQUEST, source };
+  const identity = { ...REQUEST, source, loadRemote: true };
   try {
-    observe(f.service, source);
+    f.trustRemoteOrigin(source);
+    f.messages.set(REQUEST.messageId, `![Screenshot](${source})`);
+    await f.service.resolve(identity);
     await f.service.waitForIdle();
     assert.deepEqual(await f.service.resolve(identity), {
       status: 'failed',
@@ -526,63 +555,37 @@ test('truncated HTTP images are rejected, and an explicit retry archives the rep
   }
 });
 
-test('explicit decode retries replace a legacy ready image and share concurrent capture', async () => {
+test('ready image retries retain the only saved copy after its source is deleted', async () => {
   const f = await fixture();
-  let requests = 0;
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const server = createServer((_req, res) => {
-    requests++;
-    void gate.then(() => {
-      res.setHeader('Content-Type', 'image/png');
-      res.end(PNG);
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const source = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`;
-  const identity = { ...REQUEST, source };
+  const source = join(f.root, 'temporary.png');
   try {
-    const broken = PNG.subarray(0, 8);
-    await f.authority.store.create({
-      id: 'legacy-image',
-      sessionId: identity.sessionId,
-      turnId: identity.turnId,
-      kind: 'image',
-      name: 'chat-image',
-      source: 'tool_result_projection',
-      content: broken,
-      mimeType: 'image/png',
-      imageDelivery: {
-        messageId: identity.messageId,
-        source,
-        status: 'ready',
-        contentSha256: createHash('sha256').update(broken).digest('hex'),
-      },
-    });
-    assert.deepEqual(await f.service.resolve(identity), {
-      status: 'ready',
-      artifactId: 'legacy-image',
-    });
-    assert.equal(requests, 0);
+    await writeFile(source, PNG);
+    observe(f.service, source);
+    await f.service.waitForIdle();
+    const identity = { ...REQUEST, source };
+    const ready = await f.service.resolve(identity);
+    assert.equal(ready.status, 'ready');
+    await rm(source);
     const retries = await Promise.all([
       f.service.resolve({ ...identity, retry: true }),
       f.service.resolve({ ...identity, retry: true }),
     ]);
-    assert.deepEqual(retries, [{ status: 'pending' }, { status: 'pending' }]);
-    release();
-    await f.service.waitForIdle();
-    const ready = await f.service.resolve(identity);
-    assert.equal(ready.status, 'ready');
-    assert.equal(requests, 1);
-    const page = await f.authority.store.listPage(identity.sessionId, { offset: 0, limit: 10 });
-    assert.equal(page.total, 1);
-    assert.equal(page.records[0]?.sizeBytes, PNG.length);
+    assert.deepEqual(retries, [ready, ready]);
+    assert.equal(f.reads, 1);
+    assert.equal(
+      (await f.authority.store.listPage(REQUEST.sessionId, { offset: 0, limit: 10 })).total,
+      1,
+    );
+    if (ready.status === 'ready') {
+      const bytes = await f.authority.store.readBinaryInSession(
+        REQUEST.sessionId,
+        ready.artifactId,
+      );
+      assert.ok(bytes.ok);
+      if (bytes.ok) assert.equal(bytes.base64, PNG.toString('base64'));
+    }
     assert.deepEqual(f.errors, []);
   } finally {
-    release();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
     await f.close();
   }
 });
@@ -763,7 +766,12 @@ test('source readers reject oversized payloads, unsafe MIME and redirects to pri
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
     const source = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/redirect`;
-    await assert.rejects(downloadChatImage(source, AbortSignal.timeout(2000)), /not_allowed/);
+    await assert.rejects(
+      downloadChatImage(source, AbortSignal.timeout(2000), {
+        loopbackOrigin: new URL(source).origin,
+      }),
+      /not_allowed/,
+    );
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
@@ -773,6 +781,164 @@ test('resolver codec rejects excess fields and noncanonical artifact identities'
   assert.deepEqual(spec.decodeInput(REQUEST), REQUEST);
   assert.throws(() => spec.decodeInput({ ...REQUEST, arbitraryRead: true }));
   assert.throws(() => spec.decodeOutput({ status: 'ready', artifactId: '../private' }));
+  assert.deepEqual(spec.decodeInput({ ...REQUEST, loadRemote: true }), {
+    ...REQUEST,
+    loadRemote: true,
+  });
+  assert.deepEqual(spec.decodeOutput({ status: 'requires_confirmation' }), {
+    status: 'requires_confirmation',
+  });
+  assert.throws(() => spec.decodeInput({ ...REQUEST, loadRemote: 'true' }));
+  assert.throws(() => spec.decodeOutput({ status: 'requires_confirmation', source: '/private' }));
+});
+
+test('remote capture requires a user action and current network authority, including on retry', async () => {
+  let downloads = 0;
+  const f = await fixture(undefined, undefined, undefined, async () => {
+    downloads++;
+    return checkedChatImage(PNG);
+  });
+  const source = 'https://example.invalid/image.png?data=secret';
+  const identity = { ...REQUEST, source };
+  f.messages.set(REQUEST.messageId, `![](${source})`);
+  try {
+    observe(f.service, source);
+    await f.service.waitForIdle();
+    assert.equal(downloads, 0);
+    assert.deepEqual(await f.service.resolve(identity), { status: 'requires_confirmation' });
+    f.allowRemote(false);
+    assert.deepEqual(await f.service.resolve({ ...identity, loadRemote: true }), {
+      status: 'failed',
+      reason: 'not_allowed',
+    });
+    assert.equal(downloads, 0);
+    assert.equal(
+      (await f.authority.store.listPage(REQUEST.sessionId, { offset: 0, limit: 10 })).total,
+      0,
+    );
+    f.allowRemote(true);
+    assert.deepEqual(await f.service.resolve({ ...identity, loadRemote: true }), {
+      status: 'pending',
+    });
+    await f.service.waitForIdle();
+    assert.equal(downloads, 1);
+    const ready = await f.service.resolve(identity);
+    assert.equal(ready.status, 'ready');
+    f.allowRemote(false);
+    assert.deepEqual(await f.service.resolve({ ...identity, retry: true }), ready);
+    assert.equal(downloads, 1, 'saved replay/retry never contacts origin');
+    assert.deepEqual(
+      await f.service.resolve({
+        ...identity,
+        source: 'https://example.invalid/forged',
+        loadRemote: true,
+      }),
+      { status: 'unavailable' },
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test('failed remote downloads issue one request and require explicit retry consent', async () => {
+  let downloads = 0;
+  const f = await fixture(undefined, undefined, undefined, async () => {
+    downloads++;
+    throw new Error('offline');
+  });
+  const source = 'https://example.invalid/image.png';
+  const identity = { ...REQUEST, source };
+  f.messages.set(REQUEST.messageId, `![](${source})`);
+  try {
+    await f.service.resolve({ ...identity, loadRemote: true });
+    await f.service.waitForIdle();
+    assert.equal(downloads, 1);
+    assert.deepEqual(await f.service.resolve({ ...identity, retry: true }), {
+      status: 'requires_confirmation',
+    });
+    assert.equal(downloads, 1);
+    await f.service.resolve({ ...identity, retry: true, loadRemote: true });
+    await f.service.waitForIdle();
+    assert.equal(downloads, 2);
+  } finally {
+    await f.close();
+  }
+});
+
+test('unsettled reference destinations never open half-written local paths', async () => {
+  const f = await fixture(undefined, async () => checkedChatImage(PNG));
+  try {
+    f.service.observe(REQUEST.sessionId, {
+      type: 'text_delta',
+      id: 'delta',
+      ts: 1,
+      turnId: REQUEST.turnId,
+      messageId: REQUEST.messageId,
+      text: '![image][ref]\n\n[ref]: /tmp/partial',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(f.reads, 0);
+    observe(f.service, '/tmp/partial-complete.png');
+    await f.service.waitForIdle();
+    assert.equal(f.reads, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a Markdown parser failure stays in presentation and subsequent images still capture', async () => {
+  const f = await fixture(undefined, async () => checkedChatImage(PNG));
+  try {
+    f.service.observe(REQUEST.sessionId, {
+      type: 'text_complete',
+      id: 'deep-text',
+      ts: 1,
+      turnId: REQUEST.turnId,
+      messageId: REQUEST.messageId,
+      text: '> '.repeat(5000) + '![](/tmp/image.png)',
+    });
+    assert.equal(f.presentationErrors.length, 1);
+    assert.ok(f.presentationErrors[0] instanceof RangeError);
+    assert.deepEqual(f.errors, []);
+    observe(f.service, REQUEST.source);
+    await f.service.waitForIdle();
+    assert.equal((await f.service.resolve(REQUEST)).status, 'ready');
+  } finally {
+    await f.close();
+  }
+});
+
+test('loopback is denied before GET and a served-origin grant cannot follow another local port', async () => {
+  let hits = 0;
+  const target = createServer((_req, res) => {
+    hits++;
+    res.end(PNG);
+  });
+  await new Promise<void>((resolve) => target.listen(0, '127.0.0.1', resolve));
+  const targetUrl = `http://127.0.0.1:${(target.address() as import('node:net').AddressInfo).port}/image.png`;
+  const origin = createServer((_req, res) => {
+    res.writeHead(302, { location: targetUrl });
+    res.end();
+  });
+  await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve));
+  const source = `http://127.0.0.1:${(origin.address() as import('node:net').AddressInfo).port}/redirect`;
+  try {
+    for (const url of [targetUrl, 'http://[::1]:80/image.png'])
+      await assert.rejects(downloadChatImage(url, AbortSignal.timeout(1000)), /not_allowed/);
+    await assert.rejects(
+      downloadChatImage(source, AbortSignal.timeout(1000), {
+        loopbackOrigin: new URL(source).origin,
+      }),
+      /not_allowed/,
+    );
+    assert.equal(hits, 0);
+  } finally {
+    await Promise.all(
+      [target, origin].map(
+        (server) => new Promise<void>((resolve) => server.close(() => resolve())),
+      ),
+    );
+  }
 });
 
 test('completed turns release unfinished stream slots without archiving partial messages', async () => {

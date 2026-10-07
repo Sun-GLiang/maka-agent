@@ -125,6 +125,15 @@ export function validateImageBytes(
       `Image dimensions ${dimensions.width}x${dimensions.height} exceed the ${MAX_MODEL_IMAGE_EDGE}px model input limit; downscale it and try again.`,
     );
   }
+  // Compressed byte size does not bound renderer decoding memory. Permit large
+  // screenshots while rejecting pathological headers before archival/preview.
+  if (
+    purpose === 'chat' &&
+    (Math.max(dimensions.width, dimensions.height) > 16_384 ||
+      dimensions.width * dimensions.height > 32 * 1024 * 1024)
+  ) {
+    throw imageTooLargeError(purpose);
+  }
   return { bytes, mimeType };
 }
 
@@ -132,7 +141,7 @@ function imageTooLargeError(purpose: 'model' | 'chat' = 'model'): Error {
   return new ImageFileError(
     'ERR_IMAGE_TOO_LARGE',
     purpose === 'chat'
-      ? 'Image exceeds the 2 MiB chat preview limit; resize it before publishing.'
+      ? 'Image exceeds a chat preview limit (2 MiB, 16384px per edge, or 32 megapixels); resize it before publishing.'
       : READ_IMAGE_TOO_LARGE_MESSAGE,
   );
 }

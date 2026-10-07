@@ -30,6 +30,28 @@ export function isImageDeliverySource(value: unknown): value is string {
     !/[\x00-\x1f\x7f]/.test(value)
   );
 }
+export function isRemoteImageSource(source: string): boolean {
+  return /^https?:/i.test(source);
+}
+export function isImageDeliveryRequest(value: unknown): value is ImageDeliveryRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  const identity = (s: unknown) =>
+    typeof s === 'string' &&
+    s.length > 0 &&
+    s.length <= IMAGE_DELIVERY_IDENTITY_MAX_LENGTH &&
+    !/[\x00-\x1f\x7f]/.test(s);
+  return (
+    Object.keys(v).every((k) =>
+      ['turnId', 'messageId', 'source', 'retry', 'loadRemote'].includes(k),
+    ) &&
+    identity(v.turnId) &&
+    identity(v.messageId) &&
+    isImageDeliverySource(v.source) &&
+    (v.retry === undefined || typeof v.retry === 'boolean') &&
+    (v.loadRemote === undefined || typeof v.loadRemote === 'boolean')
+  );
+}
 export const IMAGE_DELIVERY_FAILURES = [
   'not_found',
   'not_allowed',
@@ -46,8 +68,11 @@ export interface ImageDeliveryRequest {
   readonly messageId: string;
   readonly source: string;
   readonly retry?: boolean;
+  /** Explicit user action; the Host must also allow networking for this session. */
+  readonly loadRemote?: boolean;
 }
 export type ImageDeliveryResult =
+  | { readonly status: 'requires_confirmation' }
   | { readonly status: 'pending' }
   | { readonly status: 'ready'; readonly artifactId: string }
   | { readonly status: 'failed'; readonly reason: ImageDeliveryFailure }

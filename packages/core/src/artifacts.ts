@@ -186,7 +186,11 @@ export function isArtifactSharedSessionReadable(record: Pick<ArtifactRecord, 'so
   return ARTIFACT_SOURCE_POLICIES[record.source].sharedReadable;
 }
 
-export function isArtifactChildResultOutput(record: Pick<ArtifactRecord, 'source'>): boolean {
+export function isArtifactChildResultOutput(
+  record: Pick<ArtifactRecord, 'source'> & Partial<Pick<ArtifactRecord, 'imageDelivery'>>,
+): boolean {
+  if (record.imageDelivery?.status === 'pending' || record.imageDelivery?.status === 'failed')
+    return false;
   return CHILD_RESULT_OUTPUT_SOURCES.has(record.source);
 }
 

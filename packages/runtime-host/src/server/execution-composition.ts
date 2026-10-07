@@ -19,6 +19,7 @@
 
 import { createImageFileReader } from '@maka/runtime/image-file-reader';
 import { ChatImageDeliveryService } from './chat-image-delivery.js';
+import { createGenesisExecutionBoundary } from '@maka/core/sandbox-boundary';
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
 import { createWorkHubInspectionTool } from './workhub-inspection-tool.js';
 import { createJevRoutingModel } from './jev-routing-model.js';
@@ -588,6 +589,20 @@ export async function createExecutionRuntimeHostComposition(
         console.warn('[runtime-host] Image delivery persistence failed', error);
         context.requestDrain();
       },
+      presentationFailed: (error) => {
+        console.warn('[runtime-host] Image presentation failed', error);
+      },
+      canLoadRemote: async (sessionId) => {
+        const [header, stored] = await Promise.all([
+          stores.sessionStore.readHeaderSnapshot(sessionId),
+          stores.sessionStore.readExecutionBoundary(sessionId),
+        ]);
+        const boundary = stored ?? createGenesisExecutionBoundary(header.permissionMode);
+        return (
+          boundary.kind === 'bypass' ||
+          (boundary.kind === 'managed' && boundary.profile.network.kind === 'enabled')
+        );
+      },
       readLocalImage: async (sessionId, path, abortSignal) => {
         const [header, boundary] = await Promise.all([
           stores.sessionStore.readHeaderSnapshot(sessionId),
@@ -790,9 +805,13 @@ export async function createExecutionRuntimeHostComposition(
         return Uint8Array.from(Buffer.from(result.base64, 'base64'));
       },
       list: async (invocation) =>
-        (await openedArtifactStore.listTurnArtifacts(invocation.sessionId, invocation.turnId)).map(
-          pluginAttachmentRef,
-        ),
+        (await openedArtifactStore.listTurnArtifacts(invocation.sessionId, invocation.turnId))
+          .filter(
+            (record) =>
+              record.imageDelivery?.status !== 'pending' &&
+              record.imageDelivery?.status !== 'failed',
+          )
+          .map(pluginAttachmentRef),
     });
     const webSearchService = createHostWebSearchService({
       policy: runtimePolicyStores.operations,

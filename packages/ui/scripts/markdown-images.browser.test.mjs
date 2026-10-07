@@ -145,29 +145,42 @@ before(async () => {
       const mode=new URLSearchParams(location.search).get('case') || 'remote';
       const destinations=${JSON.stringify(destinations)};
       const canonicalSources=${JSON.stringify(canonicalSources)};
-      let reads=0; window.imageReads=0; window.deliveryQueries=0; window.deliverySources=[]; window.deliveryReady=false; window.deliveryRetries=0;
+      let reads=0; const captured=new Map(); window.imageReads=0; window.deliveryQueries=0; window.deliverySources=[]; window.deliveryReady=false; window.deliveryRetries=0;
       const race=mode.endsWith('-race');
+      let messageId='message';
       let text=destinations[mode] ?? (mode==='attachment' ? '![Screenshot](maka://runtime/attachments/image-1)' :
         mode==='local' || mode==='local-saved' || race ? '![Screenshot](/tmp/private.png)' :
         '![Screenshot](${imageUrl}/'+(mode==='retry' ? 'retry.png' : 'image.png')+')');
       const root=createRoot(document.getElementById('root'));
-      const readBytes=async()=>{
+      const readBytes=async(_session,artifactId)=>{
+        if(captured.has(artifactId)) return captured.get(artifactId);
+        if(mode.startsWith('layout-')) await fetch('/fixture/'+encodeURIComponent(artifactId));
         if(mode.startsWith('badge-')) await fetch('/badge-attachment');
         if(mode==='geometry-saved') await fetch('/release-attachment');
         reads++; window.imageReads=reads; return (mode==='attachment' || mode==='read-retry-saved') && reads===1 ? {ok:false,reason:'read_failed'} :
-          {ok:true,base64:mode.startsWith('badge-') ? '${badge.toString('base64')}' : mode==='geometry-saved' ? '${screenshot.toString('base64')}' : mode==='corrupt-saved' && !window.deliveryRetries ? 'iVBORw0KGgo=' : '${png.toString('base64')}',mimeType:'image/png'};
+          {ok:true,base64:mode.startsWith('badge-') || artifactId.endsWith('badge.png') ? '${badge.toString('base64')}' : mode==='geometry-saved' || artifactId.endsWith('screenshot.png') ? '${screenshot.toString('base64')}' : mode==='corrupt-saved' && reads===1 ? 'iVBORw0KGgo=' : '${png.toString('base64')}',mimeType:'image/png'};
       };
-      const resolveDelivery=mode.endsWith('saved') || mode.endsWith('saving') || race ? async(_session,request)=>{
+      const preview=mode==='preview' || mode==='signed-preview' || mode==='local';
+      const seeded=mode.endsWith('saved') || mode.endsWith('saving') || race || mode.startsWith('badge-') || mode.startsWith('layout-');
+      const resolveDelivery=preview ? undefined : async(_session,request)=>{
         window.deliveryQueries++;
         window.deliverySource=request.source;
         window.deliverySources.push(request.source);
         if(canonicalSources[mode] && !canonicalSources[mode].includes(request.source)) return {status:'unavailable'};
         if(request.retry) window.deliveryRetries++;
+        if(!seeded) {
+          if(!request.loadRemote) return {status:'requires_confirmation'};
+          const response=await fetch('/capture?source='+encodeURIComponent(request.source));
+          const payload=await response.json();
+          if(!payload.ok) return {status:'failed',reason:'download_failed'};
+          captured.set(request.source,payload);
+          return {status:'ready',artifactId:request.source};
+        }
         if(race) return window.deliveryReady ? {status:'ready',artifactId:'saved-image'} : {status:'unavailable'};
         await new Promise(resolve=>setTimeout(resolve,100));
-        return mode.endsWith('saving') && window.deliveryQueries===1 ? {status:'pending'} : {status:'ready',artifactId:'saved-image'};
-      } : undefined;
-      const markdown=(streaming)=>React.createElement(Markdown,{text,streaming,settledText:race ? text : undefined,density:'compact',imageIdentity:{turnId:'turn',messageId:'message'}});
+        return mode.endsWith('saving') && window.deliveryQueries===1 ? {status:'pending'} : {status:'ready',artifactId:mode.startsWith('layout-') ? request.source : 'saved-image'};
+      };
+      const markdown=(streaming)=>React.createElement(Markdown,{text,streaming,settledText:race ? text : undefined,density:'compact',imageIdentity:{turnId:'turn',messageId}});
       const surface=(streaming)=>mode.startsWith('layout-') ? React.createElement('section',{className:mode==='layout-side' ? 'maka-quote-companion' : '',style:{width:mode==='layout-side' ? '360px' : '100%',maxWidth:'100%'}},
         React.createElement(ChatMessageList,{className:'maka-chat-message-list maka-chatContent',align:'top'},
           React.createElement('div',{className:'maka-transcript-turn maka-turn',style:{width:'100%',maxWidth:'var(--maka-reading-measure)',marginInline:'auto'}},
@@ -179,6 +192,7 @@ before(async () => {
               React.createElement(ImageDeliveryProvider,{sessionId:'session',resolve:resolveDelivery},
               React.createElement('div',{style:mode==='offscreen' ? {paddingTop:'2500px'} : {}},
                 surface(streaming)))))));
+      window.nextMessage=()=>{messageId='next-message'; render(false);};
       window.finishStream=()=>render(false);
       window.appendText=value=>{text+=value; render(true);};
       render();
@@ -192,6 +206,14 @@ before(async () => {
   const index = await readFile(new URL('../../../apps/desktop/src/renderer/index.html', import.meta.url), 'utf8');
   const csp = index.match(/http-equiv="Content-Security-Policy"\s+content="([^"]+)"/)[1];
   appServer = createServer((req, res) => {
+    if (req.url.startsWith('/capture?')) {
+      const source=new URL(req.url, appUrl).searchParams.get('source');
+      void fetch(source).then(async response=> {
+        const payload=response.ok ? {ok:true,base64:Buffer.from(await response.arrayBuffer()).toString('base64'),mimeType:'image/png'} : {ok:false};
+        res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(payload));
+      }).catch(()=>res.end(JSON.stringify({ok:false}))); return;
+    }
+    if (req.url.startsWith('/fixture/')) { res.end(); return; }
     if (req.url === '/badge-attachment') { res.end(); return; }
     if (req.url === '/release-attachment') { void delayedAttachment.then(() => res.end()); return; }
     if (req.url === '/app.js') { res.setHeader('Content-Type', 'text/javascript'); res.end(js); }
@@ -223,28 +245,56 @@ async function loaded(page) {
   await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth === 1));
 }
 
-test('remote image loads automatically under the actual desktop CSP, without sending a referrer', async () => {
+test('a remote image sends no request until clicked, then renders Host-owned bytes', async () => {
   requests = [];
   const page = await pageFor('remote');
   try {
-    assert.equal(await page.getByRole('button', { name: 'Load image', exact: true }).count(), 0);
+    await page.getByRole('button', { name: 'Load image', exact: true }).waitFor();
+    assert.deepEqual(requests, []);
+    assert.equal(await page.locator('img').count(), 0);
+    await page.getByRole('button', { name: 'Load image', exact: true }).click();
     await loaded(page);
     assert.deepEqual(requests, [{ path: '/image.png', referer: undefined }]);
-    // Astryx Button keeps an empty live region for asynchronous actions.
-    await page.getByText('Loading image…', { exact: true }).waitFor({ state: 'hidden' });
-    assert.equal(await page.getByRole('status').filter({ hasText: /\S/ }).count(), 0);
+    assert.match(await page.locator('img').getAttribute('src'), /^data:/);
   } finally { await page.close(); }
 });
 
-test('a signed image previews using its original URL without putting the token in visible text', async () => {
+test('remote consent belongs to one message, even when the next message reuses its URL', async () => {
   requests = [];
-  const page = await pageFor('signed-preview');
+  const page = await pageFor('remote');
   try {
+    await page.getByRole('button', { name: 'Load image', exact: true }).click();
     await loaded(page);
-    assert.deepEqual(requests, [{ path: '/image.png?token=preview-secret', referer: undefined }]);
-    assert.ok(!(await page.locator('body').innerText()).includes('preview-secret'));
+    assert.equal(requests.length, 1);
+    await page.evaluate(() => window.nextMessage());
+    await page.getByRole('button', { name: 'Load image', exact: true }).waitFor();
+    assert.equal(await page.locator('img').count(), 0);
+    assert.equal(requests.length, 1);
+    await page.getByRole('button', { name: 'Load image', exact: true }).click();
+    await loaded(page);
+    assert.equal(requests.length, 2);
   } finally { await page.close(); }
 });
+
+for (const scenario of ['preview', 'signed-preview']) {
+  test(`${scenario}: untrusted Markdown cannot load remote images or signed tracking URLs`, async () => {
+    requests = [];
+    const page = await pageFor(scenario);
+    try {
+      await page.getByText('Open in browser', { exact: true }).waitFor();
+      assert.deepEqual(requests, []);
+      assert.equal(await page.locator('img').count(), 0);
+      assert.equal(await page.getByRole('button', { name: 'Load image', exact: true }).count(), 0);
+      assert.ok(!(await page.locator('body').innerText()).includes('preview-secret'));
+      // Prove the production CSP blocks a bypass of the Markdown component too.
+      await page.evaluate(url => {
+        const img=document.createElement('img'); img.src=url; document.body.append(img);
+        return new Promise(resolve=> { img.onerror=resolve; img.onload=()=>resolve(); });
+      }, `${imageUrl}/blocked.png`);
+      assert.deepEqual(requests, []);
+    } finally { await page.close(); }
+  });
+}
 
 test('two signed destinations which redact alike replay their own saved attachments', async () => {
   requests = [];
@@ -279,7 +329,8 @@ test('failed remote image has a working retry control instead of a broken image 
   failedOnce = false;
   const page = await pageFor('retry');
   try {
-    await page.getByText('Could not load the image. Try again.').waitFor();
+    await page.getByRole('button', { name: 'Load image', exact: true }).click();
+    await page.getByText('Image not saved: download failed. Try again.').waitFor();
     assert.equal(await page.locator('img').count(), 0);
     await page.getByRole('button', { name: 'Retry', exact: true }).click();
     await loaded(page);
@@ -293,21 +344,21 @@ test('attachment read failure recovers in place, and local paths explain how to 
     await loaded(page);
     assert.match(await page.locator('img').getAttribute('src'), /^data:image\/png;base64,/);
     await page.goto(`${appUrl}/?case=local`);
-    await page.getByText('This image address cannot be displayed. Send the image as a chat attachment.').waitFor();
+    await page.getByText('This image address cannot be displayed here.').waitFor();
     assert.equal(await page.locator('img').count(), 0);
     assert.equal(await page.getByRole('button', { name: 'Load image' }).count(), 0);
   } finally { await page.close(); }
 });
 
-test('a saved image decode failure invalidates both caches and recaptures its source on retry', async () => {
+test('a saved image decode failure retries archived bytes without touching its source', async () => {
   const page = await pageFor('corrupt-saved');
   try {
     await page.getByText('Could not load the image. Try again.').waitFor();
     assert.equal(await page.evaluate(() => window.imageReads), 1);
     await page.getByRole('button', { name: 'Retry', exact: true }).click();
     await page.waitForFunction(() => [...document.images].some(img => img.src.startsWith('data:image/png;') && img.naturalWidth === 1));
-    assert.equal(await page.evaluate(() => window.deliveryRetries), 1);
-    assert.equal(await page.evaluate(() => window.deliveryQueries), 2);
+    assert.equal(await page.evaluate(() => window.deliveryRetries), 0);
+    assert.equal(await page.evaluate(() => window.deliveryQueries), 1);
     assert.equal(await page.evaluate(() => window.imageReads), 2);
   } finally { await page.close(); }
 });
@@ -351,24 +402,27 @@ test('offscreen image performs no image request until it approaches the viewport
     assert.deepEqual(requests, []);
     assert.equal(await page.locator('img').count(), 0);
     await page.locator('[data-maka-image-state]').scrollIntoViewIfNeeded();
+    await page.getByRole('button', { name: 'Load image', exact: true }).waitFor();
+    assert.deepEqual(requests, []);
+    await page.getByRole('button', { name: 'Load image', exact: true }).click();
     await loaded(page);
     assert.deepEqual(requests, [{ path: '/image.png', referer: undefined }]);
   } finally { await page.close(); }
 });
 
-test('a new remote image previews during archival and switches to saved bytes after background completion', async () => {
+test('a pending archive stays a placeholder until saved bytes are available', async () => {
   requests = [];
   const page = await pageFor('saving');
   try {
-    await loaded(page);
-    await page.getByText('Saving image…').waitFor();
-    assert.equal(requests.length, 1);
+    await page.getByText('Loading image…', { exact: true }).waitFor();
+    assert.deepEqual(requests, []);
+    assert.equal(await page.locator('img').count(), 0);
     await page.waitForFunction(() => [...document.images].some(img=>img.src.startsWith('data:image/png;') && img.naturalWidth===1));
     await page.getByText('Loading image…', { exact: true }).waitFor({ state: 'hidden' });
     await page.getByText('Saving image…', { exact: true }).waitFor({ state: 'hidden' });
     assert.equal(await page.getByRole('status').filter({ hasText: /\S/ }).count(), 0);
     assert.equal(await page.evaluate(() => window.deliveryQueries), 2);
-    assert.equal(requests.length, 1);
+    assert.equal(requests.length, 0);
   } finally { await page.close(); }
 });
 
@@ -410,6 +464,7 @@ for (const scenario of ['geometry-remote', 'geometry-saved']) {
   test(`${scenario}: loading and ready images preserve the position of subsequent content`, async () => {
     const page = await pageFor(scenario);
     try {
+      if (scenario === 'geometry-remote') await page.getByRole('button', { name: 'Load image', exact: true }).click();
       await page.getByText('Loading image…', { exact: true }).waitFor();
       const before = await page.getByText('Following paragraph', { exact: true }).boundingBox();
       if (scenario === 'geometry-remote') releaseImage(); else releaseAttachment();
@@ -427,6 +482,7 @@ for (const scenario of ['geometry-remote', 'geometry-saved']) {
 test('image frames fit narrow viewports without distorting screenshots or limiting the enlarged preview', async () => {
   const page = await pageFor('screenshot');
   try {
+    await page.getByRole('button', { name: 'Load image', exact: true }).click();
     await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth > 1));
     for (const width of [720, 360]) {
       await page.setViewportSize({ width, height: 600 });
@@ -517,7 +573,7 @@ for (const scenario of ['badge-list', 'badge-table', 'badge-strip']) {
     page.setDefaultTimeout(5000);
     let release;
     const gate = new Promise(resolve => { release = resolve; });
-    await page.route(`${imageUrl}/badge.png`, async route => { await gate; await route.continue(); });
+    await page.route('**/badge-attachment', async route => { await gate; await route.continue(); });
     try {
       await page.goto(`${appUrl}/?case=${scenario}`, { waitUntil: 'domcontentloaded' });
       await page.locator('.maka-markdown-image-inline').first().waitFor();
@@ -540,7 +596,7 @@ for (const [scenario, width, height] of [
     page.setDefaultTimeout(5000);
     let release;
     const gate = new Promise(resolve => { release = resolve; });
-    await page.route(`${imageUrl}/**`, async route => { await gate; await route.continue(); });
+    await page.route('**/fixture/**', async route => { await gate; await route.continue(); });
     const measure = () => page.locator('.maka-markdown-image-resource').evaluateAll(elements => elements.map(element => {
       const r = element.getBoundingClientRect();
       return { x: r.x, y: r.y, width: r.width, height: r.height };
