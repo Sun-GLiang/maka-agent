@@ -26,12 +26,17 @@ const parser = new Marked({ gfm: true });
  * Consumers own their source policy; parsing grants no filesystem or network access.
  */
 export function markdownImageSources(text: string): string[] {
+  return [...new Set(markdownImages(text).map((image) => image.source))];
+}
+
+/** Original token spelling and canonical destination, including reference images. */
+export function markdownImages(text: string): { raw: string; source: string }[] {
   if (!text.includes('![') || text.length > IMAGE_MARKDOWN_MAX_LENGTH) return [];
-  const sources = new Set<string>();
+  const images: { raw: string; source: string }[] = [];
   parser.walkTokens(parser.lexer(text), (token) => {
-    if (token.type === 'image') sources.add(token.href);
+    if (token.type === 'image') images.push({ raw: token.raw, source: token.href });
   });
-  return [...sources];
+  return images;
 }
 
 /** Resolve a complete inline destination, rejecting trailing or partial syntax. */

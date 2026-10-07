@@ -66,8 +66,14 @@ function isSingleImage(nodes: readonly MarkdownAstNode[]): boolean {
   return node.type === 'image' || (['link', 'strong', 'emphasis', 'delete'].includes(node.type)
     && 'children' in node && isSingleImage(node.children));
 }
-export function MarkdownImageSourceProvider(props: { text: string; children: ReactNode }) {
-  const resolve = useMemo(() => createMarkdownImageSourceResolver(props.text), [props.text]);
+export function MarkdownImageSourceProvider(props: { text: string; sources?: ReadonlyMap<string, string>; children: ReactNode }) {
+  const resolve = useMemo(() => {
+    const canonical = createMarkdownImageSourceResolver(props.text);
+    return (source: string) => {
+      const resolved = canonical(source);
+      return props.sources?.get(resolved) ?? resolved;
+    };
+  }, [props.text, props.sources]);
   return <ImageSourceContext.Provider value={resolve}>{props.children}</ImageSourceContext.Provider>;
 }
 

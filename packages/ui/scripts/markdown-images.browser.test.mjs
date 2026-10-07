@@ -106,6 +106,14 @@ before(async () => {
     'geometry-remote': `![Screenshot](${imageUrl}/delayed.png)\n\nFollowing paragraph`,
     'geometry-saved': '![Screenshot](/tmp/private.png)\n\nFollowing paragraph',
     'streaming-angle-race': '![Screenshot](</tmp/my image.png>)',
+    'signed-saved': `![Screenshot](${imageUrl}/image.png?token=first-secret)`,
+    'signature-saved': `![Screenshot](${imageUrl}/image.png?signature=second-secret&expires=123)`,
+    'hash-saved': `![Screenshot](/tmp/${'a'.repeat(48)}.png)`,
+    'secret-reference-saved': `![Screenshot][picture]\n\n[picture]: ${imageUrl}/image.png?token=reference-secret`,
+    'signed-streaming-race': `![Screenshot](${imageUrl}/image.png?token=stream-secret)`,
+    'signed-preview': `![Screenshot](${imageUrl}/image.png?token=preview-secret)`,
+    'signed-duplicates-saved': `![First](${imageUrl}/image.png?token=first-secret) ![Second](${imageUrl}/image.png?token=second-secret)`,
+    'signed-live-saved': `![Screenshot](${imageUrl}/image.png?token=live-`,
     screenshot: `![Screenshot](${imageUrl}/screenshot.png)`,
   };
   const canonicalSources = {
@@ -115,6 +123,13 @@ before(async () => {
     'reference-saved': ['/tmp/my "image".png'],
     'geometry-saved': ['/tmp/private.png'],
     'streaming-angle-race': ['/tmp/my image.png'],
+    'signed-saved': [`${imageUrl}/image.png?token=first-secret`],
+    'signature-saved': [`${imageUrl}/image.png?signature=second-secret&expires=123`],
+    'hash-saved': [`/tmp/${'a'.repeat(48)}.png`],
+    'secret-reference-saved': [`${imageUrl}/image.png?token=reference-secret`],
+    'signed-streaming-race': [`${imageUrl}/image.png?token=stream-secret`],
+    'signed-duplicates-saved': [`${imageUrl}/image.png?token=first-secret`, `${imageUrl}/image.png?token=second-secret`],
+    'signed-live-saved': [`${imageUrl}/image.png?token=live-secret`],
   };
   const bundle = await build({
     stdin: { contents: `
@@ -122,7 +137,7 @@ before(async () => {
       import {createRoot} from 'react-dom/client';
       import {Theme, ChatMessageList, ChatMessage, ChatMessageBubble} from '@astryxdesign/core';
       import {makaTheme} from './apps/desktop/src/renderer/astryx-theme/maka.js';
-      import {MarkdownBody} from './packages/ui/dist/markdown-body.js';
+      import {Markdown} from './packages/ui/dist/markdown.js';
       import {LocaleProvider} from './packages/ui/dist/locale-context.js';
       import {ImageDeliveryProvider} from './packages/ui/dist/image-delivery.js';
       import {SessionAttachmentProvider} from './packages/ui/dist/attachment-image.js';
@@ -130,9 +145,9 @@ before(async () => {
       const mode=new URLSearchParams(location.search).get('case') || 'remote';
       const destinations=${JSON.stringify(destinations)};
       const canonicalSources=${JSON.stringify(canonicalSources)};
-      let reads=0; window.imageReads=0; window.deliveryQueries=0; window.deliveryReady=false; window.deliveryRetries=0;
+      let reads=0; window.imageReads=0; window.deliveryQueries=0; window.deliverySources=[]; window.deliveryReady=false; window.deliveryRetries=0;
       const race=mode.endsWith('-race');
-      const text=destinations[mode] ?? (mode==='attachment' ? '![Screenshot](maka://runtime/attachments/image-1)' :
+      let text=destinations[mode] ?? (mode==='attachment' ? '![Screenshot](maka://runtime/attachments/image-1)' :
         mode==='local' || mode==='local-saved' || race ? '![Screenshot](/tmp/private.png)' :
         '![Screenshot](${imageUrl}/'+(mode==='retry' ? 'retry.png' : 'image.png')+')');
       const root=createRoot(document.getElementById('root'));
@@ -145,13 +160,14 @@ before(async () => {
       const resolveDelivery=mode.endsWith('saved') || mode.endsWith('saving') || race ? async(_session,request)=>{
         window.deliveryQueries++;
         window.deliverySource=request.source;
+        window.deliverySources.push(request.source);
         if(canonicalSources[mode] && !canonicalSources[mode].includes(request.source)) return {status:'unavailable'};
         if(request.retry) window.deliveryRetries++;
         if(race) return window.deliveryReady ? {status:'ready',artifactId:'saved-image'} : {status:'unavailable'};
         await new Promise(resolve=>setTimeout(resolve,100));
         return mode.endsWith('saving') && window.deliveryQueries===1 ? {status:'pending'} : {status:'ready',artifactId:'saved-image'};
       } : undefined;
-      const markdown=(streaming)=>React.createElement(MarkdownBody,{text,streaming,settledText:race ? text : undefined,density:'compact',imageIdentity:{turnId:'turn',messageId:'message'}});
+      const markdown=(streaming)=>React.createElement(Markdown,{text,streaming,settledText:race ? text : undefined,density:'compact',imageIdentity:{turnId:'turn',messageId:'message'}});
       const surface=(streaming)=>mode.startsWith('layout-') ? React.createElement('section',{className:mode==='layout-side' ? 'maka-quote-companion' : '',style:{width:mode==='layout-side' ? '360px' : '100%',maxWidth:'100%'}},
         React.createElement(ChatMessageList,{className:'maka-chat-message-list maka-chatContent',align:'top'},
           React.createElement('div',{className:'maka-transcript-turn maka-turn',style:{width:'100%',maxWidth:'var(--maka-reading-measure)',marginInline:'auto'}},
@@ -164,6 +180,7 @@ before(async () => {
               React.createElement('div',{style:mode==='offscreen' ? {paddingTop:'2500px'} : {}},
                 surface(streaming)))))));
       window.finishStream=()=>render(false);
+      window.appendText=value=>{text+=value; render(true);};
       render();
     `, resolveDir: root, loader: 'js' },
     bundle: true, write: false, outdir: '/virtual', format: 'iife',
@@ -216,6 +233,45 @@ test('remote image loads automatically under the actual desktop CSP, without sen
     // Astryx Button keeps an empty live region for asynchronous actions.
     await page.getByText('Loading image…', { exact: true }).waitFor({ state: 'hidden' });
     assert.equal(await page.getByRole('status').filter({ hasText: /\S/ }).count(), 0);
+  } finally { await page.close(); }
+});
+
+test('a signed image previews using its original URL without putting the token in visible text', async () => {
+  requests = [];
+  const page = await pageFor('signed-preview');
+  try {
+    await loaded(page);
+    assert.deepEqual(requests, [{ path: '/image.png?token=preview-secret', referer: undefined }]);
+    assert.ok(!(await page.locator('body').innerText()).includes('preview-secret'));
+  } finally { await page.close(); }
+});
+
+test('two signed destinations which redact alike replay their own saved attachments', async () => {
+  requests = [];
+  const page = await pageFor('signed-duplicates-saved');
+  try {
+    await page.waitForFunction(() => document.images.length === 2 && [...document.images].every(image => image.src.startsWith('data:') && image.naturalWidth === 1));
+    assert.deepEqual(await page.evaluate(() => window.deliverySources), [
+      `${imageUrl}/image.png?token=first-secret`, `${imageUrl}/image.png?token=second-secret`,
+    ]);
+    assert.deepEqual(requests, []);
+    assert.doesNotMatch(await page.locator('body').innerText(), /first-secret|second-secret/);
+  } finally { await page.close(); }
+});
+
+test('a signed image completed by a later text delta resolves its original destination', async () => {
+  requests = [];
+  const page = await pageFor('signed-live-saved');
+  try {
+    await page.waitForFunction(() => typeof window.appendText === 'function');
+    assert.equal(await page.locator('img').count(), 0);
+    await page.evaluate(() => window.appendText('secret)'));
+    await loaded(page);
+    assert.equal(await page.evaluate(() => window.deliverySource), `${imageUrl}/image.png?token=live-secret`);
+    await page.evaluate(() => window.finishStream());
+    await loaded(page);
+    assert.deepEqual(requests, []);
+    assert.doesNotMatch(await page.locator('body').innerText(), /live-secret/);
   } finally { await page.close(); }
 });
 
@@ -316,7 +372,7 @@ test('a new remote image previews during archival and switches to saved bytes af
   } finally { await page.close(); }
 });
 
-for (const scenario of ['streaming-race', 'settled-race', 'streaming-angle-race']) {
+for (const scenario of ['streaming-race', 'settled-race', 'streaming-angle-race', 'signed-streaming-race']) {
   test(`${scenario}: an unavailable live source recovers in place once Host archival completes`, async () => {
     const page = await pageFor(scenario);
     try {
@@ -326,7 +382,7 @@ for (const scenario of ['streaming-race', 'settled-race', 'streaming-angle-race'
         await page.waitForFunction(() => window.deliveryQueries >= 2);
       }
       await page.evaluate(() => { window.deliveryReady = true; });
-      await loaded(page);
+      await page.waitForFunction(() => [...document.images].some(image => image.src.startsWith('data:') && image.naturalWidth === 1));
       assert.equal(await page.evaluate(() => window.imageReads), 1);
       assert.match(await page.locator('img').getAttribute('src'), /^data:image\/png;base64,/);
       assert.equal(await page.locator('img').count(), 1);
@@ -334,7 +390,7 @@ for (const scenario of ['streaming-race', 'settled-race', 'streaming-angle-race'
   });
 }
 
-for (const scenario of ['angle-saved', 'title-saved', 'escaped-saved', 'reference-saved', 'attachment-title']) {
+for (const scenario of ['angle-saved', 'title-saved', 'escaped-saved', 'reference-saved', 'attachment-title', 'signed-saved', 'signature-saved', 'hash-saved', 'secret-reference-saved']) {
   test(`${scenario}: standard Markdown destinations resolve to saved bytes without origin requests`, async () => {
     requests = [];
     const page = await pageFor(scenario);
@@ -491,6 +547,7 @@ for (const [scenario, width, height] of [
     }));
     try {
       await page.goto(`${appUrl}/?case=${scenario}`, { waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(() => document.querySelectorAll('.maka-markdown-image-resource').length === 2);
       await page.getByText('Following paragraph stays in place.').waitFor();
       const before = await measure();
       const followingBefore = await page.getByText('Following paragraph stays in place.').boundingBox();
