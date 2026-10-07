@@ -84,8 +84,9 @@ export async function downloadChatImage(
   options: { readonly loopbackOrigin?: string } = {},
 ): Promise<ChatImageBytes> {
   let url = new URL(source);
-  // Only an embedding Host's exact served origin can opt into loopback. A
-  // public source cannot acquire this grant by redirecting into that origin.
+  // Test fixtures alone pass loopbackOrigin; production callers must omit it.
+  // The fixture grant is pinned to its original exact origin, so redirects
+  // cannot acquire it or reach a different local port.
   const loopbackOrigin = url.origin === options.loopbackOrigin ? options.loopbackOrigin : undefined;
   for (let redirect = 0; redirect <= 3; redirect++) {
     signal.throwIfAborted();

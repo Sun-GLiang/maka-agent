@@ -111,6 +111,11 @@ before(async () => {
     'hash-saved': `![Screenshot](/tmp/${'a'.repeat(48)}.png)`,
     'secret-reference-saved': `![Screenshot][picture]\n\n[picture]: ${imageUrl}/image.png?token=reference-secret`,
     'signed-streaming-race': `![Screenshot](${imageUrl}/image.png?token=stream-secret)`,
+    'signed-corrupt-saved': `![Screenshot](${imageUrl}/image.png?token=corrupt-secret)`,
+    'signed-remote': `![Screenshot](${imageUrl}/image.png?token=remote-secret)`,
+    'signed-inline': `Build ![Badge](${imageUrl}/image.png?token=inline-secret) passing.`,
+    'signed-failed': `![Screenshot](${imageUrl}/image.png?token=failed-secret)`,
+    'secret-alt': `![https://example.invalid/?token=alt-secret](${imageUrl}/image.png)`,
     'signed-preview': `![Screenshot](${imageUrl}/image.png?token=preview-secret)`,
     'signed-duplicates-saved': `![First](${imageUrl}/image.png?token=first-secret) ![Second](${imageUrl}/image.png?token=second-secret)`,
     'signed-live-saved': `![Screenshot](${imageUrl}/image.png?token=live-`,
@@ -158,7 +163,7 @@ before(async () => {
         if(mode.startsWith('badge-')) await fetch('/badge-attachment');
         if(mode==='geometry-saved') await fetch('/release-attachment');
         reads++; window.imageReads=reads; return (mode==='attachment' || mode==='read-retry-saved') && reads===1 ? {ok:false,reason:'read_failed'} :
-          {ok:true,base64:mode.startsWith('badge-') || artifactId.endsWith('badge.png') ? '${badge.toString('base64')}' : mode==='geometry-saved' || artifactId.endsWith('screenshot.png') ? '${screenshot.toString('base64')}' : mode==='corrupt-saved' && reads===1 ? 'iVBORw0KGgo=' : '${png.toString('base64')}',mimeType:'image/png'};
+          {ok:true,base64:mode.startsWith('badge-') || artifactId.endsWith('badge.png') ? '${badge.toString('base64')}' : mode==='geometry-saved' || artifactId.endsWith('screenshot.png') ? '${screenshot.toString('base64')}' : mode.endsWith('corrupt-saved') && reads===1 ? 'iVBORw0KGgo=' : '${png.toString('base64')}',mimeType:'image/png'};
       };
       const preview=mode==='preview' || mode==='signed-preview' || mode==='local';
       const seeded=mode.endsWith('saved') || mode.endsWith('saving') || race || mode.startsWith('badge-') || mode.startsWith('layout-');
@@ -168,6 +173,8 @@ before(async () => {
         window.deliverySources.push(request.source);
         if(canonicalSources[mode] && !canonicalSources[mode].includes(request.source)) return {status:'unavailable'};
         if(request.retry) window.deliveryRetries++;
+        if(mode==='restricted') return {status:'failed',reason:'not_allowed'};
+        if(mode==='signed-failed') return {status:'failed',reason:'download_failed'};
         if(!seeded) {
           if(!request.loadRemote) return {status:'requires_confirmation'};
           const response=await fetch('/capture?source='+encodeURIComponent(request.source));
@@ -281,7 +288,13 @@ for (const scenario of ['preview', 'signed-preview']) {
     requests = [];
     const page = await pageFor(scenario);
     try {
-      await page.getByText('Open in browser', { exact: true }).waitFor();
+      if(scenario==='signed-preview') {
+        await page.getByText('The image address contains hidden sensitive information. Loading and opening it are disabled.', {exact:true}).waitFor();
+        assert.equal(await page.getByText('Open in browser', {exact:true}).count(), 0);
+      } else {
+        await page.getByText('Remote images cannot be loaded here. You can open this image in your browser.', {exact:true}).waitFor();
+        await page.getByText('Open in browser', {exact:true}).waitFor();
+      }
       assert.deepEqual(requests, []);
       assert.equal(await page.locator('img').count(), 0);
       assert.equal(await page.getByRole('button', { name: 'Load image', exact: true }).count(), 0);
@@ -295,6 +308,50 @@ for (const scenario of ['preview', 'signed-preview']) {
     } finally { await page.close(); }
   });
 }
+
+for (const scenario of ['signed-remote', 'signed-inline', 'signed-failed']) {
+  test(`${scenario}: hidden destinations provide no network actions, including failure and inline states`, async () => {
+    requests = [];
+    const page = await pageFor(scenario);
+    try {
+      const message = 'The image address contains hidden sensitive information. Loading and opening it are disabled.';
+      if (scenario === 'signed-inline') await page.getByRole('status', {name: message, exact: true}).waitFor();
+      else await page.getByText(message, {exact: true}).waitFor();
+      assert.equal(await page.getByRole('button', {name: 'Load image', exact: true}).count(), 0);
+      assert.equal(await page.getByRole('button', {name: 'Retry', exact: true}).count(), 0);
+      assert.equal(await page.getByText('Open in browser', {exact: true}).count(), 0);
+      assert.equal(await page.locator('a[href*="token="]').count(), 0);
+      assert.equal(await page.locator('img').count(), 0);
+      assert.doesNotMatch(await page.locator('body').innerText(), /remote-secret|inline-secret|failed-secret/);
+      assert.deepEqual(requests, []);
+    } finally { await page.close(); }
+  });
+}
+
+test('redacting only image alt text does not disable a safe destination', async () => {
+  requests = [];
+  const page = await pageFor('secret-alt');
+  try {
+    await page.getByRole('button', {name: 'Load image', exact: true}).waitFor();
+    assert.doesNotMatch(await page.locator('body').innerText(), /alt-secret/);
+    await page.getByRole('button', {name: 'Load image', exact: true}).click();
+    await loaded(page);
+    assert.equal(requests.length, 1);
+  } finally { await page.close(); }
+});
+
+test('network-restricted images show denial before any load click and can recheck permissions', async () => {
+  requests = [];
+  const page = await pageFor('restricted');
+  try {
+    await page.getByText('Image not saved: current permissions do not allow reading it or using the network.', {exact: true}).waitFor();
+    assert.equal(await page.getByRole('button', {name: 'Load image', exact: true}).count(), 0);
+    await page.getByRole('button', {name: 'Retry', exact: true}).click();
+    await page.getByText('Image not saved: current permissions do not allow reading it or using the network.', {exact: true}).waitFor();
+    await page.getByText('Open in browser', {exact: true}).waitFor();
+    assert.deepEqual(requests, []);
+  } finally { await page.close(); }
+});
 
 test('two signed destinations which redact alike replay their own saved attachments', async () => {
   requests = [];
@@ -350,18 +407,24 @@ test('attachment read failure recovers in place, and local paths explain how to 
   } finally { await page.close(); }
 });
 
-test('a saved image decode failure retries archived bytes without touching its source', async () => {
-  const page = await pageFor('corrupt-saved');
-  try {
-    await page.getByText('Could not load the image. Try again.').waitFor();
-    assert.equal(await page.evaluate(() => window.imageReads), 1);
-    await page.getByRole('button', { name: 'Retry', exact: true }).click();
-    await page.waitForFunction(() => [...document.images].some(img => img.src.startsWith('data:image/png;') && img.naturalWidth === 1));
-    assert.equal(await page.evaluate(() => window.deliveryRetries), 0);
-    assert.equal(await page.evaluate(() => window.deliveryQueries), 1);
-    assert.equal(await page.evaluate(() => window.imageReads), 2);
-  } finally { await page.close(); }
-});
+for (const scenario of ['corrupt-saved', 'signed-corrupt-saved']) {
+  test(`${scenario}: a saved image decode failure retries archived bytes without touching its source`, async () => {
+    requests = [];
+    const page = await pageFor(scenario);
+    try {
+      await page.getByText('Could not load the image. Try again.').waitFor();
+      assert.equal(await page.evaluate(() => window.imageReads), 1);
+      await page.getByRole('button', { name: 'Retry', exact: true }).click();
+      await page.waitForFunction(() => [...document.images].some(img => img.src.startsWith('data:image/png;') && img.naturalWidth === 1));
+      assert.equal(await page.evaluate(() => window.deliveryRetries), 0);
+      assert.equal(await page.evaluate(() => window.deliveryQueries), 1);
+      assert.equal(await page.evaluate(() => window.imageReads), 2);
+      assert.deepEqual(requests, []);
+      if(scenario==='signed-corrupt-saved') assert.equal(await page.getByText('Open in browser', {exact:true}).count(), 0);
+    } finally { await page.close(); }
+  });
+
+}
 
 test('a transient saved attachment read retries its bytes without invalidating archival or touching origin', async () => {
   requests = [];

@@ -30,8 +30,11 @@ import { useImageDelivery } from './image-delivery.js';
 import { getSharedUiCopy } from './shared-ui-copy.js';
 import { useUiLocale } from './locale-context.js';
 import { createMarkdownImageSourceResolver } from './markdown-image-source.js';
+import { redactSecrets } from './redact.js';
 
-const ImageSourceContext = createContext<(source: string) => string>((source) => source);
+const ImageSourceContext = createContext<(source: string) => { source: string; redacted: boolean }>(
+  (source) => ({ source, redacted: false }),
+);
 
 type PlacedImage = MarkdownExtensionNode<'maka-images', 'image', { src: string; alt: string; inline: boolean }>;
 // Placement comes from Markdown structure before bytes arrive. Never change a
@@ -72,7 +75,8 @@ export function MarkdownImageSourceProvider(props: { text: string; sources?: Rea
     const canonical = createMarkdownImageSourceResolver(props.text);
     return (source: string) => {
       const resolved = canonical(source);
-      return props.sources?.get(resolved) ?? resolved;
+      const original = props.sources?.get(resolved) ?? resolved;
+      return { source: original, redacted: props.sources?.has(resolved) === true && original !== redactSecrets(original) };
     };
   }, [props.text, props.sources]);
   return <ImageSourceContext.Provider value={resolve}>{props.children}</ImageSourceContext.Provider>;
@@ -80,10 +84,10 @@ export function MarkdownImageSourceProvider(props: { text: string; sources?: Rea
 
 /** Presentation only: Host resolves local addresses and archives; UI receives artifact identities. */
 export function MarkdownImage(props: { src: string; alt: string; inline?: boolean }) {
-  const source = useContext(ImageSourceContext)(props.src);
-  return <ImageResource key={source} src={source} alt={props.alt} inline={props.inline} />;
+  const { source, redacted } = useContext(ImageSourceContext)(props.src);
+  return <ImageResource key={source} src={source} redacted={redacted} alt={props.alt} inline={props.inline} />;
 }
-function ImageResource(props: { src: string; alt: string; inline?: boolean }) {
+function ImageResource(props: { src: string; redacted: boolean; alt: string; inline?: boolean }) {
   const copy = getSharedUiCopy(useUiLocale()).markdown;
   const anchor = useRef<HTMLSpanElement>(null);
   const [visible, setVisible] = useState(typeof IntersectionObserver === 'undefined');
@@ -108,16 +112,24 @@ function ImageResource(props: { src: string; alt: string; inline?: boolean }) {
     if (artifactId) image.retry();
     if (!artifactId) delivery.retry();
   };
+  // Redaction preserves the original identity for saved replay, never for a
+  // network action whose destination the user cannot inspect.
+  const hiddenRemote = remote && props.redacted;
+  const remoteBlocked = remote && delivery.status === 'failed' && delivery.reason === 'not_allowed';
   const sourceActions = <span className="maka-markdown-image-actions">
-    <Button variant="ghost" size="sm" label={copy.imageRetry} onClick={retry} />
-    {remote && <Link href={props.src} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>}
+    {(!hiddenRemote || artifactId) && <Button variant="ghost" size="sm" label={copy.imageRetry} onClick={retry} />}
+    {remote && !hiddenRemote && <Link href={props.src} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>}
   </span>;
   let message: string | undefined;
-  const needsConsent = visible && remote && !artifactId &&
-    (delivery.status === 'requires_confirmation' || !delivery.available);
+  const remotePlaceholder = visible && remote && !artifactId;
+  const needsConsent = remotePlaceholder && !hiddenRemote && delivery.status === 'requires_confirmation';
+  const remoteUnavailable = remotePlaceholder && !hiddenRemote && !delivery.available;
+  const remoteNotice = remotePlaceholder && (hiddenRemote || remoteUnavailable || needsConsent || remoteBlocked);
   if (failed) message = copy.imageLoadFailed;
   else if (!source) message = !visible ? copy.imageLoading
     : explicit && image.status === 'unavailable' ? copy.imageUnavailable
+    : remotePlaceholder && hiddenRemote ? copy.imageRemoteRedacted
+    : remoteUnavailable ? copy.imageRemoteUnavailable
     : needsConsent ? copy.imageRemoteConsent
     : delivery.status === 'failed' ? copy.imageArchiveFailure(delivery.reason)
     : delivery.status === 'pending' || artifactId ? copy.imageLoading : copy.imageUnsupported;
@@ -126,18 +138,18 @@ function ImageResource(props: { src: string; alt: string; inline?: boolean }) {
     data-maka-image-state={message ? failed ? 'failed' : 'loading' : 'ready'}>
     {message && props.inline ? <Tooltip content={message}>
       <span className="maka-markdown-image-placeholder" role="status" aria-label={message}>
-        {failed || delivery.status === 'failed'
+        {(failed || delivery.status === 'failed') && (!hiddenRemote || artifactId)
           ? <IconButton icon={<RotateCw size={14} />} size="sm" label={copy.imageRetry} onClick={retry} />
-          : needsConsent || delivery.status === 'unavailable' && visible
+          : remoteNotice || delivery.status === 'unavailable' && visible
             ? <AlertTriangle size={14} aria-hidden="true" /> : <Spinner size="sm" shade="subtle" aria-hidden="true" />}
       </span>
     </Tooltip> : message ? <span className="maka-markdown-image-placeholder">
       {props.alt && <span className="maka-markdown-image-caption">{props.alt}</span>}
-      <span role="status">{hasFrame && !failed && !needsConsent && delivery.status !== 'failed' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
+      <span role="status">{hasFrame && !failed && !remoteNotice && delivery.status !== 'failed' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
       {(failed || delivery.status === 'failed') && sourceActions}
     </span> : source && <DisplayImage key={`${source}\0${attempt}`} src={source} alt={props.alt} onError={() => setFailedSource(source)} />}
-    {needsConsent && <span className="maka-markdown-image-actions">
-      {delivery.available && <Button variant="ghost" size="sm" label={copy.imageLoad} onClick={delivery.confirmRemote} />}
+    {(needsConsent || remoteUnavailable) && <span className="maka-markdown-image-actions">
+      {needsConsent && <Button variant="ghost" size="sm" label={copy.imageLoad} onClick={delivery.confirmRemote} />}
       <Link href={props.src} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>
     </span>}
   </span>;

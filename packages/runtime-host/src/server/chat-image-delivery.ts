@@ -119,9 +119,9 @@ export class ChatImageDeliveryService {
         return { status: 'unavailable' };
     }
     if (isRemoteImageSource(identity.source)) {
-      if (!identity.loadRemote) return { status: 'requires_confirmation' };
       if (!(await this.ports.canLoadRemote(identity.sessionId)))
         return { status: 'failed', reason: 'not_allowed' };
+      if (!identity.loadRemote) return { status: 'requires_confirmation' };
     }
     if (metadata?.status === 'failed') {
       return this.ports.admission.runOrJoin(identity.sessionId, async () => {
