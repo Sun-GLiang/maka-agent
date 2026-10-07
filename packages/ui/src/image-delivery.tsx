@@ -51,6 +51,8 @@ export function useImageDelivery(source: string, enabled: boolean, allowRemote: 
   const context = useContext(DeliveryContext);
   const [attempt, setAttempt] = useState(0);
   // Saved images can resolve even when display redaction forbids a source fetch.
+  // Redaction protects display/retry UX for recognized secrets, not outbound data:
+  // an encoded value in a model-authored URL may still pass this presentation check.
   const loadRemote = allowRemote && isRemoteImageSource(source);
   const identity = useMemo(() => context && scope?.turnId && scope.messageId && enabled
     ? { context, turnId: scope.turnId, messageId: scope.messageId, streaming: scope.streaming === true, source, attempt, loadRemote } : undefined,

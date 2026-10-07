@@ -17,8 +17,9 @@
  * under the License.
  */
 
-import { planImageArchive } from './artifact-image-storage.js';
+import { assertImageArchiveQuota, planImageArchive } from './artifact-image-storage.js';
 import {
+  DEFAULT_IMAGE_ARCHIVE_LIMITS,
   isImageDeliveryMetadata,
   type ImageDeliveryMetadata,
   type ImageArchiveLimits,
@@ -140,6 +141,7 @@ export type ArtifactChunkReadResult =
   | { readonly ok: false; readonly reason: 'out_of_range' };
 
 export interface ConversationArtifactCopyInput {
+  readonly imageArchiveLimits?: ImageArchiveLimits;
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
   readonly turnIds: readonly string[];
@@ -380,6 +382,9 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
     if (input.sourceSessionId === input.targetSessionId) {
       throw new Error('Artifact conversation copy requires distinct Sessions');
     }
+    const imageArchiveLimits = Object.freeze({
+      ...(input.imageArchiveLimits ?? DEFAULT_IMAGE_ARCHIVE_LIMITS),
+    });
     const turnIds = new Set(input.turnIds);
     const includedArtifactIds = new Set(input.includeArtifactIds ?? []);
     for (const turnId of turnIds) assertArtifactTurnKey(turnId);
@@ -448,6 +453,7 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
         input.targetSessionId,
         targetId,
         input.existingTarget === 'reuse_verified',
+        imageArchiveLimits,
       );
       artifactIds.set(record.id, created.id);
       relativePaths.set(record.relativePath, created.relativePath);
@@ -460,6 +466,7 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
     targetSessionId: string,
     targetId: string,
     reuseVerified: boolean,
+    imageArchiveLimits: ImageArchiveLimits,
   ): Promise<ArtifactRecord> {
     const source = prepared.record;
     const name = sanitizeArtifactName(source.name);
@@ -495,6 +502,7 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
         }
         return { ...existing };
       }
+      assertImageArchiveQuota(this.records, { ...expected, imageArchiveLimits });
       return this.publishNewArtifactUnlocked(
         expected,
         async (targetPath) => {
