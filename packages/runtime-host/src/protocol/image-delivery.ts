@@ -19,13 +19,17 @@
 
 import {
   IMAGE_DELIVERY_FAILURES,
-  IMAGE_DELIVERY_IDENTITY_MAX_LENGTH,
-  isImageDeliverySource,
+  isImageDeliveryRequest,
   type ImageDeliveryRequest,
   type ImageDeliveryResult,
 } from '@maka/core/image-delivery';
 import { isCanonicalArtifactEntityId } from '@maka/core/artifacts';
-import { requireExactRecord, requireEntityId, requireRecord } from './codec.js';
+import {
+  requireExactRecord,
+  requireEntityId,
+  requireRecord,
+  requireShapedRecord,
+} from './codec.js';
 import { invalidProtocolFrame } from './errors.js';
 import { defineOperation } from './operation-spec.js';
 export interface ResolveImageDeliveryInput extends ImageDeliveryRequest {
@@ -53,39 +57,20 @@ export const IMAGE_DELIVERY_OPERATION_SPECS = {
       'internal_failure',
     ],
     decodeInput(value) {
-      const v = requireExactRecord(value, 'image delivery request', [
-        'sessionId',
-        'turnId',
-        'messageId',
-        'source',
-        ...(Object.hasOwn(requireRecord(value, 'image delivery request'), 'retry')
-          ? ['retry']
-          : []),
-        ...(Object.hasOwn(requireRecord(value, 'image delivery request'), 'loadRemote')
-          ? ['loadRemote']
-          : []),
-      ]);
-      const text = (s: unknown, max: number) => {
-        if (typeof s !== 'string' || !s.length || s.length > max || /[\u0000-\u001f\u007f]/.test(s))
-          throw invalidProtocolFrame('Invalid image delivery identity');
-        return s;
-      };
-      if (v.retry !== undefined && typeof v.retry !== 'boolean')
-        throw invalidProtocolFrame('Invalid image retry flag');
-      if (v.loadRemote !== undefined && typeof v.loadRemote !== 'boolean')
-        throw invalidProtocolFrame('Invalid remote image load flag');
-      const source = (s: unknown) => {
-        if (!isImageDeliverySource(s))
-          throw invalidProtocolFrame('Invalid image delivery identity');
-        return s;
-      };
+      const { sessionId, ...request } = requireShapedRecord(
+        value,
+        'image delivery request',
+        ['sessionId', 'turnId', 'messageId', 'source'],
+        ['retry', 'loadRemote'],
+      );
+      if (!isImageDeliveryRequest(request))
+        throw invalidProtocolFrame('Invalid image delivery request');
+      const { retry, loadRemote, ...identity } = request;
       return {
-        sessionId: requireEntityId(v.sessionId, 'sessionId'),
-        turnId: text(v.turnId, IMAGE_DELIVERY_IDENTITY_MAX_LENGTH),
-        messageId: text(v.messageId, IMAGE_DELIVERY_IDENTITY_MAX_LENGTH),
-        source: source(v.source),
-        ...(v.retry === true ? { retry: true } : {}),
-        ...(v.loadRemote === true ? { loadRemote: true } : {}),
+        sessionId: requireEntityId(sessionId, 'sessionId'),
+        ...identity,
+        ...(retry === true ? { retry: true } : {}),
+        ...(loadRemote === true ? { loadRemote: true } : {}),
       };
     },
     decodeOutput(value) {

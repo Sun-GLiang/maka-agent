@@ -691,22 +691,6 @@
   color: var(--muted-foreground);
   font-size: var(--maka-font-size-sm);
 }
-.maka-markdown-image-saving {
-  position: absolute;
-  inset-inline-start: var(--space-2);
-  inset-block-end: var(--space-2);
-  max-width: calc(100% - var(--space-10));
-  padding: var(--space-1) var(--space-2);
-  background: var(--background);
-  border-radius: var(--radius-surface);
-  color: var(--muted-foreground);
-  font-size: var(--maka-font-size-sm);
-}
-.maka-markdown-image-inline .maka-markdown-image-saving {
-  inset: auto auto 0 0;
-  max-width: 100%;
-  padding: 0;
-}
 
 /* Markdown code renderers are custom components so Mermaid can be loaded only
    for settled Mermaid fences. Astryx skips its own spacing wrapper when
