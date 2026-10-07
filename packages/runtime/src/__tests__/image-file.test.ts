@@ -43,6 +43,18 @@ const WIDE_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAACgAAAAABCAYAAAASePczAAAAIUlEQVR4nO3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAIA7AygBAAEQnI5pAAAAAElFTkSuQmCC',
   'base64',
 );
+test('chat images cap both edge length and total decoded pixels', () => {
+  for (const [width, height] of [
+    [16_385, 1],
+    [8192, 8192],
+  ]) {
+    const bytes = Buffer.from(ONE_PIXEL_PNG);
+    bytes.writeUInt32BE(width, 16);
+    bytes.writeUInt32BE(height, 20);
+    assert.throws(() => validateImageBytes(bytes, 'chat'), /Image exceeds/);
+  }
+  assert.equal(validateImageBytes(WIDE_PNG, 'chat').mimeType, 'image/png');
+});
 
 test('chat reader preserves structured Worker failures independently of message wording', async () => {
   for (const [reason, expected] of [

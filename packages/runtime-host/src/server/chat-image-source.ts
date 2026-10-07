@@ -76,16 +76,19 @@ export function decodedLocalImagePath(source: string): string | undefined {
 export async function downloadChatImage(
   source: string,
   signal: AbortSignal,
+  options: { readonly loopbackOrigin?: string } = {},
 ): Promise<ChatImageBytes> {
   let url = new URL(source);
+  // Only an embedding Host's exact served origin can opt into loopback. A
+  // public source cannot acquire this grant by redirecting into that origin.
+  const loopbackOrigin = url.origin === options.loopbackOrigin ? options.loopbackOrigin : undefined;
   for (let redirect = 0; redirect <= 3; redirect++) {
     signal.throwIfAborted();
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
       throw new ImageSourceError('not_allowed');
     const host = url.hostname.replace(/^\[|\]$/g, '');
-    // Literal loopback supports images served by this execution Host. Other private
-    // networks and DNS names resolving to them are never automatically fetched.
-    const literalLoopback = host === '127.0.0.1' || host === '::1';
+    const literalLoopback =
+      !!loopbackOrigin && url.origin === loopbackOrigin && (host === '127.0.0.1' || host === '::1');
     const addresses = isIP(host)
       ? [{ address: host, family: isIP(host) }]
       : await abortableLookup(host, signal);

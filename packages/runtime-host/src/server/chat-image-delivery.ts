@@ -20,9 +20,9 @@
 import { createHash } from 'node:crypto';
 import { ImageFileReadError } from '@maka/runtime/image-file-reader';
 import type { CompleteEvent, TextCompleteEvent, TextDeltaEvent } from '@maka/core/events';
-import { foldAssistantDelta } from '@maka/core/events';
 import {
   IMAGE_MARKDOWN_MAX_LENGTH,
+  isRemoteImageSource,
   type ImageArchiveLimits,
   type ImageDeliveryRequest,
   type ImageDeliveryResult,
@@ -62,8 +62,11 @@ export interface ChatImageDeliveryPorts {
   isPresent(sessionId: string): Promise<boolean>;
   readMessage(identity: DeliveryIdentity): Promise<string | undefined>;
   readLocalImage(sessionId: string, path: string, signal: AbortSignal): Promise<ChatImageBytes>;
+  canLoadRemote(sessionId: string): Promise<boolean>;
   acquireResidency(): { release(): void };
   persistenceFailed(error: unknown): void;
+  presentationFailed(error: unknown): void;
+  readonly sourceReadTimeoutMs?: number;
   readonly limits?: ImageArchiveLimits;
   readonly download?: typeof downloadChatImage;
 }
@@ -71,64 +74,28 @@ export interface ChatImageDeliveryPorts {
 export class ChatImageDeliveryService {
   readonly #jobs = new Map<string, DeliveryJob>();
   readonly #queue: DeliveryJob[] = [];
-  readonly #streams = new Map<
-    string,
-    { turnId: string; text: string; seen: Set<string>; timer?: ReturnType<typeof setTimeout> }
-  >();
   readonly #abort = new AbortController();
   #running = 0;
   #closed = false;
   constructor(private readonly ports: ChatImageDeliveryPorts) {}
 
   observe(sessionId: string, event: TextDeltaEvent | TextCompleteEvent | CompleteEvent): void {
-    if (this.#closed) return;
-    if (event.type === 'complete') {
-      for (const [key, stream] of this.#streams) {
-        if (key.startsWith(`${sessionId}\0`) && stream.turnId === event.turnId) {
-          clearTimeout(stream.timer);
-          this.#streams.delete(key);
-        }
-      }
+    if (
+      this.#closed ||
+      event.type !== 'text_complete' ||
+      event.text.length > IMAGE_MARKDOWN_MAX_LENGTH
+    )
       return;
-    }
-    const key = `${sessionId}\0${event.messageId}`;
-    let stream = this.#streams.get(key);
-    if (!stream) {
-      if (this.#streams.size >= 32) return;
-      stream = { turnId: event.turnId, text: '', seen: new Set() };
-      this.#streams.set(key, stream);
-    }
-    if (event.type === 'text_complete') stream.text = event.text;
-    else {
-      const folded = foldAssistantDelta(stream.text.length, event);
-      if (!folded) return;
-      stream.text += folded.tail;
-    }
-    if (stream.text.length > IMAGE_MARKDOWN_MAX_LENGTH) {
-      clearTimeout(stream.timer);
-      this.#streams.delete(key);
-      return;
-    }
-    const capture = () => {
-      stream!.timer = undefined;
-      for (const source of chatImageSources(stream!.text)) {
-        if (stream!.seen.has(source)) continue;
-        stream!.seen.add(source);
+    // Reference destinations can grow during streaming. Only settled text
+    // grants capture, and remote sources always require an explicit action.
+    try {
+      for (const source of chatImageSources(event.text)) {
+        if (isRemoteImageSource(source)) continue;
         this.#enqueue({ sessionId, turnId: event.turnId, messageId: event.messageId, source });
       }
-    };
-    if (event.type === 'text_complete') {
-      clearTimeout(stream.timer);
-      capture();
-      this.#streams.delete(key);
-    } else if (!stream.timer)
-      stream.timer = setTimeout(() => {
-        try {
-          capture();
-        } catch (error) {
-          if (!this.#closed) this.ports.persistenceFailed(error);
-        }
-      }, 250);
+    } catch (error) {
+      this.ports.presentationFailed(error);
+    }
   }
 
   async resolve(identity: DeliveryIdentity): Promise<ImageDeliveryResult> {
@@ -140,8 +107,8 @@ export class ChatImageDeliveryService {
       identity.source,
     );
     const metadata = record?.imageDelivery;
-    if (metadata?.status === 'ready' && !identity.retry)
-      return { status: 'ready', artifactId: record!.id };
+    // A browser decode/read failure is not authority to destroy saved history.
+    if (metadata?.status === 'ready') return { status: 'ready', artifactId: record!.id };
     if (metadata?.status === 'failed' && !identity.retry)
       return { status: 'failed', reason: metadata.reason! };
     if (this.#jobs.has(deliveryKey(identity))) return { status: 'pending' };
@@ -152,7 +119,12 @@ export class ChatImageDeliveryService {
       if (text === undefined || !chatImageSources(text).includes(identity.source))
         return { status: 'unavailable' };
     }
-    if (metadata?.status === 'failed' || metadata?.status === 'ready') {
+    if (isRemoteImageSource(identity.source)) {
+      if (!identity.loadRemote) return { status: 'requires_confirmation' };
+      if (!(await this.ports.canLoadRemote(identity.sessionId)))
+        return { status: 'failed', reason: 'not_allowed' };
+    }
+    if (metadata?.status === 'failed') {
       return this.ports.admission.runOrJoin(identity.sessionId, async () => {
         if (this.#closed) return { status: 'unavailable' };
         if (this.#jobs.has(deliveryKey(identity))) return { status: 'pending' };
@@ -195,7 +167,10 @@ export class ChatImageDeliveryService {
         try {
           await this.#capture(identity);
         } catch (error) {
-          if (!this.#abort.signal.aborted) this.ports.persistenceFailed(error);
+          if (!this.#abort.signal.aborted) {
+            if (error instanceof ImagePersistenceError) this.ports.persistenceFailed(error.cause);
+            else this.ports.presentationFailed(error);
+          }
         } finally {
           finish();
         }
@@ -236,15 +211,20 @@ export class ChatImageDeliveryService {
     const publish = async (input: Parameters<InteractiveArtifactStoreWriter['create']>[0]) =>
       this.ports.admission.runOrJoin(sessionId, async () => {
         if (this.#abort.signal.aborted || !(await this.ports.isPresent(sessionId))) return;
-        await this.ports.artifacts.create(input);
-        // Retain a pending request only until a terminal record is durable.
-        // A crash between these writes still replays the terminal record.
-        if (input.imageDelivery?.status !== 'pending')
-          await this.ports.artifacts.deleteOwnedArtifactInSession(
-            sessionId,
-            pendingId,
-            'tool_result_projection',
-          );
+        try {
+          await this.ports.artifacts.create(input);
+          // Retain a pending request only until a terminal record is durable.
+          // A crash between these writes still replays the terminal record.
+          if (input.imageDelivery?.status !== 'pending')
+            await this.ports.artifacts.deleteOwnedArtifactInSession(
+              sessionId,
+              pendingId,
+              'tool_result_projection',
+            );
+        } catch (error) {
+          if (error instanceof ImageArchiveQuotaError) throw error;
+          throw new ImagePersistenceError('Image persistence failed', { cause: error });
+        }
       });
     await publish({
       ...base,
@@ -254,7 +234,10 @@ export class ChatImageDeliveryService {
       imageDelivery: { ...metadata, status: 'pending' },
     });
     if (this.#abort.signal.aborted || !(await this.ports.isPresent(sessionId))) return;
-    const signal = AbortSignal.any([this.#abort.signal, AbortSignal.timeout(10_000)]);
+    const readAbort = new AbortController();
+    // Keep the read deadline alive even when a source has no active handles.
+    const deadline = setTimeout(() => readAbort.abort(), this.ports.sourceReadTimeoutMs ?? 10_000);
+    const signal = AbortSignal.any([this.#abort.signal, readAbort.signal]);
     let image: ChatImageBytes;
     try {
       const path = localImagePath(source);
@@ -278,16 +261,9 @@ export class ChatImageDeliveryService {
           );
         }
       } else {
-        try {
-          image = await (this.ports.download ?? downloadChatImage)(source, signal);
-        } catch (error) {
-          if (
-            signal.aborted ||
-            (error instanceof ImageSourceError && error.reason !== 'download_failed')
-          )
-            throw error;
-          image = await (this.ports.download ?? downloadChatImage)(source, signal);
-        }
+        if (!identity.loadRemote || !(await this.ports.canLoadRemote(sessionId)))
+          throw new ImageSourceError('not_allowed');
+        image = await (this.ports.download ?? downloadChatImage)(source, signal);
       }
     } catch (error) {
       if (this.#abort.signal.aborted) return;
@@ -299,6 +275,8 @@ export class ChatImageDeliveryService {
         imageDelivery: { ...metadata, status: 'failed', reason: failureReason(error, source) },
       });
       return;
+    } finally {
+      clearTimeout(deadline);
     }
     if (this.#abort.signal.aborted) return;
     if (signal.aborted) {
@@ -341,8 +319,6 @@ export class ChatImageDeliveryService {
   beginDrain(): void {
     this.#closed = true;
     this.#abort.abort();
-    for (const stream of this.#streams.values()) clearTimeout(stream.timer);
-    this.#streams.clear();
     for (const job of this.#queue.splice(0)) job.cancel();
   }
   async close(): Promise<void> {
@@ -353,6 +329,7 @@ export class ChatImageDeliveryService {
     await Promise.all([...this.#jobs.values()].map((job) => job.done));
   }
 }
+class ImagePersistenceError extends Error {}
 function deliveryKey(i: DeliveryIdentity): string {
   return createHash('sha256')
     .update(JSON.stringify([i.sessionId, i.turnId, i.messageId, i.source]))

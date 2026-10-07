@@ -40,7 +40,7 @@ const ALLOWED_HTML_TAGS = new Set([
   'title',
 ]);
 const CONTENT_SECURITY_POLICY =
-  "default-src 'self'; script-src 'self' maka-client-plugin:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; connect-src 'self'";
+  "default-src 'self'; script-src 'self' maka-client-plugin:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'";
 
 function normalizePath(path: string): string {
   return path.split(sep).join('/');

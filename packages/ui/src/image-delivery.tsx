@@ -50,16 +50,20 @@ export function useImageDelivery(source: string, enabled: boolean) {
   const scope = useContext(ImageMessageScope);
   const context = useContext(DeliveryContext);
   const [attempt, setAttempt] = useState(0);
+  const consentKey = JSON.stringify([scope?.turnId, scope?.messageId, source]);
+  const [consent, setConsent] = useState<{ context: typeof context; key: string }>();
+  const loadRemote = consent?.context === context && consent?.key === consentKey;
   const identity = useMemo(() => context && scope?.turnId && scope.messageId && enabled
-    ? { context, turnId: scope.turnId, messageId: scope.messageId, streaming: scope.streaming === true, source, attempt } : undefined,
-    [context, scope?.turnId, scope?.messageId, scope?.streaming, source, attempt, enabled]);
+    ? { context, turnId: scope.turnId, messageId: scope.messageId, streaming: scope.streaming === true, source, attempt, loadRemote } : undefined,
+    [context, scope?.turnId, scope?.messageId, scope?.streaming, source, attempt, loadRemote, enabled]);
   const [settled, setSettled] = useState<{ identity: typeof identity; result: ImageDeliveryResult }>();
   const retry = useCallback(() => setAttempt(a => a + 1), []);
+  const confirmRemote = useCallback(() => setConsent({ context, key: consentKey }), [context, consentKey]);
   useEffect(() => {
     if (!identity) return;
     let cancelled = false; let timer: ReturnType<typeof setTimeout> | undefined; let delay = 500; let unavailableRetries = 0;
     const query = async (retry: boolean) => {
-      const result = await identity.context.resolve({ turnId: identity.turnId, messageId: identity.messageId, source: identity.source, ...(retry ? { retry: true } : {}) });
+      const result = await identity.context.resolve({ turnId: identity.turnId, messageId: identity.messageId, source: identity.source, ...(retry ? { retry: true } : {}), ...(identity.loadRemote ? { loadRemote: true } : {}) });
       if (cancelled) return;
       setSettled({ identity, result });
       // Canonical text can lag the displayed stream. Retry briefly after settlement,
@@ -73,5 +77,5 @@ export function useImageDelivery(source: string, enabled: boolean) {
   }, [identity, attempt]);
   const result: ImageDeliveryResult = !identity ? { status: 'unavailable' }
     : settled?.identity === identity ? settled.result : { status: 'pending' };
-  return { ...result, retry, available: !!identity, checked: settled?.identity === identity };
+  return { ...result, retry, confirmRemote, available: !!identity, checked: settled?.identity === identity };
 }
