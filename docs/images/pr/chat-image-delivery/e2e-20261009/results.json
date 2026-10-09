@@ -1,0 +1,55 @@
+{
+  "testedImplementation": "b535d57b364aace0b62f13bcaea72660563e0642",
+  "platform": "darwin",
+  "arch": "arm64",
+  "node": "v24.18.1",
+  "runAt": "2026-10-09T05:59:26.502Z",
+  "modelBackend": "existing deterministic FakeBackend; all media and persistence production code",
+  "remoteSource": "https://raw.githubusercontent.com/Sun-GLiang/maka-agent/fc8d30612/docs/images/pr/chat-image-delivery/e2e-20261009/delivery-fixture.png",
+  "imageSha256": "dcab677f4046deb18edc9cab6c78c8cfaf1e91a363a466486d69a3e8e724e4aa",
+  "checks": [
+    {
+      "name": "Remote HTTPS image appears automatically as archived PNG bytes",
+      "result": "PASS"
+    },
+    {
+      "name": "Remote archive metadata and preload attachment bytes match source SHA-256",
+      "result": "PASS",
+      "detail": {
+        "artifactId": "chat_image_result_93c22a7ca2d5682cf671cb54dff3065ede67c47134185ff37e8c7324bb1115bc",
+        "sha256": "dcab677f4046deb18edc9cab6c78c8cfaf1e91a363a466486d69a3e8e724e4aa"
+      }
+    },
+    {
+      "name": "Click opens enlarged real Electron preview; Escape closes it",
+      "result": "PASS"
+    },
+    {
+      "name": "Local image crosses main/Host file reader and is archived byte-for-byte",
+      "result": "PASS",
+      "detail": {
+        "artifactId": "chat_image_result_2930a7cd76ddc2befdd930725c631983bc4a1eb3ac279819d850692427976cea"
+      }
+    },
+    {
+      "name": "Original local source file deleted",
+      "result": "PASS"
+    },
+    {
+      "name": "Application privacy mode enabled before restart (outbound media blocked)",
+      "result": "PASS"
+    },
+    {
+      "name": "Complete Electron restart replays local saved image after source deletion",
+      "result": "PASS"
+    },
+    {
+      "name": "Complete Electron restart replays remote saved image with outbound media blocked",
+      "result": "PASS"
+    },
+    {
+      "name": "Production renderer CSP remains self/data/blob",
+      "result": "PASS"
+    }
+  ]
+}
