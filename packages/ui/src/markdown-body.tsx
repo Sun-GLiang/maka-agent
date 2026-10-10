@@ -31,8 +31,11 @@
 
 import { MarkdownImage, MarkdownImageSourceProvider, MARKDOWN_IMAGE_PLUGINS } from './markdown-image.js';
 import { ImageMessageScope } from './image-delivery.js';
+import { createMarkdownPlugin } from '@astryxdesign/core/Markdown/plugins';
+import type { MarkdownAstNode, MarkdownAstRoot } from '@astryxdesign/core/Markdown';
 import { useCallback, useContext, useMemo, useRef, type ReactNode } from 'react';
 import { redactMarkdownImages } from './markdown-image-redaction.js';
+import { redactSecrets } from './redact.js';
 import {
   Markdown as AstryxMarkdown,
   type MarkdownComponents,
@@ -148,6 +151,7 @@ export function MarkdownBody(props: {
   /** The lazy entry redacts its fallback; the body also preserves image identities. */
   redact?: boolean;
   imageIdentity?: { turnId: string; messageId: string };
+  imageDisplay?: 'image' | 'link';
   streaming?: boolean;
   settledText?: string;
   density?: 'default' | 'compact';
@@ -161,6 +165,26 @@ export function MarkdownBody(props: {
     ? redactMarkdownImages(props.text, props.settledText)
     : { text: props.text, settledText: props.settledText, sources: undefined },
   [props.redact, props.text, props.settledText]);
+  const plugins = useMemo(() => props.imageDisplay === 'link' ? [createMarkdownPlugin({
+    name: 'maka-image-links', apiVersion: 1,
+    transform(document) {
+      // Use parsed nodes so references and code examples retain their semantics.
+      // No image component mounts in this mode, so display cannot load bytes.
+      const rewrite = (node: MarkdownAstNode, insideLink = false, phrasing = false): MarkdownAstNode => {
+        if (node.type === 'image') {
+          const source = presentation.sources?.get(node.url) ?? node.url;
+          const text = { type: 'text' as const, value: node.alt || redactSecrets(source) };
+          const link = insideLink || source !== redactSecrets(source) ? text
+            : { type: 'link' as const, url: source, children: [text] };
+          return phrasing ? link : { type: 'paragraph', children: [link] };
+        }
+        if (!('children' in node)) return node;
+        const childPhrasing = ['paragraph', 'heading', 'tableCell', 'link', 'strong', 'emphasis', 'delete'].includes(node.type);
+        return { ...node, children: node.children.map(child => rewrite(child, insideLink || node.type === 'link', childPhrasing)) } as MarkdownAstNode;
+      };
+      return rewrite(document) as MarkdownAstRoot;
+    },
+  })] : MARKDOWN_IMAGE_PLUGINS, [props.imageDisplay, presentation.sources]);
   const budgetedText = props.streaming ? presentation.text : applyMermaidRenderBudget(presentation.text);
   const density = props.density ?? 'default';
   const components = props.streaming
@@ -205,7 +229,7 @@ export function MarkdownBody(props: {
             // the one combination neither half of the argument asks for.
             density={density}
             components={components}
-            plugins={MARKDOWN_IMAGE_PLUGINS}
+            plugins={plugins}
             isStreaming={props.streaming}
             settledText={presentation.settledText}
             transformSource={transformMathSource}
