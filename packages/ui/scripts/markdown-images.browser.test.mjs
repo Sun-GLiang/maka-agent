@@ -90,6 +90,17 @@ before(async () => {
   await new Promise(resolve => imageServer.listen(0, '127.0.0.1', resolve));
   imageUrl = `http://127.0.0.1:${imageServer.address().port}`;
   const destinations = {
+    'links-formats': [
+      `![Screenshot](${imageUrl}/image.png)`,
+      '![Reference][picture]',
+      `[picture]: <${imageUrl}/reference.png>`,
+      `Build ![Badge](${imageUrl}/badge.png) passing.`,
+      `![](${imageUrl}/empty.png)`,
+      '![Local](/tmp/private.png)',
+      '`![Example](https://example.com/code.png)`',
+    ].join('\n\n'),
+    'links-redacted': `![Signed](${imageUrl}/image.png?token=reasoning-secret)\n\n![Blocked](javascript:alert)`,
+    'links-streaming': `![Streaming](${imageUrl}/stream`,
     'badge-remote': `Build ![Badge](${imageUrl}/badge.png) passing.`,
     'badge-saved': `Build ![Badge](${imageUrl}/badge.png) passing.`,
     'badge-saving': `Build ![Badge](${imageUrl}/badge.png) passing.`,
@@ -188,12 +199,12 @@ before(async () => {
         await new Promise(resolve=>setTimeout(resolve,100));
         return mode.endsWith('saving') && window.deliveryQueries===1 ? {status:'pending'} : {status:'ready',artifactId:mode.startsWith('layout-') ? request.source : 'saved-image'};
       };
-      const markdown=(streaming)=>React.createElement(Markdown,{text,streaming,settledText:race ? text : undefined,density:'compact',imageIdentity:{turnId:'turn',messageId}});
+      const markdown=(streaming)=>React.createElement(Markdown,{text,streaming,settledText:race ? text : undefined,density:'compact',imageIdentity:{turnId:'turn',messageId},imageDisplay:mode.startsWith('links-') ? 'link' : undefined});
       const surface=(streaming)=>mode.startsWith('layout-') ? React.createElement('section',{className:mode==='layout-side' ? 'maka-quote-companion' : '',style:{width:mode==='layout-side' ? '360px' : '100%',maxWidth:'100%'}},
         React.createElement(ChatMessageList,{className:'maka-chat-message-list maka-chatContent',align:'top'},
           React.createElement('div',{className:'maka-transcript-turn maka-turn',style:{width:'100%',maxWidth:'var(--maka-reading-measure)',marginInline:'auto'}},
             React.createElement(ChatMessage,{sender:'assistant'},React.createElement(ChatMessageBubble,{variant:'ghost',width:'100%',className:'maka-chat-message-bubble maka-chat-message-bubble-assistant'},markdown(streaming)))))) : markdown(streaming);
-      const render=(streaming=race)=>root.render(
+      const render=(streaming=race || mode==='links-streaming')=>root.render(
         React.createElement(Theme,{theme:makaTheme,mode:'light'},
           React.createElement(LocaleProvider,{locale:'en'},
             React.createElement(SessionAttachmentProvider,{sessionId:'session',readBytes},
@@ -252,6 +263,51 @@ async function pageFor(scenario) {
 async function loaded(page) {
   await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth === 1));
 }
+
+test('image links preserve Markdown destinations without loading image or attachment bytes', async () => {
+  requests = [];
+  const page = await pageFor('links-formats');
+  try {
+    await page.getByRole('link', {name:/^Screenshot/}).waitFor();
+    assert.equal(await page.getByRole('link', {name:/^Screenshot/}).getAttribute('href'), `${imageUrl}/image.png`);
+    assert.equal(await page.getByRole('link', {name:/^Reference/}).getAttribute('href'), `${imageUrl}/reference.png`);
+    assert.equal(await page.getByRole('link', {name:/^Badge/}).getAttribute('href'), `${imageUrl}/badge.png`);
+    assert.equal(await page.locator('a').filter({hasText:`${imageUrl}/empty.png`}).getAttribute('href'), `${imageUrl}/empty.png`);
+    assert.equal(await page.locator('a a').count(), 0);
+    assert.equal(await page.getByRole('link', {name:'Local', exact:true}).count(), 0);
+    assert.equal(await page.locator('code').innerText(), '![Example](https://example.com/code.png)');
+    assert.equal(await page.locator('img, .maka-markdown-image-resource').count(), 0);
+    assert.deepEqual(await page.evaluate(() => [window.deliveryQueries, window.imageReads]), [0, 0]);
+    assert.deepEqual(requests, []);
+  } finally { await page.close(); }
+});
+
+test('image links do not expose signed destinations or enable unsafe schemes', async () => {
+  requests = [];
+  const page = await pageFor('links-redacted');
+  try {
+    await page.getByText('Signed', {exact:true}).waitFor();
+    assert.equal(await page.locator('a, img, .maka-markdown-image-resource').count(), 0);
+    assert.doesNotMatch(await page.locator('#root').innerHTML(), /reasoning-secret|maka-image-display:/);
+    assert.deepEqual(await page.evaluate(() => [window.deliveryQueries, window.imageReads]), [0, 0]);
+    assert.deepEqual(requests, []);
+  } finally { await page.close(); }
+});
+
+test('streaming reasoning completes image syntax as a link without fetching it', async () => {
+  requests = [];
+  const page = await pageFor('links-streaming');
+  try {
+    await page.waitForFunction(() => typeof window.appendText === 'function');
+    await page.evaluate(() => window.appendText('.png)'));
+    await page.getByRole('link', {name:/^Streaming/}).waitFor();
+    await page.evaluate(() => window.finishStream());
+    assert.equal(await page.getByRole('link', {name:/^Streaming/}).getAttribute('href'), `${imageUrl}/stream.png`);
+    assert.equal(await page.locator('img, .maka-markdown-image-resource').count(), 0);
+    assert.deepEqual(await page.evaluate(() => [window.deliveryQueries, window.imageReads]), [0, 0]);
+    assert.deepEqual(requests, []);
+  } finally { await page.close(); }
+});
 
 test('a remote image loads automatically and renders Host-owned bytes', async () => {
   requests = [];
