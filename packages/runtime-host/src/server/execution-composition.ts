@@ -611,7 +611,6 @@ export async function createExecutionRuntimeHostComposition(
           resolved.networkProxy,
           resolved.secretMaterial.networkProxy?.secret,
         );
-        if (!proxy) return downloadChatImage(source, signal);
         const transport = createProxiedFetchTransport(proxy);
         try {
           return await downloadChatImage(source, signal, { fetch: transport.fetch });
