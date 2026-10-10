@@ -1,0 +1,24 @@
+PR #5969 refactor validation (2026-10-10)
+Implementation: aa614a6b30ceeb0a4123c3558ac853b2181f3076
+Main integrated: 3ab4ef76de93195df15af2acd4f4f589a39064a2
+
+Passed: root build, typecheck, lint, format; desktop and UI Knip;
+strict renderer architecture and its 166 fixtures; Astryx surface inventory;
+ASF headers; locale hygiene; Windows inventory (127 declarations);
+production dependency notices; stale-dist; protocol epoch guard (212 -> 213).
+Node tests: 3509 passed, 8 storage tests skipped (5 Windows-only, 3 opt-in process-lock stress tests).
+Browser tests: 54 passed using installed Chrome via Playwright.
+Visual comparison: 3 checks per revision, no layout shift at 1280px and 320px;
+ready image screenshots are byte-identical before and after.
+
+Storage schema v5 migrates legacy placeholder artifacts into attempt rows.
+Attempt persistence, restart/copy, selected-session bundle export/import,
+quota defaults, immutable saved artifacts, and queued retries have regression coverage.
+Canonical Marked GFM/entity semantics remain unchanged; mdast is a shared source-range adapter.
+
+Limits: full monorepo, full Electron journey, live-provider, packaged-release,
+and cross-platform Electron suites were not rerun for this refactor.
+The existing automatic remote-media network trust concern remains unresolved.
+Screenshots use the production browser fixture, not the full Electron application.
+
+Image-removal revision: ef91354f537f47b722332805d9a877ec421c8d91. Source code unchanged; screenshots removed from the PR final diff and evidence commit. Screenshot files remain local only.

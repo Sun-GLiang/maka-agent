@@ -1,0 +1,18 @@
+{
+  "date": "2026-10-10",
+  "implementation": "ef91354f537f47b722332805d9a877ec421c8d91",
+  "base": "3ab4ef76de93195df15af2acd4f4f589a39064a2",
+  "visualBaseline": "e4ac12e25",
+  "nodeTests": {
+    "core": 920,
+    "storagePassed": 1569,
+    "storageSkipped": 8,
+    "ui": 727,
+    "hostSelected": 293
+  },
+  "browserTestsPassed": 54,
+  "visualChecksPerRevision": 3,
+  "visualScope": "Production Markdown UI and CSS in existing browser fixtures; installed Chrome through Playwright. Baseline UI modules are read from e4ac12e25; not a full Electron application run. Ready screenshots have identical SHA-256 hashes before and after.",
+  "validatedImplementation": "aa614a6b30ceeb0a4123c3558ac853b2181f3076",
+  "imageRemoval": "Screenshot files removed from this evidence commit and the PR final diff. Source code is unchanged from the validated implementation."
+}
