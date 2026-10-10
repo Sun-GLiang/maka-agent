@@ -17,23 +17,11 @@
  * under the License.
  */
 
-import { fromMarkdown } from 'mdast-util-from-markdown';
-import { markdownImages } from '@maka/core/image-markdown';
+import { positionedMarkdownImages } from '@maka/core/image-markdown';
 import { redactSecrets } from './redact.js';
 
-interface PositionedNode {
-  type: string;
-  position?: { start: { offset?: number }; end: { offset?: number } };
-  children?: readonly PositionedNode[];
-  url?: string;
-  alt?: string | null;
-}
-
-/** Hide destinations behind opaque image-only aliases before redacting prose.
- * Source positions keep identical examples in code, links and HTML untouched.
- * Marked remains the authority for the destinations sent to the Host; mdast
- * supplies only source ranges, which Marked does not expose.
- */
+/** Preserve resource identities using the canonical parser's exact source ranges.
+ * The alias map is presentation-only and never grants source loading. */
 export function redactMarkdownImages(text: string, settledText?: string) {
   let prefix = 'maka-image-display:';
   while (text.includes(prefix) || settledText?.includes(prefix)) prefix += 'x';
@@ -42,33 +30,19 @@ export function redactMarkdownImages(text: string, settledText?: string) {
   const prepare = (original: string): string => {
     const redacted = redactSecrets(original);
     if (redacted === original) return redacted;
-    const images = markdownImages(original).filter(image =>
+    const images = positionedMarkdownImages(original).filter(image =>
       redactSecrets(image.source) !== image.source || redactSecrets(image.raw) !== image.raw);
     if (!images.length) return redacted;
-    const destinations = new Map(images.map(image => [image.raw, image.source]));
-    const canonical = new Set(images.map(image => image.source));
-    const replacements: { start: number; end: number; value: string }[] = [];
-    const visit = (node: PositionedNode) => {
-      if (node.type === 'image' || node.type === 'imageReference') {
-        const start = node.position?.start.offset;
-        const end = node.position?.end.offset;
-        if (start === undefined || end === undefined) return;
-        const raw = original.slice(start, end);
-        const source = destinations.get(raw) ?? (node.url && canonical.has(node.url) ? node.url : undefined);
-        if (!source || (redactSecrets(source) === source && redactSecrets(raw) === raw)) return;
-        let alias = aliases.get(source);
-        if (!alias) {
-          alias = `${prefix}${aliases.size}`;
-          aliases.set(source, alias);
-          sources.set(alias, source);
-        }
-        const alt = redactSecrets(node.alt ?? '').replace(/[\\[\]`*_<>|]/g, '\\$&');
-        replacements.push({ start, end, value: `![${alt}](${alias})` });
-        return;
+    const replacements = images.map(image => {
+      let alias = aliases.get(image.source);
+      if (!alias) {
+        alias = `${prefix}${aliases.size}`;
+        aliases.set(image.source, alias);
+        sources.set(alias, image.source);
       }
-      node.children?.forEach(visit);
-    };
-    visit(fromMarkdown(original));
+      const alt = redactSecrets(image.alt).replace(/[\\[\]`*_<>|]/g, '\\$&');
+      return { start: image.start, end: image.end, value: `![${alt}](${alias})` };
+    });
     let protectedText = original;
     for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
       protectedText = protectedText.slice(0, replacement.start) + replacement.value + protectedText.slice(replacement.end);

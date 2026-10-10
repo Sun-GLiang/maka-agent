@@ -71,7 +71,19 @@ export interface ImageDeliveryRequest {
   /** Client permits remote media loading; the Host also checks application outbound policy. */
   readonly loadRemote?: boolean;
 }
+/** Stable source identity, independent of retry or display authority. */
+export interface ImageDeliveryIdentity {
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly messageId: string;
+  readonly source: string;
+}
+/** Attempts are workflow state; only successful captures become Artifacts. */
+export type ImageDeliveryAttempt =
+  | { readonly status: 'pending' }
+  | { readonly status: 'failed'; readonly reason: ImageDeliveryFailure };
 export type ImageDeliveryResult =
+  // Legacy wire spelling: the client has not granted remote display authority.
   | { readonly status: 'requires_confirmation' }
   | { readonly status: 'pending' }
   | { readonly status: 'ready'; readonly artifactId: string }

@@ -27,6 +27,8 @@ import {
   type ImageDeliveryRequest,
   type ImageDeliveryResult,
   type ImageDeliveryFailure,
+  type ImageDeliveryIdentity,
+  type ImageDeliveryAttempt,
 } from '@maka/core/image-delivery';
 import {
   ImageArchiveQuotaError,
@@ -44,9 +46,7 @@ import {
   type ChatImageBytes,
 } from './chat-image-source.js';
 
-interface DeliveryIdentity extends ImageDeliveryRequest {
-  readonly sessionId: string;
-}
+type DeliveryIdentity = ImageDeliveryIdentity & ImageDeliveryRequest;
 interface DeliveryJob {
   readonly done: Promise<void>;
   run(): Promise<void>;
@@ -55,7 +55,7 @@ interface DeliveryJob {
 export interface ChatImageDeliveryPorts {
   readonly artifacts: Pick<
     InteractiveArtifactStoreWriter,
-    'create' | 'findImageDelivery' | 'deleteOwnedArtifactInSession'
+    'create' | 'findImageDelivery' | 'setImageDeliveryAttempt'
   >;
   readonly admission: SessionAdmissionGate;
   isPresent(sessionId: string): Promise<boolean>;
@@ -99,18 +99,16 @@ export class ChatImageDeliveryService {
 
   async resolve(identity: DeliveryIdentity): Promise<ImageDeliveryResult> {
     if (this.#closed) return { status: 'unavailable' };
-    const record = await this.ports.artifacts.findImageDelivery(
+    const metadata = await this.ports.artifacts.findImageDelivery(
       identity.sessionId,
       identity.turnId,
       identity.messageId,
       identity.source,
     );
-    const metadata = record?.imageDelivery;
     // A browser decode/read failure is not authority to destroy saved history.
-    if (metadata?.status === 'ready') return { status: 'ready', artifactId: record!.id };
-    if (metadata?.status === 'failed' && !identity.retry)
-      return { status: 'failed', reason: metadata.reason! };
+    if (metadata?.status === 'ready') return metadata;
     if (this.#jobs.has(deliveryKey(identity))) return { status: 'pending' };
+    if (metadata?.status === 'failed' && !identity.retry) return metadata;
     // A client-provided path is never a read grant. Legacy/restarted deliveries
     // must be found in canonical assistant text before any source is opened.
     if (!metadata) {
@@ -122,22 +120,6 @@ export class ChatImageDeliveryService {
       if (!(await this.ports.canLoadRemote(identity.sessionId)))
         return { status: 'failed', reason: 'not_allowed' };
       if (!identity.loadRemote) return { status: 'requires_confirmation' };
-    }
-    if (metadata?.status === 'failed') {
-      return this.ports.admission.runOrJoin(identity.sessionId, async () => {
-        if (this.#closed) return { status: 'unavailable' };
-        if (this.#jobs.has(deliveryKey(identity))) return { status: 'pending' };
-        if (this.#jobs.size >= 128) return { status: 'failed', reason: 'queue_full' };
-        await this.ports.artifacts.deleteOwnedArtifactInSession(
-          identity.sessionId,
-          record!.id,
-          'tool_result_projection',
-        );
-        // Capture outlives this admission and takes its own write admissions.
-        return this.ports.admission.detach(() => this.#enqueue(identity))
-          ? { status: 'pending' }
-          : { status: 'failed', reason: 'queue_full' };
-      });
     }
     return this.#enqueue(identity)
       ? { status: 'pending' }
@@ -197,49 +179,24 @@ export class ChatImageDeliveryService {
       messageId,
       source,
     );
-    if (existing?.imageDelivery?.status !== 'pending' && existing) return;
+    if (existing?.status === 'ready' || (existing?.status === 'failed' && !identity.retry)) return;
     const metadata = { messageId, source };
     const resultId = `chat_image_result_${deliveryKey(identity)}`;
-    const pendingId = existing?.id ?? `chat_image_request_${deliveryKey(identity)}`;
-    const base = {
-      sessionId,
-      turnId,
-      name: 'chat-image',
-      source: 'tool_result_projection' as const,
-    };
-    const publish = async (input: Parameters<InteractiveArtifactStoreWriter['create']>[0]) =>
+    const publish = async (write: () => Promise<unknown>) =>
       this.ports.admission.runOrJoin(sessionId, async () => {
         if (this.#abort.signal.aborted || !(await this.ports.isPresent(sessionId))) return;
         try {
-          await this.ports.artifacts.create(input);
-          // Retain a pending request only until a terminal record is durable.
-          // A crash between these writes still replays the terminal record.
-          if (input.imageDelivery?.status !== 'pending')
-            await this.ports.artifacts.deleteOwnedArtifactInSession(
-              sessionId,
-              pendingId,
-              'tool_result_projection',
-            );
+          await write();
         } catch (error) {
           if (error instanceof ImageArchiveQuotaError) throw error;
           throw new ImagePersistenceError('Image persistence failed', { cause: error });
         }
       });
+    const publishAttempt = (attempt: ImageDeliveryAttempt) =>
+      publish(() => this.ports.artifacts.setImageDeliveryAttempt(identity, attempt));
     const publishFailure = (reason: ImageDeliveryFailure) =>
-      publish({
-        ...base,
-        id: resultId,
-        kind: 'file',
-        content: '',
-        imageDelivery: { ...metadata, status: 'failed', reason },
-      });
-    await publish({
-      ...base,
-      id: pendingId,
-      kind: 'file',
-      content: '',
-      imageDelivery: { ...metadata, status: 'pending' },
-    });
+      publishAttempt({ status: 'failed', reason });
+    await publishAttempt({ status: 'pending' });
     if (this.#abort.signal.aborted || !(await this.ports.isPresent(sessionId))) return;
     const readAbort = new AbortController();
     // Keep the read deadline alive even when a source has no active handles.
@@ -285,16 +242,18 @@ export class ChatImageDeliveryService {
       return;
     }
     try {
-      await publish(
-        readyChatImageArtifact({
-          id: resultId,
-          sessionId,
-          turnId,
-          name: base.name,
-          ...metadata,
-          image,
-          limits: this.ports.limits,
-        }),
+      await publish(() =>
+        this.ports.artifacts.create(
+          readyChatImageArtifact({
+            id: resultId,
+            sessionId,
+            turnId,
+            name: 'chat-image',
+            ...metadata,
+            image,
+            limits: this.ports.limits,
+          }),
+        ),
       );
     } catch (error) {
       if (!(error instanceof ImageArchiveQuotaError)) throw error;
