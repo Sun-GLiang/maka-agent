@@ -188,7 +188,8 @@ import { startClientSettingsWatcher } from "./client-settings-watcher.js";
 import { registerRuntimeHostGitHubCopilotIpc } from "./runtime-host-github-copilot-ipc-main.js";
 import { registerRuntimeHostArtifactsIpc } from "./runtime-host-artifacts-ipc-main.js";
 import { ManagedArtifactPreview } from './managed-artifact-preview.js';
-import { buildManagedArtifactPreviewTools } from './managed-artifact-preview-tools.js';
+import { buildArtifactPreviewOfferTools } from './managed-artifact-preview-tools.js';
+import { createPreviewPreflightAuthority } from './preview-preflight-probes.js';
 import type { DesktopRuntimeHostClient } from "./runtime-host-client.js";
 import type {
   DesktopRuntimeHostCandidateControls,
@@ -1060,12 +1061,22 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
           {
             offerId: 'desktop_artifact_preview',
             label: 'HTML Artifact preview',
-            description: 'Prepare an isolated, temporary HTTP preview of a generated HTML Artifact.',
-            tools: buildManagedArtifactPreviewTools(async (sessionId, artifactId, signal) => {
-              if (!scope || !runtimeHostManager?.ownsScope(scope)) throw new Error('Preview target is unavailable');
-              const target = runtimePolicyTargetsByEpoch.get(scope.targetEpoch);
-              if (!target?.isActive()) throw new Error('Preview target is no longer active');
-              return managedArtifactPreview.prepare(scope.targetEpoch, target.client, sessionId, artifactId, signal);
+            description: 'Check what this client can preview locally, and prepare an isolated, temporary HTTP preview of a generated HTML Artifact.',
+            // The preflight lives in this offer, not the Browser one, for two
+            // reasons. Every Browser tool is admitted against an Origin read
+            // from the view's current URL, so a capability check there would
+            // need a page already loaded and would fail with the very
+            // "requires an HTTP origin" error it exists to explain. And the
+            // route it hands off to is ArtifactPreview, so the two must be
+            // granted together or the handoff names a tool the caller lacks.
+            tools: buildArtifactPreviewOfferTools({
+              preflight: createPreviewPreflightAuthority(),
+              prepare: async (sessionId, artifactId, signal) => {
+                if (!scope || !runtimeHostManager?.ownsScope(scope)) throw new Error('Preview target is unavailable');
+                const target = runtimePolicyTargetsByEpoch.get(scope.targetEpoch);
+                if (!target?.isActive()) throw new Error('Preview target is no longer active');
+                return managedArtifactPreview.prepare(scope.targetEpoch, target.client, sessionId, artifactId, signal);
+              },
             }),
           },
           {
