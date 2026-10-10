@@ -30,7 +30,7 @@ import {
 import { LocaleProvider } from '../locale-context.js';
 import { MarkdownBody } from '../markdown-body.js';
 import { Markdown } from '../markdown.js';
-import { ImageDeliveryProvider } from '../image-delivery.js';
+import { ImageDeliveryProvider, ImageMessageProvider } from '../image-delivery.js';
 import type { TurnViewModel } from '../materialize.js';
 
 const originalGlobals = {
@@ -104,7 +104,9 @@ test('the complete Markdown entry resolves original signed and hashed destinatio
             assert.ok(sources.includes(request.source));
             return { status: 'ready', artifactId: `saved-${sources.indexOf(request.source)}` };
           }}>
-            <Markdown text={sources.map(source => `![Screenshot](${source})`).join('\n\n') + '\n\nAuthorization: Bearer prose-secret'} imageIdentity={{ turnId: 'turn-1', messageId: 'message-1' }} />
+            <ImageMessageProvider identity={{ turnId: 'turn-1', messageId: 'message-1' }}>
+              <Markdown text={sources.map(source => `![Screenshot](${source})`).join('\n\n') + '\n\nAuthorization: Bearer prose-secret'} />
+            </ImageMessageProvider>
           </ImageDeliveryProvider>
         </SessionAttachmentProvider>
       </LocaleProvider>,

@@ -26,14 +26,11 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type { ArtifactBinaryReadResult } from '@maka/core/artifacts';
+import type { ReadAttachmentBytes } from '@maka/core/image-delivery';
 import { decideImageReadOutcome } from './artifact-preview-registry.js';
 
 /** Host capability for reading bytes from the Runtime Host attachment authority. */
-export type ReadAttachmentBytes = (
-  sessionId: string,
-  artifactId: string,
-) => Promise<ArtifactBinaryReadResult>;
+export type { ReadAttachmentBytes } from '@maka/core/image-delivery';
 
 type SessionAttachmentContextValue = {
   sessionId: string;

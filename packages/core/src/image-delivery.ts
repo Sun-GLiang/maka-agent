@@ -17,6 +17,8 @@
  * under the License.
  */
 
+import type { ArtifactBinaryReadResult } from './artifacts.js';
+
 /** Client-safe delivery contract. No filesystem or networking capabilities live here. */
 export const IMAGE_DELIVERY_IDENTITY_MAX_LENGTH = 512;
 export const IMAGE_DELIVERY_SOURCE_MAX_LENGTH = 4096;
@@ -89,6 +91,21 @@ export type ImageDeliveryResult =
   | { readonly status: 'ready'; readonly artifactId: string }
   | { readonly status: 'failed'; readonly reason: ImageDeliveryFailure }
   | { readonly status: 'unavailable' };
+
+export type ResolveImageDelivery = (
+  sessionId: string,
+  request: ImageDeliveryRequest,
+) => Promise<ImageDeliveryResult>;
+export type ReadAttachmentBytes = (
+  sessionId: string,
+  artifactId: string,
+) => Promise<ArtifactBinaryReadResult>;
+
+/** Narrow transcript image capabilities shared by the UI and desktop adapters. */
+export interface ChatImageServices {
+  readBytes: ReadAttachmentBytes;
+  resolveImageDelivery?: ResolveImageDelivery;
+}
 /** Stored with its Artifact, so session copy/export carries both provenance and bytes. */
 export interface ImageDeliveryMetadata {
   readonly messageId: string;

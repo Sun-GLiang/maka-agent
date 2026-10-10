@@ -92,8 +92,8 @@ export function createDesktopWorkHubServices(
     setDefaultModel: ({ llmConnectionSlug, model }) =>
       bridge.connections.setDefaultModel({ slug: llmConnectionSlug, model }),
     attachments: bridge.attachments,
-    readAttachmentBytes: bridge.attachments.readBytes,
-    resolveImageDelivery: bridge.attachments.resolveImage,
+    readBytes: bridge.attachments.readBytes,
+    resolveImageDelivery: bridge.attachments.resolveImageDelivery,
     prepareAttachments: async (sessionId, items) => {
       const result = await bridge.workHub.prepareAttachments(sessionId, items);
       if (!result.ok) throw new AttachmentIngestBlockedError(result.code);
