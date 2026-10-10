@@ -295,7 +295,7 @@ export function ChatView(props: {
    * host-agnostic with no direct host-global access.
    */
   onReadAttachmentBytes?: ReadAttachmentBytes;
-  onResolveImageDelivery?: import('./image-delivery.js').ResolveImageDelivery;
+  onResolveImageDelivery?: import('@maka/core/image-delivery').ResolveImageDelivery;
   /**
    * Open a linked subagent child session in the main chat column (option A).
    * Threaded into linked subagent rows inside ToolTrow.

@@ -26,6 +26,6 @@ import { useComposerStagingServices } from '../staging-services.js';
 export function StagedQuoteChatView(props: Omit<ComponentProps<typeof PlanChatView>,
   'handleRef' | 'pendingQuotes' | 'onQuoteAnnotationSubmit' | 'onReadAttachmentBytes' | 'onResolveImageDelivery'>) {
   const staging = useComposerStaging();
-  const { readBytes, resolveImage } = useComposerStagingServices();
-  return <PlanChatView {...props} {...staging.chatViewQuoteProps} onReadAttachmentBytes={readBytes} onResolveImageDelivery={resolveImage} />;
+  const { readBytes, resolveImageDelivery } = useComposerStagingServices();
+  return <PlanChatView {...props} {...staging.chatViewQuoteProps} onReadAttachmentBytes={readBytes} onResolveImageDelivery={resolveImageDelivery} />;
 }

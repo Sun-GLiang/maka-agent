@@ -29,13 +29,9 @@
  * product-specific trust boundaries around that renderer.
  */
 
-import { MarkdownImage, MarkdownImageSourceProvider, MARKDOWN_IMAGE_PLUGINS } from './markdown-image.js';
-import { ImageMessageScope } from './image-delivery.js';
-import { createMarkdownPlugin } from '@astryxdesign/core/Markdown/plugins';
-import type { MarkdownAstNode, MarkdownAstRoot } from '@astryxdesign/core/Markdown';
+import { MarkdownImage, createMarkdownImagePlugins } from './markdown-image.js';
 import { useCallback, useContext, useMemo, useRef, type ReactNode } from 'react';
 import { redactMarkdownImages } from './markdown-image-redaction.js';
-import { redactSecrets } from './redact.js';
 import {
   Markdown as AstryxMarkdown,
   type MarkdownComponents,
@@ -150,7 +146,6 @@ export function MarkdownBody(props: {
   text: string;
   /** The lazy entry redacts its fallback; the body also preserves image identities. */
   redact?: boolean;
-  imageIdentity?: { turnId: string; messageId: string };
   imageDisplay?: 'image' | 'link';
   streaming?: boolean;
   settledText?: string;
@@ -165,26 +160,8 @@ export function MarkdownBody(props: {
     ? redactMarkdownImages(props.text, props.settledText)
     : { text: props.text, settledText: props.settledText, sources: undefined },
   [props.redact, props.text, props.settledText]);
-  const plugins = useMemo(() => props.imageDisplay === 'link' ? [createMarkdownPlugin({
-    name: 'maka-image-links', apiVersion: 1,
-    transform(document) {
-      // Use parsed nodes so references and code examples retain their semantics.
-      // No image component mounts in this mode, so display cannot load bytes.
-      const rewrite = (node: MarkdownAstNode, insideLink = false, phrasing = false): MarkdownAstNode => {
-        if (node.type === 'image') {
-          const source = presentation.sources?.get(node.url) ?? node.url;
-          const text = { type: 'text' as const, value: node.alt || redactSecrets(source) };
-          const link = insideLink || source !== redactSecrets(source) ? text
-            : { type: 'link' as const, url: source, children: [text] };
-          return phrasing ? link : { type: 'paragraph', children: [link] };
-        }
-        if (!('children' in node)) return node;
-        const childPhrasing = ['paragraph', 'heading', 'tableCell', 'link', 'strong', 'emphasis', 'delete'].includes(node.type);
-        return { ...node, children: node.children.map(child => rewrite(child, insideLink || node.type === 'link', childPhrasing)) } as MarkdownAstNode;
-      };
-      return rewrite(document) as MarkdownAstRoot;
-    },
-  })] : MARKDOWN_IMAGE_PLUGINS, [props.imageDisplay, presentation.sources]);
+  const plugins = useMemo(() => createMarkdownImagePlugins(props.imageDisplay, presentation.sources),
+    [props.imageDisplay, presentation.sources]);
   const budgetedText = props.streaming ? presentation.text : applyMermaidRenderBudget(presentation.text);
   const density = props.density ?? 'default';
   const components = props.streaming
@@ -194,51 +171,47 @@ export function MarkdownBody(props: {
     : MARKDOWN_COMPONENTS[density];
 
   return (
-    <MarkdownImageSourceProvider text={budgetedText} sources={presentation.sources}>
-      <ImageMessageScope.Provider value={props.imageIdentity ? { ...props.imageIdentity, streaming: props.streaming } : undefined}>
-        <div
-          data-maka-contract="markdown"
-          data-maka-script={hasHanProse(props.text) ? 'han' : undefined}
-          // Migration-only identity wrapper. `display: contents` gives the
-          // contract harness a stable declared subtree without adding a layout
-          // box or interfering with Astryx's document root.
-          style={{ display: 'contents' }}
-        >
-          <AstryxMarkdown
-            autolink="gfm"
-            // Markdown holds no reading measure; the container it lands in does.
-            //
-            // Astryx caps prose at 680px by default but renders a supplied
-            // `components.code` bare — no spacing, no width, no alignment. Maka
-            // always supplies one, so any container that leans on the default gets
-            // prose at 680 and code blocks at whatever the container is: two right
-            // edges, which is the defect this whole change exists to remove. One
-            // authority per column, and it is the container.
-            contentWidth="100%"
-            // Chosen by the caller, and defaulting to document rhythm.
-            //
-            // The transcript passes `compact`: Astryx's default heading spacing
-            // assumes a page with a handful of sections, while an agent turn
-            // emits headings every few lines, so the default margins push each
-            // one into its own visual slab. That is the same argument that
-            // flattens transcript heading SIZES in styles/chat-message.css — and
-            // that rule is scoped to `.maka-turn` precisely because the other
-            // caller, the Daily Review panel, renders a report, which is a
-            // document. Hardcoding `compact` here contradicted that scoping: the
-            // review kept full heading sizes but got transcript block spacing,
-            // the one combination neither half of the argument asks for.
-            density={density}
-            components={components}
-            plugins={plugins}
-            isStreaming={props.streaming}
-            settledText={presentation.settledText}
-            transformSource={transformMathSource}
-          >
-            {budgetedText}
-          </AstryxMarkdown>
-        </div>
-      </ImageMessageScope.Provider>
-    </MarkdownImageSourceProvider>
+    <div
+      data-maka-contract="markdown"
+      data-maka-script={hasHanProse(props.text) ? 'han' : undefined}
+      // Migration-only identity wrapper. `display: contents` gives the
+      // contract harness a stable declared subtree without adding a layout
+      // box or interfering with Astryx's document root.
+      style={{ display: 'contents' }}
+    >
+      <AstryxMarkdown
+        autolink="gfm"
+        // Markdown holds no reading measure; the container it lands in does.
+        //
+        // Astryx caps prose at 680px by default but renders a supplied
+        // `components.code` bare — no spacing, no width, no alignment. Maka
+        // always supplies one, so any container that leans on the default gets
+        // prose at 680 and code blocks at whatever the container is: two right
+        // edges, which is the defect this whole change exists to remove. One
+        // authority per column, and it is the container.
+        contentWidth="100%"
+        // Chosen by the caller, and defaulting to document rhythm.
+        //
+        // The transcript passes `compact`: Astryx's default heading spacing
+        // assumes a page with a handful of sections, while an agent turn
+        // emits headings every few lines, so the default margins push each
+        // one into its own visual slab. That is the same argument that
+        // flattens transcript heading SIZES in styles/chat-message.css — and
+        // that rule is scoped to `.maka-turn` precisely because the other
+        // caller, the Daily Review panel, renders a report, which is a
+        // document. Hardcoding `compact` here contradicted that scoping: the
+        // review kept full heading sizes but got transcript block spacing,
+        // the one combination neither half of the argument asks for.
+        density={density}
+        components={components}
+        plugins={plugins}
+        isStreaming={props.streaming}
+        settledText={presentation.settledText}
+        transformSource={transformMathSource}
+      >
+        {budgetedText}
+      </AstryxMarkdown>
+    </div>
   );
 }
 

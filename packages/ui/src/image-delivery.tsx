@@ -18,10 +18,21 @@
  */
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { ImageDeliveryRequest, ImageDeliveryResult } from '@maka/core/image-delivery';
+import type { ImageDeliveryRequest, ImageDeliveryResult, ResolveImageDelivery } from '@maka/core/image-delivery';
 import { isRemoteImageSource } from '@maka/core/image-delivery';
-export type ResolveImageDelivery = (sessionId: string, request: ImageDeliveryRequest) => Promise<ImageDeliveryResult>;
-export const ImageMessageScope = createContext<{ turnId: string; messageId: string; streaming?: boolean } | undefined>(undefined);
+export type { ResolveImageDelivery } from '@maka/core/image-delivery';
+const ImageMessageScope = createContext<{ turnId: string; messageId: string; streaming?: boolean } | undefined>(undefined);
+/** Installed by assistant messages, outside the generic Markdown renderer. */
+export function ImageMessageProvider(props: {
+  identity?: { turnId: string; messageId: string };
+  streaming?: boolean;
+  children: ReactNode;
+}) {
+  const value = useMemo(() => props.identity
+    ? { turnId: props.identity.turnId, messageId: props.identity.messageId, streaming: props.streaming }
+    : undefined, [props.identity?.turnId, props.identity?.messageId, props.streaming]);
+  return <ImageMessageScope.Provider value={value}>{props.children}</ImageMessageScope.Provider>;
+}
 const DeliveryContext = createContext<{ resolve(request: ImageDeliveryRequest): Promise<ImageDeliveryResult> } | undefined>(undefined);
 export function ImageDeliveryProvider(props: { sessionId: string; resolve?: ResolveImageDelivery; children: ReactNode }) {
   const value = useMemo(() => {

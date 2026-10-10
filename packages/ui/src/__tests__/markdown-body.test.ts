@@ -37,6 +37,21 @@ import {
   MAX_MERMAID_SOURCE_LENGTH,
 } from '../mermaid-diagram.js';
 
+it('image links use canonical destinations for titles, angle brackets and escaped parentheses', () => {
+  for (const [text, destination] of [
+    ['![Title](https://example.com/image.png "Screenshot title")', 'https://example.com/image.png'],
+    ['![Angle](<https://example.com/image.png>)', 'https://example.com/image.png'],
+    [String.raw`![Escaped](https://example.com/a\(1\).png)`, 'https://example.com/a(1).png'],
+  ]) {
+    const markup = renderToStaticMarkup(createElement(LocaleProvider, {
+      locale: 'en',
+      children: createElement(MarkdownBody, { text, imageDisplay: 'link' }),
+    }));
+    assert.ok(markup.includes(`href="${destination}"`), markup);
+    assert.doesNotMatch(markup, /<img\b|maka-markdown-image-resource|unsafe-scheme/);
+  }
+});
+
 it('keeps raw HTML inert instead of expanding the Markdown trust surface', () => {
   const markup = renderToStaticMarkup(createElement(MarkdownBody, {
     text: '<details open><summary>Click</summary>payload</details>',

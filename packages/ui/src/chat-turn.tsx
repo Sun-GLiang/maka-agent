@@ -23,7 +23,8 @@ import { useClipboardCopyFeedback } from './clipboard-feedback.js';
 import { Markdown } from './markdown.js';
 import { formatTurnDuration } from './chat-display-helpers.js';
 import { formatAbsoluteTimestamp } from '@maka/core/relative-time';
-import { isTimeDrivenMotionEnabled } from './streaming-presentation.js';
+import { isTimeDrivenMotionEnabled, isProgressiveStreamingEnabled } from './streaming-presentation.js';
+import { ImageMessageProvider } from './image-delivery.js';
 import { computerRunningLabel } from './tool-activity/computer-action-label.js';
 import {
   Badge,
@@ -1347,24 +1348,25 @@ const AssistantAnswerBubble = memo(function AssistantAnswerBubble(props: Assista
           : 'maka-chat-message-bubble maka-chat-message-bubble-assistant maka-bubble-streaming'
       }
     >
-      <Markdown
-        text={props.text}
-        imageIdentity={props.imageIdentity}
-        imageDisplay={props.imageDisplay}
-        streaming={props.phase === 'streaming'}
-        settledText={settledText}
-        // Names the surface, and not exclusively: the desktop Artifact
-        // Preview asks for compact too and takes the same rules, so retuning
-        // them here is retuning them there. What this prop does NOT do is set
-        // this turn's block spacing. Every top-level gap in a transcript turn
-        // comes from the rhythm table in styles.css, which keys on the
-        // `data-density="compact"` this prop reflects and overrides Astryx's
-        // own margins outright. So `compact` still buys the transcript
-        // heading scale and the tighter rhythm inside a list item or a quote,
-        // and reading it as "paragraphs are squeezed here" is the wrong
-        // file — retune `--md-gap-block` instead.
-        density="compact"
-      />
+      <ImageMessageProvider identity={props.imageIdentity} streaming={isProgressiveStreamingEnabled(props.phase === 'streaming')}>
+        <Markdown
+          text={props.text}
+          imageDisplay={props.imageDisplay}
+          streaming={props.phase === 'streaming'}
+          settledText={settledText}
+          // Names the surface, and not exclusively: the desktop Artifact
+          // Preview asks for compact too and takes the same rules, so retuning
+          // them here is retuning them there. What this prop does NOT do is set
+          // this turn's block spacing. Every top-level gap in a transcript turn
+          // comes from the rhythm table in styles.css, which keys on the
+          // `data-density="compact"` this prop reflects and overrides Astryx's
+          // own margins outright. So `compact` still buys the transcript
+          // heading scale and the tighter rhythm inside a list item or a quote,
+          // and reading it as "paragraphs are squeezed here" is the wrong
+          // file — retune `--md-gap-block` instead.
+          density="compact"
+        />
+      </ImageMessageProvider>
       {truncated && (
         <Tooltip content={copy.outputTruncatedTitle}>
           {/* Colour-name archive, not the semantic one: Astryx paints

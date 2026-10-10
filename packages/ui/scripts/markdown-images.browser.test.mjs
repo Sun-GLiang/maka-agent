@@ -92,6 +92,9 @@ before(async () => {
   const destinations = {
     'links-formats': [
       `![Screenshot](${imageUrl}/image.png)`,
+      `![Title](${imageUrl}/title.png "Screenshot title")`,
+      `![Angle](<${imageUrl}/angle.png>)`,
+      '![Escaped](' + imageUrl + String.raw`/a\(1\).png)`,
       '![Reference][picture]',
       `[picture]: <${imageUrl}/reference.png>`,
       `Build ![Badge](${imageUrl}/badge.png) passing.`,
@@ -156,7 +159,7 @@ before(async () => {
       import {makaTheme} from './apps/desktop/src/renderer/astryx-theme/maka.js';
       import {Markdown} from './packages/ui/dist/markdown.js';
       import {LocaleProvider} from './packages/ui/dist/locale-context.js';
-      import {ImageDeliveryProvider} from './packages/ui/dist/image-delivery.js';
+      import {ImageDeliveryProvider, ImageMessageProvider} from './packages/ui/dist/image-delivery.js';
       import {SessionAttachmentProvider} from './packages/ui/dist/attachment-image.js';
       import './apps/desktop/src/renderer/styles.css';
       const mode=new URLSearchParams(location.search).get('case') || 'remote';
@@ -199,7 +202,8 @@ before(async () => {
         await new Promise(resolve=>setTimeout(resolve,100));
         return mode.endsWith('saving') && window.deliveryQueries===1 ? {status:'pending'} : {status:'ready',artifactId:mode.startsWith('layout-') ? request.source : 'saved-image'};
       };
-      const markdown=(streaming)=>React.createElement(Markdown,{text,streaming,settledText:race ? text : undefined,density:'compact',imageIdentity:{turnId:'turn',messageId},imageDisplay:mode.startsWith('links-') ? 'link' : undefined});
+      const markdown=(streaming)=>React.createElement(ImageMessageProvider,{identity:{turnId:'turn',messageId},streaming},
+        React.createElement(Markdown,{text,streaming,settledText:race ? text : undefined,density:'compact',imageDisplay:mode.startsWith('links-') ? 'link' : undefined}));
       const surface=(streaming)=>mode.startsWith('layout-') ? React.createElement('section',{className:mode==='layout-side' ? 'maka-quote-companion' : '',style:{width:mode==='layout-side' ? '360px' : '100%',maxWidth:'100%'}},
         React.createElement(ChatMessageList,{className:'maka-chat-message-list maka-chatContent',align:'top'},
           React.createElement('div',{className:'maka-transcript-turn maka-turn',style:{width:'100%',maxWidth:'var(--maka-reading-measure)',marginInline:'auto'}},
@@ -270,6 +274,9 @@ test('image links preserve Markdown destinations without loading image or attach
   try {
     await page.getByRole('link', {name:/^Screenshot/}).waitFor();
     assert.equal(await page.getByRole('link', {name:/^Screenshot/}).getAttribute('href'), `${imageUrl}/image.png`);
+    assert.equal(await page.getByRole('link', {name:/^Title/}).getAttribute('href'), `${imageUrl}/title.png`);
+    assert.equal(await page.getByRole('link', {name:/^Angle/}).getAttribute('href'), `${imageUrl}/angle.png`);
+    assert.equal(await page.getByRole('link', {name:/^Escaped/}).getAttribute('href'), `${imageUrl}/a(1).png`);
     assert.equal(await page.getByRole('link', {name:/^Reference/}).getAttribute('href'), `${imageUrl}/reference.png`);
     assert.equal(await page.getByRole('link', {name:/^Badge/}).getAttribute('href'), `${imageUrl}/badge.png`);
     assert.equal(await page.locator('a').filter({hasText:`${imageUrl}/empty.png`}).getAttribute('href'), `${imageUrl}/empty.png`);

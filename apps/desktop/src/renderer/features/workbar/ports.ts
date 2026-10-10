@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import type { ChatImageServices } from '@maka/core/image-delivery';
 import type { SessionInspectorService } from '../../application/contracts/session-inspector/service.js';
 export type { SessionInspectorService, SessionTracePage, SessionUsageSummary } from '../../application/contracts/session-inspector/service.js';
 
@@ -164,9 +165,7 @@ export interface WorkbarArtifactsService {
   saveAs(sessionId: string, artifactId: string): Promise<ArtifactSaveResult>;
 }
 
-export interface WorkbarAttachmentsService {
-  resolveImage?: (sessionId: string, request: import('@maka/core/image-delivery').ImageDeliveryRequest) => Promise<import('@maka/core/image-delivery').ImageDeliveryResult>;
-  readBytes(sessionId: string, artifactId: string): Promise<ArtifactBinaryReadResult>;
+export interface WorkbarAttachmentsService extends ChatImageServices {
   pickFiles(): Promise<
     | {
         ok: true;

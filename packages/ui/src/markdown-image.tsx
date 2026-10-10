@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button, IconButton, Spinner, Tooltip, useLightbox } from '@astryxdesign/core';
 import { createMarkdownPlugin, type MarkdownExtensionNode } from '@astryxdesign/core/Markdown/plugins';
 import type { MarkdownAstNode, MarkdownAstRoot } from '@astryxdesign/core/Markdown';
@@ -29,36 +29,49 @@ import { useUiLocale } from './locale-context.js';
 import { createMarkdownImageSourceResolver } from './markdown-image-source.js';
 import { redactSecrets } from './redact.js';
 
-const ImageSourceContext = createContext<(source: string) => { source: string; redacted: boolean }>(
-  (source) => ({ source, redacted: false }),
-);
-
-type PlacedImage = MarkdownExtensionNode<'maka-images', 'image', { src: string; alt: string; inline: boolean }>;
+type PlacedImage = MarkdownExtensionNode<'maka-images', 'image', { src: string; alt: string; inline: boolean; redacted: boolean }>;
 // Placement comes from Markdown structure before bytes arrive. Never change a
 // message's geometry in response to network/decode timing or archive resolution.
-export const MARKDOWN_IMAGE_PLUGINS = [createMarkdownPlugin<'maka-images', PlacedImage>({
-  name: 'maka-images', apiVersion: 1,
-  transform(document, context) {
-    if (!context.source.includes('![')) return document;
-    const rewrite = (node: MarkdownAstNode, inline = false, phrasing = false): MarkdownAstNode => {
-      if (node.type === 'image') return {
-        type: 'extension', plugin: 'maka-images', name: 'image',
-        display: phrasing ? 'inline' : 'block',
-        data: { src: node.url, alt: node.alt, inline },
-      } satisfies PlacedImage;
-      if (!('children' in node)) return node;
-      const childInline = node.type === 'paragraph' ? !isSingleImage(node.children)
-        : node.type === 'heading' || node.type === 'tableCell' ? true : inline;
-      const childPhrasing = ['paragraph', 'heading', 'tableCell', 'link', 'strong', 'emphasis', 'delete'].includes(node.type);
-      return { ...node, children: node.children.map(child => rewrite(child, childInline, childPhrasing)) } as MarkdownAstNode;
-    };
-    return rewrite(document) as MarkdownAstRoot<MarkdownExtensionNode>;
-  },
-  renderers: { image: {
-    render: ({ node }) => <MarkdownImage {...node.data} />,
-    toText: node => node.data.alt,
-  } },
-})];
+export function createMarkdownImagePlugins(
+  display: 'image' | 'link' = 'image',
+  sources?: ReadonlyMap<string, string>,
+) {
+  return [createMarkdownPlugin<'maka-images', PlacedImage>({
+    name: 'maka-images', apiVersion: 1,
+    transform(document, context) {
+      if (!context.source.includes('![')) return document;
+      const canonical = createMarkdownImageSourceResolver(context.source);
+      const rewrite = (node: MarkdownAstNode, inline = false, phrasing = false, insideLink = false): MarkdownAstNode => {
+        if (node.type === 'image') {
+          const destination = canonical(node.url);
+          const source = sources?.get(destination) ?? destination;
+          const redacted = source !== redactSecrets(source);
+          if (display === 'link') {
+            const text = { type: 'text' as const, value: node.alt || redactSecrets(source) };
+            const link = insideLink || redacted ? text
+              : { type: 'link' as const, url: source, children: [text] };
+            return phrasing ? link : { type: 'paragraph', children: [link] };
+          }
+          return {
+            type: 'extension', plugin: 'maka-images', name: 'image',
+            display: phrasing ? 'inline' : 'block',
+            data: { src: source, alt: node.alt, inline, redacted: sources?.has(destination) === true && redacted },
+          } satisfies PlacedImage;
+        }
+        if (!('children' in node)) return node;
+        const childInline = node.type === 'paragraph' ? !isSingleImage(node.children)
+          : node.type === 'heading' || node.type === 'tableCell' ? true : inline;
+        const childPhrasing = ['paragraph', 'heading', 'tableCell', 'link', 'strong', 'emphasis', 'delete'].includes(node.type);
+        return { ...node, children: node.children.map(child => rewrite(child, childInline, childPhrasing, insideLink || node.type === 'link')) } as MarkdownAstNode;
+      };
+      return rewrite(document) as MarkdownAstRoot<MarkdownExtensionNode>;
+    },
+    renderers: { image: {
+      render: ({ node }) => <MarkdownImage {...node.data} />,
+      toText: node => node.data.alt,
+    } },
+  })];
+}
 
 function isSingleImage(nodes: readonly MarkdownAstNode[]): boolean {
   const meaningful = nodes.filter(node => node.type !== 'text' || node.value.trim());
@@ -67,22 +80,9 @@ function isSingleImage(nodes: readonly MarkdownAstNode[]): boolean {
   return node.type === 'image' || (['link', 'strong', 'emphasis', 'delete'].includes(node.type)
     && 'children' in node && isSingleImage(node.children));
 }
-export function MarkdownImageSourceProvider(props: { text: string; sources?: ReadonlyMap<string, string>; children: ReactNode }) {
-  const resolve = useMemo(() => {
-    const canonical = createMarkdownImageSourceResolver(props.text);
-    return (source: string) => {
-      const resolved = canonical(source);
-      const original = props.sources?.get(resolved) ?? resolved;
-      return { source: original, redacted: props.sources?.has(resolved) === true && original !== redactSecrets(original) };
-    };
-  }, [props.text, props.sources]);
-  return <ImageSourceContext.Provider value={resolve}>{props.children}</ImageSourceContext.Provider>;
-}
-
 /** Presentation only: Host resolves local addresses and archives; UI receives artifact identities. */
-export function MarkdownImage(props: { src: string; alt: string; inline?: boolean }) {
-  const { source, redacted } = useContext(ImageSourceContext)(props.src);
-  return <ImageResource key={source} src={source} redacted={redacted} alt={props.alt} inline={props.inline} />;
+export function MarkdownImage(props: { src: string; alt: string; inline?: boolean; redacted?: boolean }) {
+  return <ImageResource key={props.src} {...props} redacted={props.redacted === true} />;
 }
 function ImageResource(props: { src: string; redacted: boolean; alt: string; inline?: boolean }) {
   const copy = getSharedUiCopy(useUiLocale()).markdown;
