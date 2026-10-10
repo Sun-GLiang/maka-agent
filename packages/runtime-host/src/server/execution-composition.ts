@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { createAssistantMessageReader } from './session-transcript-reader.js';
 import { createImageFileReader } from '@maka/runtime/image-file-reader';
 import { ChatImageDeliveryService } from './chat-image-delivery.js';
 import { downloadChatImage, ImageSourceError } from './chat-image-source.js';
@@ -635,52 +636,11 @@ export async function createExecutionRuntimeHostComposition(
         });
         return result;
       },
-      readMessage: async (identity) => {
-        await requireSessionManager(manager).ensureTranscriptLedgerForRead(identity.sessionId);
-        const [turn] = await stores.runtimeEventStore.readTranscriptTurns(identity.sessionId, {
-          turnId: identity.turnId,
-        });
-        if (!turn) return undefined;
-        for (
-          let position = turn.firstOrdinal, runs = 0;
-          position <= turn.lastOrdinal && runs < 16;
-          runs++
-        ) {
-          const found = await stores.runtimeEventStore.readTranscriptRun(
-            identity.sessionId,
-            {
-              direction: 'newer',
-              throughOrdinal: turn.lastOrdinal,
-              position,
-              maxEvents: 4096,
-              maxBytes: 16 * 1024 * 1024,
-              maxRecordBytes: 8 * 1024 * 1024,
-            },
-            (run, events) => {
-              let text: string | undefined;
-              for (const { event } of events) {
-                if (
-                  event.partial ||
-                  event.turnId !== identity.turnId ||
-                  event.role !== 'model' ||
-                  event.content?.kind !== 'text'
-                )
-                  continue;
-                if (
-                  (event.refs?.storedMessageId ?? event.refs?.providerEventId ?? event.id) ===
-                  identity.messageId
-                )
-                  text = event.content.text;
-              }
-              return { text, next: run.lastOrdinal + 1 };
-            },
-          );
-          if (!found) break;
-          if (found.text !== undefined) return found.text;
-          position = found.next;
-        }
-        return undefined;
-      },
+      readMessage: createAssistantMessageReader({
+        events: stores.runtimeEventStore,
+        ensureTranscriptLedger: (sessionId) =>
+          requireSessionManager(manager).ensureTranscriptLedgerForRead(sessionId),
+      }),
     });
     // Shared with recall's material fetch, so a file brought in from another
     // Session is answered by the same reader that answers one stored here.
@@ -823,13 +783,9 @@ export async function createExecutionRuntimeHostComposition(
         return Uint8Array.from(Buffer.from(result.base64, 'base64'));
       },
       list: async (invocation) =>
-        (await openedArtifactStore.listTurnArtifacts(invocation.sessionId, invocation.turnId))
-          .filter(
-            (record) =>
-              record.imageDelivery?.status !== 'pending' &&
-              record.imageDelivery?.status !== 'failed',
-          )
-          .map(pluginAttachmentRef),
+        (await openedArtifactStore.listTurnArtifacts(invocation.sessionId, invocation.turnId)).map(
+          pluginAttachmentRef,
+        ),
     });
     const webSearchService = createHostWebSearchService({
       policy: runtimePolicyStores.operations,
@@ -1970,7 +1926,9 @@ export async function createExecutionRuntimeHostComposition(
           return undefined;
         }
       },
-      (sessionId, event) => imageDelivery?.observe(sessionId, event),
+      (sessionId, event) => {
+        if (event.type === 'text_complete') imageDelivery?.observe(sessionId, event);
+      },
     );
     const coordinator = rootCoordinator;
     const pluginModel = createHostPluginModel({

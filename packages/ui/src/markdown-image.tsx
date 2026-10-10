@@ -23,10 +23,7 @@ import { createMarkdownPlugin, type MarkdownExtensionNode } from '@astryxdesign/
 import type { MarkdownAstNode, MarkdownAstRoot } from '@astryxdesign/core/Markdown';
 import { RotateCw, AlertTriangle } from './icons.js';
 import { Link } from '@astryxdesign/core/Link';
-import { parseAttachmentResourceRef } from '@maka/core/attachments';
-import { isRemoteImageSource } from '@maka/core/image-delivery';
-import { useAttachmentImage } from './attachment-image.js';
-import { useImageDelivery } from './image-delivery.js';
+import { useChatImageResource } from './chat-image-resource.js';
 import { getSharedUiCopy } from './shared-ui-copy.js';
 import { useUiLocale } from './locale-context.js';
 import { createMarkdownImageSourceResolver } from './markdown-image-source.js';
@@ -98,59 +95,39 @@ function ImageResource(props: { src: string; redacted: boolean; alt: string; inl
     }, { rootMargin: '300px' });
     observer.observe(anchor.current); return () => observer.disconnect();
   }, [visible]);
-  const explicit = parseAttachmentResourceRef(props.src);
-  const delivery = useImageDelivery(props.src, visible && !explicit, !props.redacted);
-  const artifactId = explicit?.artifactId ?? (delivery.status === 'ready' ? delivery.artifactId : undefined);
-  const image = useAttachmentImage(visible && artifactId ? { artifactId } : undefined);
-  const [failedSource, setFailedSource] = useState<string>();
-  const [attempt, setAttempt] = useState(0);
-  const remote = isRemoteImageSource(props.src);
-  const source = artifactId ? image.src : undefined;
-  const failed = !!source && failedSource === source || !!artifactId && image.status === 'failed';
-  const retry = () => {
-    setFailedSource(undefined); setAttempt(a => a + 1);
-    if (artifactId) image.retry();
-    if (!artifactId) delivery.retry();
-  };
-  // Redaction preserves the original identity for saved replay, never for a
-  // network action whose destination the user cannot inspect.
-  const hiddenRemote = remote && props.redacted;
-  const remoteBlocked = remote && delivery.status === 'failed' && delivery.reason === 'not_allowed';
-  const sourceActions = <span className="maka-markdown-image-actions">
-    {(!hiddenRemote || artifactId) && <Button variant="ghost" size="sm" label={copy.imageRetry} onClick={retry} />}
-    {remote && !hiddenRemote && <Link href={props.src} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>}
+  const resource = useChatImageResource({ source: props.src, redacted: props.redacted, visible });
+  const state = resource.presentation;
+  const message = state.kind === 'loading' ? copy.imageLoading
+    : state.kind === 'failed' ? state.reason === 'saved_bytes' ? copy.imageLoadFailed : copy.imageArchiveFailure(state.reason)
+    : state.kind === 'unavailable' ? {
+      attachment: copy.imageUnavailable,
+      remote: copy.imageRemoteUnavailable,
+      redacted: copy.imageRemoteRedacted,
+      unsupported: copy.imageUnsupported,
+    }[state.reason] : undefined;
+  const hasFrame = props.inline || resource.framed;
+  const actions = <span className="maka-markdown-image-actions">
+    {resource.retry && <Button variant="ghost" size="sm" label={copy.imageRetry} onClick={resource.retry} />}
+    {resource.openSource && <Link href={resource.openSource} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>}
   </span>;
-  let message: string | undefined;
-  const remotePlaceholder = visible && remote && !artifactId;
-  const remoteUnavailable = remotePlaceholder && !hiddenRemote && (!delivery.available || delivery.status === 'requires_confirmation');
-  const remoteNotice = remotePlaceholder && (hiddenRemote || remoteUnavailable || remoteBlocked);
-  if (failed) message = copy.imageLoadFailed;
-  else if (!source) message = !visible ? copy.imageLoading
-    : explicit && image.status === 'unavailable' ? copy.imageUnavailable
-    : remotePlaceholder && hiddenRemote ? copy.imageRemoteRedacted
-    : remoteUnavailable ? copy.imageRemoteUnavailable
-    : delivery.status === 'failed' ? copy.imageArchiveFailure(delivery.reason)
-    : delivery.status === 'pending' || artifactId ? copy.imageLoading : copy.imageUnsupported;
-  const hasFrame = props.inline || !visible || !!source || !!artifactId || delivery.status === 'pending';
   return <span ref={anchor} className={`maka-markdown-image-resource${hasFrame ? props.inline ? ' maka-markdown-image-inline' : ' maka-markdown-image-frame' : ''}`}
-    data-maka-image-state={message ? failed ? 'failed' : 'loading' : 'ready'}>
+    data-maka-image-state={state.kind === 'failed' ? 'failed' : state.kind === 'ready' ? 'ready' : 'loading'}>
     {message && props.inline ? <Tooltip content={message}>
       <span className="maka-markdown-image-placeholder" role="status" aria-label={message}>
-        {(failed || delivery.status === 'failed') && (!hiddenRemote || artifactId)
-          ? <IconButton icon={<RotateCw size={14} />} size="sm" label={copy.imageRetry} onClick={retry} />
-          : remoteNotice || delivery.status === 'unavailable' && visible
+        {resource.retry
+          ? <IconButton icon={<RotateCw size={14} />} size="sm" label={copy.imageRetry} onClick={resource.retry} />
+          : state.kind === 'unavailable'
             ? <AlertTriangle size={14} aria-hidden="true" /> : <Spinner size="sm" shade="subtle" aria-hidden="true" />}
       </span>
     </Tooltip> : message ? <span className="maka-markdown-image-placeholder">
       {props.alt && <span className="maka-markdown-image-caption">{props.alt}</span>}
-      <span role="status">{hasFrame && !failed && !remoteNotice && delivery.status !== 'failed' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
-      {(failed || delivery.status === 'failed') && sourceActions}
-    </span> : source && <DisplayImage key={`${source}\0${attempt}`} src={source} alt={props.alt} onError={() => setFailedSource(source)} />}
-    {remoteUnavailable && <span className="maka-markdown-image-actions">
-      <Link href={props.src} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>
-    </span>}
+      <span role="status">{hasFrame && state.kind === 'loading' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
+      {state.kind === 'failed' && actions}
+    </span> : state.kind === 'ready' && <DisplayImage key={`${state.src}\0${resource.attempt}`} src={state.src} alt={props.alt} onError={resource.onDecodeError} />}
+    {state.kind === 'unavailable' && resource.openSource && actions}
   </span>;
 }
+
 function DisplayImage(props: { src: string; alt: string; onError(): void }) {
   const copy = getSharedUiCopy(useUiLocale()).markdown;
   const [loaded, setLoaded] = useState(false);

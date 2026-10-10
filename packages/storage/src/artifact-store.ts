@@ -22,6 +22,9 @@ import {
   DEFAULT_IMAGE_ARCHIVE_LIMITS,
   isImageDeliveryMetadata,
   type ImageDeliveryMetadata,
+  type ImageDeliveryIdentity,
+  type ImageDeliveryAttempt,
+  type ImageDeliveryResult,
   type ImageArchiveLimits,
 } from '@maka/core/image-delivery';
 import { createHash, randomUUID } from 'node:crypto';
@@ -205,7 +208,11 @@ export interface ArtifactAuthorityStore extends DurableArtifactAttachmentReader 
     turnId: string,
     messageId: string,
     source: string,
-  ): Promise<ArtifactRecord | undefined>;
+  ): Promise<ImageDeliveryResult | undefined>;
+  setImageDeliveryAttempt(
+    identity: ImageDeliveryIdentity,
+    attempt: ImageDeliveryAttempt,
+  ): Promise<void>;
   close(): void;
   copyConversationArtifacts(
     input: ConversationArtifactCopyInput,
@@ -291,9 +298,22 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
     turnId: string,
     messageId: string,
     source: string,
-  ): Promise<ArtifactRecord | undefined> {
+  ): Promise<ImageDeliveryResult | undefined> {
     return this.enqueue(async () =>
       this.metadataRepository.findImageDelivery(sessionId, turnId, messageId, source),
+    );
+  }
+
+  setImageDeliveryAttempt(
+    identity: ImageDeliveryIdentity,
+    attempt: ImageDeliveryAttempt,
+  ): Promise<void> {
+    assertCanonicalArtifactEntityId(identity.sessionId, 'sessionId');
+    assertArtifactTurnKey(identity.turnId);
+    const acceptedIdentity = Object.freeze({ ...identity });
+    const acceptedAttempt = Object.freeze({ ...attempt });
+    return this.enqueueMutation(async () =>
+      this.metadataRepository.setImageDeliveryAttempt(acceptedIdentity, acceptedAttempt),
     );
   }
 
@@ -308,7 +328,8 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
     });
     if (
       acceptedInput.imageDelivery !== undefined &&
-      !isImageDeliveryMetadata(acceptedInput.imageDelivery)
+      (!isImageDeliveryMetadata(acceptedInput.imageDelivery) ||
+        acceptedInput.imageDelivery.status !== 'ready')
     )
       throw new Error('Invalid image delivery metadata');
     if (
@@ -402,7 +423,7 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
       }
       requestedLinkedArtifactIds.set(linked.sessionId, artifactIds);
     }
-    const records = await this.enqueue(async () => {
+    const { records, attempts } = await this.enqueue(async () => {
       await this.load();
       const selected = this.records
         .filter(
@@ -433,7 +454,12 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
           selectedIds.add(record.id);
         }
       }
-      return selected;
+      return {
+        records: selected,
+        attempts: this.metadataRepository.readImageDeliveryAttempts(input.sourceSessionId, [
+          ...turnIds,
+        ]),
+      };
     });
 
     const artifactIds = new Map<string, string>();
@@ -458,6 +484,9 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
       artifactIds.set(record.id, created.id);
       relativePaths.set(record.relativePath, created.relativePath);
     }
+    await this.enqueueMutation(async () =>
+      this.metadataRepository.copyImageDeliveryAttempts(attempts, input.targetSessionId),
+    );
     return { artifactIds, relativePaths };
   }
 
@@ -561,6 +590,7 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
       await this.purgeRecordsUnlocked(
         this.records.filter((record) => record.sessionId === sessionId),
       );
+      this.metadataRepository.purgeImageDeliveryAttempts(sessionId);
     });
   }
 

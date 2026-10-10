@@ -18,7 +18,11 @@
  */
 
 import type { ArtifactRecord } from '@maka/core/artifacts';
-import type { ImageArchiveLimits, ImageDeliveryMetadata } from '@maka/core/image-delivery';
+import {
+  DEFAULT_IMAGE_ARCHIVE_LIMITS,
+  type ImageArchiveLimits,
+  type ImageDeliveryMetadata,
+} from '@maka/core/image-delivery';
 
 export class ImageArchiveQuotaError extends Error {
   readonly name = 'ImageArchiveQuotaError';
@@ -66,8 +70,8 @@ export function assertImageArchiveQuota(
   const digest =
     input.imageDelivery?.status === 'ready' ? input.imageDelivery.contentSha256 : undefined;
   const size = input.sizeBytes;
-  const limits = input.imageArchiveLimits;
-  if (digest && limits) {
+  const limits = input.imageArchiveLimits ?? DEFAULT_IMAGE_ARCHIVE_LIMITS;
+  if (digest) {
     if (
       ![limits.sessionBytes, limits.workspaceBytes].every((v) => Number.isSafeInteger(v) && v >= 0)
     )

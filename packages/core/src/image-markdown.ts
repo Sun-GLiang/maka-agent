@@ -18,6 +18,8 @@
  */
 
 import { Lexer, Marked } from 'marked';
+import { fromMarkdown } from 'mdast-util-from-markdown';
+import type { Nodes } from 'mdast';
 import { IMAGE_MARKDOWN_MAX_LENGTH } from './image-delivery.js';
 
 const parser = new Marked({ gfm: true });
@@ -44,4 +46,31 @@ export function parseMarkdownImageDestination(source: string): string | undefine
   const markdown = `![](${source})`;
   const [token] = Lexer.lexInline(markdown, { gfm: true });
   return token?.type === 'image' && token.raw === markdown ? token.href : undefined;
+}
+
+/** Source ranges are an adapter detail; canonical destinations retain Marked's
+ * existing GFM and entity semantics, including identities saved by older Hosts. */
+export function positionedMarkdownImages(text: string) {
+  const images = markdownImages(text);
+  if (!images.length) return [];
+  const destinations = new Map(images.map((image) => [image.raw, image.source]));
+  const canonical = new Set(images.map((image) => image.source));
+  const positioned: { raw: string; source: string; alt: string; start: number; end: number }[] = [];
+  const pending: Nodes[] = [fromMarkdown(text)];
+  while (pending.length) {
+    const node = pending.pop()!;
+    if (node.type === 'image' || node.type === 'imageReference') {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (start === undefined || end === undefined) continue;
+      const raw = text.slice(start, end);
+      const source =
+        destinations.get(raw) ??
+        (node.type === 'image' && canonical.has(node.url) ? node.url : undefined);
+      if (source !== undefined) positioned.push({ raw, source, alt: node.alt ?? '', start, end });
+    } else if ('children' in node) {
+      for (let i = node.children.length - 1; i >= 0; i--) pending.push(node.children[i]!);
+    }
+  }
+  return positioned;
 }

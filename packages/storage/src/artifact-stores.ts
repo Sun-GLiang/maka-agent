@@ -59,6 +59,7 @@ export interface InteractiveArtifactStoreWriter extends DurableArtifactAttachmen
   readonly [writerBrand]: true;
   create(input: CreateArtifactInput): Promise<ArtifactRecord>;
   findImageDelivery: ArtifactAuthorityStore['findImageDelivery'];
+  setImageDeliveryAttempt: ArtifactAuthorityStore['setImageDeliveryAttempt'];
   /**
    * Narrow system delete for one Session-owned artifact of a declared source.
    *
@@ -140,6 +141,11 @@ function createWriterFacade(
     [writerBrand]: true,
     findImageDelivery: (sessionId, turnId, messageId, source) =>
       run(() => store.findImageDelivery(sessionId, turnId, messageId, source)),
+    setImageDeliveryAttempt: (identity, attempt) => {
+      const acceptedIdentity = Object.freeze({ ...identity });
+      const acceptedAttempt = Object.freeze({ ...attempt });
+      return run(() => store.setImageDeliveryAttempt(acceptedIdentity, acceptedAttempt));
+    },
     listPage: (sessionId, options) => run(() => store.listPage(sessionId, options)),
     listTurnArtifacts: (sessionId, turnId) => run(() => store.listTurnArtifacts(sessionId, turnId)),
     getInSession: (sessionId, artifactId) => run(() => store.getInSession(sessionId, artifactId)),

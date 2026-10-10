@@ -125,7 +125,7 @@ async function fixture(
         return authority.store.create(input);
       },
       findImageDelivery: authority.store.findImageDelivery,
-      deleteOwnedArtifactInSession: authority.store.deleteOwnedArtifactInSession,
+      setImageDeliveryAttempt: authority.store.setImageDeliveryAttempt,
     },
     admission: new SessionAdmissionGate(),
     limits,
@@ -278,7 +278,7 @@ test('automatically saves a local delivery without any UI request; deletion and 
         input.messageId,
         source,
       );
-      assert.equal(record?.imageDelivery?.status, 'ready');
+      assert.equal(record?.status, 'ready');
       const bytes = await reopened.store.readBinaryInSession(input.sessionId, result.artifactId);
       assert.equal(bytes.ok, true);
       if (bytes.ok) assert.equal(bytes.base64, PNG.toString('base64'));
@@ -570,8 +570,7 @@ test('truncated HTTP images are rejected, and an explicit retry archives the rep
     });
     assert.equal(requests, 1);
     const failed = await f.authority.store.listPage(REQUEST.sessionId, { offset: 0, limit: 10 });
-    assert.equal(failed.total, 1);
-    assert.equal(failed.records[0]?.imageDelivery?.status, 'failed');
+    assert.equal(failed.total, 0, 'failed delivery is not a file');
     content = PNG;
     assert.equal((await f.service.resolve({ ...identity, retry: true })).status, 'pending');
     await f.service.waitForIdle();
@@ -678,8 +677,16 @@ test('pending capture survives persistence failure and is removed only after a d
     observe(f.service, REQUEST.source);
     await f.service.waitForIdle();
     const pending = await f.authority.store.listPage(REQUEST.sessionId, { offset: 0, limit: 10 });
-    assert.equal(pending.total, 1);
-    assert.equal(pending.records[0]?.imageDelivery?.status, 'pending');
+    assert.equal(pending.total, 0, 'pending capture is not an artifact');
+    assert.deepEqual(
+      await f.authority.store.findImageDelivery(
+        REQUEST.sessionId,
+        REQUEST.turnId,
+        REQUEST.messageId,
+        REQUEST.source,
+      ),
+      { status: 'pending' },
+    );
     assert.equal(f.errors.length, 1);
     failPublication = false;
     assert.equal((await f.service.resolve(REQUEST)).status, 'pending');
@@ -1394,6 +1401,37 @@ test('automatic capture and PublishImage share content quota without merging the
     assert.ok(page.records.every((record) => record.imageDelivery?.status === 'ready'));
     assert.deepEqual(f.errors, []);
   } finally {
+    await f.close();
+  }
+});
+
+test('a queued retry reports pending instead of replaying the previous failure', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let fail = true;
+  const f = await fixture(undefined, async (_sessionId, path) => {
+    if (path !== REQUEST.source) await blocked;
+    else if (fail) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    return checkedChatImage(PNG);
+  });
+  try {
+    observe(f.service, REQUEST.source);
+    await f.service.waitForIdle();
+    assert.deepEqual(await f.service.resolve(REQUEST), { status: 'failed', reason: 'not_found' });
+    observe(f.service, '/tmp/blocker-one.png');
+    observe(f.service, '/tmp/blocker-two.png');
+    while (f.reads < 3) await new Promise((resolve) => setImmediate(resolve));
+    fail = false;
+    assert.deepEqual(await f.service.resolve({ ...REQUEST, retry: true }), { status: 'pending' });
+    assert.deepEqual(await f.service.resolve(REQUEST), { status: 'pending' });
+    release();
+    await f.service.waitForIdle();
+    assert.equal((await f.service.resolve(REQUEST)).status, 'ready');
+    assert.deepEqual(f.errors, []);
+  } finally {
+    release();
     await f.close();
   }
 });

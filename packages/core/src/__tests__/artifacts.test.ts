@@ -59,29 +59,6 @@ describe('Artifact turn key', () => {
 });
 
 describe('Artifact source policy', () => {
-  test('image delivery placeholders are not child-result outputs', () => {
-    for (const status of ['pending', 'failed'] as const) {
-      assert.equal(
-        isArtifactChildResultOutput({
-          source: 'tool_result_projection',
-          imageDelivery: { messageId: 'message', source: '/tmp/image.png', status },
-        }),
-        false,
-      );
-    }
-    assert.equal(
-      isArtifactChildResultOutput({
-        source: 'tool_result_projection',
-        imageDelivery: {
-          messageId: 'message',
-          source: '/tmp/image.png',
-          status: 'ready',
-          contentSha256: 'a'.repeat(64),
-        },
-      }),
-      true,
-    );
-  });
   test('keeps workflow-owned evidence out of independent user deletion', () => {
     for (const source of ARTIFACT_SOURCES) {
       assert.equal(
