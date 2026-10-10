@@ -30,8 +30,8 @@ import { createMarkdownImageSourceResolver } from './markdown-image-source.js';
 import { redactSecrets } from './redact.js';
 
 type PlacedImage = MarkdownExtensionNode<'maka-images', 'image', { src: string; alt: string; inline: boolean; redacted: boolean }>;
-// Placement comes from Markdown structure before bytes arrive. Never change a
-// message's geometry in response to network/decode timing or archive resolution.
+// Markdown structure determines inline/block placement; decoded images supply
+// their natural dimensions within the presentation's CSS bounds.
 export function createMarkdownImagePlugins(
   display: 'image' | 'link' = 'image',
   sources?: ReadonlyMap<string, string>,
@@ -105,12 +105,11 @@ function ImageResource(props: { src: string; redacted: boolean; alt: string; inl
       redacted: copy.imageRemoteRedacted,
       unsupported: copy.imageUnsupported,
     }[state.reason] : undefined;
-  const hasFrame = props.inline || resource.framed;
   const actions = <span className="maka-markdown-image-actions">
     {resource.retry && <Button variant="ghost" size="sm" label={copy.imageRetry} onClick={resource.retry} />}
     {resource.openSource && <Link href={resource.openSource} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>}
   </span>;
-  return <span ref={anchor} className={`maka-markdown-image-resource${hasFrame ? props.inline ? ' maka-markdown-image-inline' : ' maka-markdown-image-frame' : ''}`}
+  return <span ref={anchor} className={`maka-markdown-image-resource ${props.inline ? 'maka-markdown-image-inline' : 'maka-markdown-image-block'}`}
     data-maka-image-state={state.kind === 'failed' ? 'failed' : state.kind === 'ready' ? 'ready' : 'loading'}>
     {message && props.inline ? <Tooltip content={message}>
       <span className="maka-markdown-image-placeholder" role="status" aria-label={message}>
@@ -121,7 +120,7 @@ function ImageResource(props: { src: string; redacted: boolean; alt: string; inl
       </span>
     </Tooltip> : message ? <span className="maka-markdown-image-placeholder">
       {props.alt && <span className="maka-markdown-image-caption">{props.alt}</span>}
-      <span role="status">{hasFrame && state.kind === 'loading' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
+      <span role="status">{state.kind === 'loading' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
       {state.kind === 'failed' && actions}
     </span> : state.kind === 'ready' && <DisplayImage key={`${state.src}\0${resource.attempt}`} src={state.src} alt={props.alt} onError={resource.onDecodeError} />}
     {state.kind === 'unavailable' && resource.openSource && actions}
@@ -144,7 +143,7 @@ function DisplayImage(props: { src: string; alt: string; onError(): void }) {
   return <>
     <Button ref={trigger} variant="ghost" className="maka-markdown-image-preview maka-markdown-image-trigger"
         label={copy.imageExpand(props.alt)} aria-haspopup="dialog" isDisabled={!loaded}
-        style={{ width: '100%', height: '100%', padding: 0, background: 'transparent' }}
+        style={{ padding: 0, background: 'transparent' }}
         onClick={event => { event.preventDefault(); event.stopPropagation(); if (loaded) lightbox.open(); }}>
       {content}
     </Button>

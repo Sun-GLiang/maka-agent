@@ -33,6 +33,10 @@ import { chromium } from '@playwright/test';
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64');
 const badge = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAFAAAAAUCAYAAAAa2LrXAAAATklEQVR4nO3OsQ0AIAzAsJ7O5/QIhsgSg3fPnLnfgzygywO6PKDLA7o8oMsDujygywO6PKDLA7o8oMsDujygywO6PKDLA7o8oMsDujyAW5KWWkgoVkkSAAAAAElFTkSuQmCC', 'base64');
+const dimensions = [
+  ['small', 80, 20], ['square', 1000, 1000], ['landscape', 1600, 900],
+  ['portrait', 900, 1600], ['panorama', 2000, 100], ['tall', 100, 2000], ['pixel', 1, 1],
+];
 let appServer, imageServer, browser, appUrl, imageUrl;
 let requests = [], failedOnce = false;
 let releaseImage;
@@ -41,8 +45,7 @@ const delayedImage = new Promise(resolve => { releaseImage = resolve; });
 const delayedAttachment = new Promise(resolve => { releaseAttachment = resolve; });
 
 // Keep the screenshot's original dimensions without committing evidence images.
-function screenshotFixture() {
-  const width = 900, height = 730;
+function screenshotFixture(width = 900, height = 730) {
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4);
   header[8] = 8; header[9] = 2; // 8-bit RGB.
@@ -67,8 +70,12 @@ function screenshotFixture() {
 
 before(async () => {
   const screenshot = screenshotFixture();
+  const sizedImages = new Map(dimensions.map(([name, width, height]) => [`/${name}.png`, screenshotFixture(width, height)]));
   imageServer = createServer((req, res) => {
     requests.push({ path: req.url, referer: req.headers.referer });
+    if (sizedImages.has(req.url)) {
+      res.setHeader('Content-Type', 'image/png'); res.end(sizedImages.get(req.url)); return;
+    }
     if (req.url === '/delayed.png') {
       void delayedImage.then(() => { res.setHeader('Content-Type', 'image/png'); res.end(screenshot); });
       return;
@@ -90,6 +97,7 @@ before(async () => {
   await new Promise(resolve => imageServer.listen(0, '127.0.0.1', resolve));
   imageUrl = `http://127.0.0.1:${imageServer.address().port}`;
   const destinations = {
+    ...Object.fromEntries(dimensions.map(([name]) => [`size-${name}`, `![Screenshot](${imageUrl}/${name}.png)`])),
     'links-formats': [
       `![Screenshot](${imageUrl}/image.png)`,
       `![Title](${imageUrl}/title.png "Screenshot title")`,
@@ -110,8 +118,8 @@ before(async () => {
     'badge-list': `- Build ![Badge](${imageUrl}/badge.png) passing.`,
     'badge-table': `| Build | Result |\n| --- | --- |\n| ![Badge](${imageUrl}/badge.png) | passing |`,
     'badge-strip': `![Badge](${imageUrl}/badge.png) ![Badge](${imageUrl}/badge.png)`,
-    'layout-main': `## Image delivery\n\nBuild ![Badge](${imageUrl}/badge.png) passing.\n\n![Screenshot](${imageUrl}/screenshot.png)\n\nFollowing paragraph stays in place.`,
-    'layout-side': `## Image delivery\n\nBuild ![Badge](${imageUrl}/badge.png) passing.\n\n![Screenshot](${imageUrl}/screenshot.png)\n\nFollowing paragraph stays in place.`,
+    'layout-main': `## Image delivery\n\nBuild ![Badge](${imageUrl}/badge.png) passing.\n\n![Screenshot](${imageUrl}/screenshot.png)\n\nFollowing paragraph.`,
+    'layout-side': `## Image delivery\n\nBuild ![Badge](${imageUrl}/badge.png) passing.\n\n![Screenshot](${imageUrl}/screenshot.png)\n\nFollowing paragraph.`,
     'screenshot-saved': '![Screenshot](/tmp/screenshot.png)',
     'angle-saved': '![Screenshot](</tmp/my image.png>)',
     'title-saved': `![Screenshot](${imageUrl}/image.png "Screenshot title")`,
@@ -623,7 +631,7 @@ for (const scenario of ['angle-saved', 'title-saved', 'escaped-saved', 'referenc
 }
 
 for (const scenario of ['geometry-remote', 'geometry-saved']) {
-  test(`${scenario}: loading and ready images preserve the position of subsequent content`, async () => {
+  test(`${scenario}: a compact placeholder expands to the decoded image's natural proportions`, async () => {
     const page = await pageFor(scenario);
     try {
       await page.getByText('Loading image…', { exact: true }).waitFor();
@@ -632,7 +640,10 @@ for (const scenario of ['geometry-remote', 'geometry-saved']) {
       await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth > 1));
       await page.getByText('Loading image…', { exact: true }).waitFor({ state: 'hidden' });
       const after = await page.getByText('Following paragraph', { exact: true }).boundingBox();
-      assert.equal(after.y, before.y);
+      assert.ok(after.y > before.y);
+      const block = await page.locator('.maka-markdown-image-block').boundingBox();
+      const image = await page.locator('.maka-markdown-image-preview img').boundingBox();
+      assert.ok(Math.abs(block.width - image.width) < 1 && Math.abs(block.height - image.height) < 1);
     } finally {
       if (scenario === 'geometry-remote') releaseImage(); else releaseAttachment();
       await page.close();
@@ -640,14 +651,14 @@ for (const scenario of ['geometry-remote', 'geometry-saved']) {
   });
 }
 
-test('image frames fit narrow viewports without distorting screenshots or limiting the enlarged preview', async () => {
+test('natural image containers fit narrow viewports without distorting screenshots or limiting the enlarged preview', async () => {
   const page = await pageFor('screenshot');
   try {
     await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth > 1));
     for (const width of [720, 360]) {
       await page.setViewportSize({ width, height: 600 });
       const geometry = await page.locator('.maka-markdown-image-preview img').evaluate(image => {
-        const frame = image.closest('.maka-markdown-image-frame').getBoundingClientRect();
+        const frame = image.closest('.maka-markdown-image-block').getBoundingClientRect();
         const box = image.getBoundingClientRect();
         return { frame: { x: frame.x, y: frame.y, right: frame.right, bottom: frame.bottom },
           box: { x: box.x, y: box.y, right: box.right, bottom: box.bottom, width: box.width, height: box.height },
@@ -662,11 +673,41 @@ test('image frames fit narrow viewports without distorting screenshots or limiti
     await page.waitForFunction(() => document.images.length > 1);
     assert.equal(await page.locator('.maka-markdown-image-preview img').count(), 1);
     const dialog = await page.getByRole('dialog').boundingBox();
-    const frame = await page.locator('.maka-markdown-image-frame').boundingBox();
+    const frame = await page.locator('.maka-markdown-image-block').boundingBox();
     assert.ok(dialog.height > frame.height);
     assert.equal(await page.getByRole('dialog').locator('img').getAttribute('src'), await page.locator('.maka-markdown-image-preview img').getAttribute('src'));
   } finally { await page.close(); }
 });
+
+for (const [name, naturalWidth, naturalHeight] of dimensions) {
+  test(`${name}: body images shrink proportionally without upscaling or empty frames`, async () => {
+    const page = await pageFor(`size-${name}`);
+    try {
+      await page.waitForFunction(() => [...document.images].some(image => image.complete && image.naturalWidth > 0));
+      for (const [width, height] of [[1280, 900], [320, 600]]) {
+        await page.setViewportSize({ width, height });
+        const geometry = await page.locator('.maka-markdown-image-preview img').evaluate(image => {
+          const block = image.closest('.maka-markdown-image-block');
+          const column = block.parentElement;
+          const style = getComputedStyle(column);
+          const availableWidth = column.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+          const box = image.getBoundingClientRect();
+          const container = block.getBoundingClientRect();
+          return { width: box.width, height: box.height, right: box.right, availableWidth,
+            containerWidth: container.width, containerHeight: container.height };
+        });
+        const scale = Math.min(1, 640 / naturalWidth, geometry.availableWidth / naturalWidth,
+          Math.min(480, height * 0.6) / naturalHeight);
+        assert.ok(Math.abs(geometry.width - naturalWidth * scale) < 1, JSON.stringify(geometry));
+        assert.ok(Math.abs(geometry.height - naturalHeight * scale) < 1, JSON.stringify(geometry));
+        assert.ok(Math.abs(geometry.containerWidth - geometry.width) < 1, JSON.stringify(geometry));
+        assert.ok(Math.abs(geometry.containerHeight - geometry.height) < 1, JSON.stringify(geometry));
+        assert.ok(geometry.right <= width);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      }
+    } finally { await page.close(); }
+  });
+}
 
 for (const scenario of ['badge-remote', 'badge-saved', 'badge-saving']) {
   test(`${scenario}: a badge keeps its intrinsic size and surrounding text on one line`, async () => {
@@ -737,7 +778,7 @@ for (const scenario of ['badge-list', 'badge-table', 'badge-strip']) {
     try {
       await page.goto(`${appUrl}/?case=${scenario}`, { waitUntil: 'domcontentloaded' });
       await page.locator('.maka-markdown-image-inline').first().waitFor();
-      assert.equal(await page.locator('.maka-markdown-image-frame').count(), 0);
+      assert.equal(await page.locator('.maka-markdown-image-block').count(), 0);
       const before = await page.locator('.maka-markdown-image-resource').first().boundingBox();
       assert.ok(before.width <= 120 && before.height <= 32);
       release();
@@ -751,7 +792,7 @@ for (const [scenario, width, height] of [
   ['layout-main', 1280, 900], ['layout-main', 480, 700],
   ['layout-side', 720, 700], ['layout-side', 320, 600],
 ]) {
-  test(`${scenario} ${width}x${height}: production chat columns preserve image geometry through loading`, async () => {
+  test(`${scenario} ${width}x${height}: production chat columns fit natural image dimensions`, async () => {
     const page = await browser.newPage({ viewport: { width, height } });
     page.setDefaultTimeout(5000);
     let release;
@@ -764,12 +805,11 @@ for (const [scenario, width, height] of [
     try {
       await page.goto(`${appUrl}/?case=${scenario}`, { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(() => document.querySelectorAll('.maka-markdown-image-resource').length === 2);
-      await page.getByText('Following paragraph stays in place.').waitFor();
+      await page.getByText('Following paragraph.').waitFor();
       const before = await measure();
-      const followingBefore = await page.getByText('Following paragraph stays in place.').boundingBox();
       assert.equal(before.length, 2);
       assert.ok(before[0].width <= 120 && before[0].height <= 32);
-      assert.ok(before[1].width <= 800 && before[1].height <= Math.min(480, height * 0.6));
+      assert.ok(before[1].width <= 640 && before[1].height < 100);
       for (const box of before) assert.ok(box.x >= 0 && box.x + box.width <= width);
       const evidence = process.env.MAKA_IMAGE_LAYOUT_EVIDENCE_DIR;
       if (evidence) {
@@ -778,12 +818,17 @@ for (const [scenario, width, height] of [
       }
       release();
       await page.waitForFunction(() => document.images.length === 2 && [...document.images].every(image => image.complete && image.naturalWidth > 0));
-      assert.deepEqual(await measure(), before);
-      assert.deepEqual(await page.getByText('Following paragraph stays in place.').boundingBox(), followingBefore);
+      const ready = await measure();
+      assert.deepEqual(ready[0], before[0]);
+      const image = await page.locator('.maka-markdown-image-block img').boundingBox();
+      assert.ok(ready[1].width <= 640 && ready[1].height <= Math.min(480, height * 0.6));
+      assert.ok(Math.abs(ready[1].width - image.width) < 1 && Math.abs(ready[1].height - image.height) < 1);
+      assert.ok(Math.abs(image.width / image.height - 900 / 730) < 0.01);
+      assert.ok((await page.getByText('Following paragraph.').boundingBox()).y >= image.y + image.height);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
       if (evidence) {
         await page.screenshot({ path: join(evidence, `${scenario}-${width}-ready.png`), fullPage: true });
-        console.log(JSON.stringify({ scenario, viewport: { width, height }, images: before, layoutShift: 0 }));
+        console.log(JSON.stringify({ scenario, viewport: { width, height }, loading: before, ready }));
       }
     } finally { release(); await page.close(); }
   });
