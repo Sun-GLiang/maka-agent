@@ -20,7 +20,8 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import http, { createServer } from 'node:http';
+import { createServer } from 'node:http';
+import net from 'node:net';
 import dns from 'node:dns/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
@@ -4629,32 +4630,20 @@ test('production Host loads visible remote media independently of agent sandbox 
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
-  const realRequest = http.request;
+  const realConnect = net.connect;
   t.mock.method(dns, 'lookup', async (host: string) => {
     assert.equal(host, 'image.example');
-    return [{ address: '198.18.0.2', family: 4 }];
+    return [{ address: '93.184.216.34', family: 4 }];
   });
-  t.mock.method(
-    http,
-    'request',
-    (
-      url: URL,
-      options: import('node:http').RequestOptions,
-      callback: (response: import('node:http').IncomingMessage) => void,
-    ) => {
-      assert.equal(url.hostname, 'image.example');
-      assert.ok(options.lookup);
-      options.lookup(url.hostname, { all: true }, (error, addresses) => {
-        assert.equal(error, null);
-        assert.deepEqual(addresses, [{ address: '198.18.0.2', family: 4 }]);
-      });
-      return realRequest(
-        new URL(url.pathname, origin),
-        { ...options, lookup: undefined },
-        callback,
-      );
-    },
-  );
+  t.mock.method(net, 'connect', (options: net.TcpNetConnectOpts) => {
+    assert.equal(options.host, 'image.example');
+    assert.ok(options.lookup);
+    options.lookup(options.host, { all: true }, (error, addresses) => {
+      assert.equal(error, null);
+      assert.deepEqual(addresses, [{ address: '93.184.216.34', family: 4 }]);
+    });
+    return realConnect({ host: '127.0.0.1', port: Number(new URL(origin).port) });
+  });
   syncBuiltinESMExports();
   try {
     await withCompositionRoot(async ({ root, owner }) => {

@@ -23,8 +23,9 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import http, { createServer, type RequestOptions, type IncomingMessage } from 'node:http';
-import https from 'node:https';
+import { createServer } from 'node:http';
+import net from 'node:net';
+import tls from 'node:tls';
 import dns from 'node:dns/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
@@ -60,30 +61,28 @@ function publicImageOrigin(
   const source = new URL(localSource);
   source.hostname = 'image.example';
   source.protocol = protocol;
-  const request = http.request;
+  const connect = net.connect;
   t.mock.method(dns, 'lookup', async (host: string) => {
     assert.equal(host, source.hostname);
     return [{ address, family: address.includes(':') ? 6 : 4 }];
   });
-  const transport = (
-    url: URL,
-    options: RequestOptions,
-    callback: (res: IncomingMessage) => void,
-  ) => {
-    assert.equal(url.origin, source.origin);
+  const transport = (options: net.TcpNetConnectOpts & { servername?: string }) => {
+    assert.equal(options.host, source.hostname);
     assert.ok(options.lookup);
-    options.lookup(url.hostname, { all: true }, (error, addresses) => {
+    options.lookup(source.hostname, { all: true }, (error, addresses) => {
       assert.equal(error, null);
       assert.deepEqual(addresses, [{ address, family: address.includes(':') ? 6 : 4 }]);
     });
-    return request(
-      new URL(url.pathname + url.search, local),
-      { ...options, lookup: undefined },
-      callback,
-    );
+    const socket = connect({ host: local.hostname, port: Number(local.port) });
+    if (protocol === 'https:') {
+      assert.equal(options.servername, source.hostname);
+      // This HTTP fixture exercises HTTPS redirect policy, not TLS verification.
+      socket.once('connect', () => socket.emit('secureConnect'));
+    }
+    return socket;
   };
-  t.mock.method(http, 'request', transport);
-  t.mock.method(https, 'request', transport);
+  t.mock.method(net, 'connect', transport);
+  t.mock.method(tls, 'connect', transport);
   syncBuiltinESMExports();
   t.after(() => {
     t.mock.restoreAll();
@@ -860,7 +859,7 @@ test('HTTP download enforces header/stream limits, redirect budget and cancellat
       );
     }
     await assert.rejects(downloadChatImage(source + 'stalled', AbortSignal.timeout(50)), {
-      name: 'AbortError',
+      name: 'TimeoutError',
     });
   } finally {
     server.closeAllConnections();
@@ -895,7 +894,7 @@ test('DNS answers containing any private address are denied before a request', a
     { address: '127.0.0.1', family: 4 },
   ];
   const lookup = t.mock.method(dns, 'lookup', async () => answers);
-  const request = t.mock.method(http, 'request', () => {
+  const request = t.mock.method(net, 'connect', () => {
     assert.fail('unsafe DNS must not reach transport');
   });
   syncBuiltinESMExports();
@@ -912,27 +911,10 @@ test('DNS answers containing any private address are denied before a request', a
   }
 });
 
-for (const address of ['198.18.0.2', '198.19.255.254', '2001:2::6', '2001:2:0:1::2']) {
-  test(`named images load through VPN fake DNS ${address} with pinned lookup`, async (t) => {
-    const server = createServer((_req, res) => res.end(PNG));
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    try {
-      const local = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`;
-      const source = publicImageOrigin(t, local, 'https:', address);
-      assert.deepEqual(
-        await downloadChatImage(source, AbortSignal.timeout(2000)),
-        checkedChatImage(PNG),
-      );
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-  });
-}
-
-test('fake DNS never authorizes literal private addresses, local names or mixed private answers', async (t) => {
-  let answers = [{ address: '198.18.0.2', family: 4 }];
+test('literal benchmark addresses, local names and mixed private answers are denied', async (t) => {
+  let answers = [{ address: '93.184.216.34', family: 4 }];
   t.mock.method(dns, 'lookup', async () => answers);
-  const request = t.mock.method(http, 'request', () =>
+  const request = t.mock.method(net, 'connect', () =>
     assert.fail('blocked source reached transport'),
   );
   syncBuiltinESMExports();
@@ -953,7 +935,7 @@ test('fake DNS never authorizes literal private addresses, local names or mixed 
     }
     for (const address of ['127.0.0.1', '192.168.1.2', '169.254.169.254', '::1']) {
       answers = [
-        { address: '198.18.0.2', family: 4 },
+        { address: '93.184.216.34', family: 4 },
         { address, family: address.includes(':') ? 6 : 4 },
       ];
       await assert.rejects(
@@ -968,7 +950,7 @@ test('fake DNS never authorizes literal private addresses, local names or mixed 
   }
 });
 
-test('a configured HTTP proxy receives the original hostname despite fake DNS and checks redirects and limits', async (t) => {
+test('a configured HTTP proxy receives the original hostname and checks redirects and limits', async (t) => {
   const tunnels: string[] = [];
   const imageRequests: string[] = [];
   const server = createServer((request, response) => {
@@ -1027,9 +1009,8 @@ test('a configured HTTP proxy receives the original hostname despite fake DNS an
     });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  t.mock.method(dns, 'lookup', async (host: string) => {
-    assert.equal(host, 'image.example');
-    return [{ address: '198.18.0.2', family: 4 }];
+  const lookup = t.mock.method(dns, 'lookup', async () => {
+    throw Object.assign(new Error('local DNS is unavailable'), { code: 'ENOTFOUND' });
   });
   syncBuiltinESMExports();
   const transport = createProxiedFetchTransport({
@@ -1065,11 +1046,14 @@ test('a configured HTTP proxy receives the original hostname despite fake DNS an
       downloadChatImage('http://image.example/stalled', AbortSignal.timeout(50), options),
       { name: 'TimeoutError' },
     );
+    assert.equal(lookup.mock.callCount(), 0);
     assert.ok(tunnels.every((target) => target === 'image.example:80'));
     assert.equal(imageRequests.length, 9);
     assert.ok(imageRequests.every((request) => /host: image\.example/i.test(request)));
     assert.ok(
-      imageRequests.every((request) => !/198\.18|cookie:|authorization:|referer:/i.test(request)),
+      imageRequests.every(
+        (request) => !/93\.184\.216\.34|cookie:|authorization:|referer:/i.test(request),
+      ),
     );
   } finally {
     await transport.close();
@@ -1091,7 +1075,7 @@ test('proxy bypass preserves the checked and pinned direct image connection', as
   });
   try {
     const local = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`;
-    const source = publicImageOrigin(t, local, 'http:', '198.18.0.2');
+    const source = publicImageOrigin(t, local, 'http:');
     assert.deepEqual(
       await downloadChatImage(source, AbortSignal.timeout(2000), { fetch: transport.fetch }),
       checkedChatImage(PNG),
