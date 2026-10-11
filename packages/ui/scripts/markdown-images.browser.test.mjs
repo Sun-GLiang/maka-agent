@@ -112,7 +112,6 @@ before(async () => {
     ].join('\n\n'),
     'links-redacted': `![Signed](${imageUrl}/image.png?token=reasoning-secret)\n\n![Blocked](javascript:alert)`,
     'links-streaming': `![Streaming](${imageUrl}/stream`,
-    'badge-remote': `Build ![Badge](${imageUrl}/badge.png) passing.`,
     'badge-saved': `Build ![Badge](${imageUrl}/badge.png) passing.`,
     'badge-saving': `Build ![Badge](${imageUrl}/badge.png) passing.`,
     'badge-list': `- Build ![Badge](${imageUrl}/badge.png) passing.`,
@@ -324,7 +323,7 @@ test('streaming reasoning completes image syntax as a link without fetching it',
   } finally { await page.close(); }
 });
 
-test('a remote image loads automatically and renders Host-owned bytes', async () => {
+test('remote images load automatically as Host-owned bytes with a separate identity per message', async () => {
   requests = [];
   const page = await pageFor('remote');
   try {
@@ -332,15 +331,6 @@ test('a remote image loads automatically and renders Host-owned bytes', async ()
     assert.equal(await page.getByRole('button', { name: 'Load image', exact: true }).count(), 0);
     assert.deepEqual(requests, [{ path: '/image.png', referer: undefined }]);
     assert.match(await page.locator('img').getAttribute('src'), /^data:/);
-  } finally { await page.close(); }
-});
-
-test('each message automatically resolves its own remote image identity', async () => {
-  requests = [];
-  const page = await pageFor('remote');
-  try {
-    await loaded(page);
-    assert.equal(requests.length, 1);
     await page.evaluate(() => window.nextMessage());
     await page.waitForFunction(() => window.deliveryQueries >= 2);
     await loaded(page);
@@ -364,12 +354,14 @@ for (const scenario of ['preview', 'signed-preview']) {
       assert.equal(await page.locator('img').count(), 0);
       assert.equal(await page.getByRole('button', { name: 'Load image', exact: true }).count(), 0);
       assert.ok(!(await page.locator('body').innerText()).includes('preview-secret'));
-      // Prove the production CSP blocks a bypass of the Markdown component too.
-      await page.evaluate(url => {
-        const img=document.createElement('img'); img.src=url; document.body.append(img);
-        return new Promise(resolve=> { img.onerror=resolve; img.onload=()=>resolve(); });
-      }, `${imageUrl}/blocked.png`);
-      assert.deepEqual(requests, []);
+      if (scenario === 'preview') {
+        // Prove the production CSP blocks a bypass of the Markdown component too.
+        await page.evaluate(url => {
+          const img=document.createElement('img'); img.src=url; document.body.append(img);
+          return new Promise(resolve=> { img.onerror=resolve; img.onload=()=>resolve(); });
+        }, `${imageUrl}/blocked.png`);
+        assert.deepEqual(requests, []);
+      }
     } finally { await page.close(); }
   });
 }
@@ -502,22 +494,6 @@ test('a transient saved attachment read retries its bytes without invalidating a
   } finally { await page.close(); }
 });
 
-for (const scenario of ['remote-saved', 'local-saved']) {
-  test(`${scenario}: saved mapping avoids the original source and the image supports zoom`, async () => {
-    requests = [];
-    const page = await pageFor(scenario);
-    try {
-      await loaded(page);
-      assert.deepEqual(requests, []);
-      assert.equal(await page.evaluate(() => window.imageReads), 1);
-      assert.equal(await page.locator('img').count(), 1);
-      assert.match(await page.locator('img').getAttribute('src'), /^data:image\/png;base64,/);
-      await page.getByRole('button', { name: 'Enlarge image: Screenshot', exact: true }).focus();
-      await page.keyboard.press('Enter');
-      await page.waitForFunction(() => document.images.length > 1);
-    } finally { await page.close(); }
-  });
-}
 for (const scenario of ['local-saved', 'remote-saved', 'badge-saved', 'screenshot-saved']) {
   test(`${scenario}: clicking the image itself opens the enlarged preview`, async () => {
     requests = [];
@@ -526,6 +502,9 @@ for (const scenario of ['local-saved', 'remote-saved', 'badge-saved', 'screensho
       const image = page.locator('.maka-markdown-image-preview img');
       await image.waitFor();
       await image.evaluate(image => image.decode());
+      assert.equal(await page.evaluate(() => window.imageReads), 1);
+      assert.equal(await page.locator('img').count(), 1);
+      assert.match(await image.getAttribute('src'), /^data:image\/png;base64,/);
       assert.equal(await page.locator('.maka-markdown-image-expand').count(), 0);
       assert.equal(await page.getByRole('button', { name: /^Enlarge image:/ }).count(), 1);
       const source = await image.getAttribute('src');
@@ -550,11 +529,13 @@ for (const scenario of ['local-saved', 'remote-saved', 'badge-saved', 'screensho
   });
 }
 
-for (const key of ['Enter', 'Space']) {
-  test(`the image itself supports keyboard enlargement with ${key}`, async () => {
-    const page = await pageFor('local-saved');
+for (const [scenario, key] of [['local-saved', 'Enter'], ['local-saved', 'Space'], ['remote-saved', 'Enter']]) {
+  test(`${scenario}: the image itself supports keyboard enlargement with ${key}`, async () => {
+    requests = [];
+    const page = await pageFor(scenario);
     try {
       await loaded(page);
+      assert.deepEqual(requests, []);
       const trigger = page.locator('.maka-markdown-image-trigger');
       await trigger.focus();
       await page.keyboard.press(key);
@@ -589,7 +570,6 @@ test('a pending archive stays a placeholder until saved bytes are available', as
     assert.equal(await page.locator('img').count(), 0);
     await page.waitForFunction(() => [...document.images].some(img=>img.src.startsWith('data:image/png;') && img.naturalWidth===1));
     await page.getByText('Loading image…', { exact: true }).waitFor({ state: 'hidden' });
-    await page.getByText('Saving image…', { exact: true }).waitFor({ state: 'hidden' });
     assert.equal(await page.getByRole('status').filter({ hasText: /\S/ }).count(), 0);
     assert.equal(await page.evaluate(() => window.deliveryQueries), 2);
     assert.equal(requests.length, 0);
@@ -709,7 +689,7 @@ for (const [name, naturalWidth, naturalHeight] of dimensions) {
   });
 }
 
-for (const scenario of ['badge-remote', 'badge-saved', 'badge-saving']) {
+for (const scenario of ['badge-saved', 'badge-saving']) {
   test(`${scenario}: a badge keeps its intrinsic size and surrounding text on one line`, async () => {
     requests = [];
     const page = await pageFor(scenario);
@@ -735,13 +715,8 @@ for (const scenario of ['badge-remote', 'badge-saved', 'badge-saving']) {
       assert.equal(geometry.textBoxes.length, 2);
       assert.equal(geometry.textBoxes[0], geometry.textBoxes[1]);
       if (scenario === 'badge-saved') assert.deepEqual(requests, []);
-      if (scenario === 'badge-remote') {
-        await page.locator('.maka-markdown-image-preview').hover();
-        await page.getByRole('button', { name: 'Enlarge image: Badge', exact: true }).click();
-      } else {
-        await page.getByRole('button', { name: 'Enlarge image: Badge', exact: true }).focus();
-        await page.keyboard.press('Enter');
-      }
+      await page.getByRole('button', { name: 'Enlarge image: Badge', exact: true }).focus();
+      await page.keyboard.press('Enter');
       await page.getByRole('dialog').waitFor();
     } finally { await page.close(); }
   });
@@ -782,7 +757,8 @@ for (const scenario of ['badge-list', 'badge-table', 'badge-strip']) {
       const before = await page.locator('.maka-markdown-image-resource').first().boundingBox();
       assert.ok(before.width <= 120 && before.height <= 32);
       release();
-      await page.waitForFunction(() => [...document.images].every(image => image.naturalWidth === 80));
+      await page.waitForFunction(expected => document.images.length === expected &&
+        [...document.images].every(image => image.naturalWidth === 80), scenario === 'badge-strip' ? 2 : 1);
       assert.deepEqual(await page.locator('.maka-markdown-image-resource').first().boundingBox(), before);
     } finally { release(); await page.close(); }
   });

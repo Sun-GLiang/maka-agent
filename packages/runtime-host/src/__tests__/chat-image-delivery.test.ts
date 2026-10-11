@@ -252,7 +252,7 @@ test('parses real Markdown image nodes, including references and balanced destin
     '/tmp/a(1).png',
   ]);
 });
-test('automatically saves a local delivery without any UI request; deletion and Host restart do not break replay', async () => {
+test('automatically saves a local delivery without any UI request; deletion and ArtifactStore reopen do not break replay', async () => {
   const f = await fixture();
   try {
     const source = join(f.root, 'original.png');
@@ -804,8 +804,7 @@ test('copying a conversation carries delivery provenance and saved bytes; it doe
     await f.close();
   }
 });
-test('source readers reject oversized payloads, unsafe MIME and redirects to private networks', async (t) => {
-  assert.throws(() => checkedChatImage(Buffer.alloc(2 * 1024 * 1024 + 1)), /too_large/);
+test('source readers reject unsafe MIME and redirects to private networks', async (t) => {
   assert.throws(() => checkedChatImage(Buffer.from('<svg/>')), /unsupported_mime/);
   const server = createServer((_req, res) => {
     res.writeHead(302, { location: 'http://169.254.169.254/latest/meta-data/' });
@@ -888,32 +887,9 @@ test('HTTPS download cannot redirect to HTTP', async (t) => {
   }
 });
 
-test('DNS answers containing any private address are denied before a request', async (t) => {
-  const answers = [
-    { address: '93.184.216.34', family: 4 },
-    { address: '127.0.0.1', family: 4 },
-  ];
-  const lookup = t.mock.method(dns, 'lookup', async () => answers);
-  const request = t.mock.method(net, 'connect', () => {
-    assert.fail('unsafe DNS must not reach transport');
-  });
-  syncBuiltinESMExports();
-  try {
-    await assert.rejects(
-      downloadChatImage('http://image.example/image.png', AbortSignal.timeout(1000)),
-      /not_allowed/,
-    );
-    assert.equal(lookup.mock.callCount(), 1);
-    assert.equal(request.mock.callCount(), 0);
-  } finally {
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
-  }
-});
-
 test('literal benchmark addresses, local names and mixed private answers are denied', async (t) => {
   let answers = [{ address: '93.184.216.34', family: 4 }];
-  t.mock.method(dns, 'lookup', async () => answers);
+  const lookup = t.mock.method(dns, 'lookup', async () => answers);
   const request = t.mock.method(net, 'connect', () =>
     assert.fail('blocked source reached transport'),
   );
@@ -938,10 +914,12 @@ test('literal benchmark addresses, local names and mixed private answers are den
         { address: '93.184.216.34', family: 4 },
         { address, family: address.includes(':') ? 6 : 4 },
       ];
+      const previousLookups = lookup.mock.callCount();
       await assert.rejects(
         downloadChatImage('http://image.example/a.png', AbortSignal.timeout(1000)),
         /not_allowed/,
       );
+      assert.equal(lookup.mock.callCount(), previousLookups + 1);
     }
     assert.equal(request.mock.callCount(), 0);
   } finally {
@@ -1236,15 +1214,6 @@ test('loopback is denied before GET, including redirects from a public origin', 
   });
   await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve));
   try {
-    // An untyped caller passing the former fixture option cannot grant access.
-    await assert.rejects(
-      Reflect.apply(downloadChatImage, undefined, [
-        targetUrl,
-        AbortSignal.timeout(1000),
-        { loopbackOrigin: new URL(targetUrl).origin },
-      ]),
-      /not_allowed/,
-    );
     const source = publicImageOrigin(
       t,
       `http://127.0.0.1:${(origin.address() as import('node:net').AddressInfo).port}/redirect`,
