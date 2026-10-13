@@ -65,7 +65,6 @@ export function useChatImageResource(input: { source: string; redacted: boolean;
     presentation.kind === 'unavailable' && presentation.reason === 'remote') ? input.source : undefined;
   return {
     presentation, attempt, retry, openSource,
-    framed: !input.visible || !!source || !!artifactId || delivery.status === 'pending',
     onDecodeError: () => { if (source) setFailedSource(source); },
   };
 }
