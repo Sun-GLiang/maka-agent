@@ -33,9 +33,7 @@
  * lazy split, that code is parsed on demand the first time a message appears,
  * and cached for every subsequent render.
  *
- * Secret redaction happens eagerly here for the Suspense fallback. The lazy
- * body redacts prose after protecting original image destinations behind opaque
- * aliases, so signed image URLs remain usable without becoming visible text.
+ * Secret redaction happens eagerly here, before loading the Markdown body.
  * The remaining trust-boundary contract (URI allowlist, safe-scheme
  * external gate, broken-link inline errors) lives in `markdown-body.tsx`;
  * see that file for the routing rationale.
@@ -64,6 +62,9 @@ export function Markdown(props: {
   density?: 'default' | 'compact';
 }) {
   const safeText = redactSecrets(props.text);
+  const safeSettledText = props.settledText === undefined
+    ? undefined
+    : redactSecrets(props.settledText);
   const streaming = isProgressiveStreamingEnabled(props.streaming);
   return (
     <Suspense
@@ -77,11 +78,10 @@ export function Markdown(props: {
       )}
     >
       <MarkdownBody
-        text={props.text}
-        redact
+        text={safeText}
         imageDisplay={props.imageDisplay}
         streaming={streaming}
-        settledText={props.settledText}
+        settledText={safeSettledText}
         density={props.density}
       />
     </Suspense>

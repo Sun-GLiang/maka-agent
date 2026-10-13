@@ -114,7 +114,7 @@ test('WorkHub upload references round-trip through idle answers, both queue mode
     assert.equal(await services.enqueueMessage(sessionId, `message-${placement}`, 'read this', attachments, placement), 'admitted');
   }
   assert.deepEqual(structuredClone(sent.map(({ attachments }) => attachments)), [[uploaded], [uploaded], [uploaded]]);
-  assert.equal((await services.readBytes(sessionId, 'brief.txt')).ok, true);
+  assert.equal((await services.readAttachmentBytes(sessionId, 'brief.txt')).ok, true);
   assert.ok(services.resolveImageDelivery);
   assert.deepEqual(await services.resolveImageDelivery(sessionId, {
     turnId: 'image-turn', messageId: 'image-message', source: '/tmp/image.png',

@@ -92,7 +92,7 @@ export function createDesktopWorkHubServices(
     setDefaultModel: ({ llmConnectionSlug, model }) =>
       bridge.connections.setDefaultModel({ slug: llmConnectionSlug, model }),
     attachments: bridge.attachments,
-    readBytes: bridge.attachments.readBytes,
+    readAttachmentBytes: bridge.attachments.readBytes,
     resolveImageDelivery: bridge.attachments.resolveImageDelivery,
     prepareAttachments: async (sessionId, items) => {
       const result = await bridge.workHub.prepareAttachments(sessionId, items);

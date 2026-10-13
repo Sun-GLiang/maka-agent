@@ -226,15 +226,7 @@ export async function verifyLinuxRelease(
 
     return { appImagePath, debPath, checksums };
   } finally {
-    // The Runtime Host outlives Desktop for its idle grace period and can still
-    // write into the profile during cleanup. Use the same bounded filesystem
-    // retries as Windows verification for transient ENOTEMPTY/EBUSY errors.
-    await rm(workingDirectory, {
-      recursive: true,
-      force: true,
-      maxRetries: 20,
-      retryDelay: 250,
-    });
+    await rm(workingDirectory, { recursive: true, force: true });
   }
 }
 

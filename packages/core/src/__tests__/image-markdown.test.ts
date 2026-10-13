@@ -19,11 +19,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import {
-  positionedMarkdownImages,
-  markdownImageSources,
-  parseMarkdownImageDestination,
-} from '../image-markdown.js';
+import { markdownImageSources, parseMarkdownImageDestination } from '../image-markdown.js';
 import { IMAGE_MARKDOWN_MAX_LENGTH } from '../image-delivery.js';
 
 test('canonical destinations retain document order, references and explicit attachments', () => {
@@ -73,31 +69,10 @@ test('inline destinations require one complete image token with no trailing synt
     assert.equal(parseMarkdownImageDestination(source), undefined);
 });
 
-test('canonical image ranges address exact occurrences without touching shared definitions or examples', () => {
-  const text =
-    '`![code][p]`\n\n> ![one][p]\n\n![two][p]\n\n[p]: <https://example.com/a.png?token=secret>\n';
-  const refs = positionedMarkdownImages(text);
-  assert.deepEqual(
-    refs.map((ref) => ref.raw),
-    ['![one][p]', '![two][p]'],
-  );
-  assert.deepEqual(
-    refs.map((ref) => text.slice(ref.start, ref.end)),
-    refs.map((ref) => ref.raw),
-  );
-  assert.deepEqual(
-    refs.map((ref) => ref.alt),
-    ['one', 'two'],
-  );
-  assert.ok(refs.every((ref) => ref.source === 'https://example.com/a.png?token=secret'));
-});
-
-test('position adapters preserve existing GFM exclusions and archived entity identities', () => {
+test('canonical destinations preserve GFM exclusions and archived entity identities', () => {
   for (const text of ['https://example.com/![x](/tmp/a.png)', 'www.example.com/![x](/tmp/a.png)']) {
     assert.deepEqual(markdownImageSources(text), []);
-    assert.deepEqual(positionedMarkdownImages(text), []);
   }
   const text = '![x](https://example.com/a?token=secret&amp;v=1)';
   assert.deepEqual(markdownImageSources(text), ['https://example.com/a?token=secret&amp;v=1']);
-  assert.equal(positionedMarkdownImages(text)[0]?.source, markdownImageSources(text)[0]);
 });

@@ -128,19 +128,10 @@ before(async () => {
     'geometry-remote': `![Screenshot](${imageUrl}/delayed.png)\n\nFollowing paragraph`,
     'geometry-saved': '![Screenshot](/tmp/private.png)\n\nFollowing paragraph',
     'streaming-angle-race': '![Screenshot](</tmp/my image.png>)',
-    'signed-saved': `![Screenshot](${imageUrl}/image.png?token=first-secret)`,
-    'signature-saved': `![Screenshot](${imageUrl}/image.png?signature=second-secret&expires=123)`,
-    'hash-saved': `![Screenshot](/tmp/${'a'.repeat(48)}.png)`,
-    'secret-reference-saved': `![Screenshot][picture]\n\n[picture]: ${imageUrl}/image.png?token=reference-secret`,
-    'signed-streaming-race': `![Screenshot](${imageUrl}/image.png?token=stream-secret)`,
-    'signed-corrupt-saved': `![Screenshot](${imageUrl}/image.png?token=corrupt-secret)`,
     'signed-remote': `![Screenshot](${imageUrl}/image.png?token=remote-secret)`,
     'signed-inline': `Build ![Badge](${imageUrl}/image.png?token=inline-secret) passing.`,
     'signed-failed': `![Screenshot](${imageUrl}/image.png?token=failed-secret)`,
-    'secret-alt': `![https://example.invalid/?token=alt-secret](${imageUrl}/image.png)`,
     'signed-preview': `![Screenshot](${imageUrl}/image.png?token=preview-secret)`,
-    'signed-duplicates-saved': `![First](${imageUrl}/image.png?token=first-secret) ![Second](${imageUrl}/image.png?token=second-secret)`,
-    'signed-live-saved': `![Screenshot](${imageUrl}/image.png?token=live-`,
     screenshot: `![Screenshot](${imageUrl}/screenshot.png)`,
   };
   const canonicalSources = {
@@ -150,13 +141,6 @@ before(async () => {
     'reference-saved': ['/tmp/my "image".png'],
     'geometry-saved': ['/tmp/private.png'],
     'streaming-angle-race': ['/tmp/my image.png'],
-    'signed-saved': [`${imageUrl}/image.png?token=first-secret`],
-    'signature-saved': [`${imageUrl}/image.png?signature=second-secret&expires=123`],
-    'hash-saved': [`/tmp/${'a'.repeat(48)}.png`],
-    'secret-reference-saved': [`${imageUrl}/image.png?token=reference-secret`],
-    'signed-streaming-race': [`${imageUrl}/image.png?token=stream-secret`],
-    'signed-duplicates-saved': [`${imageUrl}/image.png?token=first-secret`, `${imageUrl}/image.png?token=second-secret`],
-    'signed-live-saved': [`${imageUrl}/image.png?token=live-secret`],
   };
   const bundle = await build({
     stdin: { contents: `
@@ -300,9 +284,9 @@ test('image links do not expose signed destinations or enable unsafe schemes', a
   requests = [];
   const page = await pageFor('links-redacted');
   try {
-    await page.getByText('Signed', {exact:true}).waitFor();
+    await page.locator('[data-maka-contract="markdown"]').waitFor();
     assert.equal(await page.locator('a, img, .maka-markdown-image-resource').count(), 0);
-    assert.doesNotMatch(await page.locator('#root').innerHTML(), /reasoning-secret|maka-image-display:/);
+    assert.doesNotMatch(await page.locator('#root').innerHTML(), /reasoning-secret/);
     assert.deepEqual(await page.evaluate(() => [window.deliveryQueries, window.imageReads]), [0, 0]);
     assert.deepEqual(requests, []);
   } finally { await page.close(); }
@@ -344,7 +328,7 @@ for (const scenario of ['preview', 'signed-preview']) {
     const page = await pageFor(scenario);
     try {
       if(scenario==='signed-preview') {
-        await page.getByText('The image address contains hidden sensitive information. Loading and opening it are disabled.', {exact:true}).waitFor();
+        await page.locator('[data-maka-contract="markdown"]').waitFor();
         assert.equal(await page.getByText('Open in browser', {exact:true}).count(), 0);
       } else {
         await page.getByText('Remote images cannot be loaded here. You can open this image in your browser.', {exact:true}).waitFor();
@@ -371,9 +355,7 @@ for (const scenario of ['signed-remote', 'signed-inline', 'signed-failed']) {
     requests = [];
     const page = await pageFor(scenario);
     try {
-      const message = 'The image address contains hidden sensitive information. Loading and opening it are disabled.';
-      if (scenario === 'signed-inline') await page.getByRole('status', {name: message, exact: true}).waitFor();
-      else await page.getByText(message, {exact: true}).waitFor();
+      await page.locator('[data-maka-contract="markdown"]').waitFor();
       assert.equal(await page.getByRole('button', {name: 'Load image', exact: true}).count(), 0);
       assert.equal(await page.getByRole('button', {name: 'Retry', exact: true}).count(), 0);
       assert.equal(await page.getByText('Open in browser', {exact: true}).count(), 0);
@@ -385,16 +367,6 @@ for (const scenario of ['signed-remote', 'signed-inline', 'signed-failed']) {
   });
 }
 
-test('redacting only image alt text does not disable a safe destination', async () => {
-  requests = [];
-  const page = await pageFor('secret-alt');
-  try {
-    assert.doesNotMatch(await page.locator('body').innerText(), /alt-secret/);
-    await loaded(page);
-    assert.equal(requests.length, 1);
-  } finally { await page.close(); }
-});
-
 test('application privacy policy prevents automatic image loading and can be rechecked', async () => {
   requests = [];
   const page = await pageFor('privacy');
@@ -405,35 +377,6 @@ test('application privacy policy prevents automatic image loading and can be rec
     await page.getByText('Image not saved: permissions, network settings, or the source address block loading.', {exact: true}).waitFor();
     await page.getByText('Open in browser', {exact: true}).waitFor();
     assert.deepEqual(requests, []);
-  } finally { await page.close(); }
-});
-
-test('two signed destinations which redact alike replay their own saved attachments', async () => {
-  requests = [];
-  const page = await pageFor('signed-duplicates-saved');
-  try {
-    await page.waitForFunction(() => document.images.length === 2 && [...document.images].every(image => image.src.startsWith('data:') && image.naturalWidth === 1));
-    assert.deepEqual(await page.evaluate(() => window.deliverySources), [
-      `${imageUrl}/image.png?token=first-secret`, `${imageUrl}/image.png?token=second-secret`,
-    ]);
-    assert.deepEqual(requests, []);
-    assert.doesNotMatch(await page.locator('body').innerText(), /first-secret|second-secret/);
-  } finally { await page.close(); }
-});
-
-test('a signed image completed by a later text delta resolves its original destination', async () => {
-  requests = [];
-  const page = await pageFor('signed-live-saved');
-  try {
-    await page.waitForFunction(() => typeof window.appendText === 'function');
-    assert.equal(await page.locator('img').count(), 0);
-    await page.evaluate(() => window.appendText('secret)'));
-    await loaded(page);
-    assert.equal(await page.evaluate(() => window.deliverySource), `${imageUrl}/image.png?token=live-secret`);
-    await page.evaluate(() => window.finishStream());
-    await loaded(page);
-    assert.deepEqual(requests, []);
-    assert.doesNotMatch(await page.locator('body').innerText(), /live-secret/);
   } finally { await page.close(); }
 });
 
@@ -461,7 +404,7 @@ test('attachment read failure recovers in place, and local paths explain how to 
   } finally { await page.close(); }
 });
 
-for (const scenario of ['corrupt-saved', 'signed-corrupt-saved']) {
+for (const scenario of ['corrupt-saved']) {
   test(`${scenario}: a saved image decode failure retries archived bytes without touching its source`, async () => {
     requests = [];
     const page = await pageFor(scenario);
@@ -474,7 +417,6 @@ for (const scenario of ['corrupt-saved', 'signed-corrupt-saved']) {
       assert.equal(await page.evaluate(() => window.deliveryQueries), 1);
       assert.equal(await page.evaluate(() => window.imageReads), 2);
       assert.deepEqual(requests, []);
-      if(scenario==='signed-corrupt-saved') assert.equal(await page.getByText('Open in browser', {exact:true}).count(), 0);
     } finally { await page.close(); }
   });
 
@@ -576,7 +518,7 @@ test('a pending archive stays a placeholder until saved bytes are available', as
   } finally { await page.close(); }
 });
 
-for (const scenario of ['streaming-race', 'settled-race', 'streaming-angle-race', 'signed-streaming-race']) {
+for (const scenario of ['streaming-race', 'settled-race', 'streaming-angle-race']) {
   test(`${scenario}: an unavailable live source recovers in place once Host archival completes`, async () => {
     const page = await pageFor(scenario);
     try {
@@ -594,7 +536,7 @@ for (const scenario of ['streaming-race', 'settled-race', 'streaming-angle-race'
   });
 }
 
-for (const scenario of ['angle-saved', 'title-saved', 'escaped-saved', 'reference-saved', 'attachment-title', 'signed-saved', 'signature-saved', 'hash-saved', 'secret-reference-saved']) {
+for (const scenario of ['angle-saved', 'title-saved', 'escaped-saved', 'reference-saved', 'attachment-title']) {
   test(`${scenario}: standard Markdown destinations resolve to saved bytes without origin requests`, async () => {
     requests = [];
     const page = await pageFor(scenario);

@@ -34,7 +34,6 @@ type PlacedImage = MarkdownExtensionNode<'maka-images', 'image', { src: string; 
 // their natural dimensions within the presentation's CSS bounds.
 export function createMarkdownImagePlugins(
   display: 'image' | 'link' = 'image',
-  sources?: ReadonlyMap<string, string>,
 ) {
   return [createMarkdownPlugin<'maka-images', PlacedImage>({
     name: 'maka-images', apiVersion: 1,
@@ -43,9 +42,8 @@ export function createMarkdownImagePlugins(
       const canonical = createMarkdownImageSourceResolver(context.source);
       const rewrite = (node: MarkdownAstNode, inline = false, phrasing = false, insideLink = false): MarkdownAstNode => {
         if (node.type === 'image') {
-          const destination = canonical(node.url);
-          const source = sources?.get(destination) ?? destination;
-          const redacted = source !== redactSecrets(source);
+          const source = canonical(node.url);
+          const redacted = source.includes('<redacted>') || source !== redactSecrets(source);
           if (display === 'link') {
             const text = { type: 'text' as const, value: node.alt || redactSecrets(source) };
             const link = insideLink || redacted ? text
@@ -55,7 +53,7 @@ export function createMarkdownImagePlugins(
           return {
             type: 'extension', plugin: 'maka-images', name: 'image',
             display: phrasing ? 'inline' : 'block',
-            data: { src: source, alt: node.alt, inline, redacted: sources?.has(destination) === true && redacted },
+            data: { src: source, alt: node.alt, inline, redacted },
           } satisfies PlacedImage;
         }
         if (!('children' in node)) return node;

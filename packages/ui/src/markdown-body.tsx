@@ -31,7 +31,6 @@
 
 import { MarkdownImage, createMarkdownImagePlugins } from './markdown-image.js';
 import { useCallback, useContext, useMemo, useRef, type ReactNode } from 'react';
-import { redactMarkdownImages } from './markdown-image-redaction.js';
 import {
   Markdown as AstryxMarkdown,
   type MarkdownComponents,
@@ -144,8 +143,6 @@ const MARKDOWN_COMPONENTS = {
 
 export function MarkdownBody(props: {
   text: string;
-  /** The lazy entry redacts its fallback; the body also preserves image identities. */
-  redact?: boolean;
   imageDisplay?: 'image' | 'link';
   streaming?: boolean;
   settledText?: string;
@@ -156,13 +153,8 @@ export function MarkdownBody(props: {
     (source: string) => prepareMarkdownMath(source, mathCache.current),
     [],
   );
-  const presentation = useMemo(() => props.redact
-    ? redactMarkdownImages(props.text, props.settledText)
-    : { text: props.text, settledText: props.settledText, sources: undefined },
-  [props.redact, props.text, props.settledText]);
-  const plugins = useMemo(() => createMarkdownImagePlugins(props.imageDisplay, presentation.sources),
-    [props.imageDisplay, presentation.sources]);
-  const budgetedText = props.streaming ? presentation.text : applyMermaidRenderBudget(presentation.text);
+  const plugins = useMemo(() => createMarkdownImagePlugins(props.imageDisplay), [props.imageDisplay]);
+  const budgetedText = props.streaming ? props.text : applyMermaidRenderBudget(props.text);
   const density = props.density ?? 'default';
   const components = props.streaming
     ? density === 'compact'
@@ -206,7 +198,7 @@ export function MarkdownBody(props: {
         components={components}
         plugins={plugins}
         isStreaming={props.streaming}
-        settledText={presentation.settledText}
+        settledText={props.settledText}
         transformSource={transformMathSource}
       >
         {budgetedText}
