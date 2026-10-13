@@ -171,7 +171,6 @@ export function createProxiedFetchTransport(
   const close = (): Promise<void> => {
     if (closePromise) return closePromise;
     closed = true;
-    connections.abort(new Error('Connection effect fetch transport closed'));
     const destroyed = Promise.all([
       ...[...publicDispatchers].map((dispatcher) =>
         dispatcher.destroy(new Error('Connection effect fetch transport closed')).catch(() => {}),

@@ -21,7 +21,6 @@ import { createAssistantMessageReader } from './session-transcript-reader.js';
 import { createImageFileReader } from '@maka/runtime/image-file-reader';
 import { ChatImageDeliveryService } from './chat-image-delivery.js';
 import { downloadChatImage, ImageSourceError } from './chat-image-source.js';
-import { createGenesisExecutionBoundary } from '@maka/core/sandbox-boundary';
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
 import { createWorkHubInspectionTool } from './workhub-inspection-tool.js';
 import { copyWorkHubAttachmentsToTarget } from './workhub-message-attachments.js';
