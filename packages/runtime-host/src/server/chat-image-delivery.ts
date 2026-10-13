@@ -19,7 +19,7 @@
 
 import { createHash } from 'node:crypto';
 import { ImageFileReadError } from '@maka/runtime/image-file-reader';
-import type { CompleteEvent, TextCompleteEvent, TextDeltaEvent } from '@maka/core/events';
+import type { TextCompleteEvent } from '@maka/core/events';
 import {
   IMAGE_MARKDOWN_MAX_LENGTH,
   isRemoteImageSource,
@@ -40,7 +40,6 @@ import { readyChatImageArtifact } from './chat-image-artifact.js';
 import { abortable } from '../client/wait-for-ready.js';
 import {
   downloadChatImage,
-  decodedLocalImagePath,
   ImageSourceError,
   localImagePath,
   type ChatImageBytes,
@@ -60,6 +59,7 @@ export interface ChatImageDeliveryPorts {
   readonly admission: SessionAdmissionGate;
   isPresent(sessionId: string): Promise<boolean>;
   readMessage(identity: DeliveryIdentity): Promise<string | undefined>;
+  /** Uses the Session read boundary and normalizes failures to ImageFileReadError. */
   readLocalImage(sessionId: string, path: string, signal: AbortSignal): Promise<ChatImageBytes>;
   canLoadRemote(sessionId: string): Promise<boolean>;
   acquireResidency(): { release(): void };
@@ -78,13 +78,8 @@ export class ChatImageDeliveryService {
   #closed = false;
   constructor(private readonly ports: ChatImageDeliveryPorts) {}
 
-  observe(sessionId: string, event: TextDeltaEvent | TextCompleteEvent | CompleteEvent): void {
-    if (
-      this.#closed ||
-      event.type !== 'text_complete' ||
-      event.text.length > IMAGE_MARKDOWN_MAX_LENGTH
-    )
-      return;
+  observe(sessionId: string, event: TextCompleteEvent): void {
+    if (this.#closed || event.text.length > IMAGE_MARKDOWN_MAX_LENGTH) return;
     // Reference destinations can grow during streaming. Only settled text
     // grants local capture. Remote media loads only when a client displays it.
     try {
@@ -206,24 +201,7 @@ export class ChatImageDeliveryService {
     try {
       const path = localImagePath(source);
       if (path !== undefined) {
-        try {
-          image = await abortable(() => this.ports.readLocalImage(sessionId, path, signal), signal);
-        } catch (error) {
-          // Keep readable literal percent filenames authoritative. An encoded cwd
-          // can look outside the workspace before decoding, so both missing and
-          // denied candidates get one retry through the same Read boundary/budget.
-          const decoded = decodedLocalImagePath(source);
-          if (
-            signal.aborted ||
-            !['not_found', 'not_allowed'].includes(failureReason(error, source)) ||
-            decoded === undefined
-          )
-            throw error;
-          image = await abortable(
-            () => this.ports.readLocalImage(sessionId, decoded, signal),
-            signal,
-          );
-        }
+        image = await abortable(() => this.ports.readLocalImage(sessionId, path, signal), signal);
       } else {
         if (!identity.loadRemote || !(await this.ports.canLoadRemote(sessionId)))
           throw new ImageSourceError('not_allowed');
@@ -282,8 +260,5 @@ function deliveryKey(i: DeliveryIdentity): string {
 function failureReason(error: unknown, source: string): ImageDeliveryFailure {
   if (error instanceof ImageSourceError) return error.reason;
   if (error instanceof ImageFileReadError) return error.reason;
-  const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  if (code === 'ENOENT' || code === 'ENOTDIR') return 'not_found';
-  if (code === 'EACCES' || code === 'EPERM') return 'not_allowed';
   return isRemoteImageSource(source) ? 'download_failed' : 'read_failed';
 }

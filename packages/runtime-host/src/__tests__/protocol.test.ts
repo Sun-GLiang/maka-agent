@@ -133,8 +133,8 @@ describe('Runtime Host bootstrap protocol', () => {
     // field, so mixed-version peers must fail during the handshake instead.
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 22);
   });
-  test('rejects epoch-219 peers predating image resolution', () => {
-    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 219);
+  test('rejects epoch-220 peers predating image resolution', () => {
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 220);
   });
 
   test('publishes a new compatibility epoch for Artifact invalidation frames', () => {

@@ -39,10 +39,8 @@ import {
 } from '../server/chat-image-delivery.js';
 import { chatImageSources } from '../server/chat-image-markdown.js';
 import { checkedChatImage, downloadChatImage } from '../server/chat-image-source.js';
-import { createProxiedFetchTransport } from '@maka/runtime/network/scoped-fetch-transport';
 import { IMAGE_DELIVERY_OPERATION_SPECS } from '../protocol/image-delivery.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
-import { createHostExecutionArtifactServices } from '../server/execution-artifacts.js';
 import { isImageDeliveryMetadata, isImageDeliverySource } from '@maka/core/image-delivery';
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
@@ -116,6 +114,7 @@ async function fixture(
   let reads = 0;
   let leases = 0;
   const messages = new Map<string, string>();
+  const localReader = createImageFileReader();
   let present = true;
   const service = new ChatImageDeliveryService({
     artifacts: {
@@ -136,7 +135,7 @@ async function fixture(
     readLocalImage: async (sessionId, path, signal) => {
       reads++;
       if (readLocalImage) return readLocalImage(sessionId, path, signal);
-      return checkedChatImage(await readFile(path));
+      return localReader({ path, cwd: root, abortSignal: signal });
     },
     acquireResidency: () => {
       leases++;
@@ -288,87 +287,6 @@ test('automatically saves a local delivery without any UI request; deletion and 
     await f.close();
   }
 });
-test('encoded local Markdown images are archived under the original source and replay after deletion', async () => {
-  const reader = createImageFileReader();
-  const f = await fixture(undefined, (_session, path, abortSignal) =>
-    reader({ path, cwd: f.root, abortSignal }),
-  );
-  try {
-    const directory = join(f.root, 'My Project');
-    await mkdir(directory);
-    for (const name of ['screen shot.png', '截图.png', 'literal%20name.png']) {
-      const path = join(directory, name);
-      const source = `${f.root}/My%20Project/${encodeURIComponent(name)}`;
-      await writeFile(path, PNG);
-      observe(f.service, source);
-      await f.service.waitForIdle();
-      await rm(path);
-      const result = await f.service.resolve({ ...REQUEST, source });
-      assert.equal(result.status, 'ready', source);
-      if (result.status !== 'ready') continue;
-      const bytes = await f.authority.store.readBinaryInSession(
-        REQUEST.sessionId,
-        result.artifactId,
-      );
-      assert.equal(bytes.ok, true);
-      if (bytes.ok) assert.equal(bytes.base64, PNG.toString('base64'));
-    }
-    assert.deepEqual(f.errors, []);
-  } finally {
-    await f.close();
-  }
-});
-
-test('encoded project roots are retried through the same workspace boundary', async () => {
-  const reader = createImageFileReader();
-  const paths: string[] = [];
-  const f = await fixture(undefined, (_session, path, abortSignal) => {
-    paths.push(path);
-    return reader({ path, cwd: join(f.root, 'My Project 中文'), abortSignal });
-  });
-  try {
-    const directory = join(f.root, 'My Project 中文');
-    await mkdir(directory);
-    const path = join(directory, 'image.png');
-    await writeFile(path, PNG);
-    const source = `${f.root}/${encodeURIComponent('My Project 中文')}/image.png`;
-    observe(f.service, source);
-    await f.service.waitForIdle();
-    assert.equal((await f.service.resolve({ ...REQUEST, source })).status, 'ready');
-    assert.deepEqual(paths, [source, path]);
-    await rm(path);
-    assert.equal((await f.service.resolve({ ...REQUEST, source })).status, 'ready');
-    assert.equal(paths.length, 2);
-    assert.deepEqual(f.errors, []);
-  } finally {
-    await f.close();
-  }
-});
-
-test('decoding a denied source cannot grant access outside the Read boundary', async () => {
-  const reader = createImageFileReader();
-  const paths: string[] = [];
-  const f = await fixture(undefined, (_session, path, abortSignal) => {
-    paths.push(path);
-    return reader({ path, cwd: join(f.root, 'workspace'), abortSignal });
-  });
-  try {
-    await mkdir(join(f.root, 'workspace'));
-    const path = join(f.root, 'private image.png');
-    await writeFile(path, PNG);
-    const source = `${f.root}/private%20image.png`;
-    observe(f.service, source);
-    await f.service.waitForIdle();
-    assert.deepEqual(await f.service.resolve({ ...REQUEST, source }), {
-      status: 'failed',
-      reason: 'not_allowed',
-    });
-    assert.deepEqual(paths, [source, path]);
-    assert.deepEqual(f.errors, []);
-  } finally {
-    await f.close();
-  }
-});
 
 test('literal percent filenames retain precedence and file URLs are decoded only once', async () => {
   const paths: string[] = [];
@@ -393,80 +311,6 @@ test('literal percent filenames retain precedence and file URLs are decoded only
     assert.deepEqual(f.errors, []);
   } finally {
     await f.close();
-  }
-});
-
-test('encoded local fallback preserves validation and non-path read failures', async () => {
-  for (const reason of ['too_large', 'unsupported_mime', 'read_failed'] as const) {
-    const paths: string[] = [];
-    const f = await fixture(undefined, async (_session, path) => {
-      paths.push(path);
-      throw new ImageFileReadError(reason);
-    });
-    try {
-      const source = '/tmp/My%20Project/image.png';
-      observe(f.service, source);
-      await f.service.waitForIdle();
-      assert.deepEqual(await f.service.resolve({ ...REQUEST, source }), {
-        status: 'failed',
-        reason,
-      });
-      assert.deepEqual(paths, [source]);
-      assert.deepEqual(f.errors, []);
-    } finally {
-      await f.close();
-    }
-  }
-});
-
-test('decoded local images still pass through the Read workspace boundary', async () => {
-  const reader = createImageFileReader();
-  const paths: string[] = [];
-  const f = await fixture(undefined, (_session, path, abortSignal) => {
-    paths.push(path);
-    return reader({ path, cwd: join(f.root, 'workspace'), abortSignal });
-  });
-  try {
-    await mkdir(join(f.root, 'workspace'));
-    await writeFile(join(f.root, 'private image.png'), PNG);
-    const source = '%2e%2e/private%20image.png';
-    observe(f.service, source);
-    await f.service.waitForIdle();
-    assert.deepEqual(await f.service.resolve({ ...REQUEST, source }), {
-      status: 'failed',
-      reason: 'not_allowed',
-    });
-    assert.deepEqual(paths, [source, '../private image.png']);
-    assert.deepEqual(f.errors, []);
-  } finally {
-    await f.close();
-  }
-});
-
-test('missing encoded sources never double-decode file URLs or retry invalid escapes', async () => {
-  for (const source of [
-    'file:///tmp/missing%2520image.png',
-    '/tmp/missing%.png',
-    '/tmp/missing%E4.png',
-    '/tmp/missing%00.png',
-  ]) {
-    const paths: string[] = [];
-    const f = await fixture(undefined, async (_session, path) => {
-      paths.push(path);
-      throw new ImageFileReadError('not_found');
-    });
-    try {
-      observe(f.service, source);
-      await f.service.waitForIdle();
-      assert.deepEqual(await f.service.resolve({ ...REQUEST, source }), {
-        status: 'failed',
-        reason: 'not_found',
-      });
-      assert.equal(paths.length, 1, source);
-      assert.deepEqual(f.errors, []);
-    } finally {
-      await f.close();
-    }
   }
 });
 
@@ -699,41 +543,6 @@ test('pending capture survives persistence failure and is removed only after a d
   }
 });
 
-test('a conversation copied during capture resumes and cleans its copied pending record', async () => {
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const f = await fixture(undefined, async () => {
-    await gate;
-    return checkedChatImage(PNG);
-  });
-  try {
-    observe(f.service, REQUEST.source);
-    while (!f.reads) await new Promise<void>((resolve) => setImmediate(resolve));
-    await f.authority.store.copyConversationArtifacts({
-      sourceSessionId: REQUEST.sessionId,
-      targetSessionId: 'session-copy',
-      turnIds: [REQUEST.turnId],
-    });
-    const copied = { ...REQUEST, sessionId: 'session-copy' };
-    assert.equal((await f.service.resolve(copied)).status, 'pending');
-    release();
-    await f.service.waitForIdle();
-    for (const sessionId of [REQUEST.sessionId, copied.sessionId]) {
-      const page = await f.authority.store.listPage(sessionId, { offset: 0, limit: 10 });
-      assert.equal(page.total, 1);
-      assert.equal(page.records[0]?.imageDelivery?.status, 'ready');
-      const bytes = await f.authority.store.readBinaryInSession(sessionId, page.records[0]!.id);
-      assert.ok(bytes.ok);
-      if (bytes.ok) assert.equal(bytes.base64, PNG.toString('base64'));
-    }
-    assert.deepEqual(f.errors, []);
-  } finally {
-    release();
-    await f.close();
-  }
-});
 test('quota admission is atomic under concurrent jobs and identical content shares bytes across sessions', async () => {
   const f = await fixture({ sessionBytes: PNG.length, workspaceBytes: PNG.length });
   try {
@@ -887,183 +696,6 @@ test('HTTPS download cannot redirect to HTTP', async (t) => {
   }
 });
 
-test('literal benchmark addresses, local names and mixed private answers are denied', async (t) => {
-  let answers = [{ address: '93.184.216.34', family: 4 }];
-  const lookup = t.mock.method(dns, 'lookup', async () => answers);
-  const request = t.mock.method(net, 'connect', () =>
-    assert.fail('blocked source reached transport'),
-  );
-  syncBuiltinESMExports();
-  try {
-    for (const source of [
-      'http://198.18.0.2/a.png',
-      'http://198.19.0.2/a.png',
-      'http://[2001:2::6]/a.png',
-      'http://localhost/a.png',
-      'http://localhost./a.png',
-      'http://app.localhost/a.png',
-      'http://router.lan/a.png',
-      'http://server.local/a.png',
-      'http://metadata.google.internal/a.png',
-      'http://metadata.goog/a.png',
-    ]) {
-      await assert.rejects(downloadChatImage(source, AbortSignal.timeout(1000)), /not_allowed/);
-    }
-    for (const address of ['127.0.0.1', '192.168.1.2', '169.254.169.254', '::1']) {
-      answers = [
-        { address: '93.184.216.34', family: 4 },
-        { address, family: address.includes(':') ? 6 : 4 },
-      ];
-      const previousLookups = lookup.mock.callCount();
-      await assert.rejects(
-        downloadChatImage('http://image.example/a.png', AbortSignal.timeout(1000)),
-        /not_allowed/,
-      );
-      assert.equal(lookup.mock.callCount(), previousLookups + 1);
-    }
-    assert.equal(request.mock.callCount(), 0);
-  } finally {
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
-  }
-});
-
-test('a configured HTTP proxy receives the original hostname and checks redirects and limits', async (t) => {
-  const tunnels: string[] = [];
-  const imageRequests: string[] = [];
-  const server = createServer((request, response) => {
-    imageRequests.push(
-      `${request.method} ${request.url} HTTP/1.1\r\n${request.rawHeaders.map((value, index) => (index % 2 ? `${value}\r\n` : `${value}: `)).join('')}`,
-    );
-    const path = new URL(request.url!, 'http://image.example').pathname;
-    if (path === '/redirect')
-      response.writeHead(302, { location: 'http://127.0.0.1/private' }).end();
-    else if (path === '/length') response.writeHead(200, { 'content-length': 2097153 }).end();
-    else if (path === '/stream') {
-      response.writeHead(200);
-      response.write(Buffer.alloc(2097153));
-      response.end();
-    } else if (path === '/loop') response.writeHead(302, { location: '/loop' }).end();
-    else if (path === '/stalled') {
-      /* Abort must close this unfinished response. */
-    } else response.writeHead(200, { 'content-type': 'image/png', connection: 'close' }).end(PNG);
-  });
-  server.on('connect', (request, socket) => {
-    tunnels.push(request.url!);
-    socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-    let data = '';
-    socket.on('data', (chunk) => {
-      data += chunk.toString();
-      if (!data.includes('\r\n\r\n')) return;
-      imageRequests.push(data);
-      const path = data.split(' ')[1];
-      if (path === '/redirect')
-        socket.end(
-          'HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/private\r\nContent-Length: 0\r\n\r\n',
-        );
-      else if (path === '/length') socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2097153\r\n\r\n');
-      else if (path === '/stream')
-        socket.end(
-          Buffer.concat([
-            Buffer.from('HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n200001\r\n'),
-            Buffer.alloc(2097153),
-            Buffer.from('\r\n0\r\n\r\n'),
-          ]),
-        );
-      else if (path === '/loop')
-        socket.end('HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n');
-      else if (path === '/stalled') {
-        /* The caller cancels this tunnel. */
-      } else
-        socket.end(
-          Buffer.concat([
-            Buffer.from(
-              `HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: ${PNG.length}\r\nConnection: close\r\n\r\n`,
-            ),
-            PNG,
-          ]),
-        );
-      data = '';
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const lookup = t.mock.method(dns, 'lookup', async () => {
-    throw Object.assign(new Error('local DNS is unavailable'), { code: 'ENOTFOUND' });
-  });
-  syncBuiltinESMExports();
-  const transport = createProxiedFetchTransport({
-    enabled: true,
-    type: 'http',
-    host: '127.0.0.1',
-    port: (server.address() as import('node:net').AddressInfo).port,
-    bypassList: [],
-  });
-  try {
-    const options = { fetch: transport.fetch };
-    assert.deepEqual(
-      await downloadChatImage('http://image.example/image.png', AbortSignal.timeout(2000), options),
-      checkedChatImage(PNG),
-    );
-    await assert.rejects(
-      downloadChatImage('http://image.example/redirect', AbortSignal.timeout(2000), options),
-      /not_allowed/,
-    );
-    await assert.rejects(
-      downloadChatImage('http://image.example/length', AbortSignal.timeout(2000), options),
-      /too_large/,
-    );
-    await assert.rejects(
-      downloadChatImage('http://image.example/stream', AbortSignal.timeout(2000), options),
-      /too_large/,
-    );
-    await assert.rejects(
-      downloadChatImage('http://image.example/loop', AbortSignal.timeout(2000), options),
-      /download_failed/,
-    );
-    await assert.rejects(
-      downloadChatImage('http://image.example/stalled', AbortSignal.timeout(50), options),
-      { name: 'TimeoutError' },
-    );
-    assert.equal(lookup.mock.callCount(), 0);
-    assert.ok(tunnels.every((target) => target === 'image.example:80'));
-    assert.equal(imageRequests.length, 9);
-    assert.ok(imageRequests.every((request) => /host: image\.example/i.test(request)));
-    assert.ok(
-      imageRequests.every(
-        (request) => !/93\.184\.216\.34|cookie:|authorization:|referer:/i.test(request),
-      ),
-    );
-  } finally {
-    await transport.close();
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
-});
-
-test('proxy bypass preserves the checked and pinned direct image connection', async (t) => {
-  const server = createServer((_req, res) => res.end(PNG));
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const transport = createProxiedFetchTransport({
-    enabled: true,
-    type: 'http',
-    host: '127.0.0.1',
-    port: 1,
-    bypassList: ['image.example'],
-  });
-  try {
-    const local = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/image.png`;
-    const source = publicImageOrigin(t, local, 'http:');
-    assert.deepEqual(
-      await downloadChatImage(source, AbortSignal.timeout(2000), { fetch: transport.fetch }),
-      checkedChatImage(PNG),
-    );
-  } finally {
-    await transport.close();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
-});
-
 test('resolver codec rejects excess fields and noncanonical artifact identities', () => {
   const spec = IMAGE_DELIVERY_OPERATION_SPECS['artifact.image.resolve'];
   assert.deepEqual(spec.decodeInput(REQUEST), REQUEST);
@@ -1157,27 +789,6 @@ test('failed remote downloads issue one request and require a client retry', asy
   }
 });
 
-test('unsettled reference destinations never open half-written local paths', async () => {
-  const f = await fixture(undefined, async () => checkedChatImage(PNG));
-  try {
-    f.service.observe(REQUEST.sessionId, {
-      type: 'text_delta',
-      id: 'delta',
-      ts: 1,
-      turnId: REQUEST.turnId,
-      messageId: REQUEST.messageId,
-      text: '![image][ref]\n\n[ref]: /tmp/partial',
-    });
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.equal(f.reads, 0);
-    observe(f.service, '/tmp/partial-complete.png');
-    await f.service.waitForIdle();
-    assert.equal(f.reads, 1);
-  } finally {
-    await f.close();
-  }
-});
-
 test('a Markdown parser failure stays in presentation and subsequent images still capture', async () => {
   const f = await fixture(undefined, async () => checkedChatImage(PNG));
   try {
@@ -1231,37 +842,6 @@ test('loopback is denied before GET, including redirects from a public origin', 
   }
 });
 
-test('completed turns release unfinished stream slots without archiving partial messages', async () => {
-  const f = await fixture();
-  try {
-    for (let i = 0; i < 40; i++) {
-      f.service.observe('session-1', {
-        type: 'text_delta',
-        id: `delta-${i}`,
-        turnId: `turn-${i}`,
-        ts: 1,
-        messageId: `partial-${i}`,
-        text: '![partial](/tmp/missing.png)',
-      });
-      f.service.observe('session-1', {
-        type: 'complete',
-        id: `complete-${i}`,
-        turnId: `turn-${i}`,
-        ts: 2,
-        stopReason: 'end_turn',
-      });
-    }
-    const source = join(f.root, 'final.png');
-    await writeFile(source, PNG);
-    observe(f.service, source);
-    await f.service.waitForIdle();
-    assert.equal(f.reads, 1);
-    assert.equal((await f.service.resolve({ ...REQUEST, source })).status, 'ready');
-  } finally {
-    await f.close();
-  }
-});
-
 test('capture, wire and stored metadata share source limits while retaining boundary policies', () => {
   const decode = IMAGE_DELIVERY_OPERATION_SPECS['artifact.image.resolve'].decodeInput;
   const source = '/' + 'a'.repeat(4095);
@@ -1270,14 +850,27 @@ test('capture, wire and stored metadata share source limits while retaining boun
   assert.throws(() => decode({ ...REQUEST, messageId: 'm'.repeat(513) }));
   for (const source of ['', '/' + 'a'.repeat(4096), '/tmp/a\x01.png', '/tmp/a\x7f.png']) {
     assert.equal(isImageDeliverySource(source), false);
-    assert.equal(isImageDeliveryMetadata({ messageId: 'm', source, status: 'pending' }), false);
+    assert.equal(
+      isImageDeliveryMetadata({
+        messageId: 'm',
+        source,
+        status: 'ready',
+        contentSha256: 'a'.repeat(64),
+      }),
+      false,
+    );
     assert.throws(() => decode({ ...REQUEST, source }));
     assert.deepEqual(chatImageSources(`![x](<${source}>)`), []);
   }
   // Explicit attachment refs belong to UI resolution, not automatic source capture.
   assert.deepEqual(chatImageSources('![x](maka://runtime/attachments/image-1)'), []);
   assert.equal(
-    isImageDeliveryMetadata({ messageId: 'm\x01', source: REQUEST.source, status: 'pending' }),
+    isImageDeliveryMetadata({
+      messageId: 'm\x01',
+      source: REQUEST.source,
+      status: 'ready',
+      contentSha256: 'a'.repeat(64),
+    }),
     true,
   );
   assert.throws(() => decode({ ...REQUEST, messageId: 'm\x01' }));
@@ -1310,54 +903,6 @@ test('local and downloaded invalid image bytes retain identical failure reasons'
   }
 });
 
-test('automatic capture and PublishImage share content quota without merging their identities', async () => {
-  const limits = { sessionBytes: PNG.length, workspaceBytes: PNG.length };
-  const f = await fixture(limits, async () => checkedChatImage(PNG));
-  try {
-    observe(f.service, REQUEST.source);
-    await f.service.waitForIdle();
-    const automatic = await f.service.resolve(REQUEST);
-    assert.equal(automatic.status, 'ready');
-    if (automatic.status !== 'ready') return;
-    const services = createHostExecutionArtifactServices({
-      artifacts: f.authority.store,
-      sessionAdmission: new SessionAdmissionGate(),
-      sessions: { probeSessionRemoval: async () => ({ kind: 'present' }) },
-      imageArchiveLimits: limits,
-      requestDrain: () => assert.fail('shared bytes must not exceed quota or drain'),
-    });
-    const explicit = await services.publishImage({
-      sessionId: REQUEST.sessionId,
-      turnId: REQUEST.turnId,
-      toolCallId: 'publish-call',
-      name: 'published.png',
-      bytes: PNG,
-      mimeType: 'image/png',
-    });
-    assert.notEqual(explicit.relativePath, automatic.artifactId);
-    const captured = (await f.authority.store.getInSession(REQUEST.sessionId, automatic.artifactId))
-      .record!;
-    const published = (
-      await f.authority.store.getInSession(REQUEST.sessionId, explicit.relativePath)
-    ).record!;
-    assert.equal(captured.imageDelivery?.contentSha256, published.imageDelivery?.contentSha256);
-    assert.equal(captured.imageDelivery?.source, REQUEST.source);
-    assert.equal(published.imageDelivery?.source, 'published:publish-call');
-    assert.equal(published.imageDelivery?.messageId, 'publish-call');
-    assert.equal(published.summary, 'Published chat image');
-    assert.equal(
-      (await stat(join(f.root, 'artifacts', captured.relativePath))).ino,
-      (await stat(join(f.root, 'artifacts', published.relativePath))).ino,
-    );
-    const page = await f.authority.store.listPage(REQUEST.sessionId, { offset: 0, limit: 10 });
-    assert.equal(page.total, 2);
-    assert.ok(page.records.every((record) => record.imageDelivery?.status === 'ready'));
-    assert.deepEqual(f.errors, []);
-  } finally {
-    await f.close();
-  }
-});
-
 test('a queued retry reports pending instead of replaying the previous failure', async () => {
   let release!: () => void;
   const blocked = new Promise<void>((resolve) => {
@@ -1366,7 +911,7 @@ test('a queued retry reports pending instead of replaying the previous failure',
   let fail = true;
   const f = await fixture(undefined, async (_sessionId, path) => {
     if (path !== REQUEST.source) await blocked;
-    else if (fail) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    else if (fail) throw new ImageFileReadError('not_found');
     return checkedChatImage(PNG);
   });
   try {

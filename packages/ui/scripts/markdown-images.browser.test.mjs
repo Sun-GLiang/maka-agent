@@ -23,69 +23,18 @@
 import assert from 'node:assert/strict';
 import { before, after, test } from 'node:test';
 import { createServer } from 'node:http';
-import { readFile, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { crc32, deflateSync } from 'node:zlib';
 import { build } from 'esbuild';
 import { chromium } from '@playwright/test';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64');
-const badge = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAFAAAAAUCAYAAAAa2LrXAAAATklEQVR4nO3OsQ0AIAzAsJ7O5/QIhsgSg3fPnLnfgzygywO6PKDLA7o8oMsDujygywO6PKDLA7o8oMsDujygywO6PKDLA7o8oMsDujyAW5KWWkgoVkkSAAAAAElFTkSuQmCC', 'base64');
-const dimensions = [
-  ['small', 80, 20], ['square', 1000, 1000], ['landscape', 1600, 900],
-  ['portrait', 900, 1600], ['panorama', 2000, 100], ['tall', 100, 2000], ['pixel', 1, 1],
-];
 let appServer, imageServer, browser, appUrl, imageUrl;
 let requests = [], failedOnce = false;
-let releaseImage;
-let releaseAttachment;
-const delayedImage = new Promise(resolve => { releaseImage = resolve; });
-const delayedAttachment = new Promise(resolve => { releaseAttachment = resolve; });
-
-// Keep the screenshot's original dimensions without committing evidence images.
-function screenshotFixture(width = 900, height = 730) {
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4);
-  header[8] = 8; header[9] = 2; // 8-bit RGB.
-  const stride = 1 + width * 3;
-  const pixels = Buffer.alloc(stride * height, 220);
-  for (let row = 0; row < height; row++) {
-    pixels.fill(row < height / 2 ? 120 : 220, row * stride, (row + 1) * stride);
-    pixels[row * stride] = 0; // PNG filter: None.
-  }
-  const chunk = (type, data) => {
-    const result = Buffer.alloc(data.length + 12);
-    result.writeUInt32BE(data.length, 0); result.write(type, 4, 'ascii');
-    data.copy(result, 8);
-    result.writeUInt32BE(crc32(result.subarray(4, data.length + 8)), data.length + 8);
-    return result;
-  };
-  return Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-    chunk('IHDR', header), chunk('IDAT', deflateSync(pixels)), chunk('IEND', Buffer.alloc(0)),
-  ]);
-}
-
 before(async () => {
-  const screenshot = screenshotFixture();
-  const sizedImages = new Map(dimensions.map(([name, width, height]) => [`/${name}.png`, screenshotFixture(width, height)]));
   imageServer = createServer((req, res) => {
     requests.push({ path: req.url, referer: req.headers.referer });
-    if (sizedImages.has(req.url)) {
-      res.setHeader('Content-Type', 'image/png'); res.end(sizedImages.get(req.url)); return;
-    }
-    if (req.url === '/delayed.png') {
-      void delayedImage.then(() => { res.setHeader('Content-Type', 'image/png'); res.end(screenshot); });
-      return;
-    }
-    if (req.url === '/screenshot.png') {
-      res.setHeader('Content-Type', 'image/png'); res.end(screenshot); return;
-    }
-    if (req.url === '/badge.png') {
-      res.setHeader('Content-Type', 'image/png'); res.end(badge); return;
-    }
     if (req.url === '/retry.png' && !failedOnce) {
       failedOnce = true;
       res.writeHead(404).end();
@@ -97,7 +46,6 @@ before(async () => {
   await new Promise(resolve => imageServer.listen(0, '127.0.0.1', resolve));
   imageUrl = `http://127.0.0.1:${imageServer.address().port}`;
   const destinations = {
-    ...Object.fromEntries(dimensions.map(([name]) => [`size-${name}`, `![Screenshot](${imageUrl}/${name}.png)`])),
     'links-formats': [
       `![Screenshot](${imageUrl}/image.png)`,
       `![Title](${imageUrl}/title.png "Screenshot title")`,
@@ -112,41 +60,29 @@ before(async () => {
     ].join('\n\n'),
     'links-redacted': `![Signed](${imageUrl}/image.png?token=reasoning-secret)\n\n![Blocked](javascript:alert)`,
     'links-streaming': `![Streaming](${imageUrl}/stream`,
-    'badge-saved': `Build ![Badge](${imageUrl}/badge.png) passing.`,
-    'badge-saving': `Build ![Badge](${imageUrl}/badge.png) passing.`,
-    'badge-list': `- Build ![Badge](${imageUrl}/badge.png) passing.`,
-    'badge-table': `| Build | Result |\n| --- | --- |\n| ![Badge](${imageUrl}/badge.png) | passing |`,
-    'badge-strip': `![Badge](${imageUrl}/badge.png) ![Badge](${imageUrl}/badge.png)`,
-    'layout-main': `## Image delivery\n\nBuild ![Badge](${imageUrl}/badge.png) passing.\n\n![Screenshot](${imageUrl}/screenshot.png)\n\nFollowing paragraph.`,
-    'layout-side': `## Image delivery\n\nBuild ![Badge](${imageUrl}/badge.png) passing.\n\n![Screenshot](${imageUrl}/screenshot.png)\n\nFollowing paragraph.`,
-    'screenshot-saved': '![Screenshot](/tmp/screenshot.png)',
     'angle-saved': '![Screenshot](</tmp/my image.png>)',
     'title-saved': `![Screenshot](${imageUrl}/image.png "Screenshot title")`,
     'escaped-saved': String.raw`![Screenshot](/tmp/a\(1\).png)`,
     'reference-saved': '![Screenshot][picture]\n\n[picture]: </tmp/my "image".png>',
     'attachment-title': '![Screenshot](maka://runtime/attachments/image-1 "Screenshot title")',
-    'geometry-remote': `![Screenshot](${imageUrl}/delayed.png)\n\nFollowing paragraph`,
-    'geometry-saved': '![Screenshot](/tmp/private.png)\n\nFollowing paragraph',
     'streaming-angle-race': '![Screenshot](</tmp/my image.png>)',
     'signed-remote': `![Screenshot](${imageUrl}/image.png?token=remote-secret)`,
     'signed-inline': `Build ![Badge](${imageUrl}/image.png?token=inline-secret) passing.`,
     'signed-failed': `![Screenshot](${imageUrl}/image.png?token=failed-secret)`,
     'signed-preview': `![Screenshot](${imageUrl}/image.png?token=preview-secret)`,
-    screenshot: `![Screenshot](${imageUrl}/screenshot.png)`,
   };
   const canonicalSources = {
     'angle-saved': ['/tmp/my image.png'],
     'title-saved': [`${imageUrl}/image.png`],
     'escaped-saved': ['/tmp/a(1).png'],
     'reference-saved': ['/tmp/my "image".png'],
-    'geometry-saved': ['/tmp/private.png'],
     'streaming-angle-race': ['/tmp/my image.png'],
   };
   const bundle = await build({
     stdin: { contents: `
       import React from 'react';
       import {createRoot} from 'react-dom/client';
-      import {Theme, ChatMessageList, ChatMessage, ChatMessageBubble} from '@astryxdesign/core';
+      import {Theme} from '@astryxdesign/core';
       import {makaTheme} from './apps/desktop/src/renderer/astryx-theme/maka.js';
       import {Markdown} from './packages/ui/dist/markdown.js';
       import {LocaleProvider} from './packages/ui/dist/locale-context.js';
@@ -165,14 +101,11 @@ before(async () => {
       const root=createRoot(document.getElementById('root'));
       const readBytes=async(_session,artifactId)=>{
         if(captured.has(artifactId)) return captured.get(artifactId);
-        if(mode.startsWith('layout-')) await fetch('/fixture/'+encodeURIComponent(artifactId));
-        if(mode.startsWith('badge-')) await fetch('/badge-attachment');
-        if(mode==='geometry-saved') await fetch('/release-attachment');
         reads++; window.imageReads=reads; return (mode==='attachment' || mode==='read-retry-saved') && reads===1 ? {ok:false,reason:'read_failed'} :
-          {ok:true,base64:mode.startsWith('badge-') || artifactId.endsWith('badge.png') ? '${badge.toString('base64')}' : mode==='geometry-saved' || mode==='screenshot-saved' || artifactId.endsWith('screenshot.png') ? '${screenshot.toString('base64')}' : mode.endsWith('corrupt-saved') && reads===1 ? 'iVBORw0KGgo=' : '${png.toString('base64')}',mimeType:'image/png'};
+          {ok:true,base64:mode.endsWith('corrupt-saved') && reads===1 ? 'iVBORw0KGgo=' : '${png.toString('base64')}',mimeType:'image/png'};
       };
       const preview=mode==='preview' || mode==='signed-preview' || mode==='local';
-      const seeded=mode.endsWith('saved') || mode.endsWith('saving') || race || mode.startsWith('badge-') || mode.startsWith('layout-');
+      const seeded=mode.endsWith('saved') || mode.endsWith('saving') || race;
       const resolveDelivery=preview ? undefined : async(_session,request)=>{
         window.deliveryQueries++;
         window.deliverySource=request.source;
@@ -191,21 +124,17 @@ before(async () => {
         }
         if(race) return window.deliveryReady ? {status:'ready',artifactId:'saved-image'} : {status:'unavailable'};
         await new Promise(resolve=>setTimeout(resolve,100));
-        return mode.endsWith('saving') && window.deliveryQueries===1 ? {status:'pending'} : {status:'ready',artifactId:mode.startsWith('layout-') ? request.source : 'saved-image'};
+        return mode.endsWith('saving') && window.deliveryQueries===1 ? {status:'pending'} : {status:'ready',artifactId:'saved-image'};
       };
       const markdown=(streaming)=>React.createElement(ImageMessageProvider,{identity:{turnId:'turn',messageId},streaming},
         React.createElement(Markdown,{text,streaming,settledText:race ? text : undefined,density:'compact',imageDisplay:mode.startsWith('links-') ? 'link' : undefined}));
-      const surface=(streaming)=>mode.startsWith('layout-') ? React.createElement('section',{className:mode==='layout-side' ? 'maka-quote-companion' : '',style:{width:mode==='layout-side' ? '360px' : '100%',maxWidth:'100%'}},
-        React.createElement(ChatMessageList,{className:'maka-chat-message-list maka-chatContent',align:'top'},
-          React.createElement('div',{className:'maka-transcript-turn maka-turn',style:{width:'100%',maxWidth:'var(--maka-reading-measure)',marginInline:'auto'}},
-            React.createElement(ChatMessage,{sender:'assistant'},React.createElement(ChatMessageBubble,{variant:'ghost',width:'100%',className:'maka-chat-message-bubble maka-chat-message-bubble-assistant'},markdown(streaming)))))) : markdown(streaming);
       const render=(streaming=race || mode==='links-streaming')=>root.render(
         React.createElement(Theme,{theme:makaTheme,mode:'light'},
           React.createElement(LocaleProvider,{locale:'en'},
             React.createElement(SessionAttachmentProvider,{sessionId:'session',readBytes},
               React.createElement(ImageDeliveryProvider,{sessionId:'session',resolve:resolveDelivery},
               React.createElement('div',{style:mode==='offscreen' ? {paddingTop:'2500px'} : {}},
-                surface(streaming)))))));
+                markdown(streaming)))))));
       window.nextMessage=()=>{messageId='next-message'; render(false);};
       window.finishStream=()=>render(false);
       window.appendText=value=>{text+=value; render(true);};
@@ -227,9 +156,6 @@ before(async () => {
         res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(payload));
       }).catch(()=>res.end(JSON.stringify({ok:false}))); return;
     }
-    if (req.url.startsWith('/fixture/')) { res.end(); return; }
-    if (req.url === '/badge-attachment') { res.end(); return; }
-    if (req.url === '/release-attachment') { void delayedAttachment.then(() => res.end()); return; }
     if (req.url === '/app.js') { res.setHeader('Content-Type', 'text/javascript'); res.end(js); }
     else if (req.url === '/app.css') { res.setHeader('Content-Type', 'text/css'); res.end(css); }
     else {
@@ -243,7 +169,6 @@ before(async () => {
 });
 
 after(async () => {
-  releaseImage(); releaseAttachment();
   await browser?.close();
   for (const server of [appServer, imageServer]) if (server) await new Promise(resolve => server.close(resolve));
 });
@@ -436,59 +361,6 @@ test('a transient saved attachment read retries its bytes without invalidating a
   } finally { await page.close(); }
 });
 
-for (const scenario of ['local-saved', 'remote-saved', 'badge-saved', 'screenshot-saved']) {
-  test(`${scenario}: clicking the image itself opens the enlarged preview`, async () => {
-    requests = [];
-    const page = await pageFor(scenario);
-    try {
-      const image = page.locator('.maka-markdown-image-preview img');
-      await image.waitFor();
-      await image.evaluate(image => image.decode());
-      assert.equal(await page.evaluate(() => window.imageReads), 1);
-      assert.equal(await page.locator('img').count(), 1);
-      assert.match(await image.getAttribute('src'), /^data:image\/png;base64,/);
-      assert.equal(await page.locator('.maka-markdown-image-expand').count(), 0);
-      assert.equal(await page.getByRole('button', { name: /^Enlarge image:/ }).count(), 1);
-      const source = await image.getAttribute('src');
-      const url = page.url();
-      await image.hover();
-      assert.equal(await image.evaluate(element => getComputedStyle(element).cursor), 'default');
-      const evidence = scenario === 'screenshot-saved' && process.env.MAKA_IMAGE_LAYOUT_EVIDENCE_DIR;
-      if (evidence) {
-        await mkdir(evidence, { recursive: true });
-        await page.screenshot({ path: join(evidence, 'click-image-ready.png'), fullPage: true });
-      }
-      await image.click();
-      const dialog = page.getByRole('dialog');
-      await dialog.waitFor();
-      assert.equal(await dialog.locator('img').getAttribute('src'), source);
-      if (evidence) await page.screenshot({ path: join(evidence, 'click-image-enlarged.png'), fullPage: true });
-      assert.equal(page.url(), url);
-      assert.deepEqual(requests, []);
-      await page.keyboard.press('Escape');
-      await dialog.waitFor({ state: 'hidden' });
-    } finally { await page.close(); }
-  });
-}
-
-for (const [scenario, key] of [['local-saved', 'Enter'], ['local-saved', 'Space'], ['remote-saved', 'Enter']]) {
-  test(`${scenario}: the image itself supports keyboard enlargement with ${key}`, async () => {
-    requests = [];
-    const page = await pageFor(scenario);
-    try {
-      await loaded(page);
-      assert.deepEqual(requests, []);
-      const trigger = page.locator('.maka-markdown-image-trigger');
-      await trigger.focus();
-      await page.keyboard.press(key);
-      await page.getByRole('dialog').waitFor();
-      await page.keyboard.press('Escape');
-      await page.getByRole('dialog').waitFor({ state: 'hidden' });
-      await page.waitForFunction(() => document.activeElement?.classList.contains('maka-markdown-image-trigger'));
-    } finally { await page.close(); }
-  });
-}
-
 test('offscreen image performs no image request until it approaches the viewport', async () => {
   requests = [];
   const page = await pageFor('offscreen');
@@ -549,205 +421,5 @@ for (const scenario of ['angle-saved', 'title-saved', 'escaped-saved', 'referenc
         assert.equal(await page.evaluate(() => window.deliveryQueries), 1);
       }
     } finally { await page.close(); }
-  });
-}
-
-for (const scenario of ['geometry-remote', 'geometry-saved']) {
-  test(`${scenario}: a compact placeholder expands to the decoded image's natural proportions`, async () => {
-    const page = await pageFor(scenario);
-    try {
-      await page.getByText('Loading image…', { exact: true }).waitFor();
-      const before = await page.getByText('Following paragraph', { exact: true }).boundingBox();
-      if (scenario === 'geometry-remote') releaseImage(); else releaseAttachment();
-      await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth > 1));
-      await page.getByText('Loading image…', { exact: true }).waitFor({ state: 'hidden' });
-      const after = await page.getByText('Following paragraph', { exact: true }).boundingBox();
-      assert.ok(after.y > before.y);
-      const block = await page.locator('.maka-markdown-image-block').boundingBox();
-      const image = await page.locator('.maka-markdown-image-preview img').boundingBox();
-      assert.ok(Math.abs(block.width - image.width) < 1 && Math.abs(block.height - image.height) < 1);
-    } finally {
-      if (scenario === 'geometry-remote') releaseImage(); else releaseAttachment();
-      await page.close();
-    }
-  });
-}
-
-test('natural image containers fit narrow viewports without distorting screenshots or limiting the enlarged preview', async () => {
-  const page = await pageFor('screenshot');
-  try {
-    await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth > 1));
-    for (const width of [720, 360]) {
-      await page.setViewportSize({ width, height: 600 });
-      const geometry = await page.locator('.maka-markdown-image-preview img').evaluate(image => {
-        const frame = image.closest('.maka-markdown-image-block').getBoundingClientRect();
-        const box = image.getBoundingClientRect();
-        return { frame: { x: frame.x, y: frame.y, right: frame.right, bottom: frame.bottom },
-          box: { x: box.x, y: box.y, right: box.right, bottom: box.bottom, width: box.width, height: box.height },
-          ratio: image.naturalWidth / image.naturalHeight };
-      });
-      assert.ok(Math.abs(geometry.box.width / geometry.box.height - geometry.ratio) < 0.01);
-      assert.ok(geometry.box.x >= geometry.frame.x && geometry.box.right <= geometry.frame.right + 1);
-      assert.ok(geometry.box.y >= geometry.frame.y && geometry.box.bottom <= geometry.frame.bottom + 1, JSON.stringify(geometry));
-      assert.ok(geometry.frame.right <= width);
-    }
-    await page.getByRole('button', { name: 'Enlarge image: Screenshot', exact: true }).click();
-    await page.waitForFunction(() => document.images.length > 1);
-    assert.equal(await page.locator('.maka-markdown-image-preview img').count(), 1);
-    const dialog = await page.getByRole('dialog').boundingBox();
-    const frame = await page.locator('.maka-markdown-image-block').boundingBox();
-    assert.ok(dialog.height > frame.height);
-    assert.equal(await page.getByRole('dialog').locator('img').getAttribute('src'), await page.locator('.maka-markdown-image-preview img').getAttribute('src'));
-  } finally { await page.close(); }
-});
-
-for (const [name, naturalWidth, naturalHeight] of dimensions) {
-  test(`${name}: body images shrink proportionally without upscaling or empty frames`, async () => {
-    const page = await pageFor(`size-${name}`);
-    try {
-      await page.waitForFunction(() => [...document.images].some(image => image.complete && image.naturalWidth > 0));
-      for (const [width, height] of [[1280, 900], [320, 600]]) {
-        await page.setViewportSize({ width, height });
-        const geometry = await page.locator('.maka-markdown-image-preview img').evaluate(image => {
-          const block = image.closest('.maka-markdown-image-block');
-          const column = block.parentElement;
-          const style = getComputedStyle(column);
-          const availableWidth = column.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-          const box = image.getBoundingClientRect();
-          const container = block.getBoundingClientRect();
-          return { width: box.width, height: box.height, right: box.right, availableWidth,
-            containerWidth: container.width, containerHeight: container.height };
-        });
-        const scale = Math.min(1, 640 / naturalWidth, geometry.availableWidth / naturalWidth,
-          Math.min(480, height * 0.6) / naturalHeight);
-        assert.ok(Math.abs(geometry.width - naturalWidth * scale) < 1, JSON.stringify(geometry));
-        assert.ok(Math.abs(geometry.height - naturalHeight * scale) < 1, JSON.stringify(geometry));
-        assert.ok(Math.abs(geometry.containerWidth - geometry.width) < 1, JSON.stringify(geometry));
-        assert.ok(Math.abs(geometry.containerHeight - geometry.height) < 1, JSON.stringify(geometry));
-        assert.ok(geometry.right <= width);
-        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-      }
-    } finally { await page.close(); }
-  });
-}
-
-for (const scenario of ['badge-saved', 'badge-saving']) {
-  test(`${scenario}: a badge keeps its intrinsic size and surrounding text on one line`, async () => {
-    requests = [];
-    const page = await pageFor(scenario);
-    try {
-      await page.waitForFunction(() => [...document.images].some(image => image.naturalWidth === 80));
-      if (scenario === 'badge-saving') {
-        await page.waitForFunction(() => [...document.images].some(image => image.src.startsWith('data:') && image.naturalWidth === 80));
-      }
-      const geometry = await page.locator('.maka-markdown-image-resource').evaluate(element => {
-        const box = element.getBoundingClientRect();
-        const paragraph = element.closest('[role="paragraph"]');
-        const textBoxes = [...paragraph.childNodes].filter(node => node.nodeType === Node.TEXT_NODE && node.textContent.trim()).map(node => {
-          const range = document.createRange(); range.selectNodeContents(node);
-          return range.getBoundingClientRect().y;
-        });
-        return { width: box.width, height: box.height, textBoxes };
-      });
-      assert.ok(geometry.width <= 120);
-      assert.ok(geometry.height <= 32);
-      const pixels = await page.locator('img').boundingBox();
-      assert.equal(pixels.width, 80);
-      assert.equal(pixels.height, 20);
-      assert.equal(geometry.textBoxes.length, 2);
-      assert.equal(geometry.textBoxes[0], geometry.textBoxes[1]);
-      if (scenario === 'badge-saved') assert.deepEqual(requests, []);
-      await page.getByRole('button', { name: 'Enlarge image: Badge', exact: true }).focus();
-      await page.keyboard.press('Enter');
-      await page.getByRole('dialog').waitFor();
-    } finally { await page.close(); }
-  });
-}
-
-for (const scenario of ['badge-saved', 'badge-saving']) {
-  test(`${scenario}: delayed saved bytes never change the inline placeholder geometry`, async () => {
-    const page = await browser.newPage({ viewport: { width: 720, height: 600 } });
-    page.setDefaultTimeout(5000);
-    let release;
-    const gate = new Promise(resolve => { release = resolve; });
-    await page.route('**/badge-attachment', async route => { await gate; await route.continue(); });
-    try {
-      await page.goto(`${appUrl}/?case=${scenario}`, { waitUntil: 'domcontentloaded' });
-      await page.waitForFunction(() => window.imageReads === 0 && !!document.querySelector('.maka-markdown-image-inline'));
-      const before = await page.locator('[role="paragraph"]').boundingBox();
-      const slotBefore = await page.locator('.maka-markdown-image-resource').boundingBox();
-      await page.waitForFunction(() => window.deliveryQueries >= (new URLSearchParams(location.search).get('case') === 'badge-saving' ? 2 : 1));
-      release();
-      await page.waitForFunction(() => [...document.images].some(image => image.src.startsWith('data:') && image.naturalWidth === 80));
-      assert.deepEqual(await page.locator('.maka-markdown-image-resource').boundingBox(), slotBefore);
-      assert.deepEqual(await page.locator('[role="paragraph"]').boundingBox(), before);
-    } finally { release(); await page.close(); }
-  });
-}
-
-for (const scenario of ['badge-list', 'badge-table', 'badge-strip']) {
-  test(`${scenario}: inline Markdown context is known before the image arrives`, async () => {
-    const page = await browser.newPage({ viewport: { width: 360, height: 600 } });
-    page.setDefaultTimeout(5000);
-    let release;
-    const gate = new Promise(resolve => { release = resolve; });
-    await page.route('**/badge-attachment', async route => { await gate; await route.continue(); });
-    try {
-      await page.goto(`${appUrl}/?case=${scenario}`, { waitUntil: 'domcontentloaded' });
-      await page.locator('.maka-markdown-image-inline').first().waitFor();
-      assert.equal(await page.locator('.maka-markdown-image-block').count(), 0);
-      const before = await page.locator('.maka-markdown-image-resource').first().boundingBox();
-      assert.ok(before.width <= 120 && before.height <= 32);
-      release();
-      await page.waitForFunction(expected => document.images.length === expected &&
-        [...document.images].every(image => image.naturalWidth === 80), scenario === 'badge-strip' ? 2 : 1);
-      assert.deepEqual(await page.locator('.maka-markdown-image-resource').first().boundingBox(), before);
-    } finally { release(); await page.close(); }
-  });
-}
-
-for (const [scenario, width, height] of [
-  ['layout-main', 1280, 900], ['layout-main', 480, 700],
-  ['layout-side', 720, 700], ['layout-side', 320, 600],
-]) {
-  test(`${scenario} ${width}x${height}: production chat columns fit natural image dimensions`, async () => {
-    const page = await browser.newPage({ viewport: { width, height } });
-    page.setDefaultTimeout(5000);
-    let release;
-    const gate = new Promise(resolve => { release = resolve; });
-    await page.route('**/fixture/**', async route => { await gate; await route.continue(); });
-    const measure = () => page.locator('.maka-markdown-image-resource').evaluateAll(elements => elements.map(element => {
-      const r = element.getBoundingClientRect();
-      return { x: r.x, y: r.y, width: r.width, height: r.height };
-    }));
-    try {
-      await page.goto(`${appUrl}/?case=${scenario}`, { waitUntil: 'domcontentloaded' });
-      await page.waitForFunction(() => document.querySelectorAll('.maka-markdown-image-resource').length === 2);
-      await page.getByText('Following paragraph.').waitFor();
-      const before = await measure();
-      assert.equal(before.length, 2);
-      assert.ok(before[0].width <= 120 && before[0].height <= 32);
-      assert.ok(before[1].width <= 640 && before[1].height < 100);
-      for (const box of before) assert.ok(box.x >= 0 && box.x + box.width <= width);
-      const evidence = process.env.MAKA_IMAGE_LAYOUT_EVIDENCE_DIR;
-      if (evidence) {
-        await mkdir(evidence, { recursive: true });
-        await page.screenshot({ path: join(evidence, `${scenario}-${width}-loading.png`), fullPage: true });
-      }
-      release();
-      await page.waitForFunction(() => document.images.length === 2 && [...document.images].every(image => image.complete && image.naturalWidth > 0));
-      const ready = await measure();
-      assert.deepEqual(ready[0], before[0]);
-      const image = await page.locator('.maka-markdown-image-block img').boundingBox();
-      assert.ok(ready[1].width <= 640 && ready[1].height <= Math.min(480, height * 0.6));
-      assert.ok(Math.abs(ready[1].width - image.width) < 1 && Math.abs(ready[1].height - image.height) < 1);
-      assert.ok(Math.abs(image.width / image.height - 900 / 730) < 0.01);
-      assert.ok((await page.getByText('Following paragraph.').boundingBox()).y >= image.y + image.height);
-      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-      if (evidence) {
-        await page.screenshot({ path: join(evidence, `${scenario}-${width}-ready.png`), fullPage: true });
-        console.log(JSON.stringify({ scenario, viewport: { width, height }, loading: before, ready }));
-      }
-    } finally { release(); await page.close(); }
   });
 }

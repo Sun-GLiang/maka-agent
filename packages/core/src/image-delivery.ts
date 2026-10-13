@@ -82,6 +82,16 @@ export interface ImageDeliveryIdentity {
 export type ImageDeliveryAttempt =
   | { readonly status: 'pending' }
   | { readonly status: 'failed'; readonly reason: ImageDeliveryFailure };
+export function isImageDeliveryAttempt(value: unknown): value is ImageDeliveryAttempt {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    Object.keys(v).every((k) => ['status', 'reason'].includes(k)) &&
+    (v.status === 'pending'
+      ? v.reason === undefined
+      : v.status === 'failed' && IMAGE_DELIVERY_FAILURES.includes(v.reason as ImageDeliveryFailure))
+  );
+}
 export type ImageDeliveryResult =
   // Legacy wire spelling: the client has not granted remote display authority.
   | { readonly status: 'requires_confirmation' }
@@ -98,9 +108,8 @@ export type ResolveImageDelivery = (
 export interface ImageDeliveryMetadata {
   readonly messageId: string;
   readonly source: string;
-  readonly status: 'pending' | 'ready' | 'failed';
-  readonly reason?: ImageDeliveryFailure;
-  readonly contentSha256?: string;
+  readonly status: 'ready';
+  readonly contentSha256: string;
 }
 export interface ImageArchiveLimits {
   readonly sessionBytes: number;
@@ -114,19 +123,13 @@ export function isImageDeliveryMetadata(value: unknown): value is ImageDeliveryM
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
   return (
-    Object.keys(v).every((k) =>
-      ['messageId', 'source', 'status', 'reason', 'contentSha256'].includes(k),
-    ) &&
+    Object.keys(v).every((k) => ['messageId', 'source', 'status', 'contentSha256'].includes(k)) &&
     typeof v.messageId === 'string' &&
     v.messageId.length > 0 &&
     v.messageId.length <= IMAGE_DELIVERY_IDENTITY_MAX_LENGTH &&
     isImageDeliverySource(v.source) &&
-    ['pending', 'ready', 'failed'].includes(String(v.status)) &&
-    (v.reason === undefined ||
-      IMAGE_DELIVERY_FAILURES.includes(v.reason as ImageDeliveryFailure)) &&
-    (v.contentSha256 === undefined ||
-      (typeof v.contentSha256 === 'string' && /^[a-f0-9]{64}$/.test(v.contentSha256))) &&
-    (v.status === 'failed' ? v.reason !== undefined : v.reason === undefined) &&
-    (v.status === 'ready' ? v.contentSha256 !== undefined : v.contentSha256 === undefined)
+    v.status === 'ready' &&
+    typeof v.contentSha256 === 'string' &&
+    /^[a-f0-9]{64}$/.test(v.contentSha256)
   );
 }

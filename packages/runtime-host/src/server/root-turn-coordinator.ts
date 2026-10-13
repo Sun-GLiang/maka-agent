@@ -389,10 +389,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     ) => Promise<WorkHubRoutingDecision | undefined>,
     private readonly observeAssistantText?: (
       sessionId: string,
-      event:
-        | import('@maka/core/events').TextDeltaEvent
-        | import('@maka/core/events').TextCompleteEvent
-        | import('@maka/core/events').CompleteEvent,
+      event: import('@maka/core/events').TextCompleteEvent,
     ) => void,
   ) {
     this.stores = authenticateExecutionStoresWriter(stores, 'interactive');
@@ -3234,11 +3231,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
               // Presentation observers do not participate in execution authority.
             }
           }
-          if (
-            event.type === 'text_delta' ||
-            event.type === 'text_complete' ||
-            event.type === 'complete'
-          ) {
+          if (event.type === 'text_complete') {
             try {
               this.observeAssistantText?.(input.sessionId, event);
             } catch {

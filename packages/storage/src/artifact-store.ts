@@ -423,7 +423,7 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
       }
       requestedLinkedArtifactIds.set(linked.sessionId, artifactIds);
     }
-    const { records, attempts } = await this.enqueue(async () => {
+    const records = await this.enqueue(async () => {
       await this.load();
       const selected = this.records
         .filter(
@@ -454,12 +454,7 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
           selectedIds.add(record.id);
         }
       }
-      return {
-        records: selected,
-        attempts: this.metadataRepository.readImageDeliveryAttempts(input.sourceSessionId, [
-          ...turnIds,
-        ]),
-      };
+      return selected;
     });
 
     const artifactIds = new Map<string, string>();
@@ -484,9 +479,7 @@ class SqliteArtifactStore implements ArtifactAuthorityStore {
       artifactIds.set(record.id, created.id);
       relativePaths.set(record.relativePath, created.relativePath);
     }
-    await this.enqueueMutation(async () =>
-      this.metadataRepository.copyImageDeliveryAttempts(attempts, input.targetSessionId),
-    );
+
     return { artifactIds, relativePaths };
   }
 

@@ -24,11 +24,7 @@ import {
   imageFileFailureReason,
   validateImageBytes,
 } from '@maka/runtime/image-file';
-import {
-  isImageDeliverySource,
-  isRemoteImageSource,
-  type ImageDeliveryFailure,
-} from '@maka/core/image-delivery';
+import { isRemoteImageSource, type ImageDeliveryFailure } from '@maka/core/image-delivery';
 import {
   createProxiedFetchTransport,
   PublicNetworkPolicyError,
@@ -65,18 +61,6 @@ export function localImagePath(source: string): string | undefined {
   return source;
 }
 
-/** A missing literal path may be a URL-encoded Markdown destination. File URLs
- * already went through fileURLToPath; never decode them a second time. */
-export function decodedLocalImagePath(source: string): string | undefined {
-  if (source.startsWith('file:') || isRemoteImageSource(source)) return undefined;
-  try {
-    const decoded = decodeURIComponent(source);
-    return decoded !== source && isImageDeliverySource(decoded) ? decoded : undefined;
-  } catch {
-    // A literal percent sign or incomplete escape is a valid filesystem name.
-    return undefined;
-  }
-}
 /** Network routing and public destination checks belong to the transport.
  * Only validated image bytes cross the archive boundary. */
 export async function downloadChatImage(

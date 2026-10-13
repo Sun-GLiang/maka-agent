@@ -25,7 +25,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createSqliteArtifactStoreWriteAuthority } from '../artifact-store.js';
-import { migrateSqliteArtifactDatabase } from '../sqlite-artifact-schema.js';
 import { assertImageArchiveQuota, ImageArchiveQuotaError } from '../artifact-image-storage.js';
 import { DEFAULT_IMAGE_ARCHIVE_LIMITS } from '@maka/core/image-delivery';
 import { readImageDeliveryAttempt } from '../sqlite-image-delivery.js';
@@ -41,7 +40,56 @@ const lookup = (
   i = identity,
 ) => store.findImageDelivery(i.sessionId, i.turnId, i.messageId, i.source);
 
-test('attempts survive reopen and copy, never appear as files, and purge without an artifact', async () => {
+test('schema 3 upgrades directly to 4 without rewriting existing artifacts', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-image-schema-'));
+  let authority = createSqliteArtifactStoreWriteAuthority(root);
+  try {
+    const record = await authority.store.create({
+      sessionId: identity.sessionId,
+      turnId: identity.turnId,
+      id: 'existing-file',
+      name: 'note.txt',
+      kind: 'file',
+      source: 'tool_result',
+      content: 'retained',
+    });
+    authority.close();
+    const db = new DatabaseSync(join(root, 'runtime.sqlite'));
+    try {
+      db.exec(`DROP TABLE image_delivery_attempts; DROP INDEX artifact_image_delivery_lookup;
+        UPDATE operational_schema_migrations SET version = 3 WHERE scope = 'artifact';`);
+    } finally {
+      db.close();
+    }
+    authority = createSqliteArtifactStoreWriteAuthority(root);
+    assert.deepEqual(await authority.store.listTurnArtifacts(identity.sessionId, identity.turnId), [
+      record,
+    ]);
+    const text = await authority.store.readTextInSession(identity.sessionId, record.id);
+    assert.ok(text.ok);
+    if (text.ok) assert.equal(text.text, 'retained');
+    const reopened = new DatabaseSync(join(root, 'runtime.sqlite'), { readOnly: true });
+    try {
+      assert.equal(
+        reopened
+          .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'artifact'")
+          .get()?.version,
+        4,
+      );
+      assert.equal(
+        reopened.prepare('SELECT COUNT(*) AS n FROM image_delivery_attempts').get()?.n,
+        0,
+      );
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    authority.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('attempts survive reopen, stay out of conversation copies, and purge without an artifact', async () => {
   const root = await mkdtemp(join(tmpdir(), 'maka-image-attempt-'));
   let authority = createSqliteArtifactStoreWriteAuthority(root);
   try {
@@ -66,16 +114,10 @@ test('attempts survive reopen and copy, never appear as files, and purge without
       turnIds: [identity.turnId],
     });
     const copied = { ...identity, sessionId: 'session-2' };
-    assert.deepEqual(await lookup(authority.store, copied), {
-      status: 'failed',
-      reason: 'not_found',
-    });
+    assert.equal(await lookup(authority.store, copied), undefined);
     await authority.store.purgeSessionArtifacts(identity.sessionId);
     assert.equal(await lookup(authority.store), undefined);
-    assert.deepEqual(await lookup(authority.store, copied), {
-      status: 'failed',
-      reason: 'not_found',
-    });
+    assert.equal(await lookup(authority.store, copied), undefined);
   } finally {
     authority.close();
     await rm(root, { recursive: true, force: true });
@@ -125,60 +167,13 @@ test('successful publication atomically supersedes attempts and cannot be downgr
           messageId: identity.messageId,
           source: identity.source,
           status: 'pending',
-        },
+        } as never,
       }),
       /Invalid image delivery metadata/,
     );
   } finally {
     authority.close();
     await rm(root, { recursive: true, force: true });
-  }
-});
-
-test('v4 placeholder migration preserves terminal precedence and schedules safe file cleanup', () => {
-  const db = new DatabaseSync(':memory:');
-  try {
-    migrateSqliteArtifactDatabase(db);
-    for (const status of ['pending', 'failed'] as const) {
-      const record = {
-        sessionId: identity.sessionId,
-        turnId: identity.turnId,
-        id: status,
-        name: 'chat-image',
-        kind: 'file',
-        sizeBytes: 0,
-        createdAt: 1,
-        relativePath: `session-1/${status}-chat-image`,
-        source: 'tool_result_projection',
-        imageDelivery: {
-          messageId: identity.messageId,
-          source: identity.source,
-          status,
-          ...(status === 'failed' ? { reason: 'not_found' } : {}),
-        },
-      };
-      db.prepare('INSERT INTO artifact_records VALUES (?, ?, ?, ?, ?)').run(
-        record.id,
-        record.sessionId,
-        record.createdAt,
-        record.relativePath,
-        JSON.stringify(record),
-      );
-    }
-    migrateSqliteArtifactDatabase(db);
-    assert.deepEqual(readImageDeliveryAttempt(db, identity), {
-      status: 'failed',
-      reason: 'not_found',
-    });
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM artifact_records').get()?.n, 0);
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM artifact_upgrade_orphan_paths').get()?.n, 2);
-    migrateSqliteArtifactDatabase(db);
-    assert.deepEqual(readImageDeliveryAttempt(db, identity), {
-      status: 'failed',
-      reason: 'not_found',
-    });
-  } finally {
-    db.close();
   }
 });
 

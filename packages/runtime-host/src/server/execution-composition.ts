@@ -571,7 +571,6 @@ export async function createExecutionRuntimeHostComposition(
     });
     archiveEvidence = await openToolResultArchiveEvidenceReader(context.owner.lease);
     const executionArtifacts = createHostExecutionArtifactServices({
-      ...(options.imageArchiveLimits ? { imageArchiveLimits: options.imageArchiveLimits } : {}),
       archiveEvidence,
       artifacts: openedArtifactStore,
       requestDrain: context.requestDrain,
@@ -643,7 +642,6 @@ export async function createExecutionRuntimeHostComposition(
       artifactStore: openedArtifactStore,
     });
     const builtinTools = {
-      publishImage: executionArtifacts.publishImage,
       shellRuns: runtimeResources,
       runtimeResources,
       attachmentResources,
@@ -1896,9 +1894,7 @@ export async function createExecutionRuntimeHostComposition(
       // Fresh WorkHub Turns use the coordinating Agent directly. Persisted
       // routing decisions remain readable for recovery of historical Turns.
       undefined,
-      (sessionId, event) => {
-        if (event.type === 'text_complete') imageDelivery?.observe(sessionId, event);
-      },
+      (sessionId, event) => imageDelivery?.observe(sessionId, event),
     );
     const coordinator = rootCoordinator;
     const pluginModel = createHostPluginModel({

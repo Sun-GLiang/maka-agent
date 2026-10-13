@@ -32,7 +32,6 @@ import { createImageFileReader, ImageFileReadError } from '../image-file-reader.
 import { FilesystemWorkerClientError } from '../filesystem-worker/client.js';
 import { executeFilesystemWorkerRequest } from '../filesystem-worker/operations.js';
 import { FILESYSTEM_WORKER_PROTOCOL_VERSION } from '../filesystem-worker/protocol.js';
-import { buildBuiltinTools } from '../builtin-tools.js';
 
 const ONE_PIXEL_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
@@ -159,34 +158,6 @@ for (const route of ['workspace', 'worker'] as const) {
     await assert.rejects(read('chat'), /not a supported/i);
   });
 }
-
-test('PublishImage saves a wide screenshot through the same chat read policy', async (t) => {
-  const cwd = await mkdtemp(join(tmpdir(), 'maka-publish-wide-'));
-  t.after(() => rm(cwd, { recursive: true, force: true }));
-  await writeFile(join(cwd, 'wide.png'), WIDE_PNG);
-  let published = false;
-  const tool = buildBuiltinTools({
-    publishImage: async ({ bytes }) => {
-      assert.deepEqual(Buffer.from(bytes), WIDE_PNG);
-      published = true;
-      return { kind: 'session_file', sessionId: 'session', relativePath: 'saved-image' };
-    },
-  }).find((tool) => tool.name === 'PublishImage')!;
-  await tool.impl(
-    { path: 'wide.png' },
-    {
-      sessionId: 'session',
-      turnId: 'turn',
-      toolCallId: 'publish',
-      cwd,
-      permissionMode: 'bypass',
-      executionBoundary: { kind: 'bypass', revision: 0 },
-      abortSignal: new AbortController().signal,
-      emitOutput() {},
-    },
-  );
-  assert.equal(published, true);
-});
 
 test('chat reads reject FIFOs without waiting for a writer', {
   skip: process.platform === 'win32',

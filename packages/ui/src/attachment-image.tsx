@@ -38,7 +38,6 @@ export type ReadAttachmentBytes = (
 type SessionAttachmentContextValue = {
   sessionId: string;
   loadImage: (sessionId: string, artifactId: string) => Promise<string | undefined>;
-  invalidate(sessionId: string, artifactId: string): void;
 };
 
 const SessionAttachmentContext = createContext<SessionAttachmentContextValue | undefined>(undefined);
@@ -54,19 +53,10 @@ export function SessionAttachmentProvider(props: {
       const readBytes = props.readBytes;
       if (!readBytes) return undefined;
       const pending = new Map<string, Promise<string | undefined>>();
-      const ready = new Map<string, string>();
-      let cachedBytes = 0;
       return {
         sessionId: props.sessionId,
-        invalidate(sessionId: string, artifactId: string) {
-          const key = `${sessionId}\0${artifactId}`;
-          const cached = ready.get(key);
-          if (cached) { cachedBytes -= cached.length * 2; ready.delete(key); }
-        },
         loadImage(sessionId: string, artifactId: string) {
           const key = `${sessionId}\0${artifactId}`;
-          const cached = ready.get(key);
-          if (cached) { ready.delete(key); ready.set(key, cached); return Promise.resolve(cached); }
           const existing = pending.get(key);
           if (existing) return existing;
           const loaded = readBytes(sessionId, artifactId)
@@ -78,14 +68,6 @@ export function SessionAttachmentProvider(props: {
             })
             .catch(() => undefined);
           pending.set(key, loaded);
-          void loaded.then(src => {
-            if (!src) return;
-            ready.set(key, src); cachedBytes += src.length * 2;
-            while (cachedBytes > 32 * 1024 * 1024 && ready.size) {
-              const oldest = ready.keys().next().value!;
-              cachedBytes -= ready.get(oldest)!.length * 2; ready.delete(oldest);
-            }
-          });
           void loaded.finally(() => {
             if (pending.get(key) === loaded) pending.delete(key);
           });
@@ -120,9 +102,8 @@ export function useAttachmentImage(ref: {
   const loadImage = context?.loadImage;
   const [attempt, setAttempt] = useState(0);
   const retry = useCallback(() => {
-    if (artifactId && sessionId) context?.invalidate(sessionId, artifactId);
     setAttempt((value) => value + 1);
-  }, [artifactId, sessionId, context]);
+  }, []);
   const request = useMemo(
     () => artifactId && sessionId && loadImage
       ? { artifactId, sessionId, loadImage, attempt }

@@ -18,7 +18,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Button, IconButton, Spinner, Tooltip, useLightbox } from '@astryxdesign/core';
+import { Button, IconButton, Spinner, Tooltip } from '@astryxdesign/core';
 import { createMarkdownPlugin, type MarkdownExtensionNode } from '@astryxdesign/core/Markdown/plugins';
 import type { MarkdownAstNode, MarkdownAstRoot } from '@astryxdesign/core/Markdown';
 import { RotateCw, AlertTriangle } from './icons.js';
@@ -126,25 +126,6 @@ function ImageResource(props: { src: string; redacted: boolean; alt: string; inl
 }
 
 function DisplayImage(props: { src: string; alt: string; onError(): void }) {
-  const copy = getSharedUiCopy(useUiLocale()).markdown;
-  const [loaded, setLoaded] = useState(false);
-  const lightbox = useLightbox({ media: { src: props.src, alt: props.alt }, hasZoom: true });
-  const trigger = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (lightbox.isOpen) return () => trigger.current?.focus();
-  }, [lightbox.isOpen]);
-  const content = <>
-    {!loaded && <span className="maka-markdown-image-loading" role="status" aria-label={copy.imageLoading}><Spinner size="sm" shade="subtle" aria-hidden="true" /> <span className="maka-markdown-image-loading-label">{copy.imageLoading}</span></span>}
-    <img src={props.src} alt={props.alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
-        className="maka-markdown-attachment-image" onLoad={() => setLoaded(true)} onError={props.onError} />
-  </>;
-  return <>
-    <Button ref={trigger} variant="ghost" className="maka-markdown-image-preview maka-markdown-image-trigger"
-        label={copy.imageExpand(props.alt)} aria-haspopup="dialog" isDisabled={!loaded}
-        style={{ padding: 0, background: 'transparent' }}
-        onClick={event => { event.preventDefault(); event.stopPropagation(); if (loaded) lightbox.open(); }}>
-      {content}
-    </Button>
-    {lightbox.isOpen && lightbox.element}
-  </>;
+  return <img src={props.src} alt={props.alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
+    className="maka-markdown-attachment-image" onError={props.onError} />;
 }

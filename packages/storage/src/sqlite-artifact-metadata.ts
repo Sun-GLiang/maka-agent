@@ -27,8 +27,6 @@ import {
   readImageDeliveryAttempt,
   writeImageDeliveryAttempt,
   removeImageDeliveryAttempt,
-  readImageDeliveryAttempts,
-  type StoredImageDeliveryAttempt,
 } from './sqlite-image-delivery.js';
 import type { ArtifactRecord } from '@maka/core/artifacts';
 import { decodeArtifactRecordJsons } from './artifact-metadata-codec.js';
@@ -93,40 +91,6 @@ class SqliteArtifactMetadataRepository {
       )
         return;
       writeImageDeliveryAttempt(this.#lease.database, identity, attempt);
-    });
-  }
-
-  readImageDeliveryAttempts(
-    sessionId: string,
-    turnIds: readonly string[],
-  ): StoredImageDeliveryAttempt[] {
-    this.assertOpen();
-    return readImageDeliveryAttempts(this.#lease.database, sessionId, turnIds);
-  }
-
-  copyImageDeliveryAttempts(
-    attempts: readonly StoredImageDeliveryAttempt[],
-    targetSessionId: string,
-  ): void {
-    this.assertOpen();
-    this.#lease.transaction('write', () => {
-      for (const record of attempts) {
-        const identity = { ...record.identity, sessionId: targetSessionId };
-        if (
-          !this.findImageDelivery(
-            identity.sessionId,
-            identity.turnId,
-            identity.messageId,
-            identity.source,
-          )
-        )
-          writeImageDeliveryAttempt(
-            this.#lease.database,
-            identity,
-            record.attempt,
-            record.createdAt,
-          );
-      }
     });
   }
 
