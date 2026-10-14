@@ -20,9 +20,10 @@
 import type { ExecutorCatalogEntry } from '@maka/core/executor-catalog';
 import type { ProviderType } from '@maka/core/llm-connections';
 import { Bot } from '@maka/ui/icons';
-import { ProviderBrandMark } from './provider-brand-marks.js';
-import antigravityMark from '../assets/provider-brands/antigravity.svg';
-import makaMark from '../../../assets/app-icons/sky.png';
+import type { ReactNode } from 'react';
+
+const antigravityMark = new URL('../../../assets/provider-brands/antigravity.svg', import.meta.url).href;
+const makaMark = new URL('../../../../../assets/app-icons/sky.png', import.meta.url).href;
 
 // Agent identity is independent of the models an ACP process exposes.
 const AGENT_BRANDS: Readonly<Record<string, ProviderType>> = {
@@ -40,10 +41,13 @@ const AGENT_BRANDS: Readonly<Record<string, ProviderType>> = {
   'opencode-acp': 'opencode',
 };
 
-export function ExecutorBrandMark({ entry }: { entry?: ExecutorCatalogEntry }) {
+export function ExecutorBrandMark({ entry, renderProviderMark }: {
+  entry?: ExecutorCatalogEntry;
+  renderProviderMark?(type: ProviderType): ReactNode;
+}) {
   if (!entry) return <img className="maka-executor-brand-mark-native" src={makaMark} alt="" />;
   const id = entry.id.toLowerCase();
   if (id === 'antigravity-acp' || id === 'antigravity') return <img src={antigravityMark} alt="" />;
   const provider = AGENT_BRANDS[id];
-  return provider ? <ProviderBrandMark type={provider} /> : <Bot size={24} aria-hidden="true" />;
+  return (provider && renderProviderMark?.(provider)) || <Bot size={24} aria-hidden="true" />;
 }
