@@ -167,7 +167,7 @@ for (const option of ['model', 'mode'] as const) {
         assert.deepEqual(requested[0]!.configuration, option === 'mode'
           ? { mode: 'auto' } : { model: 'model-1' });
         if (option === 'mode') {
-          const modelTrigger = dom.document.querySelector('.maka-executor-selector');
+          const modelTrigger = dom.document.querySelector('.maka-executor-selector button');
           assert.ok(modelTrigger?.hasAttribute('disabled') || modelTrigger?.getAttribute('aria-disabled') === 'true',
             'model changes must wait for mode confirmation');
         }
@@ -318,7 +318,7 @@ for (const readiness of ['ready', 'authentication_required', 'unavailable'] as c
           assert.ok(signIn);
           await act(async () => signIn.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
           assert.deepEqual(setupTargets, ['antigravity']);
-          assert.equal(dom.document.querySelector('.maka-executor-selector')?.getAttribute('aria-expanded'), 'false');
+          assert.equal(dom.document.querySelector('.maka-executor-selector button')?.getAttribute('aria-expanded'), 'false');
         } else {
           assert.equal(signIn, undefined);
         }
@@ -458,7 +458,7 @@ test('failed Antigravity discovery closes the picker before opening external-age
     assert.ok(dom.document.querySelector('.maka-executor-picker-models')?.textContent?.includes('当前不可用'));
     await click(dom.document.querySelector('.maka-executor-picker-manage'));
     assert.equal(setupOpened, true);
-    assert.equal(dom.document.querySelector('.maka-executor-selector')?.getAttribute('aria-expanded'), 'false');
+    assert.equal(dom.document.querySelector('.maka-executor-selector button')?.getAttribute('aria-expanded'), 'false');
   } finally {
     await dom.cleanup();
   }
@@ -522,6 +522,50 @@ for (const nativeModel of ['native-model', 'native-model-2']) {
     }
   });
 }
+
+test('model search keeps focus through pointer clicks and external catalog arrival inside Composer', async () => {
+  const dom = installTranscriptDom();
+  dom.window.getSelection = () => null;
+  let active: Element | null = null;
+  Object.defineProperty(dom.document, 'activeElement', { configurable: true, get: () => active });
+  const render = (entries: ExecutorModelPickerProps['catalog']) => dom.render(
+    <LocaleProvider locale="en"><Composer
+      executorPicker={{ catalog: entries, loading: entries.length === 0,
+        onSelect: () => {}, onSetup: () => {}, onRetry: () => {}, onNewTask: () => {},
+      }}
+      modelChoices={choices}
+      newChatModel={{ llmConnectionId: 'native', llmConnectionSlug: 'native', model: 'native-model' }}
+      onPickNewChatModel={() => {}}
+      onSend={() => assert.fail('Searching must never submit the draft')}
+      onStop={() => {}}
+    /></LocaleProvider>,
+  );
+  const click = async (element: Element | null) => {
+    assert.ok(element);
+    await act(async () => { element.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
+  };
+  try {
+    await render([]);
+    const editor = dom.document.querySelector<HTMLElement>('[role="textbox"]')!;
+    assert.ok(editor);
+    editor.focus = () => { active = editor; };
+    await click(dom.document.querySelector('.maka-executor-selector button'));
+    const search = dom.document.querySelector<HTMLInputElement>('.maka-executor-picker-search input')!;
+    assert.ok(search);
+    search.focus = () => { active = search; };
+    search.focus(); // The browser focuses an input before its click bubbles.
+    await click(search);
+    assert.equal(active, search, 'the composer must not reclaim a clicked search input');
+    await render(catalog);
+    assert.equal(dom.document.querySelector('.maka-executor-picker-panel')?.getAttribute('data-layout'), 'split');
+    assert.equal(dom.document.querySelector('.maka-executor-picker-search input'), search, 'catalog arrival must preserve the mounted search input');
+    assert.equal(active, search);
+    await click(search);
+    assert.equal(active, search, 'the loaded Agent rail must not change focus ownership');
+  } finally {
+    await dom.cleanup();
+  }
+});
 
 test('executor choice shares the native searchable list and exposes every external model with exact identity', async () => {
   const dom = installTranscriptDom();
@@ -623,7 +667,7 @@ test('executor choice shares the native searchable list and exposes every extern
     assert.equal(dom.document.querySelector('.maka-executor-picker-native small'), null, 'main native rows have no model-ID second line');
     await choose('Native model 2');
     assert.equal(selected.at(-1), undefined);
-    assert.equal(dom.document.querySelector('.maka-executor-selector')?.getAttribute('aria-expanded'), 'false', 'choosing a native model closes the shared panel');
+    assert.equal(dom.document.querySelector('.maka-executor-selector button')?.getAttribute('aria-expanded'), 'false', 'choosing a native model closes the shared panel');
   } finally {
     await dom.cleanup();
   }
@@ -735,7 +779,7 @@ test('unavailable executors can be inspected but never committed', async () => {
         </ExecutorModelPicker>
       </LocaleProvider>,
     );
-    const trigger = dom.document.querySelector<HTMLElement>('.maka-executor-selector');
+    const trigger = dom.document.querySelector<HTMLElement>('.maka-executor-selector button');
     assert.ok(trigger);
     await act(() => trigger.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
     const entry = [...dom.document.querySelectorAll<HTMLButtonElement>('button')].find((button) =>
@@ -815,7 +859,7 @@ test('a failed native choice keeps the shared list open for retry', async () => 
         </ExecutorModelPicker>
       </LocaleProvider>,
     );
-    const trigger = dom.document.querySelector('.maka-executor-selector')!;
+    const trigger = dom.document.querySelector('.maka-executor-selector button')!;
     await act(async () => { trigger.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
     const row = dom.document.querySelector('[role="option"]')!;
     await act(async () => { row.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
@@ -889,7 +933,7 @@ for (const initial of [undefined, 'flash-high', 'flash-mid']) test(`grouped exte
     if (initial === 'flash-high') rejectNext = true;
     await click(row('Gemini 3.1 Pro'));
     if (initial === 'flash-high') {
-      assert.equal(dom.document.querySelector('.maka-executor-selector')?.getAttribute('aria-expanded'), 'true');
+      assert.equal(dom.document.querySelector('.maka-executor-selector button')?.getAttribute('aria-expanded'), 'true');
       assert.ok(dom.document.querySelector('.maka-executor-selector')?.textContent?.includes('Gemini 3.8 Flash'));
       await click(row('Gemini 3.1 Pro'));
     }

@@ -17,8 +17,8 @@
  * under the License.
  */
 
-import { useEffect, useState, type ReactNode } from 'react';
-import { Button, EmptyState, Popover, Spinner, StatusDot } from '@astryxdesign/core';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { Button, ComplexSelector, type ComplexSelectorHandle, EmptyState, Popover, Spinner, StatusDot } from '@astryxdesign/core';
 import type {
   ExecutorCatalogEntry,
   ExecutorConfiguration,
@@ -183,18 +183,16 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
   const locale = useUiLocale();
   const copy = executorCopy(locale);
   const selected = props.catalog.find((entry) => entry.id === props.selection?.executorId);
-  const [open, setOpen] = useState(false);
+  const selector = useRef<ComplexSelectorHandle>(null);
   const [selecting, setSelecting] = useState(false);
   const [modePending, setModePending] = useState(false);
   const configurationPending = selecting || modePending;
   const [selectionFailed, setSelectionFailed] = useState(false);
   const [browsedId, setBrowsedId] = useState(props.selection?.executorId ?? NATIVE);
-  useEffect(() => {
-    if (!open) {
-      setBrowsedId(props.selection?.executorId ?? NATIVE);
-      setSelectionFailed(false);
-    }
-  }, [open, props.selection?.executorId]);
+  const onOpenChange = () => {
+    setBrowsedId(props.selection?.executorId ?? NATIVE);
+    setSelectionFailed(false);
+  };
   useEffect(() => { props.onPendingChange?.(configurationPending); }, [configurationPending, props.onPendingChange]);
   useEffect(() => () => props.onPendingChange?.(false), [props.onPendingChange]);
   const browsed = props.catalog.find((entry) => entry.id === browsedId);
@@ -222,7 +220,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
     setSelectionFailed(false);
     try {
       await props.onSelect({ executorId: entry.id, configuration });
-      setOpen(false);
+      selector.current?.close();
     } catch {
       // Keep the surface open so the owner's error state can explain the failed commit.
       setSelectionFailed(true);
@@ -235,15 +233,15 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
     setSelectionFailed(false);
   };
   const openSetup = () => {
-    setOpen(false);
+    selector.current?.close();
     props.onSetup();
   };
   const openSignIn = (executorId: string) => {
-    setOpen(false);
+    selector.current?.close();
     props.onSetup(executorId);
   };
   const openNewTask = () => {
-    setOpen(false);
+    selector.current?.close();
     props.onNewTask();
   };
   const restore = () => {
@@ -283,15 +281,24 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
   ) : null;
   return (
     <>
-      <Popover
-        label={copy.title}
+      <ComplexSelector
+        label={triggerLabel}
+        isLabelHidden
+        value={props.selection}
+        triggerLabel={<ComposerModelLabel text={triggerLabel} />}
+        variant="ghost"
+        size="sm"
         placement="above"
-        width={showExecutorRail ? 'min(420px, 92vw)' : 'min(340px, 92vw)'}
-        isOpen={open}
-        onOpenChange={setOpen}
-        isEnabled={!props.disabled && !props.isReadOnly && !modePending}
-        content={
-          <div className="maka-executor-picker-panel" data-layout={showExecutorRail ? 'split' : 'single'}>
+        handleRef={selector}
+        onOpenChange={onOpenChange}
+        isDisabled={props.disabled || props.isReadOnly || modePending}
+        className="maka-model-switcher-trigger maka-executor-selector"
+      >
+        {() => (
+          <div className="maka-executor-picker-panel" data-layout={showExecutorRail ? 'split' : 'single'}
+            // Portalled clicks still bubble through React to ChatComposer's
+            // click-to-focus body. Keep input focus inside this selector.
+            onClick={(event) => event.stopPropagation()}>
             {showExecutorRail && <nav className="maka-executor-picker-rail" aria-label={copy.title}>
               <Button
                 label="Maka"
@@ -336,7 +343,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
             </nav>}
             <section className="maka-executor-picker-models" aria-live="polite">
               {!showExecutorRail || browsedId === NATIVE ? (
-                <ModelPickerPanelContext.Provider value={{ onSelected: () => setOpen(false) }}>
+                <ModelPickerPanelContext.Provider value={{ onSelected: () => selector.current?.close() }}>
                   <div className="maka-executor-picker-native">{props.children}</div>
                 </ModelPickerPanelContext.Provider>
               ) : browsed?.readiness === 'ready' ? (
@@ -409,19 +416,8 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
               </div>
             )}
           </div>
-        }
-      >
-        <Button
-          label={triggerLabel}
-          variant="ghost"
-          size="sm"
-          isDisabled={props.disabled || props.isReadOnly || modePending}
-          tooltip={props.fixed ? copy.fixed : undefined}
-          className="maka-model-switcher-trigger maka-executor-selector"
-        >
-          <ComposerModelLabel text={triggerLabel} />
-        </Button>
-      </Popover>
+        )}
+      </ComplexSelector>
       {props.selection ? <ExecutorThinkingLevelSelector {...props} disabled={props.disabled || configurationPending} /> : props.nativeThinkingControl}
       <ExecutorModeSelector {...props} disabled={props.disabled || selecting} onPendingChange={setModePending} />
       {(selectedUnavailable || selectedInvalid || props.error) && (
