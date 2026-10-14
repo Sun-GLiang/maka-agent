@@ -89,6 +89,8 @@ export function ModelPickerPanel(props: {
         aria-activedescendant={options[combobox.highlightedIndex] ? combobox.getItemId(combobox.highlightedIndex) : undefined}
         onChange={(value) => { setQuery(value); combobox.setHighlightedIndex(-1); }}
         onKeyDown={navigate}
+        // Portalled input clicks must not reach ChatComposer's click-to-focus body.
+        onClick={(event) => event.stopPropagation()}
       />
       <div id={listboxId} className="maka-executor-picker-model-list" role="listbox" aria-label={searchPlaceholder}>
         {options.map((option, index) => (

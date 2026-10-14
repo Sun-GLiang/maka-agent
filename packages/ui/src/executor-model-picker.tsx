@@ -295,10 +295,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
         className="maka-model-switcher-trigger maka-executor-selector"
       >
         {() => (
-          <div className="maka-executor-picker-panel" data-layout={showExecutorRail ? 'split' : 'single'}
-            // Portalled clicks still bubble through React to ChatComposer's
-            // click-to-focus body. Keep input focus inside this selector.
-            onClick={(event) => event.stopPropagation()}>
+          <div className="maka-executor-picker-panel" data-layout={showExecutorRail ? 'split' : 'single'}>
             {showExecutorRail && <nav className="maka-executor-picker-rail" aria-label={copy.title}>
               <Button
                 label="Maka"
