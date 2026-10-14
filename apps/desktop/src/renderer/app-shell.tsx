@@ -86,6 +86,7 @@ import {
 } from './application/contracts/onboarding/onboarding-authority.js';
 import { ShellLifecycleSubscriptions } from './application/contracts/shell-lifecycle.js';
 import { ProviderBrandMark } from './settings/provider-brand-marks';
+import { ExecutorBrandMark } from './settings/executor-brand-marks.js';
 import { RuntimeHostSshTerminalDialog } from './settings/runtime-host-ssh-terminal-dialog.js';
 import {
   getShellCopy,
@@ -273,6 +274,7 @@ function AppShellContent({
     openProjectSettings,
     openProviderCatalog,
     openConnectionDetail,
+    openExternalAgentSettings,
     openProviderCreate,
     setSettingsProfileId,
   } = overlays.commands;
@@ -1391,7 +1393,7 @@ function AppShellContent({
                   onDeleteQueuedEntry={activeId ? queueSurface.deleteQueuedEntry : undefined}
                   onReorderQueuedEntries={activeId ? queueSurface.reorderQueuedEntries : undefined}
                   contextPickEnabled={canStageComposerContext}
-                  executorComposer={{ selection: executor, taskSubmissionHardBlocked, connectionCount: connections.length, onSetup: () => openSettingsSection('external-agents'), onNewTask: openNewTaskSurface }}
+                  executorComposer={{ selection: executor, taskSubmissionHardBlocked, connectionCount: connections.length, renderExecutorMark: (entry) => <ExecutorBrandMark entry={entry} />, onSetup: (executorId) => executorId ? openExternalAgentSettings(executorId) : openSettingsSection('external-agents'), onNewTask: openNewTaskSurface }}
                   activeSession={activeSessionForView}
                   {...{ executorTarget, onExecutorTargetChange }}
                   usageModel={activeModel}

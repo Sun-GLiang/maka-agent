@@ -293,22 +293,41 @@ for (const fixed of [false, true]) test(`${fixed ? 'fixed' : 'draft'} executor m
 });
 
 for (const readiness of ['ready', 'authentication_required', 'unavailable'] as const) {
-  test(`the ${readiness} catalog can be refreshed from the picker`, async () => {
+  test(`the ${readiness} catalog offers only the relevant recovery action`, async () => {
     const dom = installTranscriptDom();
     let retries = 0;
+    const setupTargets: Array<string | undefined> = [];
     const render = (loading = false) => dom.render(<LocaleProvider locale="en"><ExecutorModelPicker
       catalog={[{ ...catalog[0]!, readiness }]} loading={loading}
       selection={{ executorId: 'antigravity', configuration: { model: 'model-0' } }}
       onSelect={() => assert.fail('refresh must not change the selection')}
-      onSetup={() => {}} onRetry={() => { retries++; }} onNewTask={() => {}}
+      onSetup={(id) => { setupTargets.push(id); }} onRetry={() => { retries++; }} onNewTask={() => {}}
     /></LocaleProvider>);
-    const retry = () => [...dom.document.querySelectorAll('.maka-executor-picker-rail button')]
-      .find(button => button.textContent === 'Retry');
+    const retry = () => [...dom.document.querySelectorAll('.maka-executor-picker-readiness button')]
+      .find(button => (button.getAttribute('aria-label') ?? button.textContent) === 'Retry');
     try {
       await render();
       await act(async () => dom.document.querySelector('.maka-executor-selector')!
         .dispatchEvent(new dom.window.Event('click', { bubbles: true })));
+      if (readiness !== 'unavailable') {
+        assert.equal(retry(), undefined);
+        assert.ok(![...dom.document.querySelectorAll('button')].some(button => (button.getAttribute('aria-label') ?? button.textContent) === 'Retry'));
+        const signIn = [...dom.document.querySelectorAll('.maka-executor-picker-readiness button')]
+          .find(button => button.textContent === 'Go to sign in');
+        if (readiness === 'authentication_required') {
+          assert.ok(signIn);
+          await act(async () => signIn.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
+          assert.deepEqual(setupTargets, ['antigravity']);
+          assert.equal(dom.document.querySelector('.maka-executor-selector')?.getAttribute('aria-expanded'), 'false');
+        } else {
+          assert.equal(signIn, undefined);
+        }
+        assert.equal(retries, 0);
+        return;
+      }
       assert.ok(retry());
+      assert.ok(![...dom.document.querySelectorAll('.maka-executor-picker-rail button')]
+        .some(button => (button.getAttribute('aria-label') ?? button.textContent) === 'Retry'));
       await act(async () => retry()!.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
       assert.equal(retries, 1);
       await render(true);
@@ -320,10 +339,10 @@ for (const readiness of ['ready', 'authentication_required', 'unavailable'] as c
 test('the picker shows a generic loading state until the executor catalog arrives', async () => {
   const dom = installTranscriptDom();
   const selections: unknown[] = [];
-  const render = (loading: boolean) => dom.render(
+  const render = (loading: boolean, known = false) => dom.render(
     <LocaleProvider locale="zh-CN">
       <ExecutorModelPicker
-        catalog={loading ? [] : [{ ...catalog[0]!, id: 'antigravity-acp' }]}
+        catalog={loading && !known ? [] : [{ ...catalog[0]!, id: 'antigravity-acp' }]}
         loading={loading}
         onSelect={(selection) => { selections.push(selection); }}
         onSetup={() => {}}
@@ -343,15 +362,22 @@ test('the picker shows a generic loading state until the executor catalog arrive
     await click(dom.document.querySelector('.maka-executor-selector'));
     assert.ok(dom.document.querySelector('.maka-executor-picker-entry-status[role="status"]')?.textContent?.includes('正在读取执行者与模型'));
     assert.ok(![...dom.document.querySelectorAll<HTMLButtonElement>('.maka-executor-picker-rail button')]
-      .some((button) => button.textContent?.includes('Antigravity')));
+      .some((button) => button.getAttribute('aria-label') === 'Antigravity'));
     assert.equal(dom.document.querySelectorAll('.maka-executor-picker-model').length, 0);
     assert.deepEqual(selections, []);
 
     await render(false);
     assert.equal([...dom.document.querySelectorAll('.maka-executor-picker-rail button')]
-      .filter((button) => button.textContent?.includes('Antigravity')).length, 1);
+      .filter((button) => button.getAttribute('aria-label') === 'Antigravity').length, 1);
+    await render(true, true);
+    const agentStatus = dom.document.querySelector('.maka-executor-picker-agent-item .maka-executor-picker-agent-status');
+    assert.equal(agentStatus?.getAttribute('aria-label'), 'Antigravity · 正在更新状态…');
+    assert.equal(dom.document.querySelector('.maka-executor-picker-native-entry .maka-executor-picker-agent-status'), null);
+    assert.equal(dom.document.querySelector('.maka-executor-picker-rail > [role="status"]'), null);
+    await render(false);
+    assert.equal(dom.document.querySelector('.maka-executor-picker-agent-status'), null);
     await click([...dom.document.querySelectorAll<HTMLButtonElement>('.maka-executor-picker-rail button')]
-      .find((button) => button.textContent?.includes('Antigravity')));
+      .find((button) => button.getAttribute('aria-label') === 'Antigravity'));
     await click([...dom.document.querySelectorAll('.maka-executor-picker-model')]
       .find((model) => model.textContent?.includes('Gemini 3.8 Flash')));
     assert.deepEqual(selections, [{ executorId: 'antigravity-acp', configuration: { model: 'model-0' } }]);
@@ -428,9 +454,9 @@ test('failed Antigravity discovery closes the picker before opening external-age
     await click(dom.document.querySelector('.maka-executor-selector'));
     await render(false);
     await click([...dom.document.querySelectorAll<HTMLButtonElement>('.maka-executor-picker-rail button')]
-      .find((button) => button.textContent?.includes('Antigravity')));
+      .find((button) => button.getAttribute('aria-label') === 'Antigravity'));
     assert.ok(dom.document.querySelector('.maka-executor-picker-models')?.textContent?.includes('当前不可用'));
-    await click(dom.document.querySelector('.maka-executor-picker-readiness button'));
+    await click(dom.document.querySelector('.maka-executor-picker-manage'));
     assert.equal(setupOpened, true);
     assert.equal(dom.document.querySelector('.maka-executor-selector')?.getAttribute('aria-expanded'), 'false');
   } finally {
@@ -470,7 +496,7 @@ for (const nativeModel of ['native-model', 'native-model-2']) {
       await act(async () => { element.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
     };
     const button = (text: string) => [...dom.document.querySelectorAll('button')].find(
-      (element) => element.textContent === text,
+      (element) => (element.getAttribute('aria-label') ?? element.textContent) === text,
     );
     try {
       await dom.render(<Harness />);
@@ -554,7 +580,7 @@ test('executor choice shares the native searchable list and exposes every extern
     assert.ok(dom.document.querySelector('.maka-executor-picker-native .modelPickerOptionLabel bdi'), 'reuse main label formatting');
     assert.equal(dom.document.querySelectorAll('.maka-executor-picker-native [role="option"]').length, 2);
     const antigravity = [...dom.document.querySelectorAll<HTMLButtonElement>('button')].find(
-      (button) => button.textContent?.includes('Antigravity'),
+      (button) => button.getAttribute('aria-label') === 'Antigravity',
     );
     assert.ok(antigravity);
     await act(async () => {
@@ -582,7 +608,7 @@ test('executor choice shares the native searchable list and exposes every extern
     });
     await click('.maka-executor-selector');
     const maka = [...dom.document.querySelectorAll<HTMLButtonElement>('button')].find(
-      (button) => button.textContent === 'Maka',
+      (button) => button.getAttribute('aria-label') === 'Maka',
     );
     assert.ok(maka);
     await act(async () => {
@@ -713,7 +739,7 @@ test('unavailable executors can be inspected but never committed', async () => {
     assert.ok(trigger);
     await act(() => trigger.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
     const entry = [...dom.document.querySelectorAll<HTMLButtonElement>('button')].find((button) =>
-      button.textContent?.includes('Antigravity'),
+      button.getAttribute('aria-label') === 'Antigravity',
     );
     assert.ok(entry);
     await act(() => entry.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
@@ -750,7 +776,7 @@ test('native thinking stays beside the composer model trigger and follows execut
     assert.ok(element);
     await act(async () => { element.dispatchEvent(new dom.window.Event('click', { bubbles: true })); });
   };
-  const button = (text: string) => [...dom.document.querySelectorAll('button')].find((element) => element.textContent === text);
+  const button = (text: string) => [...dom.document.querySelectorAll('button')].find((element) => (element.getAttribute('aria-label') ?? element.textContent) === text);
   try {
     await dom.render(<Harness />);
     const thinking = () => dom.document.querySelector('.maka-thinking-level-selector');
@@ -858,7 +884,7 @@ for (const initial of [undefined, 'flash-high', 'flash-mid']) test(`grouped exte
     await dom.render(<Harness />);
     if (initial) assert.ok(thinking(), 'external intensity is beside the composer model trigger');
     await openModels();
-    if (!initial) await click([...dom.document.querySelectorAll('button')].find(el => el.textContent === 'Antigravity'));
+    if (!initial) await click([...dom.document.querySelectorAll('button')].find(el => el.getAttribute('aria-label') === 'Antigravity'));
     assert.equal(dom.document.querySelectorAll('.maka-executor-picker-model').length, 3);
     if (initial === 'flash-high') rejectNext = true;
     await click(row('Gemini 3.1 Pro'));

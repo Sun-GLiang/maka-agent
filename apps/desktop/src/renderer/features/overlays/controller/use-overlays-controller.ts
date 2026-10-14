@@ -96,6 +96,7 @@ export function useOverlaysController(): OverlaysController {
       openProjectSettings: (profileId) => openSettingsWith({ kind: 'project', profileId }),
       openProviderCatalog: () => openSettingsWith({ kind: 'provider-catalog' }),
       openConnectionDetail: (slug) => openSettingsWith({ kind: 'connection-detail', slug }),
+      openExternalAgentSettings: (executorId) => openSettingsWith({ kind: 'external-agent', executorId }),
       openProviderCreate: (providerType) =>
         openSettingsWith({ kind: 'provider-create', providerType }),
       setSettingsProfileId: (profileId) =>
