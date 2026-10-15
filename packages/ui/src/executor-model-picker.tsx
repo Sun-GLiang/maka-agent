@@ -23,6 +23,7 @@ import type {
   ExecutorCatalogEntry,
   ExecutorConfiguration,
   ExecutorSelection,
+  ExecutorReadiness,
 } from '@maka/core/executor-catalog';
 export type { ExecutorSelection } from '@maka/core/executor-catalog';
 import type { ProviderType } from '@maka/core/llm-connections';
@@ -35,6 +36,7 @@ import { providerMarkIcon } from './model-picker-internals.js';
 import { executorModelGroup, highestExecutorModelVariant } from './executor-model-presentation.js';
 import { ThinkingLevelSelector } from './chat-model-switcher.js';
 import { useUiLocale } from './locale-context.js';
+import { dotForStatus, type StatusSemantic } from './status-vocabulary.js';
 
 export interface ExecutorModelPickerProps {
   catalog: readonly ExecutorCatalogEntry[];
@@ -177,6 +179,16 @@ export function executorCopy(locale: UiLocale): ExecutorCopy {
 }
 
 const NATIVE = '__maka_native__';
+
+const READINESS_STATUS: Record<Exclude<ExecutorReadiness, 'ready'>, StatusSemantic> = {
+  authentication_required: 'attention',
+  restorable: 'attention',
+  restoring: 'active',
+  unavailable: 'error',
+  restore_failed: 'error',
+  history_only: 'error',
+  history_gap: 'error',
+};
 
 /** Browsing is local; choosing a model commits executor and configuration together. */
 export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
@@ -330,7 +342,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                   icon={
                     <span className="maka-executor-picker-mark" aria-hidden="true">
                       {props.renderExecutorMark?.(entry) ?? <Bot size={24} />}
-                      {!props.loading && entry.readiness !== 'ready' && <StatusDot className="maka-executor-picker-status-dot" variant="warning" label={copy[entry.readiness]} />}
+                      {!props.loading && entry.readiness !== 'ready' && <StatusDot className="maka-executor-picker-status-dot" variant={dotForStatus(READINESS_STATUS[entry.readiness])} label={copy[entry.readiness]} />}
                     </span>
                   }
                 />

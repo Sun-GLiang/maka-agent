@@ -33,6 +33,7 @@ import { NewChatModelPicker } from '../chat-model-switcher.js';
 import { Composer, type ComposerHandle } from '../composer.js';
 import { exactModelChoiceValue } from '../chat-model-helpers.js';
 import { LocaleProvider } from '../locale-context.js';
+import { ModelPickerPanel } from '../model-picker-panel.js';
 import { installTranscriptDom } from './transcript-test-dom.js';
 
 const catalog: ExecutorModelPickerProps['catalog'] = [
@@ -76,6 +77,56 @@ const choices: ChatModelChoice[] = [
     thinkingLevels: [],
   },
 ];
+
+test('executor rail distinguishes attention, active recovery and failures through status dots', async () => {
+  const dom = installTranscriptDom();
+  const cases = [
+    ['ready', undefined],
+    ['authentication_required', 'warning'],
+    ['restorable', 'warning'],
+    ['restoring', 'accent'],
+    ['unavailable', 'error'],
+    ['restore_failed', 'error'],
+    ['history_only', 'error'],
+    ['history_gap', 'error'],
+  ] as const;
+  try {
+    for (const [readiness, variant] of cases) {
+      const render = (loading = false) => dom.render(<LocaleProvider locale="en"><ExecutorModelPicker
+        catalog={[{ ...catalog[0]!, readiness }]} loading={loading}
+        onSelect={() => assert.fail('status changes must not commit a model')}
+        onSetup={() => {}} onRetry={() => {}} onNewTask={() => {}}
+      /></LocaleProvider>);
+      await render();
+      if (dom.document.querySelector('.maka-executor-selector button')?.getAttribute('aria-expanded') !== 'true') {
+        await act(async () => dom.document.querySelector('.maka-executor-selector button')!
+          .dispatchEvent(new dom.window.Event('click', { bubbles: true })));
+      }
+      const row = dom.document.querySelector('.maka-executor-picker-agent-item')!;
+      const dot = row.querySelector('.astryx-status-dot');
+      assert.equal(dot?.getAttribute('data-variant'), variant, readiness);
+      if (variant) assert.ok(row.querySelector('button')?.getAttribute('aria-description'), readiness);
+      await render(true);
+      assert.equal(row.querySelector('.astryx-status-dot'), null, 'refresh replaces stale status with progress');
+      assert.ok(row.querySelector('[role="status"]'), 'refresh remains announced');
+    }
+  } finally { await dom.cleanup(); }
+});
+
+test('an empty model catalog uses a compact empty state without a misleading clear action', async () => {
+  const dom = installTranscriptDom();
+  try {
+    await dom.render(<LocaleProvider locale="en"><ModelPickerPanel
+      options={[]} onSelect={() => assert.fail('an empty catalog cannot select')}
+    /></LocaleProvider>);
+    const empty = dom.document.querySelector('.astryx-empty-state');
+    assert.ok(empty);
+    assert.equal(empty.getAttribute('role'), 'status');
+    assert.match(empty.textContent ?? '', /No models available/);
+    assert.equal(empty.querySelector('button'), null);
+    assert.equal(dom.document.querySelector('[role="listbox"]')?.hasAttribute('hidden'), true);
+  } finally { await dom.cleanup(); }
+});
 
 test('provider mode selector preserves the model and commits only a real mode ID', async () => {
   const dom = installTranscriptDom();

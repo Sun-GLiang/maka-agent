@@ -17,8 +17,8 @@
  * under the License.
  */
 
-import { createContext, useId, useState, type KeyboardEvent, type ReactNode } from 'react';
-import { Button, TextInput, isImeKeyEvent, useCombobox } from '@astryxdesign/core';
+import { createContext, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { Button, EmptyState, TextInput, isImeKeyEvent, useCombobox } from '@astryxdesign/core';
 import { useUiLocale } from './locale-context.js';
 import { getSharedUiCopy } from './shared-ui-copy.js';
 
@@ -48,6 +48,7 @@ export function ModelPickerPanel(props: {
   const copy = getSharedUiCopy(locale).modelPicker;
   const searchPlaceholder = props.searchPlaceholder ?? copy.searchPlaceholder;
   const [query, setQuery] = useState('');
+  const searchRef = useRef<HTMLInputElement>(null);
   const listboxId = useId();
   const normalized = query.trim().toLocaleLowerCase(locale);
   const options = props.options.filter((option) => !normalized || (
@@ -75,6 +76,7 @@ export function ModelPickerPanel(props: {
   return (
     <>
       <TextInput
+        ref={searchRef}
         className="maka-executor-picker-search"
         label={searchPlaceholder}
         isLabelHidden
@@ -92,7 +94,7 @@ export function ModelPickerPanel(props: {
         // Portalled input clicks must not reach ChatComposer's click-to-focus body.
         onClick={(event) => event.stopPropagation()}
       />
-      <div id={listboxId} className="maka-executor-picker-model-list" role="listbox" aria-label={searchPlaceholder}>
+      <div id={listboxId} className="maka-executor-picker-model-list" role="listbox" aria-label={searchPlaceholder} hidden={options.length === 0}>
         {options.map((option, index) => (
           <div key={option.value} className="maka-executor-picker-option">
             {option.group && option.group !== options[index - 1]?.group ? (
@@ -123,8 +125,22 @@ export function ModelPickerPanel(props: {
             </Button>
           </div>
         ))}
-        {options.length === 0 ? <span role="status">{normalized ? copy.noResults : copy.empty}</span> : null}
       </div>
+      {options.length === 0 && <EmptyState
+        isCompact
+        title={normalized ? copy.noResults : copy.empty}
+        actions={normalized ? <Button
+          label={copy.clearSearch}
+          variant="ghost"
+          size="sm"
+          onClick={(event) => {
+            event.stopPropagation();
+            setQuery('');
+            combobox.setHighlightedIndex(-1);
+            searchRef.current?.focus();
+          }}
+        /> : undefined}
+      />}
     </>
   );
 }
