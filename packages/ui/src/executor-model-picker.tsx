@@ -262,10 +262,12 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
       label={copy.manage}
       variant="ghost"
       size={showExecutorRail ? 'lg' : 'sm'}
-      icon={<Settings size={showExecutorRail ? 24 : ICON_SIZE.control} aria-hidden="true" />}
+      icon={showExecutorRail
+        ? <span className="maka-executor-picker-mark" aria-hidden="true"><Settings size={24} /></span>
+        : <Settings size={ICON_SIZE.control} aria-hidden="true" />}
       isIconOnly={showExecutorRail}
       tooltip={showExecutorRail ? copy.manage : undefined}
-      className="maka-executor-picker-entry maka-executor-picker-action maka-executor-picker-manage"
+      className="maka-executor-picker-entry maka-executor-picker-manage"
       onClick={openSetup}
     />
   );
@@ -297,6 +299,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
         {() => (
           <div className="maka-executor-picker-panel" data-layout={showExecutorRail ? 'split' : 'single'}>
             {showExecutorRail && <nav className="maka-executor-picker-rail" aria-label={copy.title}>
+              <div className="maka-executor-picker-rail-item maka-executor-picker-native-entry" data-active={browsedId === NATIVE ? 'true' : undefined}>
               <Button
                 label="Maka"
                 variant="ghost"
@@ -304,15 +307,15 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                 isIconOnly
                 tooltip="Maka"
                 icon={<span className="maka-executor-picker-mark" aria-hidden="true">{props.renderExecutorMark?.() ?? <MakaWordmark width={24} />}</span>}
-                className="maka-executor-picker-entry maka-executor-picker-native-entry"
-                data-active={browsedId === NATIVE ? 'true' : undefined}
+                className="maka-executor-picker-entry"
                 aria-pressed={browsedId === NATIVE}
                 isDisabled={lockedTo !== undefined && lockedTo !== NATIVE}
                 onClick={() => browse(NATIVE)}
               />
+              </div>
               <div className="maka-executor-picker-agents">
               {props.catalog.map((entry) => (
-                <div key={entry.id} className="maka-executor-picker-agent-item">
+                <div key={entry.id} className="maka-executor-picker-rail-item maka-executor-picker-agent-item" data-active={browsedId === entry.id ? 'true' : undefined}>
                 <Button
                   label={entry.displayName}
                   variant="ghost"
@@ -321,7 +324,6 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                   tooltip={props.loading ? `${entry.displayName} · ${copy.refreshing}` : entry.readiness === 'ready' ? entry.displayName : `${entry.displayName} · ${copy[entry.readiness]}`}
                   aria-description={props.loading ? copy.refreshing : entry.readiness === 'ready' ? undefined : copy[entry.readiness]}
                   className="maka-executor-picker-entry"
-                  data-active={browsedId === entry.id ? 'true' : undefined}
                   aria-pressed={browsedId === entry.id}
                   isDisabled={lockedTo !== undefined && lockedTo !== entry.id}
                   onClick={() => browse(entry.id)}
@@ -336,7 +338,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                 </div>
               ))}
               </div>
-              {manageButton}
+              <div className="maka-executor-picker-rail-item maka-executor-picker-rail-manage">{manageButton}</div>
             </nav>}
             <section className="maka-executor-picker-models" aria-live="polite">
               {!showExecutorRail || browsedId === NATIVE ? (
