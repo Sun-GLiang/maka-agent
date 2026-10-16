@@ -294,7 +294,7 @@ export const ExistingExecutorConversation: Story = {
     const body = within(document.body);
     const trigger = await body.findByRole('button', { name: /Gemini 3.8 Flash/ });
     await userEvent.click(trigger);
-    const search = await body.findByRole('combobox');
+    const search = await body.findByRole('combobox', { expanded: true });
     await userEvent.click(search);
     await userEvent.type(search, 'Pro');
     await expect(search).toHaveFocus();

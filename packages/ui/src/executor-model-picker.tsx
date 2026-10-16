@@ -18,7 +18,7 @@
  */
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Button, ComplexSelector, type ComplexSelectorHandle, EmptyState, Popover, Spinner, StatusDot } from '@astryxdesign/core';
+import { Button, ComplexSelector, type ComplexSelectorHandle, EmptyState, Popover, Spinner, Stack, StatusDot } from '@astryxdesign/core';
 import { Selector } from '@astryxdesign/core/Selector';
 import type {
   ExecutorCatalogEntry,
@@ -300,6 +300,8 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
   return (
     <>
       {props.fixed && selected?.readiness === 'ready' ? (
+        // Selector portals still bubble through the Composer's click-to-focus body.
+        <Stack direction="horizontal" gap={0} className="maka-model-picker-root" onClick={(event) => event.stopPropagation()}>
         <Selector
           label={`${getConversationCopy(locale).model.switchAriaLabel}: ${modelLabel}`}
           isLabelHidden
@@ -333,6 +335,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
             if (model !== undefined) void chooseModel({ model }, selected);
           }}
         />
+        </Stack>
       ) : <ComplexSelector
         label={triggerLabel}
         isLabelHidden
