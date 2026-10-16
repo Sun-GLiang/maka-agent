@@ -78,6 +78,41 @@ const choices: ChatModelChoice[] = [
   },
 ];
 
+test('an existing external session uses the native single-column model Selector', async () => {
+  const dom = installTranscriptDom();
+  const selections: ExecutorSelection[] = [];
+  const click = async (element: Element | null | undefined) => {
+    assert.ok(element);
+    await act(async () => element.dispatchEvent(new dom.window.Event('click', { bubbles: true })));
+  };
+  try {
+    await dom.render(<LocaleProvider locale="en"><ExecutorModelPicker
+      catalog={[...catalog, { ...catalog[0]!, id: 'other-agent', displayName: 'Other agent' }]}
+      selection={{ executorId: 'antigravity', configuration: { model: 'model-0' } }}
+      fixed
+      renderProviderMark={(type) => <span data-provider-mark={type} />}
+      onSelect={(next) => { if (next) selections.push(next); }}
+      onSetup={() => assert.fail('Existing sessions only select models')}
+      onRetry={() => {}} onNewTask={() => {}}
+    /></LocaleProvider>);
+    const trigger = dom.document.querySelector('.maka-executor-selector');
+    assert.equal(trigger?.textContent, 'Gemini 3.8 Flash', 'the trigger shows the model, like Maka');
+    await click(trigger);
+    assert.equal(dom.document.querySelector('.maka-executor-picker-rail'), null);
+    assert.equal(dom.document.querySelector('.maka-executor-picker-manage'), null);
+    assert.ok(dom.document.querySelector('.astryx-selector-popup input'), 'use native Selector search');
+    const rows = [...dom.document.querySelectorAll('[role="option"]')];
+    assert.equal(rows.length, catalog[0]!.models.length);
+    assert.equal(dom.document.querySelectorAll('.modelPickerChatOption').length, rows.length);
+    assert.ok(rows[0]?.querySelector('[data-provider-mark="google"]'));
+    assert.equal(rows[0]?.textContent, 'Gemini 3.8 Flash', 'no model ID subtitle');
+    assert.equal(rows[0]?.getAttribute('aria-selected'), 'true');
+    await click(rows.find(row => row.textContent === 'Agent model 1'));
+    assert.deepEqual(selections, [{ executorId: 'antigravity', configuration: { model: 'model-1' } }]);
+    assert.equal(dom.document.querySelector('.maka-executor-selector button')?.getAttribute('aria-expanded'), 'false', 'selection closes the native popup');
+  } finally { await dom.cleanup(); }
+});
+
 test('executor rail distinguishes attention, active recovery and failures through status dots', async () => {
   const dom = installTranscriptDom();
   const cases = [
@@ -218,7 +253,7 @@ for (const option of ['model', 'mode'] as const) {
         assert.deepEqual(requested[0]!.configuration, option === 'mode'
           ? { mode: 'auto' } : { model: 'model-1' });
         if (option === 'mode') {
-          const modelTrigger = dom.document.querySelector('.maka-executor-selector button');
+          const modelTrigger = dom.document.querySelector('button.maka-executor-selector, .maka-executor-selector button');
           assert.ok(modelTrigger?.hasAttribute('disabled') || modelTrigger?.getAttribute('aria-disabled') === 'true',
             'model changes must wait for mode confirmation');
         }

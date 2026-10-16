@@ -19,6 +19,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button, ComplexSelector, type ComplexSelectorHandle, EmptyState, Popover, Spinner, StatusDot } from '@astryxdesign/core';
+import { Selector } from '@astryxdesign/core/Selector';
 import type {
   ExecutorCatalogEntry,
   ExecutorConfiguration,
@@ -32,10 +33,12 @@ import { AlertCircle, Bot, History, KeyRound, RefreshCcw, Settings, ICON_SIZE } 
 import { MakaWordmark } from './maka-wordmark.js';
 import { ModelPickerPanel, ModelPickerPanelContext } from './model-picker-panel.js';
 import { ComposerModelLabel } from './composer-model-label.js';
-import { providerMarkIcon } from './model-picker-internals.js';
+import { providerMarkIcon, renderChatModelPickerOption } from './model-picker-internals.js';
 import { executorModelGroup, highestExecutorModelVariant } from './executor-model-presentation.js';
 import { ThinkingLevelSelector } from './chat-model-switcher.js';
 import { useUiLocale } from './locale-context.js';
+import { getSharedUiCopy } from './shared-ui-copy.js';
+import { getConversationCopy } from './conversation-copy.js';
 import { dotForStatus, type StatusSemantic } from './status-vocabulary.js';
 
 export interface ExecutorModelPickerProps {
@@ -220,7 +223,8 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
   const selectedModel = props.selection?.configuration.model ?? selected?.currentModel;
   const selectedGroup = selected && executorModelGroup(selected, selectedModel);
   const currentGroup = browsed && executorModelGroup(browsed, currentModel);
-  const triggerLabel = props.selection
+  const modelLabel = selectedGroup?.name ?? selected?.models.find(model => model.id === selectedModel)?.name ?? selectedModel ?? copy.default;
+  const triggerLabel = props.fixed && props.selection ? modelLabel : props.selection
     ? `${selected?.displayName ?? props.selection.executorId} · ${
         selectedGroup?.name ?? selected?.models.find(model => model.id === selectedModel)?.name ?? selectedModel ?? copy.default
       }`
@@ -265,7 +269,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
   const lockedTo = props.fixed ? props.selection?.executorId ?? NATIVE : undefined;
   // Configured agents stay visible regardless of discovery/authentication state.
   // A selected executor also keeps its recovery surface if it is no longer registered.
-  const showExecutorRail = props.catalog.length > 0 || !!props.selection;
+  const showExecutorRail = !props.fixed && (props.catalog.length > 0 || !!props.selection);
   const loadingStatus = props.loading && !showExecutorRail ? (
     <span className="maka-executor-picker-entry-status" role="status">{copy.loading}</span>
   ) : null;
@@ -295,7 +299,41 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
   ) : null;
   return (
     <>
-      <ComplexSelector
+      {props.fixed && selected?.readiness === 'ready' ? (
+        <Selector
+          label={`${getConversationCopy(locale).model.switchAriaLabel}: ${modelLabel}`}
+          isLabelHidden
+          options={selected.models.flatMap((model) => {
+            const group = executorModelGroup(selected, model.id);
+            if (group && selected.models.find(candidate => group.variants.some(variant => variant.modelId === candidate.id))?.id !== model.id) return [];
+            return [{
+              value: group ? `group:${group.id}` : `model:${model.id}`,
+              label: group?.name ?? model.name,
+              icon: providerMarkIcon(model.providerType, props.renderProviderMark),
+            }];
+          })}
+          value={selectedGroup ? `group:${selectedGroup.id}` : `model:${selectedModel}`}
+          hasSearch
+          searchPlaceholder={getSharedUiCopy(locale).modelPicker.searchPlaceholder}
+          emptyText={<span className="modelPickerChatOption">{getSharedUiCopy(locale).modelPicker.empty}</span>}
+          emptySearchText={<span className="modelPickerChatOption">{getSharedUiCopy(locale).modelPicker.noResults}</span>}
+          variant="ghost"
+          size="sm"
+          placement="above"
+          presentation={props.presentation === 'wheel' ? 'popover' : props.presentation}
+          isReadOnly={props.isReadOnly}
+          isDisabled={props.disabled || configurationPending || !selected.supportsModelChange}
+          placeholder={modelLabel}
+          className="maka-model-switcher-trigger maka-executor-selector"
+          renderOption={renderChatModelPickerOption}
+          renderValue={(option) => <ComposerModelLabel text={option.label ?? option.value} />}
+          onChange={(value) => {
+            const group = selected.modelGroups?.find(candidate => `group:${candidate.id}` === value);
+            const model = group ? highestExecutorModelVariant(group) : value.slice('model:'.length);
+            if (model !== undefined) void chooseModel({ model }, selected);
+          }}
+        />
+      ) : <ComplexSelector
         label={triggerLabel}
         isLabelHidden
         value={props.selection}
@@ -353,7 +391,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
               <div className="maka-executor-picker-rail-item maka-executor-picker-rail-manage">{manageButton}</div>
             </nav>}
             <section className="maka-executor-picker-models" aria-live="polite">
-              {!showExecutorRail || browsedId === NATIVE ? (
+              {browsedId === NATIVE ? (
                 <ModelPickerPanelContext.Provider value={{ onSelected: () => selector.current?.close() }}>
                   <div className="maka-executor-picker-native">{props.children}</div>
                 </ModelPickerPanelContext.Provider>
@@ -419,7 +457,7 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
                 />
               )}
             </section>
-            {!showExecutorRail && (
+            {!props.fixed && !showExecutorRail && (
               <div className="maka-executor-picker-footer">
                 {loadingStatus}
                 {manageButton}
@@ -428,7 +466,8 @@ export function ExecutorModelPicker(props: ExecutorModelPickerProps) {
             )}
           </div>
         )}
-      </ComplexSelector>
+      </ComplexSelector>}
+      {props.fixed && selected?.readiness === 'ready' && selectionFailed ? <span role="alert">{copy.selectionFailed}</span> : null}
       {props.selection ? <ExecutorThinkingLevelSelector {...props} disabled={props.disabled || configurationPending} /> : props.nativeThinkingControl}
       <ExecutorModeSelector {...props} disabled={props.disabled || selecting} onPendingChange={setModePending} />
       {(selectedUnavailable || selectedInvalid || props.error) && (

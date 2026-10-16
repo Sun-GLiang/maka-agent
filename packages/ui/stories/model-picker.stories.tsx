@@ -206,19 +206,29 @@ const ANTIGRAVITY_CATALOG: readonly ExecutorCatalogEntry[] = [{
 
 // Real path: new task → composer footer model trigger. The ready catalog is a
 // fixture using model IDs observed from official ACP 1.1.1; no Agent runs here.
-function ExecutorPickerFrame({ loading }: { loading: boolean }) {
-  const [selection, setSelection] = useState<ExecutorSelection>();
+function ExecutorPickerFrame({ loading, existing = false }: { loading: boolean; existing?: boolean }) {
+  const [selection, setSelection] = useState<ExecutorSelection | undefined>(existing
+    ? { executorId: 'antigravity-acp', configuration: { model: 'gemini-3.8-flash-high' } }
+    : undefined);
   return <div style={{ width: 780, maxWidth: '100%', marginTop: 360 }}>
     <Composer
       executorPicker={{
         catalog: loading ? [] : ANTIGRAVITY_CATALOG,
         loading,
+        fixed: existing,
         selection,
         onSelect: setSelection,
         onSetup: () => {},
         onRetry: () => {},
         onNewTask: () => {},
       }}
+      activeSession={existing ? {
+        id: 'storybook-external-session', name: 'External session',
+        isFlagged: false, isArchived: false, labels: [], hasUnread: false,
+        status: 'active', backend: 'plugin-executor', connectionLocked: true, llmConnectionSlug: '',
+        model: selection?.configuration.model ?? '', permissionMode: 'ask',
+      } : undefined}
+      renderProviderMark={providerMark}
       modelChoices={CHOICES}
       newChatModel={{ llmConnectionId: 'connection-openai-main', llmConnectionSlug: 'openai-main', model: 'gpt-5' }}
       onPickNewChatModel={() => {}}
@@ -273,6 +283,35 @@ export const ExecutorCatalogReady: Story = {
     // the footer reflows and the panel's group view lands a frame later.
     await waitFor(() => expect(body.getByText('Gemini 3.8 Flash')).toBeVisible());
     await waitFor(() => expect(body.getByText('Gemini 3.1 Pro')).toBeVisible());
+  },
+};
+
+// Real path: existing external Agent conversation → composer model trigger.
+// Reuse the real Composer frame to check search focus and native popup geometry.
+export const ExistingExecutorConversation: Story = {
+  render: () => <ExecutorPickerFrame loading={false} existing />,
+  play: async () => {
+    const body = within(document.body);
+    const trigger = await body.findByRole('button', { name: /Gemini 3.8 Flash/ });
+    await userEvent.click(trigger);
+    const search = await body.findByRole('combobox');
+    await userEvent.click(search);
+    await userEvent.type(search, 'Pro');
+    await expect(search).toHaveFocus();
+    await expect(body.getAllByRole('option')).toHaveLength(1);
+    await userEvent.keyboard('{ArrowDown}{Enter}');
+    await waitFor(() => expect(trigger).toHaveTextContent('Gemini 3.1 Pro'));
+    await userEvent.click(trigger);
+    await waitFor(() => expect(body.getAllByRole('option')).toHaveLength(2));
+    await expect(document.querySelector('.maka-executor-picker-rail')).toBeNull();
+    const popup = document.querySelector<HTMLElement>('.astryx-selector-popup')!;
+    await expect(popup.getBoundingClientRect().width).toBeLessThanOrEqual(340);
+    for (const row of body.getAllByRole('option')) {
+      await expect(row.querySelector('.modelPickerChatOption')).not.toBeNull();
+    }
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(trigger).toHaveFocus());
+    await userEvent.click(trigger);
   },
 };
 
