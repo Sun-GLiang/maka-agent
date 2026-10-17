@@ -165,6 +165,7 @@ export class PluginExecutorBackend implements AgentBackend {
   ): Promise<ExecutionSettlement> {
     const turnId = input.turnId;
     let thinkingText = '';
+    let outputText = '';
     const toolUseIds = new Map<string, string>();
     const toolOutputSequences = new Map<string, number>();
     let result: PluginExecutorResult | undefined;
@@ -195,6 +196,7 @@ export class PluginExecutorBackend implements AgentBackend {
           },
           onEvent: (event) => {
             if (event.type === 'thinking_delta') thinkingText += event.text;
+            if (event.type === 'output_delta') outputText += event.text;
             this.#publishOutputEvent(
               turnId,
               messageId,
@@ -214,6 +216,20 @@ export class PluginExecutorBackend implements AgentBackend {
     }
 
     this.#closeOptionalOutput(turnId, messageId, thinkingText, toolUseIds, queue);
+    // Deltas are only live presentation. Close the interrupted text before the
+    // terminal event seals the ledger, including updates drained during cancel.
+    // Successful results keep their provider-authoritative completion text.
+    if (outputText && (failed || result?.status !== 'completed')) {
+      queue.push({
+        type: 'text_complete',
+        id: this.#newId(),
+        turnId,
+        ts: this.#now(),
+        messageId,
+        text: outputText,
+        interrupted: true,
+      });
+    }
     if (failed) {
       if (signal.aborted)
         this.#publishCancellation(turnId, { status: 'cancelled', source: 'caller' }, queue);

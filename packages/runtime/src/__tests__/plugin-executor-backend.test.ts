@@ -194,10 +194,12 @@ test('oversized executor completion fails without emitting a large text_complete
   const events = await collect(backend.send({ turnId: 'turn-a', text: 'task' }));
   assert.deepEqual(
     events.map((event) => event.type),
-    ['text_delta', 'error', 'complete'],
+    ['text_delta', 'text_complete', 'error', 'complete'],
   );
-  assert.match(events[1]?.type === 'error' ? events[1].message : '', /completion text exceeds/u);
-  assert.equal(events[2]?.type === 'complete' ? events[2].stopReason : undefined, 'error');
+  assert.equal(events[1]?.type === 'text_complete' ? events[1].text : undefined, 'streamed');
+  assert.equal(events[1]?.type === 'text_complete' ? events[1].interrupted : undefined, true);
+  assert.match(events[2]?.type === 'error' ? events[2].message : '', /completion text exceeds/u);
+  assert.equal(events[3]?.type === 'complete' ? events[3].stopReason : undefined, 'error');
   await root.fiber.dispose();
 });
 
