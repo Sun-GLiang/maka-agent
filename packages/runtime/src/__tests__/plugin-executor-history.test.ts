@@ -32,7 +32,13 @@ import { Context } from '../plugin-kernel.js';
 import { BackendRegistry, SessionManager } from '../session-manager.js';
 import { projectRuntimeEventsToStoredMessages } from '../runtime-event-read-model.js';
 
-for (const outcome of ['cancelled', 'abort-error', 'failed', 'transport-error'] as const) {
+for (const outcome of [
+  'cancelled',
+  'cancelled-oversized',
+  'abort-error',
+  'failed',
+  'transport-error',
+] as const) {
   test(`interrupted executor output survives SQLite reopen: ${outcome}`, {
     timeout: 10_000,
   }, async () => {
@@ -42,7 +48,8 @@ for (const outcome of ['cancelled', 'abort-error', 'failed', 'transport-error'] 
     const events = createWorkspaceRuntimeStore(directory);
     const root = new Context();
     const service = new PluginExecutorService(root);
-    const cancelling = outcome === 'cancelled' || outcome === 'abort-error';
+    const cancelling =
+      outcome === 'cancelled' || outcome === 'cancelled-oversized' || outcome === 'abort-error';
     root
       .extend({
         maka: { rootId: 'profile', packageId: 'fixture', entryId: 'provider', generation: 1 },
@@ -57,10 +64,14 @@ for (const outcome of ['cancelled', 'abort-error', 'failed', 'transport-error'] 
             );
           }
           // Cancellation still drains updates until the provider settles.
+          if (outcome === 'cancelled-oversized') {
+            for (let index = 0; index < 17; index++)
+              context.emit({ type: 'output_delta', text: 'x'.repeat(16 * 1024) });
+          }
           context.emit({ type: 'output_delta', text: ' and final update.' });
           if (outcome === 'abort-error' || outcome === 'transport-error')
             throw new Error('transport ended');
-          return outcome === 'cancelled'
+          return cancelling
             ? { status: 'cancelled', providerStopReason: 'cancelled' }
             : { status: 'failed', message: 'provider failed' };
         },
@@ -108,7 +119,15 @@ for (const outcome of ['cancelled', 'abort-error', 'failed', 'transport-error'] 
           invocations,
         }).messages.filter((message) => message.type === 'assistant');
         assert.equal(answers.length, 1, 'the visible partial answer survives exactly once');
-        assert.equal(answers[0]?.text, '保留 before stop and final update.');
+        const marker = '\n[Response truncated]';
+        const expected =
+          outcome === 'cancelled-oversized'
+            ? '保留 before stop' +
+              'x'.repeat(256 * 1024 - Buffer.byteLength('保留 before stop' + marker)) +
+              marker
+            : '保留 before stop and final update.';
+        assert.equal(answers[0]?.text, expected);
+        assert.ok(Buffer.byteLength(answers[0]!.text) <= 256 * 1024);
         const saved = ledger.filter(
           (event) => event.role === 'model' && event.content?.kind === 'text',
         );

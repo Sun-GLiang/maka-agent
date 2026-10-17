@@ -203,6 +203,97 @@ test('oversized executor completion fails without emitting a large text_complete
   await root.fiber.dispose();
 });
 
+for (const outcome of ['cancelled', 'failed', 'transport-error', 'oversized-completion'] as const) {
+  test(`interrupted executor text stays bounded after ${outcome}`, async () => {
+    const chunk = 'x'.repeat(16 * 1024);
+    const { root, binding } = fixture(async (_request, context) => {
+      for (let index = 0; index < 17; index++) context.emit({ type: 'output_delta', text: chunk });
+      context.emit({ type: 'output_delta', text: 'late update' });
+      if (outcome === 'transport-error') throw new Error('transport ended');
+      if (outcome === 'oversized-completion')
+        return { status: 'completed', text: chunk.repeat(17) };
+      return outcome === 'cancelled'
+        ? { status: 'cancelled' }
+        : { status: 'failed', message: 'provider failed' };
+    });
+    const backend = new PluginExecutorBackend({
+      sessionId: 'session-a',
+      cwd: '/workspace',
+      binding,
+    });
+    try {
+      const events = await collect(backend.send({ turnId: 'turn-a', text: 'task' }));
+      const answers = events.filter((event) => event.type === 'text_complete');
+      assert.equal(answers.length, 1);
+      const answer = answers[0]!;
+      assert.equal(Buffer.byteLength(answer.text), 256 * 1024);
+      assert.equal(answer.interrupted, true);
+      const marker = '\n[Response truncated]';
+      assert.equal(answer.text, 'x'.repeat(256 * 1024 - Buffer.byteLength(marker)) + marker);
+      assert.equal(events.filter((event) => event.type === 'text_delta').length, 18);
+      const terminal = events.find((event) => event.type === 'complete');
+      assert.equal(terminal?.stopReason, outcome === 'cancelled' ? 'user_stop' : 'error');
+    } finally {
+      await backend.dispose();
+      await root.fiber.dispose();
+    }
+  });
+}
+
+for (const scenario of [
+  {
+    name: 'one oversized Unicode delta',
+    chunks: ['中🙂'.repeat(100_000)],
+    expected: '中🙂'.repeat(Math.floor((256 * 1024 - 21) / 7)) + '\n[Response truncated]',
+  },
+  {
+    name: 'a surrogate pair split across deltas at the exact limit',
+    chunks: ['x'.repeat(256 * 1024 - 4), '\ud83d', '\ude42'],
+    expected: 'x'.repeat(256 * 1024 - 4) + '🙂',
+  },
+  {
+    name: 'a Unicode boundary before the truncation marker',
+    chunks: ['x'.repeat(256 * 1024 - 25), '\ud83d', '\ude42', 'z'.repeat(26)],
+    expected: 'x'.repeat(256 * 1024 - 25) + '🙂\n[Response truncated]',
+  },
+]) {
+  test(`interrupted executor text preserves ${scenario.name}`, async () => {
+    const { root, backend } = recordingFixture(async (_request, context) => {
+      for (const text of scenario.chunks) context.emit({ type: 'output_delta', text });
+      return { status: 'cancelled' };
+    });
+    try {
+      const events = await collect(backend.send({ turnId: 'turn-a', text: 'task' }));
+      const answers = events.filter((event) => event.type === 'text_complete');
+      assert.equal(answers.length, 1);
+      assert.equal(answers[0]?.text, scenario.expected);
+      assert.ok(Buffer.byteLength(answers[0]!.text) <= 256 * 1024);
+      assert.equal(Buffer.from(answers[0]!.text, 'utf8').toString('utf8'), answers[0]?.text);
+    } finally {
+      await backend.dispose();
+      await root.fiber.dispose();
+    }
+  });
+}
+
+test('a bounded interrupted buffer does not replace a successful provider answer', async () => {
+  const { root, backend, acknowledged } = recordingFixture(async (_request, context) => {
+    context.emit({ type: 'output_delta', text: 'x'.repeat(256 * 1024 + 1) });
+    return { status: 'completed', text: 'authoritative answer' };
+  });
+  try {
+    const events = await collect(backend.send({ turnId: 'turn-a', text: 'task' }));
+    const answers = events.filter((event) => event.type === 'text_complete');
+    assert.equal(answers.length, 1);
+    assert.equal(answers[0]?.text, 'authoritative answer');
+    assert.equal(answers[0]?.interrupted, undefined);
+    assert.deepEqual(acknowledged, ['session-a/turn-a']);
+  } finally {
+    await backend.dispose();
+    await root.fiber.dispose();
+  }
+});
+
 test('executor backend turns stop into abort and terminal events', async () => {
   let started!: () => void;
   const ready = new Promise<void>((resolve) => {
@@ -233,6 +324,32 @@ test('executor backend turns stop into abort and terminal events', async () => {
     'end_turn',
   );
   await root.fiber.dispose();
+});
+
+test('executor stop releases its drain wait when the consumer detaches', {
+  timeout: 5_000,
+}, async () => {
+  const { root, backend, acknowledged, abandoned } = recordingFixture(async (_request, context) => {
+    context.emit({ type: 'output_delta', text: 'before stop' });
+    await new Promise<void>((resolve) =>
+      context.signal.addEventListener('abort', () => resolve(), { once: true }),
+    );
+    context.emit({ type: 'output_delta', text: 'after stop' });
+    return { status: 'cancelled' };
+  });
+  const iterator = backend.send({ turnId: 'turn-a', text: 'task' })[Symbol.asyncIterator]();
+  try {
+    assert.equal((await iterator.next()).value?.type, 'text_delta');
+    const stopping = backend.stop('user_stop');
+    await iterator.return?.();
+    await stopping;
+    assert.deepEqual(acknowledged, []);
+    assert.deepEqual(abandoned, ['session-a/turn-a']);
+  } finally {
+    await iterator.return?.();
+    await backend.dispose();
+    await root.fiber.dispose();
+  }
 });
 
 test('executor backend projects optional thinking and external tool activity', async () => {
