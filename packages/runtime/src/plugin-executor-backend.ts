@@ -140,6 +140,12 @@ export class PluginExecutorBackend implements AgentBackend {
     }
   }
 
+  /**
+   * Cancel execution and wait for its queued events to be consumed or the consumer
+   * to detach. Keep consuming send() while stopping: awaiting stop() inside that
+   * consumer loop prevents progress. Start it without awaiting in the loop, then
+   * await it after the loop exits.
+   */
   async stop(reason: 'user_stop' | 'redirect'): Promise<void> {
     const active = [...this.#active];
     for (const execution of active) execution.abort.abort(new Error(reason));
@@ -249,6 +255,8 @@ export class PluginExecutorBackend implements AgentBackend {
     // Deltas are only live presentation. Close the interrupted text before the
     // terminal event seals the ledger, including updates drained during cancel.
     // Successful results keep their provider-authoritative completion text.
+    // Like successful completions, history stores one text block after tool
+    // results; it does not preserve the live text/tool interleaving.
     if (outputText && (failed || result?.status !== 'completed')) {
       queue.push({
         type: 'text_complete',
