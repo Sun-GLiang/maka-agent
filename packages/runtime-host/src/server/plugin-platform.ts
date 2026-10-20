@@ -146,6 +146,9 @@ export class HostPluginPlatform {
   #authority: PersistedPluginComposition = emptyCompositionAuthority();
   #desired: MakaCompositionState = emptyCompositionState();
   #mutation: Promise<void> = Promise.resolve();
+  #closeTask?: Promise<void>;
+  #compositionClosed = false;
+  #packageLoaderClosed = false;
   #phase: PluginPlatformPhase = 'new';
   #recoveryStarted = false;
   #recoveryComplete = false;
@@ -760,8 +763,15 @@ export class HostPluginPlatform {
     this.#phase = 'draining';
   }
 
-  async close(): Promise<void> {
-    if (this.#phase === 'closed') return;
+  close(): Promise<void> {
+    this.#closeTask ??= this.#close().catch((error) => {
+      this.#closeTask = undefined;
+      throw error;
+    });
+    return this.#closeTask;
+  }
+
+  async #close(): Promise<void> {
     this.#drainRequested = true;
     this.#phase = 'draining';
     if (this.#reconcileTimer) clearTimeout(this.#reconcileTimer);
@@ -773,19 +783,25 @@ export class HostPluginPlatform {
       errors.push(error);
     }
     try {
-      await this.#composition.close();
+      if (!this.#compositionClosed) {
+        await this.#composition.close();
+        this.#compositionClosed = true;
+      }
     } catch (error) {
       errors.push(error);
     }
     try {
-      await this.#packageLoader.close();
+      if (!this.#packageLoaderClosed) {
+        await this.#packageLoader.close();
+        this.#packageLoaderClosed = true;
+      }
     } catch (error) {
       errors.push(error);
     }
-    this.#phase = 'closed';
     if (errors.length > 0) {
       throw new AggregateError(errors, 'Unable to close every Plugin Platform resource');
     }
+    this.#phase = 'closed';
   }
 
   async #planPackageLayer(

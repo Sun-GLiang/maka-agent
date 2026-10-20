@@ -3490,6 +3490,39 @@ describe('non-serving Runtime Host kernel', () => {
     });
   });
 
+  for (const recovers of [true, false]) {
+    test(`Kernel retries composition cleanup before releasing ownership (recovers: ${recovers})`, async () => {
+      await withHostPaths(async (paths) => {
+        const capability = await resolveStorageRoot({ path: paths.root, kind: 'interactive' });
+        const owner = await tryAcquireInteractiveRootOwner(capability);
+        assert.ok(owner);
+        let attempts = 0;
+        const host = await RuntimeHostKernel.start({
+          owner,
+          idleGraceMs: 10_000,
+          composition: defineInteractiveRuntimeHostComposition(async () =>
+            testComposition({
+              close: async () => {
+                attempts++;
+                assert.equal(await tryAcquireInteractiveRootOwner(capability), undefined);
+                if (!recovers || attempts === 1)
+                  throw new Error('Transient composition cleanup failure');
+              },
+            }),
+          ),
+        });
+        const closing = host.close();
+        assert.equal(host.close(), closing);
+        if (recovers) await closing;
+        else await assert.rejects(closing, AggregateError);
+        assert.equal(attempts, 2, 'shutdown retries once without spinning on persistent failure');
+        const successor = await tryAcquireInteractiveRootOwner(capability);
+        assert.ok(successor);
+        await successor.close();
+      });
+    });
+  }
+
   test('reports one shutdown failure through close and closed while releasing ownership', {
     skip: process.platform === 'win32',
   }, async () => {

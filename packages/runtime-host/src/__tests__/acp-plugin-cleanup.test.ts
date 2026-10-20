@@ -30,9 +30,10 @@ import { PluginStorageService } from '@maka/runtime/plugin-data-services';
 import { PluginExecutorService } from '@maka/runtime/plugin-executor-service';
 import { Context } from '@maka/runtime/plugin-kernel';
 import { HostPluginDataRuntime } from '../server/plugin-data-runtime.js';
+import { HostPluginPlatform } from '../server/plugin-platform.js';
 import { withPluginScratchDirectory } from '../server/plugin-scratch-directory.js';
 
-test('removed ACP plugins retain failed cleanup through repeated loader shutdown', {
+test('removed ACP plugins retain failed cleanup through repeated Platform shutdown', {
   skip: process.platform === 'win32',
 }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'maka-acp-unload-'));
@@ -60,6 +61,7 @@ require('node:readline').createInterface({input: process.stdin}).on('line', line
   const storage = new PluginStorageService(root);
   storage.bindRuntime(new HostPluginDataRuntime(directory));
   const loader = new MakaCompositionLoader({ root });
+  const platform = new HostPluginPlatform(directory, { composition: loader });
   const providers = new Set<AcpExecutor>();
   const dispose = AcpExecutor.prototype.dispose;
   t.mock.method(AcpExecutor.prototype, 'dispose', function (this: AcpExecutor) {
@@ -123,12 +125,17 @@ require('node:readline').createInterface({input: process.stdin}).on('line', line
       { name: 'AbortError' },
     );
 
-    await assert.rejects(loader.close(), /Composition loader close failed/u);
+    const closing = platform.close();
+    assert.equal(platform.close(), closing, 'concurrent callers share the failed attempt');
+    await assert.rejects(closing, /Unable to close every Plugin Platform resource/u);
     assert.equal(admission?.activeCount, 1);
     kill(agent.pid, 0);
     blockTermination = false;
-    await loader.close();
-    await loader.close();
+    const retry = platform.close();
+    assert.notEqual(retry, closing);
+    assert.equal(platform.close(), retry);
+    await retry;
+    await platform.close();
     assert.equal(admission?.activeCount, 0);
     assert.equal(root.kernelFibers().length, 0);
     assert.throws(() => kill(-agent.pid, 0), { code: 'ESRCH' });
