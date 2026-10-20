@@ -1322,7 +1322,9 @@ export class AcpRuntimeService {
       withCatalogDirectory: (signal, use) =>
         storage.withScratchDirectory(directoryKey, signal, use),
     });
-    consumer.effect(() => () => provider.dispose(), `acp.dispose(${JSON.stringify(adapter.id)})`);
+    consumer.effect(() => () => provider.dispose(), `acp.dispose(${JSON.stringify(adapter.id)})`, {
+      retryOnFailure: true,
+    });
     return consumer.executors.register(provider);
   }
 }
