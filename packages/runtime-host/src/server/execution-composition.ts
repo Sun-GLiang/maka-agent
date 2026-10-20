@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { canExecuteExistingConversation } from '@maka/core/executor-catalog';
 import { markAssistantBackgroundSessions } from '../assistant/background-sessions.js';
 import { PersonalAssistantService, ASSISTANT_LEGACY_PACKAGES } from '../assistant/service.js';
 import { createAssistantMessageReader } from './session-transcript-reader.js';
@@ -1098,7 +1099,7 @@ export async function createExecutionRuntimeHostComposition(
           ...projected,
           idleOnly: true,
           supportsAttachments: entry?.supportsAttachments ?? false,
-          ...(entry?.readiness === 'ready'
+          ...(canExecuteExistingConversation(entry?.readiness)
             ? {}
             : {
                 unavailableReason:

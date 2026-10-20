@@ -188,7 +188,11 @@ test('unavailable agents cannot commit and use the existing sign-in or restore a
       const buttons = [...dom.document.querySelectorAll('button')];
       if (readiness === 'authentication_required') await click(buttons.find(el => el.textContent === 'Go to sign in'));
       if (readiness === 'restorable') await click(buttons.find(el => el.textContent === 'Restore Session'));
-      if (readiness === 'restoring') assert.equal(buttons.some(el => el.textContent === 'Restore Session'), false);
+      if (readiness === 'restoring') {
+        const restoreButton = buttons.find(el => el.textContent === 'Restore Session')!;
+        assert.equal(restoreButton.disabled, true);
+        await click(restoreButton);
+      }
     }
     assert.deepEqual(setup, ['agent']);
     assert.equal(restored, 1);
@@ -226,4 +230,103 @@ test('model switching availability retains its priority and opaque family levels
   assert.deepEqual(deriveComposerModelSwitchAvailability({ sessionStatus: 'waiting_for_user' }), { available: false, pending: false, reason: 'permission' });
   assert.equal(deriveComposerModelSwitchAvailability({}).available, true);
   assert.equal(highestExecutorModelVariant(catalog[0]!.modelGroups![0]!), 'opaque-high');
+});
+
+test('external session recovery preserves the draft and releases pending state after failure', async () => {
+  const dom = installTranscriptDom();
+  dom.window.getSelection = () => null;
+  dom.document.getSelection = () => null;
+  const ref = createRef<ComposerHandle>();
+  let rejectRestore!: (error: Error) => void;
+  let restores = 0;
+  try {
+    await dom.render(<LocaleProvider locale="en"><Composer ref={ref}
+      activeSession={session('external')} sendBlocked
+      executorPicker={{ catalog: [{ ...catalog[0]!, readiness: 'restorable' }], fixed: true,
+        selection: { executorId: 'agent', configuration: { model: 'opaque-high' } },
+        onRestore: () => { restores++; return new Promise<void>((_resolve, reject) => { rejectRestore = reject; }); },
+        onSelect() {}, onSetup() {}, onRetry() {}, onNewTask() {} }}
+      onSend={() => undefined} onStop={() => undefined}
+    /></LocaleProvider>);
+    await act(async () => { ref.current?.setText('Keep this draft'); });
+    const { click } = actions(dom);
+    const restoreButton = () => [...dom.document.querySelectorAll('button')].find(el => el.textContent === 'Restore Session')!;
+    await click(restoreButton());
+    assert.equal(restoreButton().disabled, true);
+    await click(restoreButton());
+    assert.equal(restores, 1);
+    assert.match(dom.document.querySelector('.maka-executor-recovery')!.textContent!, /Restoring/);
+    await act(async () => { rejectRestore(new Error('Agent offline')); });
+    assert.match(dom.document.querySelector('.maka-executor-recovery')!.textContent!, /Restoration failed/);
+    assert.equal(restoreButton().disabled, false);
+    assert.equal(ref.current?.getText(), 'Keep this draft');
+    assert.equal(dom.document.querySelector('button[aria-label="Send"]')!.getAttribute('aria-disabled'), 'true');
+  } finally { await dom.cleanup(); }
+});
+
+test('automatic recovery submits once and keeps the draft when host preparation refuses', async () => {
+  const dom = installTranscriptDom();
+  dom.window.getSelection = () => null;
+  dom.document.getSelection = () => null;
+  const ref = createRef<ComposerHandle>();
+  let finish!: (sent: boolean) => void;
+  const sent: string[] = [];
+  try {
+    for (const readiness of ['restorable', 'restoring', 'restore_failed'] as const) {
+      await dom.render(<LocaleProvider locale="en"><Composer ref={ref}
+        activeSession={session('external')}
+        executorPicker={{ catalog: [{ ...catalog[0]!, readiness }], fixed: true, restoreOnSend: true,
+          selection: { executorId: 'agent', configuration: { model: 'opaque-high' } },
+          onRestore: () => { assert.fail('sending delegates restoration to the host submission owner'); },
+          onSelect() {}, onSetup() {}, onRetry() {}, onNewTask() {} }}
+        onSend={text => { sent.push(text); return new Promise<boolean>(resolve => { finish = resolve; }); }}
+        onStop={() => undefined}
+      /></LocaleProvider>);
+      assert.equal(dom.document.querySelector('.maka-executor-recovery'), null);
+    }
+    await act(async () => { ref.current?.setText('Continue this task'); });
+    const submit = () => dom.document.querySelector('form')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await act(async () => { submit(); submit(); });
+    assert.deepEqual(sent, ['Continue this task']);
+    await act(async () => { finish(false); });
+    assert.equal(ref.current?.getText(), 'Continue this task');
+    await act(async () => { submit(); });
+    await act(async () => { finish(true); });
+    assert.equal(ref.current?.getText(), '');
+  } finally { await dom.cleanup(); }
+});
+
+
+test('typing starts external preparation without waiting or restoring merely on focus', async () => {
+  const dom = installTranscriptDom();
+  dom.window.getSelection = () => null;
+  dom.document.getSelection = () => null;
+  const setAttribute = dom.window.Element.prototype.setAttribute;
+  dom.window.Element.prototype.setAttribute = function normalized(name: string, value: string) {
+    return setAttribute.call(this, name === 'contentEditable' ? 'contenteditable' : name, value);
+  };
+  const ref = createRef<ComposerHandle>();
+  let prepares = 0;
+  const sent: string[] = [];
+  try {
+    await dom.render(<LocaleProvider locale="en"><Composer ref={ref}
+      activeSession={session('external')}
+      executorPicker={{ catalog: [{ ...catalog[0]!, readiness: 'restorable' }], fixed: true, restoreOnSend: true,
+        selection: { executorId: 'agent', configuration: { model: 'opaque-high' } },
+        onPrepare() { prepares++; }, onSelect() {}, onSetup() {}, onRetry() {}, onNewTask() {} }}
+      onSend={text => { sent.push(text); return true; }} onStop={() => undefined}
+    /></LocaleProvider>);
+    const editor = dom.document.querySelector<HTMLElement>('[contenteditable="true"]')!;
+    await act(async () => { editor.focus(); });
+    assert.equal(prepares, 0);
+    await act(async () => { editor.textContent = ' '; editor.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+    assert.equal(prepares, 0);
+    await act(async () => { editor.textContent = 'Continue this task'; editor.dispatchEvent(new dom.window.Event('input', { bubbles: true })); });
+    assert.equal(prepares, 1);
+    assert.equal(ref.current?.getText(), 'Continue this task');
+    assert.equal(dom.document.querySelector('.maka-executor-recovery'), null);
+    await act(async () => { dom.document.querySelector('form')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
+    assert.deepEqual(sent, ['Continue this task']);
+    assert.equal(ref.current?.getText(), '');
+  } finally { await dom.cleanup(); dom.window.Element.prototype.setAttribute = setAttribute; }
 });

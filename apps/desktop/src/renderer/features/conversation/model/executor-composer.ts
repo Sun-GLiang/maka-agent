@@ -17,11 +17,14 @@
  * under the License.
  */
 
+import { canExecuteExistingConversation } from '@maka/core/executor-catalog';
 import type { ComposerProps } from '@maka/ui';
 import type { useExecutorSelection } from '../controller/use-executor-selection.js';
 
 export function executorComposerProps(
-  executor: ReturnType<typeof useExecutorSelection>,
+  executor: Pick<ReturnType<typeof useExecutorSelection>,
+    'catalog' | 'selection' | 'entry' | 'changing' | 'loading' | 'error' | 'select' | 'restore' | 'refresh'> &
+    Partial<Pick<ReturnType<typeof useExecutorSelection>, 'prepare' | 'preparing'>>,
   input: {
     activeId: string | undefined;
     turnActive: boolean;
@@ -34,6 +37,8 @@ export function executorComposerProps(
   },
 ): Pick<ComposerProps, 'executorPicker' | 'sendBlocked' | 'noModelConnection'> {
   const fixed = !!input.activeId;
+  const canSend = fixed ? canExecuteExistingConversation(executor.entry?.readiness) ||
+    (executor.preparing && executor.entry?.readiness === 'restoring') : executor.entry?.readiness === 'ready';
   return {
     executorPicker:
       !fixed || executor.selection
@@ -42,7 +47,9 @@ export function executorComposerProps(
             renderExecutorMark: input.renderExecutorMark,
             selection: executor.selection,
             fixed,
-            disabled: executor.changing || !!input.sendPending || (fixed && input.turnActive),
+            restoreOnSend: fixed,
+            onPrepare: fixed && !input.turnActive && !input.taskSubmissionHardBlocked ? executor.prepare : undefined,
+            disabled: executor.changing || executor.preparing || !!input.sendPending || (fixed && input.turnActive),
             loading: executor.loading,
             error: executor.error,
             onSelect: (selection) => executor.select(selection),
@@ -58,9 +65,10 @@ export function executorComposerProps(
     sendBlocked:
       input.taskSubmissionHardBlocked ||
       !!input.sendPending ||
+      executor.changing ||
       !!(
         executor.selection &&
-        (executor.entry?.readiness !== 'ready' || (fixed && input.turnActive))
+        (!canSend || (fixed && input.turnActive))
       ),
   };
 }

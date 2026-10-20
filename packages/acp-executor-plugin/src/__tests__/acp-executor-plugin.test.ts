@@ -125,6 +125,50 @@ test('durably acknowledged ACP Session resumes the same external ID without repl
   }
 });
 
+test('execution restores the saved external conversation and retries a failed restore without duplicating prompts', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.supportsRestore = true;
+  const storage = durableState();
+  const make = () =>
+    new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      {
+        state: storage.state,
+        createConnection: protocol.factory,
+      },
+    );
+  const first = make();
+  let reopened: AcpExecutor | undefined;
+  try {
+    assert.equal((await first.execute(request('first'), executorContext([]))).status, 'completed');
+    await first.acknowledgeExecution('session-a', 'turn-first');
+    await first.dispose();
+    reopened = make();
+    const conversation = { conversationKey: 'session-a', cwd: process.cwd() };
+    assert.equal((await reopened.inspectConversation(conversation)).readiness, 'restorable');
+    protocol.restoreFailure = true;
+    assert.equal((await reopened.execute(request('second'), executorContext([]))).status, 'failed');
+    assert.equal(protocol.prompts, 1, 'a failed restore never sends the new prompt');
+    assert.equal((await reopened.inspectConversation(conversation)).readiness, 'restore_failed');
+    protocol.restoreFailure = false;
+    assert.equal(
+      (await reopened.execute(request('second'), executorContext([]))).status,
+      'completed',
+    );
+    await reopened.acknowledgeExecution('session-a', 'turn-second');
+    assert.equal(protocol.prompts, 2);
+    assert.equal(protocol.sessions, 1, 'execution retains the original external conversation');
+    assert.equal(protocol.resumes, 1);
+    assert.equal(storage.record().committedPrompts, 2);
+  } finally {
+    await reopened?.dispose();
+    await first.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('unacknowledged prompt loads replay as restoration and exposes history gap without a second prompt', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();

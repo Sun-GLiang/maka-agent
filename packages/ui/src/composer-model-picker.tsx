@@ -18,13 +18,13 @@
  */
 
 import { useEffect, useState, type ReactNode } from 'react';
-import { Button, Stack } from '@astryxdesign/core';
+import { Button, Card, Item, Spinner, Stack, Text } from '@astryxdesign/core';
 import { Selector, SelectorOption, type SelectorOptionType } from '@astryxdesign/core/Selector';
 import type { ExecutorCatalogEntry, ExecutorConfiguration, ExecutorSelection } from '@maka/core/executor-catalog';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { ProviderType } from '@maka/core/llm-connections';
 import { type UiLocale, defineShippedUiMessageCatalog, resolveUiMessageCatalog } from '@maka/core/ui-locale';
-import { Settings, ICON_SIZE } from './icons.js';
+import { AlertCircle, RotateCcw, Settings, ICON_SIZE } from './icons.js';
 import { ComposerModelLabel } from './composer-model-label.js';
 import { buildModelPickerOptions, providerMarkIcon, renderChatModelPickerOption } from './model-picker-internals.js';
 import { exactModelChoiceValue, modelMenuGroups, type ChatModelChoice } from './chat-model-helpers.js';
@@ -55,6 +55,10 @@ export interface ComposerExecutorPicker {
   selection?: ExecutorSelection;
   renderExecutorMark?(entry?: ExecutorCatalogEntry): ReactNode;
   fixed?: boolean;
+  /** Restore the external connection during execution without a manual recovery prompt. */
+  restoreOnSend?: boolean;
+  /** Begin speculative restoration on user input; never waits for it to finish. */
+  onPrepare?(): void;
   disabled?: boolean;
   loading?: boolean;
   error?: string;
@@ -95,7 +99,7 @@ const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<Exec
     authentication_required: 'Sign in from External Agents settings.',
     history_only:
       'The external process was lost. History is readable; start a new task to continue.',
-    restorable: 'The external Session can be restored. Restore it before continuing.',
+    restorable: 'Restore this session to continue chatting.',
     restoring: 'Restoring the external Session…',
     restore_failed: 'Restoration failed. History is readable; retry or start a new task.',
     history_gap: 'The Agent may be ahead of saved history. Start a new task to avoid an incomplete transcript.',
@@ -114,7 +118,7 @@ const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<Exec
     unavailable: '当前不可用，请检查设置后重试。',
     authentication_required: '需要登录，请前往外部 Agent 设置。',
     history_only: '外部进程已丢失。历史仍可阅读，请新建任务继续。',
-    restorable: '外部会话可以恢复。请先恢复，再继续对话。',
+    restorable: '恢复会话后即可继续对话。',
     restoring: '正在恢复外部会话…',
     restore_failed: '恢复失败，历史仍可阅读。请重试或新建任务。',
     history_gap: 'Agent 的进度可能超出已保存历史。请新建任务，避免记录不完整。',
@@ -133,7 +137,7 @@ const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<Exec
     unavailable: '目前無法使用，請檢查設定後重試。',
     authentication_required: '需要登入，請前往外部 Agent 設定。',
     history_only: '外部程序已遺失。歷史仍可閱讀，請建立新任務繼續。',
-    restorable: '外部會話可以恢復。請先恢復，再繼續對話。',
+    restorable: '恢復會話後即可繼續對話。',
     restoring: '正在恢復外部會話…',
     restore_failed: '恢復失敗，歷史仍可閱讀。請重試或建立新任務。',
     history_gap: 'Agent 的進度可能超出已儲存歷史。請建立新任務，避免記錄不完整。',
@@ -148,6 +152,58 @@ const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<Exec
 
 export function executorCopy(locale: UiLocale): ExecutorCopy {
   return EXECUTOR_COPY[locale];
+}
+
+
+/** Session recovery is separate from model configuration so it can occupy a full row. */
+export function ComposerExecutorRecovery(props: {
+  executor: ComposerExecutorPicker;
+  disabled?: boolean;
+  onPendingChange?(pending: boolean): void;
+}) {
+  const copy = executorCopy(useUiLocale());
+  const { executor } = props;
+  const [pending, setPending] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const disabled = props.disabled || executor.disabled;
+  useEffect(() => { props.onPendingChange?.(pending); }, [pending, props.onPendingChange]);
+  useEffect(() => () => props.onPendingChange?.(false), [props.onPendingChange]);
+  const entries = executor.catalog.filter(entry => entry.readiness !== 'ready'
+    && (!executor.fixed || entry.id === executor.selection?.executorId)
+    && !(executor.restoreOnSend && ['restorable', 'restoring', 'restore_failed'].includes(entry.readiness)));
+  const restore = async () => {
+    if (pending || disabled || !executor.onRestore) return;
+    setPending(true);
+    setFailed(false);
+    try { await executor.onRestore(); } catch { setFailed(true); } finally { setPending(false); }
+  };
+  return <>{entries.map(entry => {
+    const canRestore = entry.readiness === 'restorable' || entry.readiness === 'restore_failed';
+    const restoring = entry.readiness === 'restoring' || (canRestore && pending);
+    const readiness = restoring ? 'restoring' : canRestore && failed ? 'restore_failed' : entry.readiness;
+    const warning = !['restorable', 'restoring'].includes(readiness);
+    return <Card key={entry.id}
+      className="maka-executor-recovery" data-state={readiness}
+      variant="muted" padding={0} role="status"
+    ><Item
+      align="center" density="spacious"
+      label={<Text type="label" maxLines={1}>{entry.displayName}</Text>}
+      description={copy[readiness as Exclude<typeof readiness, 'ready'>]}
+      startContent={<Stack width={24} height={24} hAlign="center" vAlign="center" aria-hidden="true" data-recovery-icon>
+        {restoring ? <Spinner size="sm" shade="subtle" />
+          : warning ? <AlertCircle size={ICON_SIZE.control} /> : <RotateCcw size={ICON_SIZE.control} />}
+      </Stack>}
+      endContent={canRestore || restoring ? <Button
+        label={copy.restore} variant="secondary" size="sm" isDisabled={restoring || disabled || !executor.onRestore}
+        onClick={() => { void restore(); }} />
+        : entry.readiness === 'history_only' || entry.readiness === 'history_gap' ? <Button
+          label={copy.newTask} variant="secondary" size="sm" isDisabled={disabled} onClick={executor.onNewTask} />
+        : entry.readiness === 'authentication_required' ? <Button
+          label={copy.signIn} variant="secondary" size="sm" isDisabled={disabled} onClick={() => executor.onSetup(entry.id)} />
+        : <Button label={copy.retry} variant="secondary" size="sm" isDisabled={disabled}
+          isLoading={executor.loading} onClick={executor.onRetry} />}
+    /></Card>;
+  })}</>;
 }
 
 
@@ -199,6 +255,7 @@ export function ComposerModelPicker(props: {
   onNativeChange?(choice: { llmConnectionId: string; llmConnectionSlug: string; model: string }): void | Promise<void>;
   renderThinkingControl?(pending: boolean): ReactNode;
   executor?: ComposerExecutorPicker;
+  recoveryInComposer?: boolean;
   contribution?: ComposerModelContribution;
   executorTarget?: MakaClientExecutorTarget;
   onExecutorTargetChange?(target: MakaClientExecutorTarget): void | Promise<void>;
@@ -307,7 +364,7 @@ export function ComposerModelPicker(props: {
     executor?.onSelect({ executorId: executor.selection!.executorId, configuration: executor.fixed || (configuration.model !== undefined && configuration.model !== selectedModel)
       ? configuration : { ...executor.selection!.configuration, ...configuration } });
   const mode = executor?.selection?.configuration.mode ?? selected?.currentMode;
-  const recoveryEntries = catalog.filter(entry => entry.readiness !== 'ready');
+  const executorError = executor?.error && !(props.recoveryInComposer && selected && selected.readiness !== 'ready');
   return <>
     {/* Keep portaled search clicks from focusing the composer editor. */}
     <Stack direction="horizontal" className="maka-model-picker-root"
@@ -380,20 +437,10 @@ export function ComposerModelPicker(props: {
     {!executor && !actions.size && props.onOpenSettings && <Button
       label={modelCopy.configureTitle} variant="ghost" size="sm"
       icon={<Settings size={ICON_SIZE.control} />} onClick={props.onOpenSettings} />}
-    {recoveryEntries.map(entry => <span key={entry.id} className="maka-executor-notice" role="status">
-      {entry.displayName + ': ' + copy[entry.readiness as Exclude<typeof entry.readiness, 'ready'>]}
-      {executor && (entry.readiness === 'restorable' || entry.readiness === 'restore_failed') ? <Button
-        label={copy.restore} variant="ghost" size="sm" isDisabled={pending || !executor.onRestore}
-        onClick={() => { if (executor.onRestore) void commit(executor.onRestore); }} />
-        : executor && (entry.readiness === 'history_only' || entry.readiness === 'history_gap') ? <Button
-          label={copy.newTask} variant="ghost" size="sm" onClick={executor.onNewTask} />
-        : executor && entry.readiness === 'authentication_required' ? <Button
-          label={copy.signIn} variant="ghost" size="sm" onClick={() => executor.onSetup(entry.id)} />
-        : executor && entry.readiness !== 'restoring' ? <Button
-          label={copy.retry} variant="ghost" size="sm" isLoading={executor.loading} onClick={executor.onRetry} />
-        : null}
-    </span>)}
-    {(failed || invalid || executor?.error || (unavailable && !selected) || contribution?.error) && <span className="maka-executor-notice" role="status">
+    {executor && !props.recoveryInComposer && <ComposerExecutorRecovery
+      executor={{ ...executor, catalog }} disabled={props.disabled || props.isReadOnly}
+    />}
+    {(failed || invalid || executorError || (unavailable && !selected) || contribution?.error) && <span className="maka-executor-notice" role="status">
       {contribution?.error ? contribution.label + ': ' + copy.unavailable : unavailable && !selected ? copy.unavailable : invalid ? copy.invalid : copy.selectionFailed}
       {contribution?.error && <Button label={copy.retry} variant="ghost" size="sm" isLoading={contribution.loading} onClick={contribution.onLoad} />}
       {executor && !contribution?.error && <Button label={copy.retry} variant="ghost" size="sm" isLoading={executor.loading} onClick={executor.onRetry} />}

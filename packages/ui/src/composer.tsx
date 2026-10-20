@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import { executorCopy, ComposerModelPicker, ThinkingLevelSelector, type ComposerExecutorPicker } from './composer-model-picker.js';
+import { executorCopy, ComposerExecutorRecovery, ComposerModelPicker, ThinkingLevelSelector, type ComposerExecutorPicker } from './composer-model-picker.js';
 import { usePromptSuggestion } from './prompt-suggestion.js';
 import {
   forwardRef,
@@ -941,6 +941,7 @@ export const Composer = forwardRef<
   // PR-UI-15: locale-aware copy for placeholder + toolbar states.
   const locale = useUiLocale();
   const [executorModelPending, setExecutorModelPending] = useState(false);
+  const [executorRestorePending, setExecutorRestorePending] = useState(false);
   const executorNativeDisabledReason = props.executorPicker?.selection ? executorCopy(locale).nativeOperations : undefined;
   const copy = getConversationCopy(locale).composer;
   const mentionCopy = getConversationCopy(locale).mentions;
@@ -1451,6 +1452,7 @@ export const Composer = forwardRef<
       props.disabled
       || props.sendBlocked
       || executorModelPending
+      || executorRestorePending
       || sendPendingRef.current
       || importActionOwnerRef.current?.pending
     ) return;
@@ -1612,6 +1614,8 @@ export const Composer = forwardRef<
   }
 
   function onInputChange(next: string) {
+    if (next.trim() && props.executorPicker?.fixed && props.executorPicker.restoreOnSend)
+      props.executorPicker.onPrepare?.();
     nextPrompt.dismiss();
     applyText(next);
     resetPromptHistoryNavigation();
@@ -1683,7 +1687,7 @@ export const Composer = forwardRef<
     hasStagedContext,
     disabled: props.disabled,
     sendBlocked: props.sendBlocked,
-    executorModelPending,
+    executorModelPending: executorModelPending || executorRestorePending,
     sendPending,
     importActionBusy,
     noModelConnection,
@@ -1923,6 +1927,7 @@ export const Composer = forwardRef<
     onNativeChange={props.onModelChange || props.onPickNewChatModel ? onNativeModelChange : undefined}
     renderThinkingControl={!props.executorTarget ? renderNativeThinkingControl : undefined}
     executor={props.executorPicker}
+    recoveryInComposer={props.executorPicker?.fixed}
     contribution={contribution}
     executorTarget={props.executorTarget}
     onExecutorTargetChange={props.onExecutorTargetChange}
@@ -2210,6 +2215,12 @@ export const Composer = forwardRef<
                 event.stopPropagation();
               }}
             >
+              {props.executorPicker?.fixed && <ComposerExecutorRecovery
+                key={props.activeSession?.id ?? activeDraftKey()}
+                executor={props.executorPicker}
+                disabled={props.disabled || props.pickersReadOnly}
+                onPendingChange={setExecutorRestorePending}
+              />}
               {((props.pendingSessionReferences?.length ?? 0) > 0 || props.pendingQuotes?.some((quote) => quote.sourceSessionId)) && (
                 <div className="maka-composer-session-references" role="group" aria-label={copy.stagedContext}>
                   {props.pendingSessionReferences?.map((session) => (

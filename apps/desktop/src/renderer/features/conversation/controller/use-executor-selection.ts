@@ -41,6 +41,8 @@ export function useExecutorSelection(input: {
   }>();
   const handoff = useRef<typeof snapshot>(undefined);
   const [changingKey, setChangingKey] = useState<string>();
+  const [preparingKey, setPreparingKey] = useState<string>();
+  const preparationAttempt = useRef<string | undefined>(undefined);
   const [confirmed, setConfirmed] = useState<{
     key: string;
     previous?: ExecutorConfiguration;
@@ -56,6 +58,7 @@ export function useExecutorSelection(input: {
     input.target?.projectId,
     input.cwd,
   ]);
+  useEffect(() => { preparationAttempt.current = undefined; }, [key]);
   const current = useRef(key);
   current.current = key;
   const revision = useRef(0);
@@ -213,7 +216,7 @@ export function useExecutorSelection(input: {
       : draft?.key === key
         ? draft.selection
         : undefined;
-  const select = async (next: ExecutorSelection | undefined) => {
+  const select = async (next: ExecutorSelection | undefined, background = false) => {
     if (inFlight.current === key) throw new Error('Executor configuration is pending');
     if (!sessionId) {
       if (next && !catalog.some(entry => entry.id === next.executorId && entry.readiness === 'ready' &&
@@ -226,7 +229,8 @@ export function useExecutorSelection(input: {
     if (!next || next.executorId !== executorId || !services.sessions.setExecutorModelConfiguration)
       throw new Error('Executor configuration is unavailable');
     inFlight.current = key;
-    setChangingKey(key);
+    if (background) setPreparingKey(key);
+    else setChangingKey(key);
     try {
       const result = await services.sessions.setExecutorModelConfiguration(
         sessionId,
@@ -252,7 +256,7 @@ export function useExecutorSelection(input: {
       }
     } catch (error) {
       if (current.current === key) await refresh();
-      if (current.current === key)
+      if (!background && current.current === key)
         setSnapshot((previous) => ({
           key,
           catalog: previous?.key === key ? previous.catalog : [],
@@ -263,9 +267,19 @@ export function useExecutorSelection(input: {
     } finally {
       if (inFlight.current === key) inFlight.current = undefined;
       setChangingKey(previous => previous === key ? undefined : previous);
+      setPreparingKey(previous => previous === key ? undefined : previous);
     }
   };
   const entry = catalog.find((candidate) => candidate.id === selection?.executorId);
+  const prepare = () => {
+    if (current.current !== key || !sessionId || !selection || input.sessionPending ||
+      inFlight.current === key || preparationAttempt.current === key ||
+      (entry?.readiness !== 'restorable' && entry?.readiness !== 'restore_failed')) return;
+    preparationAttempt.current = key;
+    // The Host serializes configuration and message admission for this Session.
+    // Local message saving must not wait for this speculative reconnection.
+    void select(selection, true).catch(() => undefined);
+  };
   const adoptSession = (session: SessionSummary) => {
     if (sessionId || !selection || !entry || session.executorId !== selection.executorId) return;
     // Only a submitted draft hands its catalog to the new Session. Navigation
@@ -301,7 +315,17 @@ export function useExecutorSelection(input: {
           }
         : previous,
     );
-    await select({ executorId, configuration });
+    try {
+      await select({ executorId, configuration });
+    } catch (error) {
+      if (current.current === key) setSnapshot(previous => previous?.key === key ? {
+        ...previous,
+        catalog: previous.catalog.map(entry => entry.id === executorId &&
+          (entry.readiness === 'restoring' || entry.readiness === 'restorable')
+          ? { ...entry, readiness: 'restore_failed' } : entry),
+      } : previous);
+      throw error;
+    }
   };
   return {
     selection,
@@ -309,6 +333,9 @@ export function useExecutorSelection(input: {
     entry,
     select,
     restore,
+    prepare,
+    preparing: preparingKey === key,
+    submission: { executorSelection: selection, executorEntry: inspected, executorPreparing: preparingKey === key },
     refresh,
     adoptSession,
     changing: changingKey === key,
