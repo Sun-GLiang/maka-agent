@@ -37,11 +37,6 @@ export interface EffectMeta {
   readonly children: readonly EffectMeta[];
 }
 
-export interface EffectOptions {
-  /** Retain failed cleanup for a later disposal attempt. Successful cleanup is never repeated. */
-  readonly retryOnFailure?: boolean;
-}
-
 export interface StandardSchema {
   readonly '~standard': {
     validate(
@@ -252,12 +247,8 @@ export class Context {
     return this.plugin(Object.assign(callback, { inject }));
   }
 
-  effect(
-    execute: () => unknown,
-    label = 'anonymous',
-    options: EffectOptions = {},
-  ): Disposable<Promise<void>> {
-    return this.fiber.own(execute, label, options);
+  effect(execute: () => unknown, label = 'anonymous'): Disposable<Promise<void>> {
+    return this.fiber.own(execute, label);
   }
 
   provide(name: string, value?: unknown, check?: () => boolean): Disposable<Promise<void>> {
@@ -766,11 +757,7 @@ export class Fiber {
     }
   }
 
-  own(
-    execute: () => unknown,
-    label = 'anonymous',
-    options: EffectOptions = {},
-  ): Disposable<Promise<void>> {
+  own(execute: () => unknown, label = 'anonymous'): Disposable<Promise<void>> {
     if (this.#disposed || this.state === FiberState.UNLOADING) {
       throw new Error('Cannot create an Effect on an inactive Fiber');
     }
@@ -799,25 +786,19 @@ export class Fiber {
           await setupTask.catch(() => undefined);
           const errors: unknown[] = [];
           try {
-            for (let index = disposers.length - 1; index >= 0; index--) {
+            for (const cleanup of disposers.reverse()) {
               try {
-                await disposers[index]!();
-                disposers.splice(index, 1);
+                await cleanup();
               } catch (error) {
                 errors.push(error);
               }
             }
           } finally {
-            if (!options.retryOnFailure || disposers.length === 0) {
-              const index = this.#effects.indexOf(dispose);
-              if (index >= 0) this.#effects.splice(index, 1);
-            }
+            const index = this.#effects.indexOf(dispose);
+            if (index >= 0) this.#effects.splice(index, 1);
           }
           if (errors.length) throw new AggregateError(errors, `Effect ${label} cleanup failed`);
-        })().catch((error) => {
-          if (options.retryOnFailure) disposeTask = undefined;
-          throw error;
-        });
+        })();
         return disposeTask;
       },
       { [effectMeta]: Object.freeze({ label, children: Object.freeze([]) }) },
@@ -885,24 +866,13 @@ export class Fiber {
         await this.#unload(FiberState.DISPOSED);
       } finally {
         const kernel = this.context._kernel();
-        // Keep retryable resources reachable from parent shutdown even after
-        // their composition entry has been removed. The Context stays fenced.
-        if (!this.#hasPendingCleanup()) {
-          kernel.fibers.delete(this);
-          this.#runtime?.fibers.delete(this);
-          if (this.parent) this.parent.#children.delete(this);
-        }
+        kernel.fibers.delete(this);
+        this.#runtime?.fibers.delete(this);
+        if (this.parent) this.parent.#children.delete(this);
         if (this.id === 0) kernel.closed = true;
       }
-    }).catch((error) => {
-      if (this.#hasPendingCleanup()) this.#disposeTask = undefined;
-      throw error;
     });
     return this.#disposeTask;
-  }
-
-  #hasPendingCleanup(): boolean {
-    return this.#effects.length > 0 || this.#children.size > 0;
   }
 
   #enqueue(operation: () => Promise<void>): Promise<void> {
@@ -957,7 +927,7 @@ export class Fiber {
   }
 
   async #unload(nextState: FiberState): Promise<void> {
-    if (this.state === FiberState.DISPOSED && !this.#hasPendingCleanup()) return;
+    if (this.state === FiberState.DISPOSED) return;
     this.#setState(FiberState.UNLOADING);
     const childResults = await Promise.allSettled(
       [...this.#children].reverse().map((child) => child.dispose()),

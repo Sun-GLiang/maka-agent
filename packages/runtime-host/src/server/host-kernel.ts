@@ -1175,20 +1175,7 @@ export class RuntimeHostKernel {
     this.#assertShutdownCanContinue();
     await this.#compositionStartup;
     this.#assertShutdownCanContinue();
-    try {
-      await this.#composition?.close();
-    } catch (error) {
-      // Retry before releasing the root owner. The composition retains unfinished
-      // cleanup, and the existing shutdown deadline still bounds both attempts.
-      this.#assertShutdownCanContinue();
-      try {
-        await this.#composition?.close();
-      } catch (retryError) {
-        errors.push(
-          new AggregateError([error, retryError], 'Runtime Host composition cleanup failed'),
-        );
-      }
-    }
+    await this.#composition?.close().catch((error: unknown) => errors.push(error));
     this.#assertShutdownCanContinue();
     await this.#waitForResidencies();
     this.#assertShutdownCanContinue();

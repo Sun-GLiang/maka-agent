@@ -2275,53 +2275,6 @@ test('Plugin Platform close aggregates every resource failure', async () => {
   }
 });
 
-test('Plugin Platform retries failed composition cleanup without repeating package cleanup', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'maka-platform-retry-'));
-  const composition = new MakaCompositionLoader();
-  const packages = new PluginPackageStore(directory);
-  const packageLoader = new TrustedPluginPackageLoader(directory, packages);
-  const platform = createPlatform(directory, { composition, packages, packageLoader });
-  let fail = true;
-  let attempts = 0;
-  let packageCloses = 0;
-  const closePackages = packageLoader.close.bind(packageLoader);
-  t.mock.method(packageLoader, 'close', async () => {
-    packageCloses++;
-    await closePackages();
-  });
-  try {
-    await platform.recover();
-    composition.root.effect(
-      () => () => {
-        attempts++;
-        if (fail) throw new Error('Transient cleanup failure');
-      },
-      'retryable-owner',
-      { retryOnFailure: true },
-    );
-    const first = platform.close();
-    assert.equal(platform.close(), first);
-    await assert.rejects(first, AggregateError);
-    await assert.rejects(platform.reconcile(), /draining/u);
-    await assert.rejects(platform.close(), AggregateError);
-    assert.equal(attempts, 2);
-    assert.equal(packageCloses, 1);
-    fail = false;
-    const retry = platform.close();
-    assert.notEqual(retry, first);
-    assert.equal(platform.close(), retry);
-    await retry;
-    await platform.close();
-    assert.equal(attempts, 3);
-    assert.equal(packageCloses, 1);
-    assert.throws(() => platform.inspect('profile'), /closed/u);
-  } finally {
-    fail = false;
-    await platform.close();
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
 interface InstallRecoveryState {
   readonly target?: string;
   readonly candidate?: string;

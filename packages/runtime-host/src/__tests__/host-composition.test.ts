@@ -133,59 +133,6 @@ test('Domain Module drain fences every owner and reports failures during close',
   assert.deepEqual(events, ['second:drain', 'first:drain', 'second:close', 'first:close']);
 });
 
-test('Domain Module retries only failed resources and shares concurrent close attempts', async () => {
-  const calls: string[] = [];
-  let fail = true;
-  const module = createRuntimeHostDomainModule({
-    id: 'retry-cleanup',
-    close: [
-      () => {
-        calls.push('first');
-      },
-      () => {
-        calls.push('retry');
-        if (fail) throw new Error('Transient cleanup failure');
-      },
-      () => {
-        calls.push('last');
-      },
-    ],
-  });
-  const first = module.close();
-  assert.equal(module.close(), first);
-  await assert.rejects(first, AggregateError);
-  assert.deepEqual(calls, ['first', 'retry', 'last']);
-  await assert.rejects(module.close(), AggregateError);
-  fail = false;
-  const retry = module.close();
-  assert.notEqual(retry, first);
-  assert.equal(module.close(), retry);
-  await retry;
-  await module.close();
-  assert.deepEqual(calls, ['first', 'retry', 'last', 'retry', 'retry']);
-});
-
-test('Domain Module cleanup retries do not hide a drain failure', async () => {
-  let closes = 0;
-  const module = createRuntimeHostDomainModule({
-    id: 'failed-drain',
-    drain: [
-      () => {
-        throw new Error('Drain failed');
-      },
-    ],
-    close: [
-      () => {
-        closes++;
-      },
-    ],
-  });
-  module.beginDrain();
-  await assert.rejects(module.close(), AggregateError);
-  await assert.rejects(module.close(), AggregateError);
-  assert.equal(closes, 1);
-});
-
 function domainModule(
   id: string,
   events: string[],

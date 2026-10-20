@@ -114,7 +114,6 @@ import {
 import { PersonalAssistantService } from '../assistant/service.js';
 import { RootTurnCoordinator } from '../server/root-turn-coordinator.js';
 import { HostWorkHubResultCoordinator } from '../server/workhub-result-coordinator.js';
-import { HostPluginPlatform } from '../server/plugin-platform.js';
 import { readLedgerMessages } from './fixtures/ledger-transcript.js';
 import { clientCapabilityConnectionIdentity } from './fixtures/client-capability.js';
 import { workHubDesktopCapabilityOffers } from './fixtures/workhub-capabilities.js';
@@ -122,46 +121,6 @@ import { workHubDesktopCapabilityOffers } from './fixtures/workhub-capabilities.
 const require = createRequire(import.meta.url);
 const FAKE_CONNECTION_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const CONTEXT_OFFLOAD_DATABASE_NAME = 'context-offload.sqlite';
-
-test('production composition retries Platform cleanup without repeating successful domain cleanup', async (t) => {
-  await withCompositionRoot(async ({ owner }) => {
-    const { composition } = await createCapturedExecutionComposition(owner);
-    const closePlatform = HostPluginPlatform.prototype.close;
-    const closeAssistant = PersonalAssistantService.prototype.close;
-    let platformAttempts = 0;
-    let assistantCloses = 0;
-    t.mock.method(HostPluginPlatform.prototype, 'close', function (this: HostPluginPlatform) {
-      platformAttempts++;
-      if (platformAttempts === 1)
-        return Promise.reject(new Error('Transient Platform cleanup failure'));
-      return closePlatform.call(this);
-    });
-    t.mock.method(
-      PersonalAssistantService.prototype,
-      'close',
-      function (this: PersonalAssistantService) {
-        assistantCloses++;
-        return closeAssistant.call(this);
-      },
-    );
-    try {
-      const first = composition.close();
-      assert.equal(composition.close(), first);
-      await assert.rejects(first, /Unable to close Runtime Host execution composition/u);
-      assert.equal(platformAttempts, 1);
-      assert.equal(assistantCloses, 1);
-      const retry = composition.close();
-      assert.notEqual(retry, first);
-      assert.equal(composition.close(), retry);
-      await retry;
-      await composition.close();
-      assert.equal(platformAttempts, 2);
-      assert.equal(assistantCloses, 1);
-    } finally {
-      await composition.close().catch(() => composition.plugins?.close());
-    }
-  });
-});
 const HANDOFF_TEST_COMPOSITION = createRunCompositionSnapshot({
   composerId: 'test.handoff',
   composerRevision: '1',

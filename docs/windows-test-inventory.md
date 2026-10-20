@@ -15,11 +15,11 @@ Locations intentionally omit line numbers so unrelated edits do not invalidate t
 
 | Classification | Count |
 |---|---:|
-| windows-backend-gap | 28 |
-| portable-candidate | 60 |
+| windows-backend-gap | 27 |
+| portable-candidate | 59 |
 | platform-contract | 49 |
 
-Total Windows-excluded declarations: **137**
+Total Windows-excluded declarations: **135**
 
 ## Inventory
 
@@ -45,7 +45,6 @@ Total Windows-excluded declarations: **137**
 | platform-contract | `apps/desktop/src/main/__tests__/shell-env.test.ts` kills login-shell descendants when capture times out | `process.platform === 'win32'` |
 | platform-contract | `apps/desktop/src/main/__tests__/shell-env.test.ts` bounds shell output instead of buffering until the global timeout | `process.platform === 'win32'` |
 | platform-contract | `apps/desktop/src/main/__tests__/skill-locations.test.ts` reports an unreadable Skill directory instead of an available empty location | `process.platform === 'win32' ? 'POSIX permissions are required to make the Skill directory unreadable' : process.getuid?.() === 0` |
-| portable-candidate | `packages/acp-executor-plugin/src/__tests__/acp-process.test.ts` real catalog ${retry} retries cleanup and terminates the retained process and helper | `process.platform === 'win32'` |
 | portable-candidate | `packages/acp-executor-plugin/src/__tests__/acp-process.test.ts` disposing a real retained process also terminates its helper | `process.platform === 'win32'` |
 | portable-candidate | `packages/acp-executor-plugin/src/__tests__/acp-process.test.ts` retiring one conversation cleans its helper after the parent has crashed | `process.platform === 'win32'` |
 | platform-contract | `packages/cli/src/__tests__/acp-prompt-content.test.ts` rejects a FIFO without blocking the process | `process.platform === 'win32'` |
@@ -56,7 +55,6 @@ Total Windows-excluded declarations: **137**
 | portable-candidate | `packages/cli/src/__tests__/runtime-host-setup.test.ts` managed operator binds its Client Data Root and routes deployment cleanup | `process.platform === 'win32'` |
 | portable-candidate | `packages/cli/src/__tests__/tui-mcp-control.test.ts` TUI MCP reconciles an already-published write through execute: ${scenario} | `process.platform === 'win32'` |
 | portable-candidate | `packages/eval/src/__tests__/install-preflight.test.ts` rejects an unusable trials root before invoking external prerequisites | `process.platform === 'win32' \|\| process.geteuid?.() === 0` |
-| windows-backend-gap | `packages/runtime-host/src/__tests__/acp-plugin-cleanup.test.ts` removed ACP plugins retain failed cleanup through repeated Platform shutdown | `process.platform === 'win32'` |
 | platform-contract | `packages/runtime-host/src/__tests__/antigravity-install.test.ts` <dynamic test title> | `process.platform !== 'darwin'` |
 | windows-backend-gap | `packages/runtime-host/src/__tests__/connection-effect-coordinator.test.ts` leaves canonical onboarding state unchanged when the durable intent cannot be published | `process.platform === 'win32'` |
 | windows-backend-gap | `packages/runtime-host/src/__tests__/connection-effect-coordinator.test.ts` recovers a durable onboarding intent instead of rolling back a partial publication | `process.platform === 'win32'` |

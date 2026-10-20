@@ -1220,7 +1220,6 @@ export async function createExecutionRuntimeHostComposition(
     let rootRecoveryCompleted = false;
     let clientBoundRecovery: Promise<void> = Promise.resolve();
     let closeTask: Promise<void> | undefined;
-    let storageClosed = false;
     let backendInvalidationPoisoned = false;
     let domainModules: readonly RuntimeHostDomainModule[] | undefined;
     let domainModuleDrainBegun = false;
@@ -3681,10 +3680,7 @@ export async function createExecutionRuntimeHostComposition(
           errors.push(error);
         }
         try {
-          if (!storageClosed) {
-            await storage.close();
-            storageClosed = true;
-          }
+          await storage.close();
         } catch (error) {
           errors.push(error);
         }
@@ -3692,10 +3688,7 @@ export async function createExecutionRuntimeHostComposition(
         if (errors.length > 0) {
           throw new AggregateError(errors, 'Unable to close Runtime Host execution composition');
         }
-      })().catch((error) => {
-        closeTask = undefined;
-        throw error;
-      });
+      })();
       return closeTask;
     };
     return {

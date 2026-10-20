@@ -40,12 +40,8 @@ export class AcpCatalog {
 
   constructor(
     private readonly admission: AdmissionLimiter,
-    private readonly probe: (
-      signal: AbortSignal,
-      holdAdmission: (until: Promise<void>) => void,
-    ) => Promise<ExecutorCatalogEntry>,
+    private readonly probe: (signal: AbortSignal) => Promise<ExecutorCatalogEntry>,
     private readonly unavailable: () => ExecutorCatalogEntry,
-    private readonly drain: () => Promise<void> = async () => {},
   ) {}
 
   async get(signal: AbortSignal, refresh = false): Promise<ExecutorCatalogEntry> {
@@ -79,24 +75,14 @@ export class AcpCatalog {
           // A refresh must drain the superseded process before starting its replacement.
           await previous;
           startup.throwIfAborted();
-          // Failed cleanup may still own the previous permit. Retry it before
-          // acquiring another permit, including when the budget is only one.
-          await this.drain();
-          startup.throwIfAborted();
           const permit = await this.admission.acquire(startup);
-          let retained = false;
           let entry: ExecutorCatalogEntry;
           try {
             startup.throwIfAborted();
-            entry = await this.probe(startup, (until) => {
-              retained = true;
-              void until.then(
-                () => permit.release(),
-                () => permit.release(),
-              );
-            });
+            // probe settles only after its process and temporary directory have been disposed.
+            entry = await this.probe(startup);
           } finally {
-            if (!retained) permit.release();
+            permit.release();
           }
           if (startup.aborted || revision !== this.#revision || this.#disposed)
             return this.unavailable();

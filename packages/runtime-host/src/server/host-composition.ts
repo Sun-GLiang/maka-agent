@@ -85,10 +85,7 @@ export function createRuntimeHostDomainModule(
       }
     },
     close: () => {
-      closeTask ??= closeModuleResources(definition.id, close, drainFailures).catch((error) => {
-        closeTask = undefined;
-        throw error;
-      });
+      closeTask ??= closeModuleResources(definition.id, close, drainFailures);
       return closeTask;
     },
     ...(releaseConnection.length > 0
@@ -198,17 +195,15 @@ function mergeModuleHandlers(
 
 async function closeModuleResources(
   moduleId: string,
-  resources: (() => void | Promise<void> | undefined)[],
+  resources: readonly (() => void | Promise<void> | undefined)[],
   priorFailures: readonly unknown[],
 ): Promise<void> {
   const errors: unknown[] = [...priorFailures];
-  for (let index = 0; index < resources.length; ) {
+  for (const close of resources) {
     try {
-      await resources[index]!();
-      resources.splice(index, 1);
+      await close();
     } catch (error) {
       errors.push(error);
-      index++;
     }
   }
   if (errors.length > 0) {
