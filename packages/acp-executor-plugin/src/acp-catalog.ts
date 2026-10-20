@@ -20,8 +20,8 @@
 import type { ExecutorCatalogEntry } from '@maka/core/executor-catalog';
 import type { AdmissionLimiter } from '@maka/runtime/admission-limiter';
 
-const CATALOG_TTL_MS = 60_000;
 const PROBE_TIMEOUT_MS = 30_000;
+const RETRY_COOLDOWN_MS = 60_000;
 
 interface PendingProbe {
   revision: number;
@@ -29,39 +29,132 @@ interface PendingProbe {
   promise: Promise<ExecutorCatalogEntry>;
 }
 
+export interface AcpCatalogStore {
+  load(): Promise<ExecutorCatalogEntry | undefined>;
+  save(entry: ExecutorCatalogEntry | undefined): Promise<void>;
+}
+
 /** Instance-scoped candidates. Only a retained task Session owns workspace configuration. */
 export class AcpCatalog {
-  #cached?: { entry: ExecutorCatalogEntry; expires: number };
+  #cached?: ExecutorCatalogEntry;
   #pending?: PendingProbe;
   #tail?: Promise<ExecutorCatalogEntry>;
   readonly #operations = new Set<Promise<ExecutorCatalogEntry>>();
   #revision = 0;
+  #generation = 0;
   #disposed = false;
+  #hydration?: Promise<void>;
+  #writes: Promise<void> = Promise.resolve();
+  #persisted?: string;
+  #failure?: { entry: ExecutorCatalogEntry; retryAt: number };
 
   constructor(
     private readonly admission: AdmissionLimiter,
-    private readonly probe: (signal: AbortSignal) => Promise<ExecutorCatalogEntry>,
+    private readonly probe: (
+      signal: AbortSignal,
+      holdAdmission: (until: Promise<void>) => void,
+    ) => Promise<ExecutorCatalogEntry>,
     private readonly unavailable: () => ExecutorCatalogEntry,
+    private readonly drain: () => Promise<void> = async () => {},
+    private readonly store?: AcpCatalogStore,
   ) {}
+
+  /** Authentication/configuration invalidation fences observations from old Sessions. */
+  get generation(): number {
+    return this.#generation;
+  }
+
+  updateModels(entry: ExecutorCatalogEntry, generation: number): void {
+    if (
+      this.#disposed ||
+      generation !== this.#generation ||
+      entry.readiness !== 'ready' ||
+      !entry.supportsModelChange
+    )
+      return;
+    const cached = this.#cached;
+    // A task advertises candidates, not defaults for other projects. Retain only
+    // defaults/modes learned by the neutral probe, never the task's selection.
+    const next: ExecutorCatalogEntry = {
+      id: entry.id,
+      displayName: entry.displayName,
+      readiness: 'ready',
+      models: entry.models,
+      ...(entry.modelGroups ? { modelGroups: entry.modelGroups } : {}),
+      ...(cached?.currentModel && entry.models.some((model) => model.id === cached.currentModel)
+        ? { currentModel: cached.currentModel }
+        : {}),
+      ...(cached?.modes ? { modes: cached.modes } : {}),
+      ...(cached?.currentMode ? { currentMode: cached.currentMode } : {}),
+      supportsAttachments: entry.supportsAttachments,
+      supportsModelChange: entry.supportsModelChange,
+      supportsModeChange: cached?.supportsModeChange ?? false,
+    };
+    this.#cancelProbe();
+    this.#failure = undefined;
+    this.#cached = next;
+    this.#save(next);
+  }
 
   async get(signal: AbortSignal, refresh = false): Promise<ExecutorCatalogEntry> {
     signal.throwIfAborted();
     if (this.#disposed) return this.unavailable();
-    if (refresh) this.invalidate();
+    if (!this.#cached) await waitForSignal(this.#hydrate(), signal);
+    if (refresh) {
+      this.#cancelProbe();
+      this.#failure = undefined;
+    }
+    let force = refresh;
     while (true) {
       signal.throwIfAborted();
       if (this.#disposed) return this.unavailable();
       const cached = this.#cached;
-      if (cached && cached.expires > Date.now()) return cached.entry;
+      if (cached && !force) return this.#failure ? { ...cached, refreshFailed: true } : cached;
+      if (!force && this.#failure && Date.now() < this.#failure.retryAt) return this.#failure.entry;
       const pending = this.#ensureProbe();
       const result = await waitForSignal(pending.promise, signal);
       signal.throwIfAborted();
       if (this.#disposed) return this.unavailable();
       // An invalidation need not have another caller to start its replacement.
       // Only superseded revisions retry; genuine failures remain terminal.
-      if (pending.revision !== this.#revision) continue;
+      if (pending.revision !== this.#revision) {
+        force = !!this.#pending;
+        continue;
+      }
       return result;
     }
+  }
+
+  #hydrate(): Promise<void> {
+    if (!this.#hydration) {
+      const revision = this.#revision;
+      this.#hydration = (async () => {
+        const entry = await this.store?.load();
+        if (this.#disposed || revision !== this.#revision || !entry) return;
+        this.#cached = entry;
+        this.#persisted = JSON.stringify(entry);
+      })().catch(() => {
+        // An optional cache must not prevent fresh discovery.
+      });
+    }
+    return this.#hydration;
+  }
+
+  #save(entry: ExecutorCatalogEntry | undefined): void {
+    if (!this.store) return;
+    const snapshot = entry ? structuredClone(entry) : undefined;
+    const serialized = JSON.stringify(snapshot ?? null);
+    // Serialize writes and invalidation so a slow old write cannot resurrect a
+    // deleted snapshot. Identical Session observations do not rewrite storage.
+    this.#writes = this.#writes
+      .then(async () => {
+        if (serialized === this.#persisted) return;
+        await this.store!.save(snapshot);
+        this.#persisted = serialized;
+      })
+      .catch(() => {
+        // Keep the in-memory catalog usable; a later observation can retry.
+      });
   }
 
   #ensureProbe(): PendingProbe {
@@ -75,21 +168,33 @@ export class AcpCatalog {
           // A refresh must drain the superseded process before starting its replacement.
           await previous;
           startup.throwIfAborted();
+          // Failed cleanup may still own the previous permit. Retry it before
+          // acquiring another permit, including when the budget is only one.
+          await this.drain();
+          startup.throwIfAborted();
           const permit = await this.admission.acquire(startup);
+          let retained = false;
           let entry: ExecutorCatalogEntry;
           try {
             startup.throwIfAborted();
-            // probe settles only after its process and temporary directory have been disposed.
-            entry = await this.probe(startup);
+            entry = await this.probe(startup, (until) => {
+              retained = true;
+              void until.then(
+                () => permit.release(),
+                () => permit.release(),
+              );
+            });
           } finally {
-            permit.release();
+            if (!retained) permit.release();
           }
-          if (startup.aborted || revision !== this.#revision || this.#disposed)
+          if (controller.signal.aborted || revision !== this.#revision || this.#disposed)
             return this.unavailable();
-          if (entry.readiness === 'ready')
-            this.#cached = { entry, expires: Date.now() + CATALOG_TTL_MS };
-          return entry;
+          if (startup.aborted) return this.#acceptProbe(this.unavailable());
+          return this.#acceptProbe(entry);
         } catch {
+          // A real timeout is retryable; cancellation/supersession is not a failure.
+          if (!controller.signal.aborted && revision === this.#revision && !this.#disposed)
+            return this.#acceptProbe(this.unavailable());
           return this.unavailable();
         }
       };
@@ -105,17 +210,47 @@ export class AcpCatalog {
     return this.#pending;
   }
 
+  #acceptProbe(entry: ExecutorCatalogEntry): ExecutorCatalogEntry {
+    if (entry.readiness === 'ready') {
+      this.#failure = undefined;
+      this.#cached = entry;
+      this.#save(entry);
+      return entry;
+    }
+    if (entry.readiness === 'authentication_required') {
+      // A known account failure must not expose the previous account's choices.
+      this.#generation++;
+      this.#cached = undefined;
+      this.#hydration = Promise.resolve();
+      this.#save(undefined);
+    }
+    this.#failure = { entry, retryAt: Date.now() + RETRY_COOLDOWN_MS };
+    return this.#cached ? { ...this.#cached, refreshFailed: true } : entry;
+  }
+
   invalidate(): void {
-    this.#revision++;
+    this.#generation++;
     this.#cached = undefined;
+    this.#failure = undefined;
+    this.#cancelProbe();
+    this.#hydration = Promise.resolve();
+    this.#save(undefined);
+  }
+
+  #cancelProbe(): void {
+    this.#revision++;
     this.#pending?.controller.abort(new Error('ACP catalog invalidated'));
     this.#pending = undefined;
   }
 
   async dispose(): Promise<void> {
     this.#disposed = true;
-    this.invalidate();
+    this.#generation++;
+    this.#cached = undefined;
+    this.#cancelProbe();
     await Promise.allSettled(this.#operations);
+    await this.#hydration;
+    await this.#writes;
   }
 }
 

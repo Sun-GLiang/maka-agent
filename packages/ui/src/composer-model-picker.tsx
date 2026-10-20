@@ -18,7 +18,7 @@
  */
 
 import { useEffect, useState, type ReactNode } from 'react';
-import { Button, Stack } from '@astryxdesign/core';
+import { Button, Spinner, Stack } from '@astryxdesign/core';
 import { Selector, SelectorOption, type SelectorOptionType } from '@astryxdesign/core/Selector';
 import type { ExecutorCatalogEntry, ExecutorConfiguration, ExecutorSelection } from '@maka/core/executor-catalog';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
@@ -57,15 +57,22 @@ export interface ComposerExecutorPicker {
   fixed?: boolean;
   disabled?: boolean;
   loading?: boolean;
+  loadingIds?: readonly string[];
   error?: string;
   onSelect(selection: ExecutorSelection | undefined): void | Promise<void>;
   onSetup(executorId?: string): void;
-  onRetry(): void;
+  onRetry(executorId?: string): void;
   onNewTask(): void;
   onRestore?(): void | Promise<void>;
 }
 
+function isExecutorLoading(executor: ComposerExecutorPicker, id: string): boolean {
+  return executor.loadingIds ? executor.loadingIds.includes(id) : !!executor.loading;
+}
+
 interface ExecutorCopy {
+  loading: string;
+  refreshFailed: string;
   nativeOperations: string;
   manage: string;
   signIn: string;
@@ -87,6 +94,8 @@ interface ExecutorCopy {
 
 const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<ExecutorCopy>()({
   en: {
+    loading: 'Loading models…',
+    refreshFailed: 'Refresh failed. Using the previous model list.',
     nativeOperations: 'This operation requires Maka. Start a new Maka task.',
     manage: 'Manage external agents',
     signIn: 'Go to sign in',
@@ -107,6 +116,8 @@ const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<Exec
     mode: 'Mode',
   },
   'zh-CN': {
+    loading: '正在获取模型…',
+    refreshFailed: '刷新失败，正在使用上次的模型列表。',
     nativeOperations: '此操作仅支持 Maka。请新建 Maka 任务。',
     manage: '管理外部 Agent',
     signIn: '前往登录',
@@ -126,6 +137,8 @@ const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<Exec
     mode: '模式',
   },
   'zh-TW': {
+    loading: '正在取得模型…',
+    refreshFailed: '重新整理失敗，正在使用上次的模型清單。',
     nativeOperations: '此操作僅支援 Maka。請建立 Maka 任務。',
     manage: '管理外部 Agent',
     signIn: '前往登入',
@@ -271,7 +284,7 @@ export function ComposerModelPicker(props: {
     options.push({
       type: 'section',
       title: entry.displayName,
-      options: entry.readiness === 'ready' ? entry.models.flatMap(model => {
+      options: [...(entry.readiness === 'ready' ? entry.models.flatMap(model => {
         const family = executorModelGroup(entry, model.id);
         if (family && entry.models.find(candidate => family.variants.some(variant => variant.modelId === candidate.id))?.id !== model.id) return [];
         const value = externalValue(entry, model.id);
@@ -284,7 +297,8 @@ export function ComposerModelPicker(props: {
           icon: providerMarkIcon(model.providerType, props.renderProviderMark) ?? executor?.renderExecutorMark?.(entry),
           disabled: !!executor?.fixed && !entry.supportsModelChange,
         }];
-      }) : [{ value: JSON.stringify([entry.id, 'unavailable']), label: copy[entry.readiness], disabled: true }],
+      }) : executor && isExecutorLoading(executor, entry.id) ? [] : [{ value: JSON.stringify([entry.id, 'unavailable']), label: copy[entry.readiness], disabled: true }]),
+      ...(executor && isExecutorLoading(executor, entry.id) ? [{ value: JSON.stringify([entry.id, 'loading']), label: copy.loading, disabled: true, icon: <Spinner size="sm" /> }] : [])],
     });
   }
   if (authoritative && !actions.has(authoritative) && !props.hideUnavailableCurrentOption) {
@@ -307,7 +321,8 @@ export function ComposerModelPicker(props: {
     executor?.onSelect({ executorId: executor.selection!.executorId, configuration: executor.fixed || (configuration.model !== undefined && configuration.model !== selectedModel)
       ? configuration : { ...executor.selection!.configuration, ...configuration } });
   const mode = executor?.selection?.configuration.mode ?? selected?.currentMode;
-  const recoveryEntries = catalog.filter(entry => entry.readiness !== 'ready');
+  const recoveryEntries = catalog.filter(entry => (entry.readiness !== 'ready' || entry.refreshFailed)
+    && !(entry.readiness === 'unavailable' && executor && isExecutorLoading(executor, entry.id)));
   return <>
     {/* Keep portaled search clicks from focusing the composer editor. */}
     <Stack direction="horizontal" className="maka-model-picker-root"
@@ -326,7 +341,7 @@ export function ComposerModelPicker(props: {
         variant="ghost" size="sm" placement="above"
         presentation={props.presentation}
         isReadOnly={props.isReadOnly || displayOnly}
-        isLoading={executor?.loading || contribution?.loading}
+        isLoading={contributed ? contribution?.loading : !!executor?.selection && isExecutorLoading(executor, executor.selection.executorId)}
         isDisabled={disabled || entryDisabled}
         disabledMessage={props.disabledReason}
         isDefaultOpen={!!props.openNonce || reopen}
@@ -381,7 +396,7 @@ export function ComposerModelPicker(props: {
       label={modelCopy.configureTitle} variant="ghost" size="sm"
       icon={<Settings size={ICON_SIZE.control} />} onClick={props.onOpenSettings} />}
     {recoveryEntries.map(entry => <span key={entry.id} className="maka-executor-notice" role="status">
-      {entry.displayName + ': ' + copy[entry.readiness as Exclude<typeof entry.readiness, 'ready'>]}
+      {entry.displayName + ': ' + (entry.refreshFailed ? copy.refreshFailed : copy[entry.readiness as Exclude<typeof entry.readiness, 'ready'>])}
       {executor && (entry.readiness === 'restorable' || entry.readiness === 'restore_failed') ? <Button
         label={copy.restore} variant="ghost" size="sm" isDisabled={pending || !executor.onRestore}
         onClick={() => { if (executor.onRestore) void commit(executor.onRestore); }} />
@@ -390,13 +405,13 @@ export function ComposerModelPicker(props: {
         : executor && entry.readiness === 'authentication_required' ? <Button
           label={copy.signIn} variant="ghost" size="sm" onClick={() => executor.onSetup(entry.id)} />
         : executor && entry.readiness !== 'restoring' ? <Button
-          label={copy.retry} variant="ghost" size="sm" isLoading={executor.loading} onClick={executor.onRetry} />
+          label={copy.retry} variant="ghost" size="sm" isLoading={isExecutorLoading(executor, entry.id)} onClick={() => executor.onRetry(entry.id)} />
         : null}
     </span>)}
     {(failed || invalid || executor?.error || (unavailable && !selected) || contribution?.error) && <span className="maka-executor-notice" role="status">
       {contribution?.error ? contribution.label + ': ' + copy.unavailable : unavailable && !selected ? copy.unavailable : invalid ? copy.invalid : copy.selectionFailed}
       {contribution?.error && <Button label={copy.retry} variant="ghost" size="sm" isLoading={contribution.loading} onClick={contribution.onLoad} />}
-      {executor && !contribution?.error && <Button label={copy.retry} variant="ghost" size="sm" isLoading={executor.loading} onClick={executor.onRetry} />}
+      {executor && !contribution?.error && <Button label={copy.retry} variant="ghost" size="sm" isLoading={!!executor.selection && isExecutorLoading(executor, executor.selection.executorId)} onClick={() => executor.onRetry(executor.selection?.executorId)} />}
     </span>}
   </>;
 }

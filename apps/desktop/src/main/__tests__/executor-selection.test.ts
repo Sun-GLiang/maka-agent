@@ -513,3 +513,68 @@ test('draft submission keeps the selected mode and blocks a removed catalog choi
     executorEntry: { ...entry, modes: [{ id: 'ask', name: 'Ask' }] },
   }, 0, 'en') ?? '', /no longer available/u);
 });
+
+test('draft agent catalogs settle independently and targeted retry does not wait for another agent', async () => {
+  const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
+  const values = { document, window, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true };
+  const originals = new Map(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const root = createRoot(document.getElementById('root')!);
+  let latest!: ReturnType<typeof useExecutorSelection>;
+  let settleSlow!: (value: readonly ExecutorCatalogEntry[]) => void;
+  const slow = new Promise<readonly ExecutorCatalogEntry[]>(resolve => { settleSlow = resolve; });
+  const calls: Array<[string | undefined, boolean | undefined]> = [];
+  let failFast = false;
+  let slowReads = 0;
+  const services = {
+    subscribeChanges: () => () => {},
+    newTasks: {
+      subscribeChanges: () => () => {},
+      listExecutors: async () => [entry, { ...entry, id: 'slow', readiness: 'unavailable', models: [] }],
+      getExecutors: async (_target: unknown, _cwd: string, force?: boolean, id?: string) => {
+        calls.push([id, force]);
+        if (id === 'slow') return ++slowReads === 1 ? slow : [{ ...entry, id: 'slow', displayName: 'Current Slow' }];
+        if (failFast) throw new Error('transport failed');
+        return [entry];
+      },
+    },
+  } as unknown as ConversationServices;
+  function Probe(props: { draftKey: string }) {
+    latest = useExecutorSelection({ key: props.draftKey, cwd: '/fixture', target: { hostId: 'host', profileId: 'profile', projectId: null } });
+    return null;
+  }
+  const render = (draftKey: string) => act(async () => root.render(createElement(ConversationServicesProvider, {
+    services, children: createElement(Probe, { draftKey }),
+  })));
+  try {
+    await render('first');
+    assert.deepEqual(latest.loadingIds, ['slow']);
+    assert.equal(latest.catalog.find(candidate => candidate.id === 'external')?.readiness, 'ready');
+    await act(async () => latest.select({ executorId: 'external', configuration: { model: 'selected' } }));
+    failFast = true;
+    await act(async () => latest.refresh(true, 'external'));
+    assert.deepEqual(latest.loadingIds, ['slow']);
+    assert.equal(latest.entry?.refreshFailed, true);
+    assert.deepEqual(latest.entry?.models, entry.models);
+    assert.deepEqual(calls, [['external', false], ['slow', false], ['external', true]]);
+    failFast = false;
+    await render('second');
+    assert.deepEqual(latest.loadingIds, []);
+    await act(async () => {
+      settleSlow([{ ...entry, id: 'slow', displayName: 'Stale Slow' }]);
+      await slow;
+    });
+    assert.deepEqual(latest.loadingIds, []);
+    assert.equal(latest.loading, false);
+    assert.equal(latest.catalog.find(candidate => candidate.id === 'slow')?.readiness, 'ready');
+    assert.equal(latest.catalog.find(candidate => candidate.id === 'slow')?.displayName, 'Current Slow',
+      'late agent responses cannot overwrite the newly selected draft');
+  } finally {
+    settleSlow([]);
+    await act(async () => root.unmount());
+    for (const [key, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});

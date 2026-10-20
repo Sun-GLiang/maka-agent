@@ -159,10 +159,57 @@ This does not introduce a new application architecture or another backend.
 
 PR 2 covers local macOS arm64 Desktop and local Runtime Host. PR 3 added explicit restoration of the
 same external Session after process loss, with a visible history gap when replay cannot be aligned.
-PR 4 extends the generic executor configuration with opaque Agent modes and scopes catalog caches
-by workspace. A successful setup/login or configuration change invalidates provider discovery;
-manual refresh requests a new probe for the selected workspace. Remote execution, OAuth forwarding, external child orchestration, steering and
+PR 4 extends the generic executor configuration with opaque Agent modes. Draft catalogs now
+belong to the configured executor instance and use a neutral directory for discovery, shared
+across projects. A successful setup/login or configuration change invalidates provider discovery;
+manual refresh requests a new neutral probe. Remote execution, OAuth forwarding, external child orchestration, steering and
 cross-Agent continuation are not added here.
+
+### Draft model catalog reuse
+
+Successful discovery is cached in memory and persisted through the Host's namespaced Plugin
+storage, without a time-based expiry. Opening a new draft after spending time in another task,
+or after restarting the application or Host, reuses these candidates instead of starting
+another ACP process. Standalone executors can opt into the same storage contract.
+
+Snapshots are isolated by Host, Plugin scope, and executor entry. A versioned snapshot binds
+to a digest of the configuration, launch arguments, platform, and executable/sidecar file
+metadata. Configuration values and credentials are not stored in the snapshot. Missing,
+incompatible, or corrupt snapshots fall back to discovery. Executable changes are detected
+when loading the snapshot on restart; inherited process environment changes do not invalidate it.
+External account or upstream model changes are learned through the next real Session or manual
+refresh, rather than a timer or a background disposable Session.
+
+Successful real Session initialization (including restoration), confirmed configuration changes,
+and `config_option_update` notifications update the shared model candidates. A real Session can
+populate an empty cache, avoiding a separate discovery process. Task selections and
+workspace-specific modes are not copied into draft defaults; only a neutral probe supplies
+those defaults. Every real Session still validates requested configuration against its own
+advertised options.
+
+First discovery without cached candidates and explicit refresh still use a disposable probe.
+Transient refresh failures retain the successful in-memory and disk snapshot and expose a
+refresh-failed notice. Cold discovery failures have a 60-second retry cooldown; this is not a
+TTL for successful catalogs. Manual retry and explicit invalidation bypass the cooldown, and
+real Session observations recover immediately. Authentication failures clear previous choices
+and fence observations from older Sessions.
+Setup/login and configuration invalidation discard the cache and fence updates from older
+Sessions. A newer Session observation supersedes an in-flight probe, whose process still drains
+through the existing cleanup/admission path before its waiting callers receive the new snapshot.
+Disk reads cannot override newer Session observations, and serialized writes prevent a pending
+save from resurrecting an invalidated snapshot. Repeated identical observations skip disk
+writes. Normal shutdown drains pending writes and retains the snapshot; storage failures leave
+the in-memory catalog usable.
+
+Setup/login invalidates only the affected executor. RuntimePolicy edits rely on Plugin
+reconciliation to replace changed configurations; unrelated settings do not invalidate catalogs.
+The draft picker first reads the process-free executor inventory, then discovers each executor
+independently. Completed results and retry/loading state belong to each agent, so a slow
+Antigravity probe does not block another agent's catalog or animate a selected native model.
+The executor query's inventory/filter fields require compatibility epoch 226.
+
+See [catalog cache acceptance](archive/antigravity-catalog-cache-acceptance.md) for real
+Antigravity process counts across navigation, Host restarts, and application restarts.
 
 See [PR 2 acceptance evidence](archive/antigravity-acp-pr2-acceptance.md),
 [PR 3 acceptance evidence](archive/antigravity-acp-pr3-acceptance.md), and

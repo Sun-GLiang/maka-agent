@@ -22,7 +22,7 @@ import { setImmediate } from 'node:timers/promises';
 import { test } from 'node:test';
 import type { ExecutorCatalogEntry } from '@maka/core/executor-catalog';
 import { AdmissionLimiter } from '@maka/runtime/admission-limiter';
-import { AcpCatalog } from '../acp-catalog.js';
+import { AcpCatalog, type AcpCatalogStore } from '../acp-catalog.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -284,7 +284,7 @@ test('repeated invalidations without refresh drain and join the latest revision'
   }
 });
 
-test('ready catalog cache expires without a timer or caller refresh', async () => {
+test('ready catalog survives idle time until explicit refresh or invalidation', async () => {
   let calls = 0;
   let now = 100000;
   const original = Date.now;
@@ -301,11 +301,353 @@ test('ready catalog cache expires without a timer or caller refresh', async () =
     await catalog.get(signal());
     await catalog.get(signal());
     assert.equal(calls, 1);
-    now += 61000;
+    now += 24 * 60 * 60 * 1000;
     await catalog.get(signal());
+    assert.equal(calls, 1, 'opening another draft after a day does not start a probe');
+    await catalog.get(signal(), true);
     assert.equal(calls, 2);
+    catalog.invalidate();
+    await catalog.get(signal());
+    assert.equal(calls, 3);
   } finally {
     Date.now = original;
     await catalog.dispose();
   }
+});
+
+function observedModels(id: string): ExecutorCatalogEntry {
+  return {
+    ...entry('agent'),
+    models: [{ id, name: id }],
+    currentModel: id,
+    modes: [{ id: 'project-mode', name: 'Project mode' }],
+    currentMode: 'project-mode',
+    supportsModelChange: true,
+    supportsModeChange: true,
+  };
+}
+
+test('a real Session supplies candidates without inheriting its defaults or starting a probe', async () => {
+  let probes = 0;
+  const catalog = new AcpCatalog(
+    new AdmissionLimiter(1),
+    async () => {
+      probes++;
+      return entry('probe');
+    },
+    () => entry('unavailable', 'unavailable'),
+  );
+  try {
+    catalog.updateModels(observedModels('live'), catalog.generation);
+    const result = await catalog.get(signal());
+    assert.deepEqual(result.models, [{ id: 'live', name: 'live' }]);
+    assert.equal(result.currentModel, undefined);
+    assert.equal(result.currentMode, undefined);
+    assert.equal(result.modes, undefined);
+    assert.equal(result.supportsModeChange, false);
+    assert.equal(probes, 0);
+  } finally {
+    await catalog.dispose();
+  }
+});
+
+test('a late probe cannot overwrite models observed from a real Session', async () => {
+  const started = deferred<void>();
+  const result = deferred<ExecutorCatalogEntry>();
+  const admission = new AdmissionLimiter(1);
+  let probes = 0;
+  const catalog = new AcpCatalog(
+    admission,
+    async () => {
+      probes++;
+      started.resolve();
+      return await result.promise;
+    },
+    () => entry('unavailable', 'unavailable'),
+  );
+  try {
+    const waiting = catalog.get(signal());
+    await started.promise;
+    catalog.updateModels(observedModels('live'), catalog.generation);
+    const live = await catalog.get(signal());
+    assert.equal(live.models[0]?.id, 'live', 'new callers do not wait for probe cleanup');
+    result.resolve(observedModels('stale'));
+    assert.equal(await waiting, live);
+    assert.equal(await catalog.get(signal()), live);
+    assert.equal(probes, 1);
+    assert.equal(admission.activeCount, 0);
+  } finally {
+    result.resolve(entry('cleanup'));
+    await catalog.dispose();
+  }
+});
+
+test('invalidated and disposed catalogs reject observations from old Sessions', async () => {
+  const catalog = new AcpCatalog(
+    new AdmissionLimiter(1),
+    async () => observedModels('new-account'),
+    () => entry('unavailable', 'unavailable'),
+  );
+  const generation = catalog.generation;
+  try {
+    catalog.updateModels(observedModels('old-account'), generation);
+    catalog.invalidate();
+    catalog.updateModels(observedModels('late-old-account'), generation);
+    assert.equal((await catalog.get(signal())).models[0]?.id, 'new-account');
+    catalog.updateModels(observedModels('latest'), catalog.generation);
+    assert.equal((await catalog.get(signal())).models[0]?.id, 'latest');
+    await catalog.dispose();
+    catalog.updateModels(observedModels('after-disposal'), catalog.generation);
+    assert.equal((await catalog.get(signal())).readiness, 'unavailable');
+  } finally {
+    await catalog.dispose();
+  }
+});
+
+test('manual refresh preserves the ability of live Sessions to update the catalog', async () => {
+  const catalog = new AcpCatalog(
+    new AdmissionLimiter(1),
+    async () => observedModels('probe'),
+    () => entry('unavailable', 'unavailable'),
+  );
+  try {
+    const generation = catalog.generation;
+    catalog.updateModels(observedModels('live'), generation);
+    await catalog.get(signal(), true);
+    catalog.updateModels(observedModels('updated'), generation);
+    assert.equal((await catalog.get(signal())).models[0]?.id, 'updated');
+  } finally {
+    await catalog.dispose();
+  }
+});
+
+test('shutdown flushes Session candidates and restart uses them without a probe', async () => {
+  let saved: ExecutorCatalogEntry | undefined;
+  let writes = 0;
+  let probes = 0;
+  const store: AcpCatalogStore = {
+    load: async () => saved,
+    save: async (entry) => {
+      saved = entry;
+      writes++;
+    },
+  };
+  const make = () =>
+    new AcpCatalog(
+      new AdmissionLimiter(1),
+      async () => {
+        probes++;
+        return observedModels('probe');
+      },
+      () => entry('unavailable', 'unavailable'),
+      undefined,
+      store,
+    );
+  const first = make();
+  first.updateModels(observedModels('live'), first.generation);
+  first.updateModels(observedModels('live'), first.generation);
+  await first.dispose();
+  assert.equal(writes, 1, 'identical observations do not rewrite the disk snapshot');
+  const restarted = make();
+  try {
+    assert.equal((await restarted.get(signal())).models[0]?.id, 'live');
+    assert.equal(probes, 0);
+    assert.equal((await restarted.get(signal(), true)).models[0]?.id, 'probe');
+    assert.equal(probes, 1, 'manual refresh bypasses both cache layers');
+  } finally {
+    await restarted.dispose();
+  }
+  assert.equal(saved?.models[0]?.id, 'probe', 'normal shutdown retains the latest snapshot');
+});
+
+test('late disk reads cannot override a Session update or explicit invalidation', async () => {
+  for (const invalidate of [false, true]) {
+    const started = deferred<void>();
+    const read = deferred<ExecutorCatalogEntry>();
+    let probes = 0;
+    const catalog = new AcpCatalog(
+      new AdmissionLimiter(1),
+      async () => {
+        probes++;
+        return observedModels('fresh-probe');
+      },
+      () => entry('unavailable', 'unavailable'),
+      undefined,
+      {
+        load: async () => {
+          started.resolve();
+          return await read.promise;
+        },
+        save: async () => {},
+      },
+    );
+    const waiting = catalog.get(signal());
+    try {
+      await started.promise;
+      if (invalidate) catalog.invalidate();
+      else catalog.updateModels(observedModels('live'), catalog.generation);
+      read.resolve(observedModels('stale-disk'));
+      assert.equal((await waiting).models[0]?.id, invalidate ? 'fresh-probe' : 'live');
+      assert.equal(probes, invalidate ? 1 : 0);
+    } finally {
+      read.resolve(observedModels('cleanup'));
+      await catalog.dispose();
+    }
+  }
+});
+
+test('invalidation deletes the disk cache after an already-running write settles', async () => {
+  const started = deferred<void>();
+  const writing = deferred<void>();
+  let saved: ExecutorCatalogEntry | undefined;
+  const catalog = new AcpCatalog(
+    new AdmissionLimiter(1),
+    async () => observedModels('probe'),
+    () => entry('unavailable', 'unavailable'),
+    undefined,
+    {
+      load: async () => saved,
+      save: async (entry) => {
+        if (entry) {
+          started.resolve();
+          await writing.promise;
+        }
+        saved = entry;
+      },
+    },
+  );
+  catalog.updateModels(observedModels('old-account'), catalog.generation);
+  await started.promise;
+  catalog.invalidate();
+  const disposal = catalog.dispose();
+  writing.resolve();
+  await disposal;
+  assert.equal(saved, undefined, 'a late write cannot resurrect an invalidated account catalog');
+});
+
+test('cache read and write failures do not prevent discovery or live updates', async () => {
+  const catalog = new AcpCatalog(
+    new AdmissionLimiter(1),
+    async () => observedModels('probe'),
+    () => entry('unavailable', 'unavailable'),
+    undefined,
+    {
+      load: async () => {
+        throw new Error('unreadable');
+      },
+      save: async () => {
+        throw new Error('read-only');
+      },
+    },
+  );
+  try {
+    assert.equal((await catalog.get(signal())).models[0]?.id, 'probe');
+    catalog.updateModels(observedModels('live'), catalog.generation);
+    assert.equal((await catalog.get(signal())).models[0]?.id, 'live');
+  } finally {
+    await catalog.dispose();
+  }
+});
+
+test('failed refresh retains memory and disk choices while concurrent reads stay available', async () => {
+  const started = deferred<void>();
+  const result = deferred<ExecutorCatalogEntry>();
+  let saved: ExecutorCatalogEntry | undefined = observedModels('saved');
+  let probes = 0;
+  const catalog = new AcpCatalog(
+    new AdmissionLimiter(1),
+    async () => {
+      probes++;
+      started.resolve();
+      return result.promise;
+    },
+    () => entry('agent', 'unavailable'),
+    undefined,
+    {
+      load: async () => saved,
+      save: async (value) => {
+        saved = value;
+      },
+    },
+  );
+  try {
+    const refresh = catalog.get(signal(), true);
+    await started.promise;
+    assert.equal((await catalog.get(signal())).models[0]?.id, 'saved');
+    result.resolve(entry('agent', 'unavailable'));
+    const failed = await refresh;
+    assert.equal(failed.readiness, 'ready');
+    assert.equal(failed.models[0]?.id, 'saved');
+    assert.equal(failed.refreshFailed, true);
+    assert.equal((await catalog.get(signal())).refreshFailed, true);
+    assert.equal(probes, 1);
+    assert.equal(
+      saved?.refreshFailed,
+      undefined,
+      'failure state is not persisted over a successful snapshot',
+    );
+    catalog.updateModels(observedModels('live'), catalog.generation);
+    assert.equal((await catalog.get(signal())).refreshFailed, undefined);
+  } finally {
+    result.resolve(entry('agent', 'unavailable'));
+    await catalog.dispose();
+  }
+  assert.equal(saved?.models[0]?.id, 'live');
+});
+
+test('cold failures cool down automatic reads but manual retry and invalidation bypass the delay', async () => {
+  const original = Date.now;
+  let now = 0;
+  let probes = 0;
+  const catalog = new AcpCatalog(
+    new AdmissionLimiter(1),
+    async () => {
+      probes++;
+      return entry('agent', 'unavailable');
+    },
+    () => entry('agent', 'unavailable'),
+  );
+  try {
+    Date.now = () => now;
+    await catalog.get(signal());
+    now = 59_999;
+    await catalog.get(signal());
+    assert.equal(probes, 1);
+    now = 60_000;
+    await Promise.all([catalog.get(signal()), catalog.get(signal())]);
+    assert.equal(probes, 2, 'concurrent retries share one probe after the cooldown');
+    await catalog.get(signal(), true);
+    assert.equal(probes, 3);
+    catalog.invalidate();
+    await catalog.get(signal());
+    assert.equal(probes, 4);
+    catalog.updateModels(observedModels('live'), catalog.generation);
+    assert.equal((await catalog.get(signal())).models[0]?.id, 'live');
+    assert.equal(probes, 4, 'a real Session recovers without another probe');
+  } finally {
+    Date.now = original;
+    await catalog.dispose();
+  }
+});
+
+test('authentication failure discards persisted choices and fences old Session observations', async () => {
+  let saved: ExecutorCatalogEntry | undefined = observedModels('old-account');
+  const catalog = new AcpCatalog(
+    new AdmissionLimiter(1),
+    async () => entry('agent', 'authentication_required'),
+    () => entry('agent', 'unavailable'),
+    undefined,
+    {
+      load: async () => saved,
+      save: async (value) => {
+        saved = value;
+      },
+    },
+  );
+  const generation = catalog.generation;
+  assert.equal((await catalog.get(signal(), true)).readiness, 'authentication_required');
+  catalog.updateModels(observedModels('old-session'), generation);
+  assert.equal((await catalog.get(signal())).readiness, 'authentication_required');
+  await catalog.dispose();
+  assert.equal(saved, undefined);
 });
