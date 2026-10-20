@@ -174,6 +174,12 @@ interface RetainedSession {
   loss?: Promise<void>;
 }
 
+interface RetainedCatalogProbe {
+  session?: RetainedSession;
+  directory: Promise<void>;
+  releaseDirectory(): void;
+}
+
 type CatalogDirectory = <T>(
   signal: AbortSignal,
   use: (directory: string) => Promise<T>,
@@ -188,7 +194,9 @@ export class AcpExecutor implements PluginExecutorProvider {
   readonly #createConnection: AcpConnectionFactory;
   readonly #state?: AcpConversationStateStore;
   readonly #sessions = new Map<string, RetainedSession>();
+  readonly #catalogProbes = new Set<RetainedCatalogProbe>();
   #disposed = false;
+  #disposal?: Promise<void>;
   readonly #catalog: AcpCatalog;
   readonly #withCatalogDirectory: CatalogDirectory;
   #temporaryDirectory?: Promise<string>;
@@ -226,8 +234,9 @@ export class AcpExecutor implements PluginExecutorProvider {
       });
     this.#catalog = new AcpCatalog(
       options.catalogAdmission ?? new AdmissionLimiter(1),
-      (signal) => this.#probeCatalog(signal),
+      (signal, holdAdmission) => this.#probeCatalog(signal, holdAdmission),
       () => this.#catalogEntry('unavailable'),
+      () => this.#drainCatalogProbes(),
     );
   }
 
@@ -241,13 +250,47 @@ export class AcpExecutor implements PluginExecutorProvider {
     return await this.#catalog.get(input.signal, input.refresh);
   }
 
-  async #probeCatalog(signal: AbortSignal): Promise<ExecutorCatalogEntry> {
-    return await this.#withCatalogDirectory(signal, (directory) =>
-      this.#readCatalog(directory, signal),
-    );
+  async #probeCatalog(
+    signal: AbortSignal,
+    holdAdmission: (until: Promise<void>) => void,
+  ): Promise<ExecutorCatalogEntry> {
+    let resolveResult!: (entry: ExecutorCatalogEntry) => void;
+    let rejectResult!: (error: unknown) => void;
+    const result = new Promise<ExecutorCatalogEntry>((resolve, reject) => {
+      resolveResult = resolve;
+      rejectResult = reject;
+    });
+    let releaseDirectory!: () => void;
+    const released = new Promise<void>((resolve) => {
+      releaseDirectory = resolve;
+    });
+    const probe: RetainedCatalogProbe = { directory: Promise.resolve(), releaseDirectory };
+    this.#catalogProbes.add(probe);
+    // Report a cleanup failure to discovery while retaining the directory lease
+    // and admission permit until a refresh or shutdown successfully retries it.
+    probe.directory = this.#withCatalogDirectory(signal, async (directory) => {
+      try {
+        resolveResult(await this.#readCatalog(probe, directory, signal));
+      } catch (error) {
+        rejectResult(error);
+      } finally {
+        await released;
+      }
+    }).finally(() => {
+      if (!probe.session?.owner) this.#catalogProbes.delete(probe);
+    });
+    holdAdmission(probe.directory);
+    void probe.directory.catch(rejectResult);
+    const entry = await result;
+    await probe.directory;
+    return entry;
   }
 
-  async #readCatalog(directory: string, signal: AbortSignal): Promise<ExecutorCatalogEntry> {
+  async #readCatalog(
+    probe: RetainedCatalogProbe,
+    directory: string,
+    signal: AbortSignal,
+  ): Promise<ExecutorCatalogEntry> {
     let session: RetainedSession | undefined;
     try {
       signal.throwIfAborted();
@@ -257,6 +300,7 @@ export class AcpExecutor implements PluginExecutorProvider {
         configOptions: [],
         lost: false,
       };
+      probe.session = session;
       await this.#initialize(session, signal, true);
       return this.#catalogEntry('ready', session.configOptions);
     } catch (error) {
@@ -265,8 +309,26 @@ export class AcpExecutor implements PluginExecutorProvider {
       );
     } finally {
       // The directory lease outlives process cleanup, including failure cleanup.
-      if (session) await (session.loss ?? this.#disposeSession(session));
+      if (session) await this.#lose(session);
+      probe.releaseDirectory();
     }
+  }
+
+  async #disposeCatalogProbe(probe: RetainedCatalogProbe): Promise<void> {
+    if (probe.session) await this.#lose(probe.session);
+    probe.releaseDirectory();
+    await probe.directory;
+    this.#catalogProbes.delete(probe);
+  }
+
+  async #drainCatalogProbes(): Promise<void> {
+    const settlements = await Promise.allSettled(
+      [...this.#catalogProbes].map((probe) => this.#disposeCatalogProbe(probe)),
+    );
+    const failures = settlements.flatMap((settlement) =>
+      settlement.status === 'rejected' ? [settlement.reason] : [],
+    );
+    if (failures.length) throw new AggregateError(failures, 'ACP probe cleanup failed');
   }
 
   invalidateCatalog(): void {
@@ -508,14 +570,25 @@ export class AcpExecutor implements PluginExecutorProvider {
   }
 
   async dispose(): Promise<void> {
-    if (this.#disposed) return;
+    if (this.#disposal) return await this.#disposal;
     this.#disposed = true;
+    this.#disposal = this.#dispose().catch((error) => {
+      this.#disposal = undefined;
+      throw error;
+    });
+    await this.#disposal;
+  }
+
+  async #dispose(): Promise<void> {
     await this.#catalog.dispose();
-    const sessions = [...this.#sessions.values()];
-    this.#sessions.clear();
-    const settlements = await Promise.allSettled(
-      sessions.map((session) => session.loss ?? this.#disposeSession(session)),
-    );
+    const settlements = await Promise.allSettled([
+      ...[...this.#sessions.values()].map(async (session) => {
+        await this.#lose(session);
+        if (this.#sessions.get(session.conversationKey) === session)
+          this.#sessions.delete(session.conversationKey);
+      }),
+      this.#drainCatalogProbes(),
+    ]);
     const failures = settlements.flatMap((settlement) =>
       settlement.status === 'rejected' ? [settlement.reason] : [],
     );
@@ -527,6 +600,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     readonly cwd: string;
     readonly configuration?: ExecutorConfiguration;
   }): Promise<RetainedSession> {
+    if (this.#disposed) throw new AcpRuntimeError('ACP executor is unavailable', 'acp_unavailable');
     const cwd = resolve(request.cwd);
     const existing = this.#sessions.get(request.conversationKey);
     if (existing) {
@@ -540,7 +614,9 @@ export class AcpExecutor implements PluginExecutorProvider {
           'ACP conversation is history-only because its external process was lost',
           'acp_history_only',
         );
-      await existing.loss;
+      await this.#lose(existing);
+      if (this.#disposed)
+        throw new AcpRuntimeError('ACP executor is unavailable', 'acp_unavailable');
       if (this.#sessions.get(request.conversationKey) !== existing) return this.#session(request);
       this.#sessions.delete(request.conversationKey);
     }
@@ -623,6 +699,9 @@ export class AcpExecutor implements PluginExecutorProvider {
       throw new AcpRuntimeError('ACP Agent installation changed', 'acp_restore_identity_changed');
     const executable = await checkedExecutable(launch.executable);
     await Promise.all((launch.requiredExecutables ?? []).map(checkedExecutable));
+    // Closing may have started while startup was reading state or checking binaries.
+    if (this.#disposed || session.lost)
+      throw new AcpRuntimeError('ACP executor is unavailable', 'acp_unavailable');
     const owner = this.#createConnection({
       ...launch,
       executable,
@@ -1147,18 +1226,23 @@ export class AcpExecutor implements PluginExecutorProvider {
   }
 
   async #lose(session: RetainedSession): Promise<void> {
+    session.lost = true;
+    session.connection = undefined;
     if (!session.loss) {
-      session.lost = true;
-      session.loss = this.#disposeSession(session);
+      session.loss = this.#disposeSession(session).catch((error) => {
+        // Keep the owner until cleanup succeeds, and let a later caller retry failures.
+        session.loss = undefined;
+        throw error;
+      });
     }
     await session.loss;
   }
 
   async #disposeSession(session: RetainedSession): Promise<void> {
     const owner = session.owner;
-    session.owner = undefined;
     session.connection = undefined;
     if (owner) await owner.dispose();
+    session.owner = undefined;
   }
 }
 

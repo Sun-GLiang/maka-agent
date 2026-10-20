@@ -489,6 +489,313 @@ test('concurrent restore retries share one replacement Session', async () => {
   }
 });
 
+test('conversation cleanup shares each attempt, retries failures and remains idempotent after success', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const firstCleanup = deferred<void>();
+  const retryCleanup = deferred<void>();
+  let attempts = 0;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      createConnection: (input) => {
+        const owner = protocol.factory(input);
+        return {
+          ...owner,
+          dispose: async () => {
+            attempts++;
+            if (attempts === 1) {
+              await firstCleanup.promise;
+              throw new Error('Transient cleanup failure');
+            }
+            await retryCleanup.promise;
+            await owner.dispose();
+          },
+        };
+      },
+    },
+  );
+  try {
+    assert.equal(
+      (await executor.execute(request('first'), executorContext([]))).status,
+      'completed',
+    );
+    const first = executor.disposeConversation('session-a');
+    const concurrent = executor.disposeConversation('session-a');
+    const failures = Promise.all([
+      assert.rejects(first, /Transient cleanup failure/u),
+      assert.rejects(concurrent, /Transient cleanup failure/u),
+    ]);
+    assert.equal(attempts, 1);
+    firstCleanup.resolve();
+    await failures;
+    assert.equal(protocol.disposals, 0);
+    const retry = executor.disposeConversation('session-a');
+    const retryTogether = executor.disposeConversation('session-a');
+    const retries = Promise.allSettled([retry, retryTogether]);
+    assert.equal(attempts, 2);
+    assert.equal(
+      (await executor.inspectConversation(request('inspect'))).readiness,
+      'history_only',
+    );
+    retryCleanup.resolve();
+    assert.deepEqual(
+      (await retries).map((result) => result.status),
+      ['fulfilled', 'fulfilled'],
+    );
+    await executor.disposeConversation('session-a');
+    await executor.dispose();
+    assert.equal(attempts, 2);
+    assert.equal(protocol.disposals, 1);
+  } finally {
+    firstCleanup.resolve();
+    retryCleanup.resolve();
+    await executor.dispose().catch(() => undefined);
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('restore retries cleanup before reconnecting and concurrent callers share cleanup and restoration', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.supportsRestore = true;
+  const storage = durableState();
+  const cleanup = deferred<void>();
+  let attempts = 0;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      state: storage.state,
+      createConnection: (input) => {
+        const owner = protocol.factory(input);
+        if (protocol.connections > 1) return owner;
+        return {
+          ...owner,
+          dispose: async () => {
+            attempts++;
+            if (attempts <= 2) throw new Error('Transient cleanup failure');
+            await cleanup.promise;
+            await owner.dispose();
+          },
+        };
+      },
+    },
+  );
+  try {
+    assert.equal(
+      (await executor.execute(request('first'), executorContext([]))).status,
+      'completed',
+    );
+    await executor.acknowledgeExecution('session-a', 'turn-first');
+    const sessionId = storage.record().sessionId;
+    await assert.rejects(executor.disposeConversation('session-a'), /Transient cleanup failure/u);
+    const failed = await executor.execute(request('blocked'), executorContext([]));
+    assert.equal(failed.status, 'failed');
+    assert.equal(attempts, 2, 'restore must retry the old owner, not reuse its rejected promise');
+    assert.equal(protocol.connections, 1);
+    assert.equal(protocol.prompts, 1);
+    const input = { ...request('restore'), configuration: { model: 'default' } };
+    const restore = executor.configureConversation(input, new AbortController().signal);
+    const concurrent = executor.configureConversation(input, new AbortController().signal);
+    const restored = Promise.allSettled([restore, concurrent]);
+    assert.equal(attempts, 3);
+    assert.equal(protocol.connections, 1, 'a replacement cannot overlap pending cleanup');
+    assert.equal(protocol.resumes, 0);
+    const disposal = executor.disposeConversation('session-a');
+    assert.equal(attempts, 3, 'explicit disposal shares the restore cleanup');
+    cleanup.resolve();
+    await disposal;
+    assert.equal((await restored).filter((result) => result.status === 'fulfilled').length, 1);
+    assert.equal(protocol.connections, 2);
+    assert.equal(protocol.disposals, 1);
+    assert.equal(protocol.resumes, 1);
+    assert.equal(protocol.sessions, 1);
+    assert.equal(storage.record().sessionId, sessionId);
+    assert.equal(
+      (await executor.execute(request('second'), executorContext([]))).status,
+      'completed',
+    );
+    await executor.acknowledgeExecution('session-a', 'turn-second');
+    assert.equal(storage.record().committedPrompts, 2);
+  } finally {
+    cleanup.resolve();
+    await executor.dispose().catch(() => undefined);
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('executor disposal retries only unfinished owners and shares failures and retries with concurrent callers', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const firstCleanup = deferred<void>();
+  const cleanupStarted = deferred<void>();
+  const retryCleanup = deferred<void>();
+  const retryStarted = deferred<void>();
+  const attempts = [0, 0];
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      createConnection: (input) => {
+        const owner = protocol.factory(input);
+        const index = protocol.connections - 1;
+        return {
+          ...owner,
+          dispose: async () => {
+            attempts[index]++;
+            if (index === 0) {
+              if (attempts[index] === 1) {
+                cleanupStarted.resolve();
+                await firstCleanup.promise;
+                throw new Error('Transient cleanup failure');
+              }
+              retryStarted.resolve();
+              await retryCleanup.promise;
+            }
+            await owner.dispose();
+          },
+        };
+      },
+    },
+  );
+  try {
+    await executor.execute(request('first'), executorContext([]));
+    await executor.execute(
+      { ...request('other'), conversationKey: 'session-b', sessionId: 'session-b' },
+      executorContext([]),
+    );
+    const first = executor.dispose();
+    await cleanupStarted.promise;
+    const concurrent = executor.dispose();
+    const failures = Promise.all([
+      assert.rejects(first, (error: unknown) => {
+        assert.ok(error instanceof AggregateError);
+        assert.match(error.errors[0].message, /Transient cleanup failure/u);
+        return true;
+      }),
+      assert.rejects(concurrent, /ACP process cleanup failed/u),
+      assert.rejects(executor.disposeConversation('session-a'), /Transient cleanup failure/u),
+    ]);
+    assert.deepEqual(attempts, [1, 1]);
+    firstCleanup.resolve();
+    await failures;
+    assert.equal(protocol.disposals, 1, 'other owners are cleaned despite one failure');
+    assert.equal((await executor.execute(request('closed'), executorContext([]))).status, 'failed');
+    await assert.rejects(
+      executor.configureConversation(
+        { ...request('closed'), configuration: { model: 'default' } },
+        new AbortController().signal,
+      ),
+      /unavailable/u,
+    );
+    const retry = executor.dispose();
+    const retryTogether = executor.dispose();
+    const retries = Promise.allSettled([retry, retryTogether]);
+    await retryStarted.promise;
+    assert.deepEqual(attempts, [2, 1]);
+    const conversationRetry = executor.disposeConversation('session-a');
+    assert.deepEqual(attempts, [2, 1]);
+    retryCleanup.resolve();
+    await conversationRetry;
+    assert.deepEqual(
+      (await retries).map((result) => result.status),
+      ['fulfilled', 'fulfilled'],
+    );
+    await executor.dispose();
+    assert.deepEqual(attempts, [2, 1]);
+    assert.equal(protocol.disposals, 2);
+    assert.equal(protocol.connections, 2);
+  } finally {
+    firstCleanup.resolve();
+    retryCleanup.resolve();
+    await executor.dispose().catch(() => undefined);
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('executor shutdown prevents a waiting restore from creating a replacement connection', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  protocol.supportsRestore = true;
+  const storage = durableState();
+  const cleanup = deferred<void>();
+  let attempts = 0;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      state: storage.state,
+      createConnection: (input) => {
+        const owner = protocol.factory(input);
+        return {
+          ...owner,
+          dispose: async () => {
+            attempts++;
+            await cleanup.promise;
+            await owner.dispose();
+          },
+        };
+      },
+    },
+  );
+  try {
+    await executor.execute(request('first'), executorContext([]));
+    await executor.acknowledgeExecution('session-a', 'turn-first');
+    const disposingConversation = executor.disposeConversation('session-a');
+    const restoring = executor.execute(request('restore'), executorContext([]));
+    const shuttingDown = executor.dispose();
+    cleanup.resolve();
+    await Promise.all([disposingConversation, shuttingDown]);
+    assert.equal((await restoring).status, 'failed');
+    assert.equal(protocol.connections, 1);
+    assert.equal(protocol.resumes, 0);
+    assert.equal(attempts, 1);
+  } finally {
+    cleanup.resolve();
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('executor shutdown prevents pending initialization from acquiring a new owner', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const storage = durableState();
+  const reading = deferred<void>();
+  const read = deferred<void>();
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      createConnection: protocol.factory,
+      state: {
+        ...storage.state,
+        read: async (key) => {
+          reading.resolve();
+          await read.promise;
+          return await storage.state.read!(key);
+        },
+      },
+    },
+  );
+  try {
+    const execution = executor.execute(request('first'), executorContext([]));
+    await reading.promise;
+    await executor.dispose();
+    read.resolve();
+    assert.equal((await execution).status, 'failed');
+    assert.equal(protocol.connections, 0);
+    assert.equal(protocol.disposals, 0);
+    assert.equal(storage.values.size, 0);
+  } finally {
+    read.resolve();
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('runtime retains one ACP process and Session across prompts', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
@@ -1152,6 +1459,250 @@ test('a failed probe keeps admission until its already-started process cleanup f
     assert.equal(admission.activeCount, 0);
   } finally {
     releaseCleanup();
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('failed catalog cleanup retains its lease and permit until refresh cleans the old owner', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const admission = new AdmissionLimiter(1);
+  const otherProtocol = fakeProtocol();
+  const other = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      catalogAdmission: admission,
+      createConnection: otherProtocol.factory,
+    },
+  );
+  const retryStarted = deferred<void>();
+  const retryCleanup = deferred<void>();
+  let attempts = 0;
+  let leased = false;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      catalogAdmission: admission,
+      withCatalogDirectory: async (_signal, use) => {
+        assert.equal(leased, false);
+        leased = true;
+        try {
+          return await use(fixture.root);
+        } finally {
+          leased = false;
+        }
+      },
+      createConnection: (input) => {
+        const owner = protocol.factory(input);
+        if (protocol.connections > 1) {
+          assert.equal(protocol.disposals, 1, 'the old owner must be cleaned before replacement');
+          return owner;
+        }
+        return {
+          ...owner,
+          dispose: async () => {
+            attempts++;
+            assert.equal(leased, true);
+            assert.equal(admission.activeCount, 1);
+            if (attempts <= 2) throw new Error('Probe cleanup failed');
+            retryStarted.resolve();
+            await retryCleanup.promise;
+            await owner.dispose();
+          },
+        };
+      },
+    },
+  );
+  const input = { cwd: fixture.root, signal: new AbortController().signal };
+  try {
+    assert.equal((await executor.discover(input)).readiness, 'unavailable');
+    assert.equal(attempts, 1);
+    assert.equal(leased, true);
+    assert.equal(admission.activeCount, 1);
+    assert.equal((await executor.discover({ ...input, refresh: true })).readiness, 'unavailable');
+    assert.equal(attempts, 2);
+    assert.equal(protocol.connections, 1, 'failed retry cannot start another process');
+    const queued = other.discover(input);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(admission.waitingCount, 1);
+    assert.equal(otherProtocol.connections, 0, 'failed cleanup still consumes shared capacity');
+    const refresh = executor.discover({ ...input, refresh: true });
+    await retryStarted.promise;
+    const concurrent = executor.discover(input);
+    assert.equal(protocol.connections, 1);
+    assert.equal(attempts, 3);
+    retryCleanup.resolve();
+    const results = await Promise.all([refresh, concurrent, queued]);
+    assert.ok(results.every((entry) => entry.readiness === 'ready'));
+    assert.equal(protocol.connections, 2);
+    assert.equal(protocol.disposals, 2);
+    assert.equal(otherProtocol.disposals, 1);
+    assert.equal(leased, false);
+    assert.equal(admission.activeCount, 0);
+  } finally {
+    attempts = Math.max(attempts, 2);
+    retryCleanup.resolve();
+    await Promise.all([executor.dispose(), other.dispose()]);
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('executor shutdown retries failed catalog cleanup and also cleans retained conversations', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const admission = new AdmissionLimiter(1);
+  const retryStarted = deferred<void>();
+  const cleanup = deferred<void>();
+  let attempts = 0;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      catalogAdmission: admission,
+      createConnection: (input) => {
+        const owner = protocol.factory(input);
+        if (protocol.connections > 1) return owner;
+        return {
+          ...owner,
+          dispose: async () => {
+            attempts++;
+            if (attempts <= 2) throw new Error('Probe cleanup failed');
+            retryStarted.resolve();
+            await cleanup.promise;
+            await owner.dispose();
+          },
+        };
+      },
+    },
+  );
+  try {
+    assert.equal(
+      (
+        await executor.discover({
+          cwd: fixture.root,
+          signal: new AbortController().signal,
+        })
+      ).readiness,
+      'unavailable',
+    );
+    assert.equal(
+      (await executor.execute(request('first'), executorContext([]))).status,
+      'completed',
+    );
+    await assert.rejects(executor.dispose(), /ACP process cleanup failed/u);
+    assert.equal(attempts, 2);
+    assert.equal(protocol.disposals, 1, 'probe failure must not skip conversation cleanup');
+    assert.equal(admission.activeCount, 1);
+    const retry = executor.dispose();
+    const concurrent = executor.dispose();
+    await retryStarted.promise;
+    assert.equal(attempts, 3);
+    cleanup.resolve();
+    await Promise.all([retry, concurrent]);
+    await executor.dispose();
+    assert.equal(attempts, 3);
+    assert.equal(protocol.disposals, 2);
+    assert.equal(admission.activeCount, 0);
+  } finally {
+    attempts = Math.max(attempts, 2);
+    cleanup.resolve();
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('probe completion, connection failure and shutdown share one in-flight cleanup', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const cleaning = deferred<void>();
+  const cleanup = deferred<void>();
+  let crash!: (error: Error) => void;
+  let attempts = 0;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      createConnection: (input) => {
+        const owner = protocol.factory(input);
+        return {
+          ...owner,
+          failed: new Promise<never>((_resolve, reject) => {
+            crash = reject;
+          }),
+          dispose: async () => {
+            attempts++;
+            cleaning.resolve();
+            await cleanup.promise;
+            await owner.dispose();
+          },
+        };
+      },
+    },
+  );
+  try {
+    const discovery = executor.discover({
+      cwd: fixture.root,
+      signal: new AbortController().signal,
+    });
+    await cleaning.promise;
+    crash(new Error('Connection failed while cleaning'));
+    const shutdown = executor.dispose();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(attempts, 1);
+    cleanup.resolve();
+    await shutdown;
+    assert.equal((await discovery).readiness, 'unavailable');
+    assert.equal(attempts, 1);
+    assert.equal(protocol.disposals, 1);
+  } finally {
+    cleanup.resolve();
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('shutdown during a catalog cleanup retry prevents the waiting refresh from starting a process', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const cleaning = deferred<void>();
+  const cleanup = deferred<void>();
+  let attempts = 0;
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    {
+      createConnection: (input) => {
+        const owner = protocol.factory(input);
+        return {
+          ...owner,
+          dispose: async () => {
+            attempts++;
+            if (attempts === 1) throw new Error('Probe cleanup failed');
+            cleaning.resolve();
+            await cleanup.promise;
+            await owner.dispose();
+          },
+        };
+      },
+    },
+  );
+  const input = { cwd: fixture.root, signal: new AbortController().signal };
+  try {
+    assert.equal((await executor.discover(input)).readiness, 'unavailable');
+    const refresh = executor.discover({ ...input, refresh: true });
+    await cleaning.promise;
+    const shutdown = executor.dispose();
+    cleanup.resolve();
+    await shutdown;
+    assert.equal((await refresh).readiness, 'unavailable');
+    assert.equal(attempts, 2);
+    assert.equal(protocol.connections, 1);
+    assert.equal(protocol.disposals, 1);
+  } finally {
+    cleanup.resolve();
     await executor.dispose();
     await rm(fixture.root, { recursive: true, force: true });
   }
