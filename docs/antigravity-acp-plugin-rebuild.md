@@ -186,6 +186,10 @@ populate an empty cache, avoiding a separate discovery process. Task selections 
 workspace-specific modes are not copied into draft defaults; only a neutral probe supplies
 those defaults. Every real Session still validates requested configuration against its own
 advertised options.
+When a restored task publishes models before the first draft opens, disk hydration merges its
+saved neutral defaults with the latest Session candidates before persisting. A concurrent shutdown
+finishes that merge and write; a late disk read cannot replace the observed models, and invalidation
+fences the old account's defaults and pending observations.
 
 First discovery without cached candidates and explicit refresh still use a disposable probe.
 Transient refresh failures retain the successful in-memory and disk snapshot and expose a
@@ -206,6 +210,11 @@ reconciliation to replace changed configurations; unrelated settings do not inva
 The draft picker first reads the process-free executor inventory, then discovers each executor
 independently. Completed results and retry/loading state belong to each agent, so a slow
 Antigravity probe does not block another agent's catalog or animate a selected native model.
+Ready agents expose **Refresh models** beside the draft model picker, even while a native model
+is selected. This refresh targets only that agent and preserves the draft selection. Inventory
+transport failures retry the inventory rather than just the selected agent, clearing the error
+through the full inventory recovery path. A successful single-agent read does not dismiss an
+inventory error.
 The executor query's inventory/filter fields require compatibility epoch 226.
 
 See [catalog cache acceptance](archive/antigravity-catalog-cache-acceptance.md) for real

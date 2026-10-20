@@ -252,3 +252,46 @@ test('agent loading stays in its section and refresh recovery retries only that 
     assert.deepEqual(retried, ['ready', 'ready']);
   } finally { await dom.cleanup(); }
 });
+
+test('ready draft agents can refresh independently without changing the current selection', async () => {
+  const dom = installTranscriptDom();
+  const retried: Array<string | undefined> = [];
+  let selectionWrites = 0;
+  try {
+    for (const selection of [undefined, { executorId: 'agent', configuration: { model: 'opaque-high' } }]) {
+      const render = (loadingIds: string[] = []) => dom.render(<LocaleProvider locale="en"><ComposerModelPicker label="Native" choices={choices}
+        executor={{ catalog: [catalog[0]!, { ...catalog[0]!, id: 'other', displayName: 'Other Agent' }],
+          selection, loadingIds,
+          onSelect() { selectionWrites++; }, onSetup() {}, onRetry: id => { retried.push(id); }, onNewTask() {} }}
+      /></LocaleProvider>);
+      await render();
+      const { click, trigger } = actions(dom);
+      const refresh = (name: string) => dom.document.querySelector<HTMLButtonElement>(`button[aria-label="${name}: Refresh models"]`);
+      assert.ok(refresh('Agent'));
+      assert.ok(refresh('Other Agent'));
+      await click(refresh('Other Agent'));
+      assert.equal(trigger()?.textContent, selection ? 'Agent · Family' : 'Native');
+      await render(['other']);
+      assert.equal(refresh('Other Agent')?.getAttribute('aria-disabled'), 'true');
+      assert.notEqual(refresh('Agent')?.getAttribute('aria-disabled'), 'true');
+      await click(refresh('Other Agent'));
+      await click(refresh('Agent'));
+    }
+    assert.deepEqual(retried, ['other', 'agent', 'other', 'agent']);
+    assert.equal(selectionWrites, 0);
+  } finally { await dom.cleanup(); }
+});
+
+test('inventory errors retry the roster even with a valid external selection', async () => {
+  const dom = installTranscriptDom();
+  const retried: Array<string | undefined> = [];
+  try {
+    await dom.render(<LocaleProvider locale="en"><ComposerModelPicker label="Native" choices={choices}
+      executor={{ catalog, selection: { executorId: 'agent', configuration: { model: 'opaque-high' } },
+        error: 'Inventory unavailable',
+        onSelect() {}, onSetup() {}, onRetry: id => { retried.push(id); }, onNewTask() {} }}
+    /></LocaleProvider>);
+    await actions(dom).click([...dom.document.querySelectorAll('button')].find(el => el.textContent === 'Retry'));
+    assert.deepEqual(retried, [undefined], 'a successful single-agent read cannot repair the inventory');
+  } finally { await dom.cleanup(); }
+});

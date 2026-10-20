@@ -24,7 +24,7 @@ import type { ExecutorCatalogEntry, ExecutorConfiguration, ExecutorSelection } f
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { ProviderType } from '@maka/core/llm-connections';
 import { type UiLocale, defineShippedUiMessageCatalog, resolveUiMessageCatalog } from '@maka/core/ui-locale';
-import { Settings, ICON_SIZE } from './icons.js';
+import { RefreshCcw, Settings, ICON_SIZE } from './icons.js';
 import { ComposerModelLabel } from './composer-model-label.js';
 import { buildModelPickerOptions, providerMarkIcon, renderChatModelPickerOption } from './model-picker-internals.js';
 import { exactModelChoiceValue, modelMenuGroups, type ChatModelChoice } from './chat-model-helpers.js';
@@ -72,6 +72,7 @@ function isExecutorLoading(executor: ComposerExecutorPicker, id: string): boolea
 
 interface ExecutorCopy {
   loading: string;
+  refresh: string;
   refreshFailed: string;
   nativeOperations: string;
   manage: string;
@@ -95,6 +96,7 @@ interface ExecutorCopy {
 const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<ExecutorCopy>()({
   en: {
     loading: 'Loading models…',
+    refresh: 'Refresh models',
     refreshFailed: 'Refresh failed. Using the previous model list.',
     nativeOperations: 'This operation requires Maka. Start a new Maka task.',
     manage: 'Manage external agents',
@@ -117,6 +119,7 @@ const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<Exec
   },
   'zh-CN': {
     loading: '正在获取模型…',
+    refresh: '刷新模型',
     refreshFailed: '刷新失败，正在使用上次的模型列表。',
     nativeOperations: '此操作仅支持 Maka。请新建 Maka 任务。',
     manage: '管理外部 Agent',
@@ -138,6 +141,7 @@ const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<Exec
   },
   'zh-TW': {
     loading: '正在取得模型…',
+    refresh: '重新整理模型',
     refreshFailed: '重新整理失敗，正在使用上次的模型清單。',
     nativeOperations: '此操作僅支援 Maka。請建立 Maka 任務。',
     manage: '管理外部 Agent',
@@ -389,6 +393,12 @@ export function ComposerModelPicker(props: {
       className="maka-executor-mode-selector"
       onChange={value => { void commit(() => externalConfiguration({ mode: value })); }}
     />}
+    {executor && !executor.fixed && catalog.filter(entry => entry.readiness === 'ready' && !entry.refreshFailed).map(entry => <Button
+      key={entry.id} label={entry.displayName + ': ' + copy.refresh} tooltip={entry.displayName + ': ' + copy.refresh}
+      variant="ghost" size="sm" isIconOnly icon={<RefreshCcw size={ICON_SIZE.control} />}
+      isLoading={isExecutorLoading(executor, entry.id)}
+      isDisabled={disabled || props.isReadOnly || isExecutorLoading(executor, entry.id)}
+      onClick={() => executor.onRetry(entry.id)} />)}
     {executor && !executor.fixed && <Button label={copy.manage} tooltip={copy.manage}
       variant="ghost" size="sm" isIconOnly icon={<Settings size={ICON_SIZE.control} />}
       onClick={() => executor.onSetup()} />}
@@ -411,7 +421,7 @@ export function ComposerModelPicker(props: {
     {(failed || invalid || executor?.error || (unavailable && !selected) || contribution?.error) && <span className="maka-executor-notice" role="status">
       {contribution?.error ? contribution.label + ': ' + copy.unavailable : unavailable && !selected ? copy.unavailable : invalid ? copy.invalid : copy.selectionFailed}
       {contribution?.error && <Button label={copy.retry} variant="ghost" size="sm" isLoading={contribution.loading} onClick={contribution.onLoad} />}
-      {executor && !contribution?.error && <Button label={copy.retry} variant="ghost" size="sm" isLoading={!!executor.selection && isExecutorLoading(executor, executor.selection.executorId)} onClick={() => executor.onRetry(executor.selection?.executorId)} />}
+      {executor && !contribution?.error && <Button label={copy.retry} variant="ghost" size="sm" isLoading={executor.error ? executor.loading : !!executor.selection && isExecutorLoading(executor, executor.selection.executorId)} onClick={() => executor.onRetry(executor.error ? undefined : executor.selection?.executorId)} />}
     </span>}
   </>;
 }

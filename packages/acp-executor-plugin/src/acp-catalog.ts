@@ -37,6 +37,11 @@ export interface AcpCatalogStore {
 /** Instance-scoped candidates. Only a retained task Session owns workspace configuration. */
 export class AcpCatalog {
   #cached?: ExecutorCatalogEntry;
+  // Only neutral discovery (including its disk snapshot) supplies draft defaults.
+  #defaults?: Pick<
+    ExecutorCatalogEntry,
+    'currentModel' | 'modes' | 'currentMode' | 'supportsModeChange'
+  >;
   #pending?: PendingProbe;
   #tail?: Promise<ExecutorCatalogEntry>;
   readonly #operations = new Set<Promise<ExecutorCatalogEntry>>();
@@ -72,34 +77,37 @@ export class AcpCatalog {
       !entry.supportsModelChange
     )
       return;
-    const cached = this.#cached;
+    this.#cancelProbe();
+    this.#failure = undefined;
+    this.#cached = this.#withDefaults(entry);
+    this.#save(this.#cached, true);
+  }
+
+  #withDefaults(entry: ExecutorCatalogEntry): ExecutorCatalogEntry {
+    const defaults = this.#defaults;
     // A task advertises candidates, not defaults for other projects. Retain only
     // defaults/modes learned by the neutral probe, never the task's selection.
-    const next: ExecutorCatalogEntry = {
+    return {
       id: entry.id,
       displayName: entry.displayName,
       readiness: 'ready',
       models: entry.models,
       ...(entry.modelGroups ? { modelGroups: entry.modelGroups } : {}),
-      ...(cached?.currentModel && entry.models.some((model) => model.id === cached.currentModel)
-        ? { currentModel: cached.currentModel }
+      ...(defaults?.currentModel && entry.models.some((model) => model.id === defaults.currentModel)
+        ? { currentModel: defaults.currentModel }
         : {}),
-      ...(cached?.modes ? { modes: cached.modes } : {}),
-      ...(cached?.currentMode ? { currentMode: cached.currentMode } : {}),
+      ...(defaults?.modes ? { modes: defaults.modes } : {}),
+      ...(defaults?.currentMode ? { currentMode: defaults.currentMode } : {}),
       supportsAttachments: entry.supportsAttachments,
       supportsModelChange: entry.supportsModelChange,
-      supportsModeChange: cached?.supportsModeChange ?? false,
+      supportsModeChange: defaults?.supportsModeChange ?? false,
     };
-    this.#cancelProbe();
-    this.#failure = undefined;
-    this.#cached = next;
-    this.#save(next);
   }
 
   async get(signal: AbortSignal, refresh = false): Promise<ExecutorCatalogEntry> {
     signal.throwIfAborted();
     if (this.#disposed) return this.unavailable();
-    if (!this.#cached) await waitForSignal(this.#hydrate(), signal);
+    await waitForSignal(this.#hydrate(), signal);
     if (refresh) {
       this.#cancelProbe();
       this.#failure = undefined;
@@ -127,11 +135,12 @@ export class AcpCatalog {
 
   #hydrate(): Promise<void> {
     if (!this.#hydration) {
-      const revision = this.#revision;
+      const generation = this.#generation;
       this.#hydration = (async () => {
         const entry = await this.store?.load();
-        if (this.#disposed || revision !== this.#revision || !entry) return;
-        this.#cached = entry;
+        if (generation !== this.#generation || !entry) return;
+        this.#defaults = entry;
+        this.#cached = this.#cached ? this.#withDefaults(this.#cached) : entry;
         this.#persisted = JSON.stringify(entry);
       })().catch(() => {
         // An optional cache must not prevent fresh discovery.
@@ -140,16 +149,23 @@ export class AcpCatalog {
     return this.#hydration;
   }
 
-  #save(entry: ExecutorCatalogEntry | undefined): void {
+  #save(entry: ExecutorCatalogEntry | undefined, observation = false): void {
     if (!this.store) return;
     const snapshot = entry ? structuredClone(entry) : undefined;
-    const serialized = JSON.stringify(snapshot ?? null);
+    // A Session may arrive before the first draft. Load defaults before its
+    // observation can overwrite storage, including during normal shutdown.
+    const hydration = observation ? this.#hydrate() : undefined;
+    const generation = this.#generation;
     // Serialize writes and invalidation so a slow old write cannot resurrect a
     // deleted snapshot. Identical Session observations do not rewrite storage.
     this.#writes = this.#writes
       .then(async () => {
+        await hydration;
+        if (observation && generation !== this.#generation) return;
+        const merged = observation && snapshot ? this.#withDefaults(snapshot) : snapshot;
+        const serialized = JSON.stringify(merged ?? null);
         if (serialized === this.#persisted) return;
-        await this.store!.save(snapshot);
+        await this.store!.save(merged);
         this.#persisted = serialized;
       })
       .catch(() => {
@@ -213,6 +229,7 @@ export class AcpCatalog {
   #acceptProbe(entry: ExecutorCatalogEntry): ExecutorCatalogEntry {
     if (entry.readiness === 'ready') {
       this.#failure = undefined;
+      this.#defaults = entry;
       this.#cached = entry;
       this.#save(entry);
       return entry;
@@ -221,6 +238,7 @@ export class AcpCatalog {
       // A known account failure must not expose the previous account's choices.
       this.#generation++;
       this.#cached = undefined;
+      this.#defaults = undefined;
       this.#hydration = Promise.resolve();
       this.#save(undefined);
     }
@@ -231,6 +249,7 @@ export class AcpCatalog {
   invalidate(): void {
     this.#generation++;
     this.#cached = undefined;
+    this.#defaults = undefined;
     this.#failure = undefined;
     this.#cancelProbe();
     this.#hydration = Promise.resolve();
@@ -245,12 +264,13 @@ export class AcpCatalog {
 
   async dispose(): Promise<void> {
     this.#disposed = true;
-    this.#generation++;
-    this.#cached = undefined;
     this.#cancelProbe();
     await Promise.allSettled(this.#operations);
     await this.#hydration;
     await this.#writes;
+    this.#generation++;
+    this.#cached = undefined;
+    this.#defaults = undefined;
   }
 }
 

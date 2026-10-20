@@ -37,10 +37,24 @@ against its parent Entry.
 ACP draft discovery uses an empty, stable scratch directory owned by Plugin storage. It never passes the selected
 project to the Agent's session/new request, sends a prompt, or writes task continuity. Maka does
 not inspect project files to construct this catalog. Candidates are shared across projects within
-one configured executor instance,
-cached for 60 seconds, and invalidated on setup/login, explicit refresh, or provider replacement.
-A refresh affects that executor's draft candidates; it never mutates a retained task.
-The scratch path is stable across refresh, TTL expiry and Host restarts, scoped to the data root,
+one configured executor instance. Successful catalogs have no time-based expiry and are persisted
+through namespaced Plugin storage. Versioned snapshots bind to configuration, launch arguments,
+platform and executable/helper metadata; missing or incompatible snapshots trigger discovery.
+Standalone embeddings opt into disk reuse with `catalogPersistence: { storage, key }`.
+Setup/login and provider configuration changes invalidate the affected catalog. Explicit refresh
+requests a new probe while retaining successful choices on transient failure; it never mutates a
+retained task. Cold discovery failures have a 60-second retry cooldown, bypassed by explicit refresh.
+The draft picker exposes a **Refresh models** action for each ready Agent, including while a native
+model is selected. Account and remote model changes are learned from real Sessions or explicit
+refresh rather than a periodic discovery timer.
+
+Neutral defaults (model and modes), observed Session model candidates, and transient refresh state
+have separate lifetimes. A Session can update candidates before the first draft opens; disk
+hydration merges the saved neutral defaults before persisting the observation, including during
+shutdown. Task selections and workspace-specific modes never become draft defaults, and refresh
+errors are not persisted. Invalidation fences both pending reads and observations from old Sessions.
+
+The scratch path is stable across refresh and Host restarts, scoped to the data root,
 Plugin namespace, adapter and composition Entry. A native file lease serializes owners across
 runtime instances and processes. Probe processes are drained before directory contents are removed
 and the lease is released. A later owner clears residual contents after a crashed Host releases
@@ -54,7 +68,8 @@ queued probes are cancelled by invalidation or disposal. Individual callers can 
 without owning a shared probe. Pending callers follow invalidations to the current revision even
 when setup/login does not start a replacement query. Genuine probe failures do not automatically
 retry, and cancellation or disposal stops the caller. The 30-second probe deadline includes time waiting for capacity.
-No additional Host protocol or Agent-specific Desktop discovery path is required.
+The generic executor query supports process-free inventory and per-executor discovery/filtering;
+no Agent-specific Desktop discovery path is required.
 
 Draft candidates are advisory. The existing retained Session path initializes in the task's real
 workspace and validates the requested model, then its dependent mode, before sending any prompt.

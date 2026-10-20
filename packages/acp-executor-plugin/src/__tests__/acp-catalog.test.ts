@@ -496,6 +496,102 @@ test('late disk reads cannot override a Session update or explicit invalidation'
   }
 });
 
+for (const startup of ['session-first', 'read-in-flight', 'shutdown'] as const) {
+  test(`${startup} merges Session models with persisted neutral defaults before saving`, async () => {
+    const neutral: ExecutorCatalogEntry = {
+      ...observedModels('default'),
+      models: [
+        { id: 'default', name: 'Default' },
+        { id: 'removed', name: 'Removed' },
+      ],
+      modes: [
+        { id: 'ask', name: 'Ask' },
+        { id: 'auto', name: 'Auto' },
+      ],
+      currentMode: 'ask',
+    };
+    let saved: ExecutorCatalogEntry | undefined = neutral;
+    const read = deferred<ExecutorCatalogEntry>();
+    const started = deferred<void>();
+    let probes = 0;
+    const make = (pendingRead = false) =>
+      new AcpCatalog(
+        new AdmissionLimiter(1),
+        async () => {
+          probes++;
+          return neutral;
+        },
+        () => entry('agent', 'unavailable'),
+        undefined,
+        {
+          load: async () => {
+            started.resolve();
+            return pendingRead ? read.promise : saved;
+          },
+          save: async (value) => {
+            saved = value;
+          },
+        },
+      );
+    const catalog = make(true);
+    const waiting = startup === 'read-in-flight' ? catalog.get(signal()) : undefined;
+    try {
+      if (waiting) await started.promise;
+      catalog.updateModels(observedModels('superseded'), catalog.generation);
+      const latest = {
+        ...observedModels('live'),
+        models: [
+          { id: 'default', name: 'Default' },
+          { id: 'live', name: 'Live' },
+        ],
+      };
+      catalog.updateModels(latest, catalog.generation);
+      const closing = startup === 'shutdown' ? catalog.dispose() : undefined;
+      read.resolve(neutral);
+      await closing;
+      const result = closing ? saved! : await (waiting ?? catalog.get(signal()));
+      assert.deepEqual(result.models, latest.models);
+      assert.equal(result.currentModel, 'default', 'a task does not replace the neutral default');
+      assert.deepEqual(result.modes, neutral.modes);
+      assert.equal(result.currentMode, 'ask');
+      assert.equal(result.supportsModeChange, true);
+      await catalog.dispose();
+      const restarted = make();
+      try {
+        assert.deepEqual(await restarted.get(signal()), result);
+        assert.equal(probes, 0, 'loading defaults never starts a discovery process');
+      } finally {
+        await restarted.dispose();
+      }
+    } finally {
+      read.resolve(neutral);
+      await catalog.dispose();
+    }
+  });
+}
+
+test('invalidation fences Session observations still waiting for persisted defaults', async () => {
+  const read = deferred<ExecutorCatalogEntry>();
+  let saved: ExecutorCatalogEntry | undefined = observedModels('old-disk');
+  const catalog = new AcpCatalog(
+    new AdmissionLimiter(1),
+    async () => observedModels('new-probe'),
+    () => entry('agent', 'unavailable'),
+    undefined,
+    {
+      load: async () => read.promise,
+      save: async (value) => {
+        saved = value;
+      },
+    },
+  );
+  catalog.updateModels(observedModels('old-session'), catalog.generation);
+  catalog.invalidate();
+  read.resolve(observedModels('old-disk'));
+  await catalog.dispose();
+  assert.equal(saved, undefined, 'old account defaults and observations must stay invalidated');
+});
+
 test('invalidation deletes the disk cache after an already-running write settles', async () => {
   const started = deferred<void>();
   const writing = deferred<void>();
