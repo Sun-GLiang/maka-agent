@@ -177,33 +177,27 @@ to a digest of the configuration, launch arguments, platform, and executable/sid
 metadata. Configuration values and credentials are not stored in the snapshot. Missing,
 incompatible, or corrupt snapshots fall back to discovery. Executable changes are detected
 when loading the snapshot on restart; inherited process environment changes do not invalidate it.
-External account or upstream model changes are learned through the next real Session or manual
-refresh, rather than a timer or a background disposable Session.
+External account or upstream model changes reach the public catalog through manual refresh or
+setup/login invalidation, rather than a timer or a background disposable Session.
 
-Successful real Session initialization (including restoration), confirmed configuration changes,
-and `config_option_update` notifications update the shared model candidates. A real Session can
-populate an empty cache, avoiding a separate discovery process. Task selections and
-workspace-specific modes are not copied into draft defaults; only a neutral probe supplies
-those defaults. Every real Session still validates requested configuration against its own
-advertised options.
-When a restored task publishes models before the first draft opens, disk hydration merges its
-saved neutral defaults with the latest Session candidates before persisting. A concurrent shutdown
-finishes that merge and write; a late disk read cannot replace the observed models, and invalidation
-fences the old account's defaults and pending observations.
+Only neutral discovery populates the shared model catalog and its persisted snapshot. Real Session
+initialization (including restoration), confirmed configuration changes, and `config_option_update`
+notifications update that Session's capabilities, exposed by conversation inspection. Project-specific
+models, selections, and modes never replace the public candidates. Every real Session still validates
+requested configuration against its own advertised options. This boundary stays entirely inside the
+ACP Plugin; Host queries and the UI continue to use the existing discovery/inspection contracts.
+A task that starts before the first draft does not warm the public catalog. The first uncached draft
+requires one neutral probe, then later drafts and restarts reuse it. Snapshot version 2 rejects older
+snapshots because version 1 may contain project-specific candidates; an upgrade re-probes once.
 
 First discovery without cached candidates and explicit refresh still use a disposable probe.
 Transient refresh failures retain the successful in-memory and disk snapshot and expose a
 refresh-failed notice. Cold discovery failures have a 60-second retry cooldown; this is not a
-TTL for successful catalogs. Manual retry and explicit invalidation bypass the cooldown, and
-real Session observations recover immediately. Authentication failures clear previous choices
-and fence observations from older Sessions.
-Setup/login and configuration invalidation discard the cache and fence updates from older
-Sessions. A newer Session observation supersedes an in-flight probe, whose process still drains
-through the existing cleanup/admission path before its waiting callers receive the new snapshot.
-Disk reads cannot override newer Session observations, and serialized writes prevent a pending
-save from resurrecting an invalidated snapshot. Repeated identical observations skip disk
-writes. Normal shutdown drains pending writes and retains the snapshot; storage failures leave
-the in-memory catalog usable.
+TTL for successful catalogs. Manual retry and explicit invalidation bypass the cooldown.
+Authentication failures clear previous choices. Setup/login and configuration invalidation discard
+the cache and fence pending disk reads and probes. Serialized writes prevent a pending save from
+resurrecting an invalidated snapshot. Identical neutral probe results skip disk writes. Normal shutdown
+drains pending writes and retains the snapshot; storage failures leave the in-memory catalog usable.
 
 Setup/login invalidates only the affected executor. RuntimePolicy edits rely on Plugin
 reconciliation to replace changed configurations; unrelated settings do not invalidate catalogs.

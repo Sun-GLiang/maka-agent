@@ -136,6 +136,7 @@ test('corrupt, incompatible, and cross-executor snapshots fall back to fresh dis
     const valid = JSON.parse(await readFile(f.path, 'utf8'));
     const invalid = [
       '{broken',
+      JSON.stringify({ ...valid, version: 1 }),
       JSON.stringify({ ...valid, version: 999 }),
       JSON.stringify({ ...valid, entry: { ...entry, id: 'other-agent' } }),
       JSON.stringify({ ...valid, entry: { ...entry, models: 'invalid' } }),

@@ -83,7 +83,9 @@ export function createAcpCatalogStore(
       const value = (await storage.get(key)).value;
       if (!value || typeof value !== 'object' || Array.isArray(value)) return;
       const record = value as Record<string, unknown>;
-      if (record.version !== 1 || record.binding !== (await fingerprint())) return;
+      // Version 1 could contain project-specific Session models. Re-probe once
+      // rather than allowing those candidates to survive an upgrade indefinitely.
+      if (record.version !== 2 || record.binding !== (await fingerprint())) return;
       const entry = normalizeCatalogEntry(record.entry as ExecutorCatalogEntry, executorId);
       return entry.readiness === 'ready' ? entry : undefined;
     },
@@ -95,7 +97,7 @@ export function createAcpCatalogStore(
       }
       const normalized = normalizeCatalogEntry(entry, executorId);
       if (normalized.readiness !== 'ready') return;
-      await storage.set(key, { version: 1, binding: await fingerprint(), entry: normalized });
+      await storage.set(key, { version: 2, binding: await fingerprint(), entry: normalized });
     },
   };
 }

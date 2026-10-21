@@ -168,7 +168,6 @@ interface RetainedSession {
   awaitingAck?: string;
   continuityReserved?: boolean;
   configOptions: readonly SessionConfigOption[];
-  catalogGeneration?: number;
   initialization?: Promise<void>;
   active?: ActivePrompt;
   configuring?: boolean;
@@ -487,21 +486,6 @@ export class AcpExecutor implements PluginExecutorProvider {
     };
   }
 
-  #publishSessionModels(session: RetainedSession): void {
-    if (
-      session.catalogGeneration === undefined ||
-      session.lost ||
-      session.restoring ||
-      session.historyGap ||
-      this.#sessions.get(session.conversationKey) !== session
-    )
-      return;
-    this.#catalog.updateModels(
-      this.#catalogEntry('ready', session.configOptions),
-      session.catalogGeneration,
-    );
-  }
-
   async execute(
     request: Readonly<PluginExecutorRequest>,
     context: PluginExecutorContext,
@@ -663,12 +647,10 @@ export class AcpExecutor implements PluginExecutorProvider {
     deferSelectedConfig = false,
   ): Promise<void> {
     if (session.initialization) return await session.initialization;
-    session.catalogGeneration = this.#catalog.generation;
     const initialization = this.#initialize(session, signal, false, deferSelectedConfig);
     session.initialization = initialization;
     try {
       await initialization;
-      this.#publishSessionModels(session);
     } catch (error) {
       session.initialization = undefined;
       session.restoring = false;
@@ -870,9 +852,6 @@ export class AcpExecutor implements PluginExecutorProvider {
       session.record = established;
       await this.#persistConfirmedConfig(session);
     }
-    // session/new already advertised the current candidates. Publish them even
-    // if the task's previously selected model is now unavailable and fails below.
-    this.#publishSessionModels(session);
     if (!probe && !deferSelectedConfig) {
       await this.#applyInitialConfig(
         session,
@@ -1027,7 +1006,6 @@ export class AcpExecutor implements PluginExecutorProvider {
           'acp_config_unconfirmed',
         );
       await this.#persistConfirmedConfig(session);
-      this.#publishSessionModels(session);
       return Object.fromEntries(target);
     } catch (error) {
       let restored = false;
@@ -1067,7 +1045,6 @@ export class AcpExecutor implements PluginExecutorProvider {
         }
       }
       if (!restored) await this.#lose(session);
-      else this.#publishSessionModels(session);
       throw error;
     }
   }
@@ -1132,7 +1109,6 @@ export class AcpExecutor implements PluginExecutorProvider {
       // During our mutation, its response (or rollback response) is authoritative.
       if (!session.configuring && !session.lost) {
         session.configOptions = update.configOptions;
-        this.#publishSessionModels(session);
         // Agent notifications report observed state. Only a confirmed response
         // to our own configuration request may change the durable selection.
       }

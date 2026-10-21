@@ -105,15 +105,19 @@ test('durably acknowledged ACP Session resumes the same external ID without repl
       assert.equal(protocol.sessions, 1);
       assert.equal(protocol.resumes, 1);
       assert.equal(protocol.loads, 0);
-      const catalog = await restored.discover({
+      const catalog = await restored.inspectConversation({
+        conversationKey: 'session-a',
         cwd: process.cwd(),
-        signal: new AbortController().signal,
       });
       assert.deepEqual(
         catalog.models.map((model) => model.id),
         ['default', 'fast'],
       );
-      assert.equal(protocol.connections, 2, 'restoration warms candidates without a probe');
+      assert.equal(
+        protocol.connections,
+        2,
+        'inspection reads the restored Session without a probe',
+      );
       assert.equal(
         (await restored.inspectConversation({ conversationKey: 'session-a', cwd: process.cwd() }))
           .readiness,
@@ -2411,112 +2415,118 @@ for (const selection of ['model', 'mode'] as const) {
   );
 }
 
-test('real Sessions warm and update draft model candidates without extra processes', async () => {
-  const fixture = await executableFixture();
-  const protocol = fakeProtocol();
-  protocol.hasMode = true;
-  const executor = new AcpExecutor(
-    adapter,
-    { executable: fixture.executable },
-    { createConnection: protocol.factory },
-  );
-  const discover = () =>
-    executor.discover({
-      cwd: fixture.root,
-      signal: new AbortController().signal,
-    });
-  try {
-    assert.equal(
-      (await executor.execute(request('first'), executorContext([]))).status,
-      'completed',
-    );
-    assert.deepEqual(
-      (await discover()).models.map((model) => model.id),
-      ['default', 'fast'],
-    );
-    assert.equal(protocol.connections, 1, 'the first real Session eliminates the discovery probe');
+for (const startup of ['cold', 'warm'] as const) {
+  test(`${startup} public catalogs stay isolated from project models across restart`, async () => {
+    const fixture = await executableFixture();
+    const projectA = await realpath(fixture.root);
+    const projectB = join(projectA, 'other-project');
+    const protocol = fakeProtocol();
+    protocol.hasMode = true;
+    protocol.onSessionNew = (cwd) => {
+      protocol.modelValues = cwd === projectA ? ['default'] : ['default', 'fast'];
+      protocol.selectedModel = 'default';
+      protocol.selectedMode = cwd === projectA ? 'auto' : 'ask';
+    };
+    const values = new Map<string, unknown>();
+    const storage: AcpCatalogPersistence['storage'] = {
+      async get<T>(key: string) {
+        return { revision: 1, value: structuredClone(values.get(key)) as T | undefined };
+      },
+      async set<T>(key: string, value: T) {
+        values.set(key, structuredClone(value));
+        return { revision: 1, value };
+      },
+      async delete(key: string) {
+        values.delete(key);
+        return { revision: 2, value: undefined };
+      },
+    };
+    const make = () =>
+      new AcpExecutor(
+        adapter,
+        { executable: fixture.executable },
+        {
+          createConnection: protocol.factory,
+          catalogPersistence: { storage, key: 'snapshot' },
+        },
+      );
+    const first = make();
+    let restarted: AcpExecutor | undefined;
+    const discover = (executor = first, refresh = false) =>
+      executor.discover({
+        cwd: projectB,
+        signal: new AbortController().signal,
+        refresh,
+      });
+    try {
+      if (startup === 'warm') await discover();
+      const task = { ...request('project-a'), cwd: projectA, configuration: { model: 'default' } };
+      assert.equal((await first.execute(task, executorContext([]))).status, 'completed');
+      const notifyProject = protocol.notifyConfiguration;
+      const neutral = await discover();
+      assert.deepEqual(
+        neutral.models.map((model) => model.id),
+        ['default', 'fast'],
+        'a restricted project cannot hide another project’s models',
+      );
+      assert.equal(neutral.currentMode, 'ask', 'only discovery supplies public defaults');
+      assert.equal(protocol.connections, 2, 'cold drafts still require one neutral probe');
 
-    // A confirmed model change may also add/remove offered models.
-    protocol.modelValues = ['fast'];
-    await executor.configureConversation(
-      { ...request('configure'), configuration: { model: 'fast' } },
-      new AbortController().signal,
-    );
-    assert.deepEqual(
-      (await discover()).models.map((model) => model.id),
-      ['fast'],
-    );
+      // Both confirmed mutations and unsolicited notifications belong to the task.
+      protocol.modelValues = ['default', 'project-only'];
+      notifyProject('default');
+      assert.deepEqual(await discover(), neutral);
+      await first.configureConversation(
+        { ...task, configuration: { model: 'project-only' } },
+        new AbortController().signal,
+      );
+      assert.equal((await first.inspectConversation(task)).currentModel, 'project-only');
+      assert.deepEqual(await discover(), neutral);
+      protocol.modelValues = ['default'];
+      notifyProject('default');
+      assert.deepEqual(
+        (await first.inspectConversation(task)).models.map((model) => model.id),
+        ['default'],
+      );
+      assert.deepEqual(await discover(), neutral);
+      assert.equal(protocol.connections, 2, 'task updates do not trigger discovery');
 
-    protocol.modelValues = ['default'];
-    protocol.notifyConfiguration('default');
-    const updated = await discover();
-    assert.deepEqual(
-      updated.models.map((model) => model.id),
-      ['default'],
-    );
-    assert.equal(updated.currentModel, undefined, 'another task does not choose draft defaults');
-    assert.equal(updated.currentMode, undefined);
-    assert.equal(updated.supportsModeChange, false, 'project modes are not instance defaults');
-    assert.equal(protocol.connections, 1);
-    assert.equal(protocol.sessions, 1);
-  } finally {
-    await executor.dispose();
-    await rm(fixture.root, { recursive: true, force: true });
-  }
-});
-
-test('real Session models survive executor restart without a discovery connection', async () => {
-  const fixture = await executableFixture();
-  const protocol = fakeProtocol();
-  const values = new Map<string, unknown>();
-  const storage: AcpCatalogPersistence['storage'] = {
-    async get<T>(key: string) {
-      return { revision: 1, value: structuredClone(values.get(key)) as T | undefined };
-    },
-    async set<T>(key: string, value: T) {
-      values.set(key, structuredClone(value));
-      return { revision: 1, value };
-    },
-    async delete(key: string) {
-      values.delete(key);
-      return { revision: 2, value: undefined };
-    },
-  };
-  const make = () =>
-    new AcpExecutor(
-      adapter,
-      { executable: fixture.executable },
-      { createConnection: protocol.factory, catalogPersistence: { storage, key: 'snapshot' } },
-    );
-  const first = make();
-  let restarted: AcpExecutor | undefined;
-  try {
-    assert.equal((await first.execute(request('first'), executorContext([]))).status, 'completed');
-    protocol.modelValues = ['fast'];
-    protocol.notifyConfiguration('fast');
-    await first.dispose();
-    restarted = make();
-    const input = { cwd: fixture.root, signal: new AbortController().signal };
-    const restored = await restarted.discover(input);
-    assert.deepEqual(
-      restored.models.map((model) => model.id),
-      ['fast'],
-    );
-    assert.equal(restored.currentModel, undefined, 'task selections are not persisted as defaults');
-    assert.equal(protocol.connections, 1, 'restart reads storage without initializing ACP');
-    restarted.invalidateCatalog();
-    protocol.modelValues = ['default'];
-    assert.deepEqual(
-      (await restarted.discover(input)).models.map((model) => model.id),
-      ['default'],
-    );
-    assert.equal(protocol.connections, 2, 'explicit invalidation allows fresh discovery');
-  } finally {
-    await first.dispose();
-    await restarted?.dispose();
-    await rm(fixture.root, { recursive: true, force: true });
-  }
-});
+      await first.dispose();
+      restarted = make();
+      assert.deepEqual(
+        await discover(restarted),
+        neutral,
+        'restart must reuse the neutral snapshot, not the restricted project’s candidates',
+      );
+      assert.equal(protocol.connections, 2, 'restart does not start a discovery process');
+      assert.equal(
+        (
+          await restarted.execute(
+            {
+              ...request('project-b'),
+              conversationKey: 'session-b',
+              cwd: projectB,
+              configuration: { model: 'fast' },
+            },
+            executorContext([]),
+          )
+        ).status,
+        'completed',
+      );
+      assert.deepEqual(
+        await discover(restarted),
+        neutral,
+        'the other project’s selected model must not become the public default',
+      );
+      assert.deepEqual(await discover(restarted, true), neutral);
+      assert.equal(protocol.connections, 4, 'explicit refresh starts exactly one neutral probe');
+    } finally {
+      await first.dispose();
+      await restarted?.dispose();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
 
 test('configuration invalidation fences late model updates from an existing Session', async () => {
   const fixture = await executableFixture();
@@ -2556,7 +2566,7 @@ test('configuration invalidation fences late model updates from an existing Sess
   }
 });
 
-test('a removed cached model is corrected even when the first task configuration fails', async () => {
+test('a project-rejected model is corrected only in its Session until neutral refresh', async () => {
   const fixture = await executableFixture();
   const protocol = fakeProtocol();
   const executor = new AcpExecutor(
@@ -2580,9 +2590,24 @@ test('a removed cached model is corrected even when the first task configuration
     assert.equal(protocol.prompts, 0, 'the real Session still validates the selected model');
     assert.deepEqual(
       (await discover()).models.map((model) => model.id),
+      ['default', 'fast'],
+    );
+    assert.deepEqual(
+      (await executor.inspectConversation(request('removed'))).models.map((model) => model.id),
       ['default'],
+      'the failed task exposes its own candidates for recovery',
     );
     assert.equal(protocol.connections, 2, 'the failed selection does not require another probe');
+    const refreshed = await executor.discover({
+      cwd: fixture.root,
+      signal: new AbortController().signal,
+      refresh: true,
+    });
+    assert.deepEqual(
+      refreshed.models.map((model) => model.id),
+      ['default'],
+    );
+    assert.equal(protocol.connections, 3, 'only neutral refresh updates the public catalog');
   } finally {
     await executor.dispose();
     await rm(fixture.root, { recursive: true, force: true });

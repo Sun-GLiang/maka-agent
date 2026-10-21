@@ -45,14 +45,16 @@ Setup/login and provider configuration changes invalidate the affected catalog. 
 requests a new probe while retaining successful choices on transient failure; it never mutates a
 retained task. Cold discovery failures have a 60-second retry cooldown, bypassed by explicit refresh.
 The draft picker exposes a **Refresh models** action only for the selected ready external Agent.
-New drafts using a native model do not show it. Account and remote model changes are learned from real Sessions or explicit
-refresh rather than a periodic discovery timer.
+New drafts using a native model do not show it. Account and remote model changes reach the public
+catalog through explicit refresh or setup/login invalidation, without a periodic discovery timer.
 
-Neutral defaults (model and modes), observed Session model candidates, and transient refresh state
-have separate lifetimes. A Session can update candidates before the first draft opens; disk
-hydration merges the saved neutral defaults before persisting the observation, including during
-shutdown. Task selections and workspace-specific modes never become draft defaults, and refresh
-errors are not persisted. Invalidation fences both pending reads and observations from old Sessions.
+Only neutral discovery may populate or persist the public catalog. Real Session initialization,
+restoration, configuration changes, and notifications update that Session's own capabilities,
+read through conversation inspection. Project-specific models, selections, and modes never replace
+another project's draft choices or the shared snapshot. Even when a task starts first, the first
+uncached draft still needs one neutral probe. Snapshot version 2 rejects older snapshots that may
+contain Session-specific candidates. Refresh errors are not persisted, and invalidation fences
+pending disk reads and probe results.
 
 The scratch path is stable across refresh and Host restarts, scoped to the data root,
 Plugin namespace, adapter and composition Entry. A native file lease serializes owners across
