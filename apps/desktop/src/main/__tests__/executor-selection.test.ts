@@ -29,6 +29,66 @@ import { executorComposerProps, executorSubmissionError, newTaskConfiguration } 
 
 const entry: ExecutorCatalogEntry = { id: 'external', displayName: 'External', readiness: 'ready', models: [{ id: 'selected', name: 'Selected' }], supportsAttachments: false, supportsModelChange: true };
 
+test('ready Session polling and events refresh silently while initial reads and retries show loading', async (context) => {
+  const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
+  const values = { document, window, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true };
+  const originals = new Map(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const root = createRoot(document.getElementById('root')!);
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  let latest!: ReturnType<typeof useExecutorSelection>;
+  let changed!: (id: string) => void;
+  const reads: Array<(entries: readonly ExecutorCatalogEntry[]) => void> = [];
+  const services = {
+    subscribeChanges: (handler: typeof changed) => { changed = handler; return () => {}; },
+    newTasks: { subscribeChanges: () => () => {} },
+    sessions: { getExecutorState: () => new Promise<readonly ExecutorCatalogEntry[]>(resolve => { reads.push(resolve); }) },
+  } as unknown as ConversationServices;
+  const session = { id: 'saved', executorId: 'external', executorConfig: { model: 'selected' } } as SessionSummary;
+  function Probe() {
+    latest = useExecutorSelection({ key: 'saved', session });
+    return null;
+  }
+  const settle = async (entries: readonly ExecutorCatalogEntry[]) => {
+    const resolve = reads.shift();
+    assert.ok(resolve, 'an inspection must be pending');
+    await act(async () => { resolve(entries); });
+  };
+  try {
+    await act(async () => root.render(createElement(ConversationServicesProvider, { services, children: createElement(Probe) })));
+    assert.equal(latest.loading, true);
+    assert.deepEqual(latest.loadingIds, ['external']);
+    await settle([entry]);
+    const selected = latest.selection;
+    await act(async () => { context.mock.timers.tick(3000); });
+    assert.equal(reads.length, 1, 'the periodic inspection still runs');
+    assert.equal(latest.loading, false, 'background polling must not flash the picker');
+    assert.deepEqual(latest.loadingIds, []);
+    assert.deepEqual(latest.selection, selected);
+    const updated = { ...entry, models: [...entry.models, { id: 'new', name: 'New model' }] };
+    await settle([updated]);
+    assert.deepEqual(latest.entry?.models, updated.models, 'silent inspection still updates model choices');
+    await act(async () => { changed(session.id); });
+    assert.equal(reads.length, 1);
+    assert.equal(latest.loading, false, 'Session events must not flash the picker either');
+    assert.deepEqual(latest.loadingIds, []);
+    await settle([{ ...entry, readiness: 'unavailable', models: [] }]);
+    assert.equal(latest.entry?.readiness, 'unavailable', 'silent refresh must surface real failures');
+    let retry!: Promise<void>;
+    await act(async () => { retry = latest.refresh(true); });
+    assert.equal(latest.loading, true);
+    assert.deepEqual(latest.loadingIds, ['external']);
+    await settle([entry]);
+    await retry;
+    assert.equal(latest.loading, false);
+    assert.equal(latest.entry?.readiness, 'ready');
+  } finally {
+    await act(async () => root.unmount());
+    context.mock.timers.reset();
+    for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); }
+  }
+});
+
 test('first send carries the selected catalog through inspection and Agent initialization', async () => {
   const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
   const values = { document, window, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true };

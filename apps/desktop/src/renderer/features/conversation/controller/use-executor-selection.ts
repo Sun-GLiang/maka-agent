@@ -122,6 +122,11 @@ export function useExecutorSelection(input: {
       const inherited = handoff.current?.key === key ? handoff.current : undefined;
       setSnapshot((previous) => {
         const seed = previous?.key === key ? previous : inherited;
+        // Polling and Session events revalidate an already usable picker in the
+        // background. Do not flash its loading indicator on every inspection.
+        if (sessionId && !force && !input.sessionPending && seed && !seed.loading &&
+          seed.catalog.some(entry => entry.id === executorId && entry.readiness === 'ready'))
+          return seed;
         return { key, catalog: seed?.catalog ?? [], loading: true };
       });
       if (sessionId && input.sessionPending) return;
