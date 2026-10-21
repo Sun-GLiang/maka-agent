@@ -25,6 +25,13 @@ import type { PluginStorageService } from '@maka/runtime/plugin-data-services';
 import type { AcpCatalogStore } from './acp-catalog.js';
 import type { AcpLaunchSpec } from './index.js';
 
+// Covers both the stored shape and the semantics of the derived catalog.
+// Bump when AcpExecutor.#catalogEntry, catalog normalization, or any adapter's
+// displayName/describeModels changes persisted labels, groups, provider types,
+// defaults, or capabilities. Configuration and executable fingerprints cannot
+// detect those code-only changes. A mismatch forces one neutral discovery.
+const CATALOG_SNAPSHOT_VERSION = 2;
+
 export interface AcpCatalogPersistence {
   readonly storage: Pick<PluginStorageService, 'get' | 'set' | 'delete'>;
   /** Stable executor entry key within the Host's namespaced Plugin storage. */
@@ -78,7 +85,8 @@ export function createAcpCatalogStore(
       const record = value as Record<string, unknown>;
       // Version 1 could contain project-specific Session models. Re-probe once
       // rather than allowing those candidates to survive an upgrade indefinitely.
-      if (record.version !== 2 || record.binding !== (await fingerprint())) return;
+      if (record.version !== CATALOG_SNAPSHOT_VERSION || record.binding !== (await fingerprint()))
+        return;
       const entry = normalizeCatalogEntry(record.entry as ExecutorCatalogEntry, executorId);
       return entry.readiness === 'ready' ? entry : undefined;
     },
@@ -89,7 +97,11 @@ export function createAcpCatalogStore(
       }
       const normalized = normalizeCatalogEntry(entry, executorId);
       if (normalized.readiness !== 'ready') return;
-      await storage.set(key, { version: 2, binding: await fingerprint(), entry: normalized });
+      await storage.set(key, {
+        version: CATALOG_SNAPSHOT_VERSION,
+        binding: await fingerprint(),
+        entry: normalized,
+      });
     },
   };
 }

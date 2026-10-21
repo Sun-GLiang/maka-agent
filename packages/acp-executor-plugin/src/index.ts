@@ -91,6 +91,7 @@ export interface AcpAgentAdapter<TConfig = unknown> {
   configure(config: TConfig): AcpConfiguredAgent;
   permissionKind?(request: RequestPermissionRequest): 'permission' | 'question';
   executionFailed?(text: string): boolean;
+  /** Changes to persisted presentation require a CATALOG_SNAPSHOT_VERSION bump in acp-catalog-store.ts. */
   describeModels?(
     models: ExecutorCatalogEntry['models'],
   ): Pick<ExecutorCatalogEntry, 'models' | 'modelGroups'>;

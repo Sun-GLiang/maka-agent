@@ -56,6 +56,17 @@ uncached draft still needs one neutral probe. Snapshot version 2 rejects older s
 contain Session-specific candidates. Refresh errors are not persisted, and invalidation fences
 pending disk reads and probe results.
 
+`CATALOG_SNAPSHOT_VERSION` in `src/acp-catalog-store.ts` versions both the storage
+format and the derived catalog semantics. Increment it whenever `#catalogEntry`,
+catalog normalization, or an adapter's display name or `describeModels` changes
+persisted labels, model groups, provider types, defaults, or capabilities. This
+includes changes in adapter packages such as `@maka/antigravity-acp-plugin`, even
+when the Agent executable and launch configuration are unchanged. Old snapshots
+then trigger one neutral discovery and are replaced with the current derivation;
+subsequent restarts reuse the refreshed snapshot. Unrelated Maka updates need no
+version bump. This is an explicit maintenance contract, not automatic code-change
+detection.
+
 After initial disk hydration, cache hits do not read or write storage. Every successful neutral
 probe checks the current executable/helper metadata and persists its result, even when its model
 list is unchanged. This keeps the snapshot bound to the refreshed installation after an in-place

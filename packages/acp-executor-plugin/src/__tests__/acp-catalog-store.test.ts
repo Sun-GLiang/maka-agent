@@ -102,6 +102,59 @@ test('disk snapshot survives recreation without credentials or inherited environ
   }
 });
 
+test('a catalog version bump re-derives presentation once without an executable or config change', async () => {
+  const f = await fixture();
+  const derived = {
+    ...entry,
+    displayName: 'Current adapter name',
+    models: [{ id: 'fast', name: 'Current model name' }],
+  };
+  let probes = 0;
+  const makeCatalog = () =>
+    new AcpCatalog(
+      new AdmissionLimiter(1),
+      async () => {
+        probes++;
+        return derived;
+      },
+      () => ({ ...entry, readiness: 'unavailable' }),
+      undefined,
+      f.make(),
+    );
+  try {
+    await f.make().save(entry);
+    const current = JSON.parse(await readFile(f.path, 'utf8'));
+    // Keep the binding and old derived values intact: only the code's catalog
+    // version changes across this simulated upgrade.
+    await writeFile(f.path, JSON.stringify({ ...current, version: current.version - 1 }));
+    const upgraded = makeCatalog();
+    try {
+      assert.deepEqual(await upgraded.get(new AbortController().signal), derived);
+      assert.deepEqual(await upgraded.get(new AbortController().signal), derived);
+      assert.equal(probes, 1);
+    } finally {
+      await upgraded.dispose();
+    }
+    const repaired = JSON.parse(await readFile(f.path, 'utf8'));
+    assert.equal(repaired.version, current.version);
+    assert.equal(
+      repaired.binding,
+      current.binding,
+      'config and executable metadata did not change',
+    );
+    assert.deepEqual(repaired.entry, derived);
+    const restarted = makeCatalog();
+    try {
+      assert.deepEqual(await restarted.get(new AbortController().signal), derived);
+      assert.equal(probes, 1, 'the refreshed derivation survives another restart without a probe');
+    } finally {
+      await restarted.dispose();
+    }
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test('updated executables and missing sidecars cannot reuse a disk snapshot', async () => {
   const f = await fixture();
   try {
