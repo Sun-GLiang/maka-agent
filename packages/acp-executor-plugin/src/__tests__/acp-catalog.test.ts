@@ -98,52 +98,70 @@ test('the shared runtime budget covers cleanup and queues different executor ins
   assert.equal(admission.activeCount, 0);
 });
 
-test('repeated refresh drains the old process and redirects every waiter to the latest probe', async () => {
-  const admission = new AdmissionLimiter(2);
-  const started = deferred<void>();
-  const cleaning = deferred<void>();
-  const cleanup = deferred<void>();
-  let probes = 0;
-  const catalog = new AcpCatalog(
-    admission,
-    async (startup) => {
-      probes++;
-      if (probes > 1) return entry('fresh');
-      started.resolve();
-      try {
-        await new Promise<void>((_resolve, reject) => {
-          startup.addEventListener('abort', () => reject(startup.reason), { once: true });
-        });
-        return entry('stale');
-      } finally {
-        cleaning.resolve();
-        await cleanup.promise;
-      }
-    },
-    () => entry('unavailable', 'unavailable'),
-  );
-  const old = catalog.get(signal());
-  try {
-    await started.promise;
-    const refresh = catalog.get(signal(), true);
-    await cleaning.promise;
-    const newer = catalog.get(signal(), true);
-    await setImmediate();
-    assert.equal(probes, 1, 'replacement must wait for the old process to close');
-    assert.equal(admission.activeCount, 1);
-    cleanup.resolve();
-    const results = await Promise.all([old, refresh, newer]);
-    assert.equal(probes, 2, 'an invalidated queued refresh must never start a process');
-    assert.equal(
-      results.every((result) => result.id === 'fresh'),
-      true,
+for (const shutdown of [false, true]) {
+  test(`repeated refresh drains the old process before ${shutdown ? 'shutdown' : 'replacement'}`, async () => {
+    const admission = new AdmissionLimiter(2);
+    const started = deferred<void>();
+    const cleaning = deferred<void>();
+    const cleanup = deferred<void>();
+    let probes = 0;
+    const catalog = new AcpCatalog(
+      admission,
+      async (startup) => {
+        probes++;
+        if (probes > 1) return entry('fresh');
+        started.resolve();
+        try {
+          await new Promise<void>((_resolve, reject) => {
+            startup.addEventListener('abort', () => reject(startup.reason), { once: true });
+          });
+          return entry('stale');
+        } finally {
+          cleaning.resolve();
+          await cleanup.promise;
+        }
+      },
+      () => entry('unavailable', 'unavailable'),
     );
-    assert.equal(await catalog.get(signal()), results[2]);
-  } finally {
-    cleanup.resolve();
-    await catalog.dispose();
-  }
-});
+    const old = catalog.get(signal());
+    try {
+      await started.promise;
+      const refresh = catalog.get(signal(), true);
+      await cleaning.promise;
+      const newer = catalog.get(signal(), true);
+      await setImmediate();
+      assert.equal(probes, 1, 'replacement must wait for the old process to close');
+      assert.equal(admission.activeCount, 1);
+      let disposed = false;
+      const closing = shutdown
+        ? catalog.dispose().then(() => {
+            disposed = true;
+          })
+        : undefined;
+      await setImmediate();
+      assert.equal(disposed, false, 'shutdown must wait for superseded probe cleanup');
+      cleanup.resolve();
+      const results = await Promise.all([old, refresh, newer]);
+      await closing;
+      if (shutdown) {
+        assert.equal(disposed, true);
+        assert.equal(probes, 1, 'shutdown cannot start a queued replacement');
+        assert.equal(admission.activeCount, 0);
+        assert.ok(results.every((result) => result.readiness === 'unavailable'));
+        return;
+      }
+      assert.equal(probes, 2, 'an invalidated queued refresh must never start a process');
+      assert.equal(
+        results.every((result) => result.id === 'fresh'),
+        true,
+      );
+      assert.equal(await catalog.get(signal()), results[2]);
+    } finally {
+      cleanup.resolve();
+      await catalog.dispose();
+    }
+  });
+}
 
 test('disposing a queued executor removes its admission without starting a probe', async () => {
   const admission = new AdmissionLimiter(1);
@@ -353,10 +371,11 @@ test('shutdown flushes neutral candidates and restart uses them without a probe'
   await first.get(signal());
   await first.get(signal(), true);
   await first.dispose();
-  assert.equal(writes, 1, 'identical neutral probes do not rewrite the disk snapshot');
+  const discoveryWrites = writes;
   const restarted = make();
   try {
     assert.deepEqual(await restarted.get(signal()), catalogModels('probe'));
+    assert.equal(writes, discoveryWrites, 'cached reads do not rewrite the disk snapshot');
     assert.equal(probes, 2, 'restart reads the persisted snapshot');
     await restarted.get(signal(), true);
     assert.equal(probes, 3, 'manual refresh bypasses both cache layers');

@@ -56,6 +56,11 @@ uncached draft still needs one neutral probe. Snapshot version 2 rejects older s
 contain Session-specific candidates. Refresh errors are not persisted, and invalidation fences
 pending disk reads and probe results.
 
+After initial disk hydration, cache hits do not read or write storage. Every successful neutral
+probe checks the current executable/helper metadata and persists its result, even when its model
+list is unchanged. This keeps the snapshot bound to the refreshed installation after an in-place
+binary update. There is no separate fingerprint cache or model-list write deduplication.
+
 The scratch path is stable across refresh and Host restarts, scoped to the data root,
 Plugin namespace, adapter and composition Entry. A native file lease serializes owners across
 runtime instances and processes. Probe processes are drained before directory contents are removed
@@ -66,10 +71,12 @@ within that executor's lifetime; supply `withCatalogDirectory` for durable direc
 The ACP runtime Entry shares a two-probe FIFO budget across its adapter registrations, using
 Runtime's existing AdmissionLimiter. The permit covers initialization, connection disposal and
 temporary-directory removal. Replacement probes wait for superseded probes to finish cleanup;
-queued probes are cancelled by invalidation or disposal. Individual callers can stop waiting
+each executor therefore retains at most one probe owner, including after cleanup failure.
+Queued probes are cancelled by invalidation or disposal. Individual callers can stop waiting
 without owning a shared probe. Pending callers follow invalidations to the current revision even
-when setup/login does not start a replacement query. Genuine probe failures do not automatically
-retry, and cancellation or disposal stops the caller. The 30-second probe deadline includes time waiting for capacity.
+when setup/login does not start a replacement query. A failed request does not loop; later automatic
+reads can retry after the cooldown. Cancellation or disposal stops the caller. The 30-second probe
+deadline includes time waiting for capacity.
 The generic executor query supports process-free inventory and per-executor discovery/filtering;
 no Agent-specific Desktop discovery path is required.
 

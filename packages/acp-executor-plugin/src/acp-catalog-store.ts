@@ -57,25 +57,18 @@ export function createAcpCatalogStore(
         ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
         : value,
   );
-  let binding: Promise<string> | undefined;
-  const fingerprint = () => {
-    binding ??= (async () => {
-      const files = await Promise.all(
-        [launch.executable, ...(launch.requiredExecutables ?? [])].map(async (path) => {
-          const resolved = await realpath(path);
-          await access(resolved, constants.X_OK);
-          const file = await stat(resolved);
-          if (!file.isFile()) throw new Error('ACP executable is not a file');
-          return { path: resolved, size: file.size, mtime: file.mtimeMs, ctime: file.ctimeMs };
-        }),
-      );
-      // Metadata avoids reading the large ACP executable on every Host boot.
-      return createHash('sha256').update(configuration).update(JSON.stringify(files)).digest('hex');
-    })().catch((error: unknown) => {
-      binding = undefined;
-      throw error;
-    });
-    return binding;
+  const fingerprint = async () => {
+    const files = await Promise.all(
+      [launch.executable, ...(launch.requiredExecutables ?? [])].map(async (path) => {
+        const resolved = await realpath(path);
+        await access(resolved, constants.X_OK);
+        const file = await stat(resolved);
+        if (!file.isFile()) throw new Error('ACP executable is not a file');
+        return { path: resolved, size: file.size, mtime: file.mtimeMs, ctime: file.ctimeMs };
+      }),
+    );
+    // Check current metadata when loading or persisting a neutral probe, not on cached reads.
+    return createHash('sha256').update(configuration).update(JSON.stringify(files)).digest('hex');
   };
   const { storage, key } = persistence;
   return {
@@ -91,7 +84,6 @@ export function createAcpCatalogStore(
     },
     async save(entry) {
       if (!entry) {
-        binding = undefined;
         await storage.delete(key);
         return;
       }

@@ -39,13 +39,10 @@ export class AcpCatalog {
   #cached?: ExecutorCatalogEntry;
   #pending?: PendingProbe;
   #tail?: Promise<ExecutorCatalogEntry>;
-  readonly #operations = new Set<Promise<ExecutorCatalogEntry>>();
   #revision = 0;
-  #generation = 0;
   #disposed = false;
   #hydration?: Promise<void>;
   #writes: Promise<void> = Promise.resolve();
-  #persisted?: string;
   #failure?: { entry: ExecutorCatalogEntry; retryAt: number };
 
   constructor(
@@ -90,12 +87,11 @@ export class AcpCatalog {
 
   #hydrate(): Promise<void> {
     if (!this.#hydration) {
-      const generation = this.#generation;
+      const revision = this.#revision;
       this.#hydration = (async () => {
         const entry = await this.store?.load();
-        if (generation !== this.#generation || !entry) return;
+        if (revision !== this.#revision || !entry) return;
         this.#cached = entry;
-        this.#persisted = JSON.stringify(entry);
       })().catch(() => {
         // An optional cache must not prevent fresh discovery.
       });
@@ -107,13 +103,10 @@ export class AcpCatalog {
     if (!this.store) return;
     const snapshot = entry ? structuredClone(entry) : undefined;
     // Serialize writes and invalidation so a slow old write cannot resurrect a
-    // deleted snapshot. Identical neutral probes do not rewrite storage.
+    // deleted snapshot. Every successful probe refreshes the executable binding.
     this.#writes = this.#writes
       .then(async () => {
-        const serialized = JSON.stringify(snapshot ?? null);
-        if (serialized === this.#persisted) return;
         await this.store!.save(snapshot);
-        this.#persisted = serialized;
       })
       .catch(() => {
         // Keep the in-memory catalog usable; a later refresh can retry.
@@ -162,13 +155,11 @@ export class AcpCatalog {
         }
       };
       const promise = run().finally(() => {
-        this.#operations.delete(promise);
         if (this.#pending?.promise === promise) this.#pending = undefined;
         if (this.#tail === promise) this.#tail = undefined;
       });
       this.#pending = { revision, controller, promise };
       this.#tail = promise;
-      this.#operations.add(promise);
     }
     return this.#pending;
   }
@@ -182,7 +173,6 @@ export class AcpCatalog {
     }
     if (entry.readiness === 'authentication_required') {
       // A known account failure must not expose the previous account's choices.
-      this.#generation++;
       this.#cached = undefined;
       this.#hydration = Promise.resolve();
       this.#save(undefined);
@@ -192,7 +182,6 @@ export class AcpCatalog {
   }
 
   invalidate(): void {
-    this.#generation++;
     this.#cached = undefined;
     this.#failure = undefined;
     this.#cancelProbe();
@@ -209,10 +198,10 @@ export class AcpCatalog {
   async dispose(): Promise<void> {
     this.#disposed = true;
     this.#cancelProbe();
-    await Promise.allSettled(this.#operations);
+    // Each replacement awaits its predecessor, including cancelled probes.
+    await this.#tail;
     await this.#hydration;
     await this.#writes;
-    this.#generation++;
     this.#cached = undefined;
   }
 }

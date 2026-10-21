@@ -195,7 +195,7 @@ export class AcpExecutor implements PluginExecutorProvider {
   readonly #createConnection: AcpConnectionFactory;
   readonly #state?: AcpConversationStateStore;
   readonly #sessions = new Map<string, RetainedSession>();
-  readonly #catalogProbes = new Set<RetainedCatalogProbe>();
+  #catalogProbe?: RetainedCatalogProbe;
   #disposed = false;
   #disposal?: Promise<void>;
   readonly #catalog: AcpCatalog;
@@ -238,7 +238,7 @@ export class AcpExecutor implements PluginExecutorProvider {
       options.catalogAdmission ?? new AdmissionLimiter(1),
       (signal, holdAdmission) => this.#probeCatalog(signal, holdAdmission),
       () => this.#catalogEntry('unavailable'),
-      () => this.#drainCatalogProbes(),
+      () => this.#drainCatalogProbe(),
       options.catalogPersistence
         ? createAcpCatalogStore(
             options.catalogPersistence,
@@ -275,7 +275,7 @@ export class AcpExecutor implements PluginExecutorProvider {
       releaseDirectory = resolve;
     });
     const probe: RetainedCatalogProbe = { directory: Promise.resolve(), releaseDirectory };
-    this.#catalogProbes.add(probe);
+    this.#catalogProbe = probe;
     // Report a cleanup failure to discovery while retaining the directory lease
     // and admission permit until a refresh or shutdown successfully retries it.
     probe.directory = this.#withCatalogDirectory(signal, async (directory) => {
@@ -287,7 +287,7 @@ export class AcpExecutor implements PluginExecutorProvider {
         await released;
       }
     }).finally(() => {
-      if (!probe.session?.owner) this.#catalogProbes.delete(probe);
+      if (this.#catalogProbe === probe && !probe.session?.owner) this.#catalogProbe = undefined;
     });
     holdAdmission(probe.directory);
     void probe.directory.catch(rejectResult);
@@ -324,21 +324,14 @@ export class AcpExecutor implements PluginExecutorProvider {
     }
   }
 
-  async #disposeCatalogProbe(probe: RetainedCatalogProbe): Promise<void> {
+  async #drainCatalogProbe(): Promise<void> {
+    // AcpCatalog serializes probes and drains any retained owner before replacement.
+    const probe = this.#catalogProbe;
+    if (!probe) return;
     if (probe.session) await this.#lose(probe.session);
     probe.releaseDirectory();
     await probe.directory;
-    this.#catalogProbes.delete(probe);
-  }
-
-  async #drainCatalogProbes(): Promise<void> {
-    const settlements = await Promise.allSettled(
-      [...this.#catalogProbes].map((probe) => this.#disposeCatalogProbe(probe)),
-    );
-    const failures = settlements.flatMap((settlement) =>
-      settlement.status === 'rejected' ? [settlement.reason] : [],
-    );
-    if (failures.length) throw new AggregateError(failures, 'ACP probe cleanup failed');
+    if (this.#catalogProbe === probe) this.#catalogProbe = undefined;
   }
 
   invalidateCatalog(): void {
@@ -597,7 +590,7 @@ export class AcpExecutor implements PluginExecutorProvider {
         if (this.#sessions.get(session.conversationKey) === session)
           this.#sessions.delete(session.conversationKey);
       }),
-      this.#drainCatalogProbes(),
+      this.#drainCatalogProbe(),
     ]);
     const failures = settlements.flatMap((settlement) =>
       settlement.status === 'rejected' ? [settlement.reason] : [],

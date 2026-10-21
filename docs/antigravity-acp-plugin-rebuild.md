@@ -176,7 +176,7 @@ Snapshots are isolated by Host, Plugin scope, and executor entry. A versioned sn
 to a digest of the configuration, launch arguments, platform, and executable/sidecar file
 metadata. Configuration values and credentials are not stored in the snapshot. Missing,
 incompatible, or corrupt snapshots fall back to discovery. Executable changes are detected
-when loading the snapshot on restart; inherited process environment changes do not invalidate it.
+when loading a snapshot or saving a successful probe; inherited process environment changes do not invalidate it.
 External account or upstream model changes reach the public catalog through manual refresh or
 setup/login invalidation, rather than a timer or a background disposable Session.
 
@@ -196,8 +196,16 @@ refresh-failed notice. Cold discovery failures have a 60-second retry cooldown; 
 TTL for successful catalogs. Manual retry and explicit invalidation bypass the cooldown.
 Authentication failures clear previous choices. Setup/login and configuration invalidation discard
 the cache and fence pending disk reads and probes. Serialized writes prevent a pending save from
-resurrecting an invalidated snapshot. Identical neutral probe results skip disk writes. Normal shutdown
-drains pending writes and retains the snapshot; storage failures leave the in-memory catalog usable.
+resurrecting an invalidated snapshot. Each successful neutral probe rechecks executable metadata and
+persists its result, even when the model list is unchanged, so an in-place executable update does not
+leave an obsolete snapshot binding. Cached reads do not touch storage. Normal shutdown drains pending
+writes and retains the snapshot; storage failures leave the in-memory catalog usable.
+
+The cache uses one revision counter to fence stale disk reads and probe results. Probes form a
+serial promise chain, so shutdown waits on its tail rather than tracking a second operation set.
+An executor retains at most one probe owner; cleanup retries finish before a replacement starts.
+Disk-read fencing and serialized snapshot writes remain necessary: removing either causes a stale
+snapshot to survive invalidation. The ablation results are recorded in the acceptance document.
 
 Setup/login invalidates only the affected executor. RuntimePolicy edits rely on Plugin
 reconciliation to replace changed configurations; unrelated settings do not invalidate catalogs.
@@ -212,8 +220,10 @@ through the full inventory recovery path. A successful single-agent read does no
 inventory error.
 The executor query's inventory/filter fields require compatibility epoch 226.
 
-See [catalog cache acceptance](archive/antigravity-catalog-cache-acceptance.md) for real
-Antigravity process counts across navigation, Host restarts, and application restarts.
+See [catalog cache acceptance](archive/antigravity-catalog-cache-acceptance.md) for current
+regression and ablation results, plus historical real Antigravity process counts across navigation,
+Host restarts, and application restarts. The official-binary acceptance was not repeated after
+the isolation and ablation follow-ups.
 
 See [PR 2 acceptance evidence](archive/antigravity-acp-pr2-acceptance.md),
 [PR 3 acceptance evidence](archive/antigravity-acp-pr3-acceptance.md), and

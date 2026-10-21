@@ -129,6 +129,48 @@ test('updated executables and missing sidecars cannot reuse a disk snapshot', as
   }
 });
 
+for (const changedModels of [false, true]) {
+  test(`refresh after an executable update persists ${changedModels ? 'changed' : 'unchanged'} models with the new binding`, async () => {
+    const f = await fixture();
+    const store = f.make();
+    let confirmSave!: () => void;
+    const firstSave = new Promise<void>((resolve) => {
+      confirmSave = resolve;
+    });
+    let observed = entry;
+    const catalog = new AcpCatalog(
+      new AdmissionLimiter(1),
+      async () => observed,
+      () => ({ ...entry, readiness: 'unavailable' }),
+      undefined,
+      {
+        load: () => store.load(),
+        save: async (value) => {
+          await store.save(value);
+          confirmSave();
+        },
+      },
+    );
+    try {
+      await catalog.get(new AbortController().signal);
+      await firstSave;
+      await writeFile(f.executable, 'updated-fixture');
+      if (changedModels)
+        observed = { ...entry, models: [{ id: 'new', name: 'New' }], currentModel: 'new' };
+      assert.deepEqual(await catalog.get(new AbortController().signal, true), observed);
+      await catalog.dispose();
+      assert.deepEqual(
+        await f.make().load(),
+        observed,
+        'restart must reuse the refreshed snapshot after an in-place executable update',
+      );
+    } finally {
+      await catalog.dispose();
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
+
 test('corrupt, incompatible, and cross-executor snapshots fall back to fresh discovery', async () => {
   const f = await fixture();
   try {
