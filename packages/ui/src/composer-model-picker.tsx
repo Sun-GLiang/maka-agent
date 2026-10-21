@@ -243,11 +243,9 @@ export function ComposerModelPicker(props: {
   const selected = catalog.find(entry => entry.id === executor?.selection?.executorId);
   const selectedModel = executor?.selection?.configuration.model ?? selected?.currentModel;
   const group = selected && executorModelGroup(selected, selectedModel);
-  const modelLabel = contributed ? contributedModel?.label ?? props.executorTarget?.model ?? copy.default : executor?.selection
+  const label = contributed ? contributedModel?.label ?? props.executorTarget?.model ?? copy.default : executor?.selection
     ? group?.name ?? selected?.models.find(model => model.id === selectedModel)?.name ?? selectedModel ?? copy.default
     : props.label;
-  const label = !executor?.fixed && (contributed || executor?.selection)
-    ? `${contributed?.label ?? selected?.displayName ?? executor?.selection?.executorId} · ${modelLabel}` : modelLabel;
   const authoritative = contributed ? JSON.stringify([contributed.id, props.executorTarget?.model ?? '']) : executor?.selection
     ? selected ? externalValue(selected, selectedModel) : JSON.stringify([executor.selection.executorId, selectedModel ?? ''])
     : props.value ?? (props.choices.length === 0 && !executor ? '__maka_model_display__' : '');

@@ -45,7 +45,7 @@ test('new tasks can recover another Agent without changing their selection', asy
         /></LocaleProvider>);
         const { click, trigger } = actions(dom);
         await click([...dom.document.querySelectorAll('button')].find(el => el.textContent === (readiness === 'unavailable' ? 'Retry' : 'Go to sign in')));
-        assert.equal(trigger()?.textContent, selected ? 'Ready Agent · Family' : 'Native');
+        assert.equal(trigger()?.textContent, selected ? 'Family' : 'Native');
       }
     }
     assert.deepEqual(setup, ['agent', 'agent']);
@@ -144,7 +144,7 @@ test('external model families preserve opaque IDs, reset model-bound modes and r
     assert.equal(pending.at(-1), true);
     await act(async () => { finish(); });
     assert.equal(pending.at(-1), false);
-    assert.equal(trigger()?.textContent, 'Agent · Family');
+    assert.equal(trigger()?.textContent, 'Family');
     await click(trigger());
     await click(option('Other'));
     assert.deepEqual(writes.at(-1), { executorId: 'agent', configuration: { model: 'other' } });
@@ -278,7 +278,7 @@ test('draft refresh appears only for the selected external agent and preserves i
       assert.ok(refresh(name));
       assert.equal(refresh(otherName), null);
       await click(refresh(name));
-      assert.equal(trigger()?.textContent, name + ' · Family');
+      assert.equal(trigger()?.textContent, 'Family');
       await render([executorId === 'agent' ? 'other' : 'agent']);
       assert.notEqual(refresh(name)?.getAttribute('aria-disabled'), 'true');
       await render([executorId]);
