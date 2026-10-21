@@ -393,12 +393,12 @@ export function ComposerModelPicker(props: {
       className="maka-executor-mode-selector"
       onChange={value => { void commit(() => externalConfiguration({ mode: value })); }}
     />}
-    {executor && !executor.fixed && catalog.filter(entry => entry.readiness === 'ready' && !entry.refreshFailed).map(entry => <Button
-      key={entry.id} label={entry.displayName + ': ' + copy.refresh} tooltip={entry.displayName + ': ' + copy.refresh}
+    {executor && !executor.fixed && selected?.readiness === 'ready' && !selected.refreshFailed && <Button
+      label={selected.displayName + ': ' + copy.refresh} tooltip={selected.displayName + ': ' + copy.refresh}
       variant="ghost" size="sm" isIconOnly icon={<RefreshCcw size={ICON_SIZE.control} />}
-      isLoading={isExecutorLoading(executor, entry.id)}
-      isDisabled={disabled || props.isReadOnly || isExecutorLoading(executor, entry.id)}
-      onClick={() => executor.onRetry(entry.id)} />)}
+      isLoading={isExecutorLoading(executor, selected.id)}
+      isDisabled={disabled || props.isReadOnly || isExecutorLoading(executor, selected.id)}
+      onClick={() => executor.onRetry(selected.id)} />}
     {executor && !executor.fixed && <Button label={copy.manage} tooltip={copy.manage}
       variant="ghost" size="sm" isIconOnly icon={<Settings size={ICON_SIZE.control} />}
       onClick={() => executor.onSetup()} />}

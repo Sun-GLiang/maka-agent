@@ -210,8 +210,9 @@ reconciliation to replace changed configurations; unrelated settings do not inva
 The draft picker first reads the process-free executor inventory, then discovers each executor
 independently. Completed results and retry/loading state belong to each agent, so a slow
 Antigravity probe does not block another agent's catalog or animate a selected native model.
-Ready agents expose **Refresh models** beside the draft model picker, even while a native model
-is selected. This refresh targets only that agent and preserves the draft selection. Inventory
+The selected ready external agent exposes **Refresh models** beside the draft model picker.
+The button is hidden while a native model is selected and remains outside the model list.
+This refresh targets only the selected agent and preserves the draft selection. Inventory
 transport failures retry the inventory rather than just the selected agent, clearing the error
 through the full inventory recovery path. A successful single-agent read does not dismiss an
 inventory error.

@@ -44,8 +44,8 @@ Standalone embeddings opt into disk reuse with `catalogPersistence: { storage, k
 Setup/login and provider configuration changes invalidate the affected catalog. Explicit refresh
 requests a new probe while retaining successful choices on transient failure; it never mutates a
 retained task. Cold discovery failures have a 60-second retry cooldown, bypassed by explicit refresh.
-The draft picker exposes a **Refresh models** action for each ready Agent, including while a native
-model is selected. Account and remote model changes are learned from real Sessions or explicit
+The draft picker exposes a **Refresh models** action only for the selected ready external Agent.
+New drafts using a native model do not show it. Account and remote model changes are learned from real Sessions or explicit
 refresh rather than a periodic discovery timer.
 
 Neutral defaults (model and modes), observed Session model candidates, and transient refresh state

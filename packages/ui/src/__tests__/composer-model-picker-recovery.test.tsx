@@ -253,12 +253,13 @@ test('agent loading stays in its section and refresh recovery retries only that 
   } finally { await dom.cleanup(); }
 });
 
-test('ready draft agents can refresh independently without changing the current selection', async () => {
+test('draft refresh appears only for the selected external agent and preserves its selection', async () => {
   const dom = installTranscriptDom();
   const retried: Array<string | undefined> = [];
   let selectionWrites = 0;
   try {
-    for (const selection of [undefined, { executorId: 'agent', configuration: { model: 'opaque-high' } }]) {
+    for (const executorId of [undefined, 'agent', 'other', undefined]) {
+      const selection = executorId ? { executorId, configuration: { model: 'opaque-high' } } : undefined;
       const render = (loadingIds: string[] = []) => dom.render(<LocaleProvider locale="en"><ComposerModelPicker label="Native" choices={choices}
         executor={{ catalog: [catalog[0]!, { ...catalog[0]!, id: 'other', displayName: 'Other Agent' }],
           selection, loadingIds,
@@ -267,17 +268,24 @@ test('ready draft agents can refresh independently without changing the current 
       await render();
       const { click, trigger } = actions(dom);
       const refresh = (name: string) => dom.document.querySelector<HTMLButtonElement>(`button[aria-label="${name}: Refresh models"]`);
-      assert.ok(refresh('Agent'));
-      assert.ok(refresh('Other Agent'));
-      await click(refresh('Other Agent'));
-      assert.equal(trigger()?.textContent, selection ? 'Agent · Family' : 'Native');
-      await render(['other']);
-      assert.equal(refresh('Other Agent')?.getAttribute('aria-disabled'), 'true');
-      assert.notEqual(refresh('Agent')?.getAttribute('aria-disabled'), 'true');
-      await click(refresh('Other Agent'));
-      await click(refresh('Agent'));
+      if (!executorId) {
+        assert.equal(refresh('Agent'), null);
+        assert.equal(refresh('Other Agent'), null);
+        continue;
+      }
+      const name = executorId === 'agent' ? 'Agent' : 'Other Agent';
+      const otherName = executorId === 'agent' ? 'Other Agent' : 'Agent';
+      assert.ok(refresh(name));
+      assert.equal(refresh(otherName), null);
+      await click(refresh(name));
+      assert.equal(trigger()?.textContent, name + ' · Family');
+      await render([executorId === 'agent' ? 'other' : 'agent']);
+      assert.notEqual(refresh(name)?.getAttribute('aria-disabled'), 'true');
+      await render([executorId]);
+      assert.equal(refresh(name)?.getAttribute('aria-disabled'), 'true');
+      await click(refresh(name));
     }
-    assert.deepEqual(retried, ['other', 'agent', 'other', 'agent']);
+    assert.deepEqual(retried, ['agent', 'other']);
     assert.equal(selectionWrites, 0);
   } finally { await dom.cleanup(); }
 });
