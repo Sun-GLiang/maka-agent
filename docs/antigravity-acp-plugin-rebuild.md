@@ -201,11 +201,8 @@ persists its result, even when the model list is unchanged, so an in-place execu
 leave an obsolete snapshot binding. Cached reads do not touch storage. Normal shutdown drains pending
 writes and retains the snapshot; storage failures leave the in-memory catalog usable.
 
-The cache uses one revision counter to fence stale disk reads and probe results. Probes form a
-serial promise chain, so shutdown waits on its tail rather than tracking a second operation set.
-An executor retains at most one probe owner; cleanup retries finish before a replacement starts.
-Disk-read fencing and serialized snapshot writes remain necessary: removing either causes a stale
-snapshot to survive invalidation. The ablation results are recorded in the acceptance document.
+Probes run serially within an executor. Cleanup retries finish before a replacement starts,
+and shutdown waits for pending probe cleanup.
 
 Setup/login invalidates only the affected executor. RuntimePolicy edits rely on Plugin
 reconciliation to replace changed configurations; unrelated settings do not invalidate catalogs.
@@ -219,11 +216,6 @@ transport failures retry the inventory rather than just the selected agent, clea
 through the full inventory recovery path. A successful single-agent read does not dismiss an
 inventory error.
 The executor query's inventory/filter fields require compatibility epoch 226.
-
-See [catalog cache acceptance](archive/antigravity-catalog-cache-acceptance.md) for current
-regression and ablation results, plus historical real Antigravity process counts across navigation,
-Host restarts, and application restarts. The official-binary acceptance was not repeated after
-the isolation and ablation follow-ups.
 
 See [PR 2 acceptance evidence](archive/antigravity-acp-pr2-acceptance.md),
 [PR 3 acceptance evidence](archive/antigravity-acp-pr3-acceptance.md), and

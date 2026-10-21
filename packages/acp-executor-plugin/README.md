@@ -59,7 +59,7 @@ pending disk reads and probe results.
 After initial disk hydration, cache hits do not read or write storage. Every successful neutral
 probe checks the current executable/helper metadata and persists its result, even when its model
 list is unchanged. This keeps the snapshot bound to the refreshed installation after an in-place
-binary update. There is no separate fingerprint cache or model-list write deduplication.
+binary update.
 
 The scratch path is stable across refresh and Host restarts, scoped to the data root,
 Plugin namespace, adapter and composition Entry. A native file lease serializes owners across
