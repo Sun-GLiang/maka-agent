@@ -34,6 +34,7 @@ import { getSharedUiCopy } from './shared-ui-copy.js';
 import { getConversationCopy } from './conversation-copy.js';
 import { usePendingSelection } from './use-pending-selection.js';
 import type { MakaClientExecutorTarget } from './client-plugin-slots.js';
+import { useToast } from './toast.js';
 
 export interface ComposerModelContribution {
   readonly id: string;
@@ -97,7 +98,7 @@ const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<Exec
   en: {
     loading: 'Loading models…',
     refresh: 'Refresh models',
-    refreshFailed: 'Refresh failed. Using the previous model list.',
+    refreshFailed: 'Could not refresh models. Please try again later.',
     nativeOperations: 'This operation requires Maka. Start a new Maka task.',
     manage: 'Manage external agents',
     signIn: 'Go to sign in',
@@ -120,7 +121,7 @@ const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<Exec
   'zh-CN': {
     loading: '正在获取模型…',
     refresh: '刷新模型',
-    refreshFailed: '刷新失败，正在使用上次的模型列表。',
+    refreshFailed: '模型列表刷新失败，请稍后再试。',
     nativeOperations: '此操作仅支持 Maka。请新建 Maka 任务。',
     manage: '管理外部 Agent',
     signIn: '前往登录',
@@ -142,7 +143,7 @@ const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<Exec
   'zh-TW': {
     loading: '正在取得模型…',
     refresh: '重新整理模型',
-    refreshFailed: '重新整理失敗，正在使用上次的模型清單。',
+    refreshFailed: '模型清單重新整理失敗，請稍後再試。',
     nativeOperations: '此操作僅支援 Maka。請建立 Maka 任務。',
     manage: '管理外部 Agent',
     signIn: '前往登入',
@@ -165,6 +166,12 @@ const EXECUTOR_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<Exec
 
 export function executorCopy(locale: UiLocale): ExecutorCopy {
   return EXECUTOR_COPY[locale];
+}
+
+function ExecutorRefreshFailure({ name, message }: { name: string; message: string }) {
+  const toast = useToast();
+  useEffect(() => { toast.error(message, name); }, [toast, message, name]);
+  return null;
 }
 
 
@@ -323,7 +330,7 @@ export function ComposerModelPicker(props: {
     executor?.onSelect({ executorId: executor.selection!.executorId, configuration: executor.fixed || (configuration.model !== undefined && configuration.model !== selectedModel)
       ? configuration : { ...executor.selection!.configuration, ...configuration } });
   const mode = executor?.selection?.configuration.mode ?? selected?.currentMode;
-  const recoveryEntries = catalog.filter(entry => (entry.readiness !== 'ready' || entry.refreshFailed)
+  const recoveryEntries = catalog.filter(entry => entry.readiness !== 'ready'
     && !(entry.readiness === 'unavailable' && executor && isExecutorLoading(executor, entry.id)));
   return <>
     {/* Keep portaled search clicks from focusing the composer editor. */}
@@ -391,7 +398,7 @@ export function ComposerModelPicker(props: {
       className="maka-executor-mode-selector"
       onChange={value => { void commit(() => externalConfiguration({ mode: value })); }}
     />}
-    {executor && !executor.fixed && selected?.readiness === 'ready' && !selected.refreshFailed && <Button
+    {executor && !executor.fixed && selected?.readiness === 'ready' && <Button
       label={selected.displayName + ': ' + copy.refresh} tooltip={selected.displayName + ': ' + copy.refresh}
       variant="ghost" size="sm" isIconOnly icon={<RefreshCcw size={ICON_SIZE.control} />}
       isLoading={isExecutorLoading(executor, selected.id)}
@@ -403,8 +410,10 @@ export function ComposerModelPicker(props: {
     {!executor && !actions.size && props.onOpenSettings && <Button
       label={modelCopy.configureTitle} variant="ghost" size="sm"
       icon={<Settings size={ICON_SIZE.control} />} onClick={props.onOpenSettings} />}
+    {executor && catalog.filter(entry => entry.refreshFailed && !isExecutorLoading(executor, entry.id)).map(entry =>
+      <ExecutorRefreshFailure key={entry.id} name={entry.displayName} message={copy.refreshFailed} />)}
     {recoveryEntries.map(entry => <span key={entry.id} className="maka-executor-notice" role="status">
-      {entry.displayName + ': ' + (entry.refreshFailed ? copy.refreshFailed : copy[entry.readiness as Exclude<typeof entry.readiness, 'ready'>])}
+      {entry.displayName + ': ' + copy[entry.readiness as Exclude<typeof entry.readiness, 'ready'>]}
       {executor && (entry.readiness === 'restorable' || entry.readiness === 'restore_failed') ? <Button
         label={copy.restore} variant="ghost" size="sm" isDisabled={pending || !executor.onRestore}
         onClick={() => { if (executor.onRestore) void commit(executor.onRestore); }} />

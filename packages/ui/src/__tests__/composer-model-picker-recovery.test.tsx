@@ -25,6 +25,7 @@ import { Composer, type ComposerHandle } from '../composer.js';
 import { ComposerModelPicker } from '../composer-model-picker.js';
 import { highestExecutorModelVariant } from '../executor-model-presentation.js';
 import { LocaleProvider } from '../locale-context.js';
+import { ToastProvider } from '../toast.js';
 import { installTranscriptDom } from './transcript-test-dom.js';
 import { deriveComposerModelSwitchAvailability } from '../composer-helpers.js';
 import { actions, catalog, choices, session } from './composer-model-picker-fixture.js';
@@ -228,20 +229,23 @@ test('model switching availability retains its priority and opaque family levels
   assert.equal(highestExecutorModelVariant(catalog[0]!.modelGroups![0]!), 'opaque-high');
 });
 
-test('agent loading stays in its section and refresh recovery retries only that agent', async () => {
+test('agent loading stays in its section and failed refresh keeps the selected agent refresh button', async () => {
   const dom = installTranscriptDom();
   const retried: Array<string | undefined> = [];
   try {
     for (const selection of [undefined, { executorId: 'ready', configuration: { model: 'opaque-high' } }]) {
-      await dom.render(<LocaleProvider locale="en"><ComposerModelPicker label="Native" choices={choices}
+      await dom.render(<LocaleProvider locale="en"><ToastProvider><ComposerModelPicker label="Native" choices={choices}
         executor={{ catalog: [{ ...catalog[0]!, readiness: 'unavailable', models: [] }, { ...catalog[0]!, id: 'ready', displayName: 'Ready Agent', refreshFailed: true }],
           selection, loading: true, loadingIds: ['agent'],
           onSelect() {}, onSetup() {}, onRetry: id => { retried.push(id); }, onNewTask() {} }}
-      /></LocaleProvider>);
+      /></ToastProvider></LocaleProvider>);
       const { click, trigger } = actions(dom);
       assert.notEqual(trigger()?.getAttribute('aria-busy'), 'true', 'another agent never makes the current model busy');
-      assert.match(dom.document.body.textContent ?? '', /Refresh failed. Using the previous model list/);
-      await click([...dom.document.querySelectorAll('button')].find(el => el.textContent === 'Retry'));
+      assert.equal(dom.document.querySelector('.maka-executor-notice'), null);
+      assert.equal([...dom.document.querySelectorAll('button')].some(el => el.textContent === 'Retry'), false);
+      const refresh = dom.document.querySelector<HTMLButtonElement>('button[aria-label="Ready Agent: Refresh models"]');
+      if (selection) { assert.ok(refresh); await click(refresh); }
+      else assert.equal(refresh, null);
       await click(trigger());
       const pending = dom.document.querySelector('[role="group"][aria-label="Agent"]');
       assert.match(pending?.textContent ?? '', /Loading models/);
@@ -249,7 +253,7 @@ test('agent loading stays in its section and refresh recovery retries only that 
       assert.match(ready?.textContent ?? '', /Family/);
       await click(trigger());
     }
-    assert.deepEqual(retried, ['ready', 'ready']);
+    assert.deepEqual(retried, ['ready']);
   } finally { await dom.cleanup(); }
 });
 

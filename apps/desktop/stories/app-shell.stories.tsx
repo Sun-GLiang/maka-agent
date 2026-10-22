@@ -1871,6 +1871,58 @@ export const NewChatComposer: Story = {
   },
 };
 
+function DraftCatalogRefreshFailure() {
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
+  return <ToastProvider><ComposedShell session={null} chat={{ messages: [] }} composer={{
+    executorPicker: {
+      catalog: [{
+        id: 'antigravity', displayName: 'Antigravity', readiness: 'ready', refreshFailed,
+        models: [
+          { id: 'flash-low', name: 'Gemini 3.8 Flash (Low)', providerType: 'google' },
+          { id: 'flash-high', name: 'Gemini 3.8 Flash (High)', providerType: 'google' },
+        ],
+        modelGroups: [{ id: 'flash', name: 'Gemini 3.8 Flash', variants: [
+          { modelId: 'flash-low', level: 'low' }, { modelId: 'flash-high', level: 'high' },
+        ] }],
+        currentModel: 'flash-high', supportsModelChange: true, supportsAttachments: true,
+      }],
+      selection: { executorId: 'antigravity', configuration: { model: 'flash-high' } },
+      loadingIds: refreshing ? ['antigravity'] : [],
+      onSelect: noop, onSetup: noop, onNewTask: noop,
+      onRetry: () => {
+        setRefreshing(true);
+        window.setTimeout(() => { setRefreshFailed(true); setRefreshing(false); }, 300);
+      },
+    },
+  }} /></ToastProvider>;
+}
+
+// Real path: 新任务 → select an ACP model → Refresh models fails; the global toast appears outside the unchanged Composer.
+export const NewChatCatalogRefreshFailure: Story = {
+  render: () => <DraftCatalogRefreshFailure />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const refresh = canvas.getByRole('button', { name: /Antigravity: (Refresh models|刷新模型|重新整理模型)/ });
+    const composer = canvasElement.querySelector<HTMLElement>('.maka-composer')!;
+    const model = canvasElement.querySelector<HTMLElement>('.maka-model-switcher-trigger')!;
+    const before = composer.getBoundingClientRect();
+    await userEvent.click(refresh);
+    const notice = await page.findByText(/Could not refresh models|模型列表刷新失败|模型清單重新整理失敗/);
+    await waitFor(() => expect(notice).toBeVisible());
+    await expect(composer.contains(notice)).toBe(false);
+    await expect(refresh).toBeEnabled();
+    await expect(within(composer).queryByRole('button', { name: /^(Retry|重试|重試)$/ })).not.toBeInTheDocument();
+    await expect(composer.querySelector('.maka-executor-notice')).toBeNull();
+    await expect(model).toHaveTextContent('Gemini 3.8 Flash');
+    await expect(composer.getBoundingClientRect().height).toBe(before.height);
+    const buttonBox = refresh.getBoundingClientRect();
+    const modelBox = model.getBoundingClientRect();
+    await expect(Math.abs((buttonBox.y + buttonBox.height / 2) - (modelBox.y + modelBox.height / 2))).toBeLessThanOrEqual(2);
+  },
+};
+
 // A ready Local Host with no registered Projects must still expose its two
 // bootstrap actions while another Host owns the draft.
 export const NewChatComposerEmptyLocalHost: Story = {
