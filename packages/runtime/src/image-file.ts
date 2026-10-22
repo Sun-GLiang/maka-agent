@@ -28,6 +28,7 @@ import {
   READ_IMAGE_TOO_LARGE_MESSAGE,
   sniffAttachmentMimeType,
 } from '@maka/core/attachments';
+import { prepareSvgPreview, isSvgPreviewCandidate } from '@maka/core/svg-preview';
 import { ARTIFACT_IMAGE_PREVIEW_MAX_BYTES } from '@maka/core/artifacts';
 
 export interface WorkspaceFileReadOptions {
@@ -36,7 +37,12 @@ export interface WorkspaceFileReadOptions {
 }
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
-export type ImageMimeType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+export type ImageMimeType =
+  | 'image/png'
+  | 'image/jpeg'
+  | 'image/gif'
+  | 'image/webp'
+  | 'image/svg+xml';
 
 export class ImageFileError extends Error {
   constructor(
@@ -100,6 +106,14 @@ export function validateImageBytes(
   if (bytes.length > (purpose === 'chat' ? ARTIFACT_IMAGE_PREVIEW_MAX_BYTES : MAX_READ_IMAGE_BYTES))
     throw imageTooLargeError(purpose);
   const mimeType = sniffImageMime(bytes);
+  if (!mimeType && purpose === 'chat' && isSvgPreviewCandidate(bytes)) {
+    try {
+      prepareSvgPreview(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      return { bytes, mimeType: 'image/svg+xml' };
+    } catch {
+      /* Continue to the common unsupported-image failure. */
+    }
+  }
   if (!mimeType)
     throw new ImageFileError(
       'ERR_INVALID_IMAGE',

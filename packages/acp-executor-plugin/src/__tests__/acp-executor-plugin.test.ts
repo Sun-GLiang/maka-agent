@@ -1975,6 +1975,61 @@ test('questions retain option identity and output updates retain arrival order',
   }
 });
 
+test('ACP waits for asynchronous media publication and preserves surrounding text', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory },
+  );
+  const events: unknown[] = [];
+  try {
+    const result = await executor.execute(request('media'), {
+      ...executorContext(events),
+      requestPermission: async () => {
+        protocol.notifyUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'before' },
+        });
+        protocol.notifyUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'image', mimeType: 'image/png', data: 'AAAA' },
+        });
+        protocol.notifyUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'after' },
+        });
+        return { outcome: 'selected', optionId: 'allow_once' };
+      },
+      publishMedia: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return {
+          kind: 'image',
+          mimeType: 'image/png',
+          ref: { kind: 'session_file', sessionId: 'session-a', relativePath: 'saved-image' },
+        };
+      },
+    });
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') throw new Error('Expected completion');
+    assert.equal(
+      result.text,
+      'before\n\n![](maka://runtime/attachments/saved-image)\n\nafterreply:media',
+    );
+    assert.equal(
+      events
+        .filter((e: any) => e.type === 'output_delta')
+        .map((e: any) => e.text)
+        .join(''),
+      result.text,
+    );
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 function request(text: string) {
   return {
     sessionId: 'session-a',

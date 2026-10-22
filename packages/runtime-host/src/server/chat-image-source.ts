@@ -77,7 +77,7 @@ export async function downloadChatImage(
       const response = await fetch(url, {
         targetPolicy: 'public',
         signal,
-        headers: { accept: 'image/png,image/jpeg,image/webp,image/gif' },
+        headers: { accept: 'image/png,image/jpeg,image/webp,image/gif,image/svg+xml' },
         redirect: 'manual',
         credentials: 'omit',
       });

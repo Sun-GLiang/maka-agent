@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { sessionContentMarkdown, SESSION_MEDIA_MAX_BASE64 } from '@maka/core/session-media';
 import { createHash } from 'node:crypto';
 import { constants, createReadStream } from 'node:fs';
 import { access, mkdir, mkdtemp, realpath, rm, stat } from 'node:fs/promises';
@@ -53,7 +54,8 @@ import {
   boundedText,
   emitText,
   emitToolOutput,
-  projectToolResult,
+  projectRichToolResult,
+  projectContentBlock,
   promptText,
   summarizeToolContent,
   toolName,
@@ -134,6 +136,10 @@ interface ActivePrompt {
   readonly context: PluginExecutorContext;
   readonly tools: Map<string, ToolSnapshot>;
   text: string;
+  updates: Promise<void>;
+  updateError?: unknown;
+  mediaCount: number;
+  mediaBytes: number;
 }
 
 interface ToolSnapshot {
@@ -443,7 +449,14 @@ export class AcpExecutor implements PluginExecutorProvider {
     }
     if (session.active || session.configuring || session.awaitingAck)
       return failure(`${this.displayName} ACP Session is busy`, 'acp_busy', true);
-    const active: ActivePrompt = { context, tools: new Map(), text: '' };
+    const active: ActivePrompt = {
+      context,
+      tools: new Map(),
+      text: '',
+      updates: Promise.resolve(),
+      mediaCount: 0,
+      mediaBytes: 0,
+    };
     session.active = active;
     try {
       await this.#ensureInitialized(session, context.signal);
@@ -456,6 +469,8 @@ export class AcpExecutor implements PluginExecutorProvider {
         prompt: [{ type: 'text', text: promptText(request) }],
       });
       const response = await this.#awaitPrompt(session, prompt, context.signal);
+      await active.updates;
+      if (active.updateError) throw active.updateError;
       if (!response) return { status: 'cancelled', reason: 'timeout' };
       // A settled prompt can be checkpointed even when it was cancelled or failed.
       // Timeouts and transport failures never reach this point, and the Runtime
@@ -498,6 +513,7 @@ export class AcpExecutor implements PluginExecutorProvider {
       }
       return failure(safeErrorMessage(error), errorCode(error), retryable);
     } finally {
+      await active.updates;
       if (session.active === active) session.active = undefined;
     }
   }
@@ -974,7 +990,58 @@ export class AcpExecutor implements PluginExecutorProvider {
   #configureClient(session: RetainedSession, app: ClientApp): void {
     app
       .onNotification(methods.client.session.update, ({ params }) => {
-        if (params.sessionId === session.acpSessionId) this.#acceptUpdate(session, params.update);
+        if (params.sessionId !== session.acpSessionId) return;
+        const active = session.active;
+        if (
+          !active ||
+          session.restoring ||
+          params.update.sessionUpdate === 'config_option_update'
+        ) {
+          void this.#acceptUpdate(session, params.update);
+          return;
+        }
+        // Bound retained protocol payloads before queuing behind an asynchronous publication.
+        const reserve = (
+          block: import('@agentclientprotocol/sdk').ContentBlock,
+        ): import('@agentclientprotocol/sdk').ContentBlock => {
+          if (block.type === 'text') return block;
+          const size =
+            block.type === 'image'
+              ? block.data.length
+              : block.type === 'resource'
+                ? 'blob' in block.resource
+                  ? block.resource.blob.length
+                  : block.resource.text.length
+                : 0;
+          if (
+            ++active.mediaCount > 64 ||
+            size > SESSION_MEDIA_MAX_BASE64 ||
+            active.mediaBytes + size > 8 * 1024 * 1024
+          )
+            return { type: 'text', text: '[Media omitted: response media limit reached]' };
+          active.mediaBytes += size;
+          return block;
+        };
+        let update = params.update;
+        if (update.sessionUpdate === 'agent_message_chunk')
+          update = { ...update, content: reserve(update.content) };
+        else if (
+          (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') &&
+          update.content
+        )
+          update = {
+            ...update,
+            content: update.content
+              .slice(0, 64)
+              .map((item) =>
+                item.type === 'content' ? { ...item, content: reserve(item.content) } : item,
+              ),
+          };
+        active.updates = active.updates
+          .then(() => this.#acceptUpdate(session, update))
+          .catch((error) => {
+            active.updateError ??= error;
+          });
       })
       .onRequest(methods.client.fs.readTextFile, async ({ params }) => {
         this.#assertWorkspaceAccess(session, params.sessionId);
@@ -1007,7 +1074,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     return { outcome };
   }
 
-  #acceptUpdate(session: RetainedSession, update: SessionUpdate): void {
+  async #acceptUpdate(session: RetainedSession, update: SessionUpdate): Promise<void> {
     if (session.restoring) {
       if (session.replay) {
         session.replay.updates++;
@@ -1032,12 +1099,20 @@ export class AcpExecutor implements PluginExecutorProvider {
       emitText(active.context, 'output_delta', update.content.text);
       return;
     }
+    if (update.sessionUpdate === 'agent_message_chunk') {
+      const text = sessionContentMarkdown(
+        await projectContentBlock(update.content, active.context),
+      );
+      active.text += text;
+      emitText(active.context, 'output_delta', text);
+      return;
+    }
     if (update.sessionUpdate === 'agent_thought_chunk' && update.content.type === 'text') {
       emitText(active.context, 'thinking_delta', update.content.text);
       return;
     }
-    if (update.sessionUpdate === 'tool_call') this.#acceptTool(active, update);
-    if (update.sessionUpdate === 'tool_call_update') this.#acceptTool(active, update);
+    if (update.sessionUpdate === 'tool_call') await this.#acceptTool(active, update);
+    if (update.sessionUpdate === 'tool_call_update') await this.#acceptTool(active, update);
   }
 
   #assertWorkspaceAccess(session: RetainedSession, sessionId: string): void {
@@ -1050,7 +1125,7 @@ export class AcpExecutor implements PluginExecutorProvider {
     }
   }
 
-  #acceptTool(active: ActivePrompt, update: ToolCall | ToolCallUpdate): void {
+  async #acceptTool(active: ActivePrompt, update: ToolCall | ToolCallUpdate): Promise<void> {
     const snapshot = active.tools.get(update.toolCallId) ?? {
       id: update.toolCallId,
       title: 'External tool',
@@ -1098,7 +1173,7 @@ export class AcpExecutor implements PluginExecutorProvider {
       active.context.emit({
         type: 'tool_result',
         toolCallId: snapshot.id,
-        content: projectToolResult(snapshot.content, snapshot.rawOutput),
+        content: await projectRichToolResult(snapshot.content, snapshot.rawOutput, active.context),
         ...(snapshot.status === 'failed' ? { isError: true } : {}),
       });
       snapshot.terminal = true;

@@ -1466,6 +1466,7 @@ export async function createExecutionRuntimeHostComposition(
                 : {}),
               ...(factoryContext.systemPrompt ? { instructions: factoryContext.systemPrompt } : {}),
               binding,
+              publishMedia: (owner, media) => imageDelivery!.publish(owner, media),
             }),
         };
       },
