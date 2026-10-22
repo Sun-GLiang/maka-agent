@@ -98,12 +98,14 @@ export async function readWorkspaceFile(
 
 export function validateImageBytes(
   bytes: Uint8Array,
-  purpose: 'model' | 'chat' = 'model',
+  purpose: 'model' | 'chat' | 'avatar' = 'model',
 ): {
   bytes: Uint8Array;
   mimeType: ImageMimeType;
 } {
-  if (bytes.length > (purpose === 'chat' ? ARTIFACT_IMAGE_PREVIEW_MAX_BYTES : MAX_READ_IMAGE_BYTES))
+  if (
+    bytes.length > (purpose === 'model' ? MAX_READ_IMAGE_BYTES : ARTIFACT_IMAGE_PREVIEW_MAX_BYTES)
+  )
     throw imageTooLargeError(purpose);
   const mimeType = sniffImageMime(bytes);
   if (!mimeType && purpose === 'chat' && isSvgPreviewCandidate(bytes)) {
@@ -142,7 +144,7 @@ export function validateImageBytes(
   // Compressed byte size does not bound renderer decoding memory. Permit large
   // screenshots while rejecting pathological headers before archival/preview.
   if (
-    purpose === 'chat' &&
+    purpose !== 'model' &&
     (Math.max(dimensions.width, dimensions.height) > 16_384 ||
       dimensions.width * dimensions.height > 32 * 1024 * 1024)
   ) {
@@ -151,10 +153,10 @@ export function validateImageBytes(
   return { bytes, mimeType };
 }
 
-function imageTooLargeError(purpose: 'model' | 'chat' = 'model'): Error {
+function imageTooLargeError(purpose: 'model' | 'chat' | 'avatar' = 'model'): Error {
   return new ImageFileError(
     'ERR_IMAGE_TOO_LARGE',
-    purpose === 'chat'
+    purpose !== 'model'
       ? 'Image exceeds a chat preview limit (2 MiB, 16384px per edge, or 32 megapixels); resize it before publishing.'
       : READ_IMAGE_TOO_LARGE_MESSAGE,
   );

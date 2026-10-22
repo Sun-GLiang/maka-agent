@@ -39,9 +39,12 @@ export interface ChatImageBytes {
   readonly bytes: Uint8Array;
   readonly mimeType: string;
 }
-export function checkedChatImage(bytes: Uint8Array): ChatImageBytes {
+export function checkedChatImage(
+  bytes: Uint8Array,
+  purpose: 'chat' | 'avatar' = 'chat',
+): ChatImageBytes {
   try {
-    return validateImageBytes(bytes, 'chat');
+    return validateImageBytes(bytes, purpose);
   } catch (error) {
     if (!(error instanceof ImageFileError)) throw error;
     throw new ImageSourceError(imageFileFailureReason(error));
