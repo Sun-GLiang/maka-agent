@@ -9049,7 +9049,7 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
 
-Package: dompurify@3.4.13
+Package: dompurify@3.4.17
 Declared license: (MPL-2.0 OR Apache-2.0)
 Selected license: Apache-2.0
 Repository: git://github.com/cure53/DOMPurify.git
@@ -11271,7 +11271,7 @@ SOFTWARE.
 
 ================================================================================
 
-Package: ip-address@10.7.2
+Package: ip-address@10.7.4
 Declared license: MIT
 Selected license: MIT
 Repository: https://github.com/beaugunderson/ip-address.git

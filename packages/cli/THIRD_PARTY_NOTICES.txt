@@ -4798,7 +4798,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
 
-Package: ip-address@10.7.2
+Package: ip-address@10.7.4
 Declared license: MIT
 Selected license: MIT
 Repository: https://github.com/beaugunderson/ip-address.git
