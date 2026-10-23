@@ -1908,6 +1908,7 @@ export const NewChatCatalogRefreshFailure: Story = {
     const composer = canvasElement.querySelector<HTMLElement>('.maka-composer')!;
     const model = canvasElement.querySelector<HTMLElement>('.maka-model-switcher-trigger')!;
     const before = composer.getBoundingClientRect();
+    const controlsBefore = [refresh, model].map(control => ({ control, box: control.getBoundingClientRect() }));
     await userEvent.click(refresh);
     const notice = await page.findByText(/Could not refresh models|模型列表刷新失败|模型清單重新整理失敗/);
     await waitFor(() => expect(notice).toBeVisible());
@@ -1916,10 +1917,14 @@ export const NewChatCatalogRefreshFailure: Story = {
     await expect(within(composer).queryByRole('button', { name: /^(Retry|重试|重試)$/ })).not.toBeInTheDocument();
     await expect(composer.querySelector('.maka-executor-notice')).toBeNull();
     await expect(model).toHaveTextContent('Gemini 3.8 Flash');
-    await expect(composer.getBoundingClientRect().height).toBe(before.height);
-    const buttonBox = refresh.getBoundingClientRect();
-    const modelBox = model.getBoundingClientRect();
-    await expect(Math.abs((buttonBox.y + buttonBox.height / 2) - (modelBox.y + modelBox.height / 2))).toBeLessThanOrEqual(2);
+    const after = composer.getBoundingClientRect();
+    await expect(after.height).toBe(before.height);
+    // Controls may already wrap on narrow screens; the toast must preserve their positions within the Composer.
+    for (const { control, box } of controlsBefore) {
+      const current = control.getBoundingClientRect();
+      await expect(Math.abs((current.x - after.x) - (box.x - before.x))).toBeLessThanOrEqual(2);
+      await expect(Math.abs((current.y - after.y) - (box.y - before.y))).toBeLessThanOrEqual(2);
+    }
   },
 };
 
