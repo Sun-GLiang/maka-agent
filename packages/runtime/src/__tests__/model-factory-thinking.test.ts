@@ -51,6 +51,91 @@ function custom(
 }
 
 describe('buildProviderOptions: thinking level', () => {
+  test('MiniMax direct release pricing has unique rows and no coding-plan Flash price', async () => {
+    const { BUILTIN_PRICING, getBuiltinPricing } = await import('../telemetry/builtin-pricing.js');
+    for (const providerType of ['MiniMax', 'MiniMax-cn']) {
+      const modelKey = `${providerType}:MiniMax-M3.1-Flash`;
+      assert.deepEqual(getBuiltinPricing(modelKey), {
+        modelKey,
+        inputUsdPer1M: 0.15,
+        outputUsdPer1M: 0.6,
+        cacheReadUsdPer1M: 0.015,
+      });
+      assert.equal(BUILTIN_PRICING.filter((row) => row.modelKey === modelKey).length, 1);
+      assert.equal(getBuiltinPricing(`${providerType}:MiniMax-M3`)?.cacheReadUsdPer1M, 0.06);
+    }
+    assert.equal(getBuiltinPricing('minimax-coding-plan:MiniMax-M3.1-Flash'), null);
+  });
+  test('MiniMax-M3 exposes off and sends disabled thinking on both regional providers', () => {
+    for (const providerType of ['MiniMax', 'MiniMax-cn'] as const) {
+      assert.deepEqual([...thinkingVariantsForModel(providerType, 'MiniMax-M3')], ['off', 'on']);
+      assert.deepEqual(buildProviderOptions(conn(providerType), 'MiniMax-M3', 'on'), {
+        anthropic: { thinking: { type: 'adaptive' } },
+      });
+      assert.deepEqual(buildProviderOptions(conn(providerType), 'MiniMax-M3', 'off'), {
+        anthropic: { thinking: { type: 'disabled' } },
+      });
+      assert.deepEqual(buildProviderOptions(conn(providerType), 'MiniMax-M3'), { anthropic: {} });
+      assert.deepEqual(buildProviderOptions(conn(providerType), 'MiniMax-M3', 'high'), {
+        anthropic: {},
+      });
+    }
+  });
+
+  test('MiniMax Flash efforts survive SDK serialization without disabled thinking or service tier', async () => {
+    for (const providerType of ['MiniMax', 'MiniMax-cn'] as const) {
+      const connection = conn(providerType);
+      const modelId = 'MiniMax-M3.1-Flash';
+      const levels = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+      assert.deepEqual(thinkingVariantsForModel(providerType, modelId), levels);
+      for (const level of [undefined, ...levels, 'off', 'on'] as const) {
+        let body: Record<string, unknown> = {};
+        await getAIModel({
+          connection,
+          modelId,
+          apiKey: 'test-key',
+          fetch: async (_input, init) => {
+            body = JSON.parse(String(init?.body));
+            return Response.json({
+              id: 'msg-1',
+              type: 'message',
+              role: 'assistant',
+              model: modelId,
+              content: [{ type: 'text', text: 'ok' }],
+              stop_reason: 'end_turn',
+              usage: { input_tokens: 1, output_tokens: 1 },
+            });
+          },
+        }).doGenerate({
+          prompt: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+          providerOptions: buildProviderOptions(
+            {
+              ...connection,
+              modelOverrides: { [modelId]: { thinkingLevels: [...levels, 'off', 'on'] } },
+            },
+            modelId,
+            level,
+          ),
+        });
+        assert.deepEqual(body.thinking, { type: 'adaptive' });
+        assert.deepEqual(body.output_config, {
+          effort: level && level !== 'off' && level !== 'on' ? level : 'max',
+        });
+        assert.equal(body.service_tier, undefined);
+        assert.equal(body.reasoning_effort, undefined);
+      }
+    }
+  });
+
+  test('MiniMax-M2.7 remains always on for both regional providers', () => {
+    for (const providerType of ['MiniMax', 'MiniMax-cn'] as const) {
+      assert.deepEqual([...thinkingVariantsForModel(providerType, 'MiniMax-M2.7')], []);
+      assert.deepEqual(buildProviderOptions(conn(providerType), 'MiniMax-M2.7', 'off'), {
+        anthropic: {},
+      });
+    }
+  });
+
   test('provider defaults reach the SDK request body without thinking overrides', async () => {
     for (const [connection, modelId] of [
       [conn('openai'), 'gpt-5.5'],
@@ -58,6 +143,7 @@ describe('buildProviderOptions: thinking level', () => {
       [conn('kimi-coding-plan'), 'kimi-for-coding'],
       [{ ...conn('kimi-coding-plan'), models: [{ id: 'k3', apiProtocol: 'openai-chat' }] }, 'k3'],
       [conn('volcengine-ark'), 'doubao-seed-2-0-pro-260215'],
+      [conn('inception'), 'mercury-3'],
     ] satisfies readonly (readonly [LlmConnection, string])[]) {
       let body: Record<string, unknown> = {};
       await getAIModel({
@@ -443,6 +529,50 @@ describe('buildProviderOptions: thinking level', () => {
       thinkingBudget: 0,
     });
     assert.ok((g25.google as { safetySettings: unknown[] }).safetySettings.length > 0);
+  });
+
+  test('Inception serializes reasoning effort on the Chat Completions wire', async () => {
+    const connection = conn('inception');
+    let body: Record<string, unknown> = {};
+    const model = getAIModel({
+      connection,
+      modelId: 'mercury-3',
+      apiKey: 'test-key',
+      fetch: async (input, init) => {
+        assert.equal(String(input), 'https://api.inceptionlabs.ai/v1/chat/completions');
+        assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer test-key');
+        body = JSON.parse(String(init?.body));
+        return Response.json({
+          id: 'chatcmpl-inception',
+          object: 'chat.completion',
+          created: 1,
+          model: 'mercury-3',
+          choices: [
+            { index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      },
+    });
+    await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      providerOptions: buildProviderOptions(connection, 'mercury-3', 'high'),
+    });
+    assert.equal(body.model, 'mercury-3');
+    assert.equal(body.reasoning_effort, 'high');
+  });
+
+  test('Inception sends supported reasoning efforts and leaves the provider default alone', () => {
+    for (const id of ['mercury-3', 'mercury-2.5', 'mercury-2']) {
+      assert.deepEqual([...thinkingVariantsForModel('inception', id)], ['low', 'medium', 'high']);
+      assert.deepEqual(buildProviderOptions(conn('inception'), id), {});
+      assert.deepEqual(buildProviderOptions(conn('inception'), id, 'off'), {});
+      for (const effort of ['low', 'medium', 'high'] as const) {
+        assert.deepEqual(buildProviderOptions(conn('inception'), id, effort), {
+          inception: { reasoningEffort: effort },
+        });
+      }
+    }
   });
 
   test('openai-compatible sends reasoningEffort for effort levels and does not expose no-op off', () => {
