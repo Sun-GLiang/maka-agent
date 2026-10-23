@@ -145,7 +145,7 @@
     "node_modules/htmlparser2@10.1.0",
     "node_modules/https-proxy-agent@5.0.1",
     "node_modules/image-dimensions@2.6.0",
-    "node_modules/ip-address@10.7.2",
+    "node_modules/ip-address@10.7.4",
     "node_modules/is-fullwidth-code-point@3.0.0",
     "node_modules/isexe@2.0.0",
     "node_modules/jose@6.2.3",
