@@ -207,11 +207,21 @@ export async function projectContentBlock(
       input = { kind: 'inline', mimeType: resource.mimeType, base64: resource.blob };
   }
   if (!input || !context.publishMedia) return { kind: 'text', text: '[Media preview unavailable]' };
+  if (context.signal.aborted) return { kind: 'text', text: '[Media publication cancelled]' };
+  let onAbort!: () => void;
+  const cancelled = new Promise<SessionContentPart>((resolve) => {
+    onAbort = () => resolve({ kind: 'text', text: '[Media publication cancelled]' });
+    context.signal.addEventListener('abort', onAbort, { once: true });
+  });
   try {
-    const part = await context.publishMedia(input);
+    // The Host owns archival work. Stop waiting on cancellation, but keep observing late
+    // rejection through the race and never let late publication emit another ACP update.
+    const part = await Promise.race([context.publishMedia(input), cancelled]);
     return part.kind === 'file_diff' ? { kind: 'text', text: '[Media preview unavailable]' } : part;
   } catch {
     return { kind: 'text', text: '[Media publication failed]' };
+  } finally {
+    context.signal.removeEventListener('abort', onAbort);
   }
 }
 

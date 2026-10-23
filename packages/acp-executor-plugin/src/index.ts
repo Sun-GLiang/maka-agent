@@ -30,6 +30,7 @@ import {
   methods,
   type ClientApp,
   type ClientConnection,
+  type ContentBlock,
   type RequestPermissionRequest,
   type SessionConfigOption,
   type SessionUpdate,
@@ -138,7 +139,7 @@ interface ActivePrompt {
   text: string;
   updates: Promise<void>;
   updateError?: unknown;
-  mediaCount: number;
+  readonly media: Map<string, ContentBlock>;
   mediaBytes: number;
 }
 
@@ -449,12 +450,13 @@ export class AcpExecutor implements PluginExecutorProvider {
     }
     if (session.active || session.configuring || session.awaitingAck)
       return failure(`${this.displayName} ACP Session is busy`, 'acp_busy', true);
+    const mediaAbort = new AbortController();
     const active: ActivePrompt = {
-      context,
+      context: { ...context, signal: AbortSignal.any([context.signal, mediaAbort.signal]) },
       tools: new Map(),
       text: '',
       updates: Promise.resolve(),
-      mediaCount: 0,
+      media: new Map(),
       mediaBytes: 0,
     };
     session.active = active;
@@ -513,6 +515,8 @@ export class AcpExecutor implements PluginExecutorProvider {
       }
       return failure(safeErrorMessage(error), errorCode(error), retryable);
     } finally {
+      // Transport failure must also release media waits before draining received updates.
+      mediaAbort.abort();
       await active.updates;
       if (session.active === active) session.active = undefined;
     }
@@ -1000,10 +1004,8 @@ export class AcpExecutor implements PluginExecutorProvider {
           void this.#acceptUpdate(session, params.update);
           return;
         }
-        // Bound retained protocol payloads before queuing behind an asynchronous publication.
-        const reserve = (
-          block: import('@agentclientprotocol/sdk').ContentBlock,
-        ): import('@agentclientprotocol/sdk').ContentBlock => {
+        // Intern repeated snapshots before queuing: only unique media consumes the turn budget.
+        const reserve = (block: ContentBlock): ContentBlock => {
           if (block.type === 'text') return block;
           const size =
             block.type === 'image'
@@ -1013,12 +1015,14 @@ export class AcpExecutor implements PluginExecutorProvider {
                   ? block.resource.blob.length
                   : block.resource.text.length
                 : 0;
-          if (
-            ++active.mediaCount > 64 ||
-            size > SESSION_MEDIA_MAX_BASE64 ||
-            active.mediaBytes + size > 8 * 1024 * 1024
-          )
+          if (size > SESSION_MEDIA_MAX_BASE64)
             return { type: 'text', text: '[Media omitted: response media limit reached]' };
+          const key = createHash('sha256').update(JSON.stringify(block)).digest('hex');
+          const existing = active.media.get(key);
+          if (existing) return existing;
+          if (active.media.size >= 64 || active.mediaBytes + size > 8 * 1024 * 1024)
+            return { type: 'text', text: '[Media omitted: response media limit reached]' };
+          active.media.set(key, block);
           active.mediaBytes += size;
           return block;
         };
