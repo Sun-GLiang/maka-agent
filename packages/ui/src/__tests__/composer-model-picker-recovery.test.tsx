@@ -402,6 +402,36 @@ test('draft refresh appears only for the selected external agent and preserves i
   } finally { await dom.cleanup(); }
 });
 
+for (const readiness of ['restorable', 'restoring'] as const)
+test(`${readiness} Sessions keep inspection failures actionable while automatic recovery stays hidden`, async () => {
+  const dom = installTranscriptDom();
+  const retried: Array<string | undefined> = [];
+  const render = (error?: string) => dom.render(<LocaleProvider locale="en"><Composer
+    activeSession={session('external')}
+    executorPicker={{ catalog: [{ ...catalog[0]!, readiness, supportsModelChange: false, supportsModeChange: false }],
+      fixed: true, restoreOnSend: true,
+      selection: { executorId: 'agent', configuration: { model: 'opaque-high', mode: 'plan' } }, error,
+      onSelect() { assert.fail('inspection retry must not configure the Agent'); },
+      onRestore() { assert.fail('inspection retry must not restore the Agent'); },
+      onSetup() {}, onRetry: id => { retried.push(id); }, onNewTask() {} }}
+    onSend={() => undefined} onStop={() => undefined}
+  /></LocaleProvider>);
+  try {
+    await render();
+    assert.equal(dom.document.querySelector('.maka-executor-recovery'), null);
+    assert.equal(dom.document.querySelector('.maka-executor-notice'), null);
+    await render('Host inspection disconnected');
+    assert.equal(dom.document.querySelector('.maka-executor-recovery'), null);
+    assert.match(dom.document.querySelector('.maka-executor-notice')?.textContent ?? '', /failed/);
+    await actions(dom).click([...dom.document.querySelectorAll('button')].find(el => el.textContent === 'Retry'));
+    assert.deepEqual(retried, [undefined]);
+    assert.equal(actions(dom).trigger()?.textContent, 'Family', 'a failed read preserves the cached model label');
+    await render();
+    assert.equal(dom.document.querySelector('.maka-executor-notice'), null, 'successful inspection clears the error');
+    assert.equal(dom.document.querySelector('.maka-executor-recovery'), null);
+  } finally { await dom.cleanup(); }
+});
+
 test('inventory errors retry the roster even with a valid external selection', async () => {
   const dom = installTranscriptDom();
   const retried: Array<string | undefined> = [];

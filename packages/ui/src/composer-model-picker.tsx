@@ -386,7 +386,9 @@ export function ComposerModelPicker(props: {
     executor?.onSelect({ executorId: executor.selection!.executorId, configuration: executor.fixed || (configuration.model !== undefined && configuration.model !== selectedModel)
       ? configuration : { ...executor.selection!.configuration, ...configuration } });
   const mode = executor?.selection?.configuration.mode ?? selected?.currentMode;
-  const executorError = executor?.error && !(props.recoveryInComposer && selected && selected.readiness !== 'ready');
+  // Automatic recovery has no card to carry inspection failures or its retry action.
+  const recoveryHidden = executor?.restoreOnSend && (selected?.readiness === 'restorable' || selected?.readiness === 'restoring');
+  const executorError = executor?.error && (recoveryHidden || !(props.recoveryInComposer && selected && selected.readiness !== 'ready'));
   return <>
     {/* Keep portaled search clicks from focusing the composer editor. */}
     <Stack direction="horizontal" className="maka-model-picker-root"

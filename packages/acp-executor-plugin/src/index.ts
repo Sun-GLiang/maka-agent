@@ -436,15 +436,12 @@ export class AcpExecutor implements PluginExecutorProvider {
     saved?: AcpSessionPresentation,
   ): Promise<ExecutorCatalogEntry> {
     const presentation = this.#readPresentation(saved) ?? (await this.#catalog.readCached());
-    if (
-      !entry.currentModel ||
-      !presentation?.models.some((model) => model.id === entry.currentModel)
-    )
-      return entry;
+    if (!presentation) return entry;
     return {
       ...entry,
-      models: presentation.models,
-      modelGroups: presentation.modelGroups,
+      ...(entry.currentModel && presentation.models.some((model) => model.id === entry.currentModel)
+        ? { models: presentation.models, modelGroups: presentation.modelGroups }
+        : {}),
       ...(entry.currentMode && presentation.modes?.some((mode) => mode.id === entry.currentMode)
         ? { modes: presentation.modes }
         : {}),
