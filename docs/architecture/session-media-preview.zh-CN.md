@@ -30,7 +30,7 @@
 
 正文中的结构化图片转换为 `maka://runtime/attachments/<artifactId>` Markdown 引用，沿用现有文本事件和历史格式，保留文字与图片顺序。工具结果新增 `content.parts`，允许文本、图片和 diff 混排。旧的 text、file_diff、image 结果保持可读。
 
-混合工具结果属于新的 wire 内容类型，Runtime Host 兼容性 epoch 从 228 升为 229，避免旧客户端接收无法解码的结果。合并前需对照 main 重新确认 epoch。
+混合工具结果属于新的 wire 内容类型，Runtime Host 兼容性 epoch 从 229 升为 230，避免旧客户端接收无法解码的结果。合并前需对照 main 重新确认 epoch。
 
 复制会话时收集并重写混合内容里的图片引用。CLI 将混合内容按顺序输出为文本描述。没有媒体发布能力的执行器宿主显示明确的不可用描述；发布失败不会将二进制内容倾倒进正文。
 

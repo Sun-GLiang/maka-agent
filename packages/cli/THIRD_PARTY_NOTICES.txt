@@ -3987,7 +3987,7 @@ SOFTWARE.
 
 ================================================================================
 
-Package: fast-uri@3.1.8
+Package: fast-uri@3.1.9
 Declared license: BSD-3-Clause
 Selected license: BSD-3-Clause
 Repository: git+https://github.com/fastify/fast-uri.git
@@ -7461,7 +7461,7 @@ PERFORMANCE OF THIS SOFTWARE.
 
 ================================================================================
 
-Package: undici@7.30.0
+Package: undici@7.30.1
 Declared license: MIT
 Selected license: MIT
 Repository: git+https://github.com/nodejs/undici.git
@@ -7491,7 +7491,7 @@ SOFTWARE.
 
 ================================================================================
 
-Package: undici@8.11.2
+Package: undici@8.12.3
 Declared license: MIT
 Selected license: MIT
 Repository: git+https://github.com/nodejs/undici.git
@@ -7951,7 +7951,7 @@ ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ================================================================================
 
-Package: zod@4.6.5
+Package: zod@4.6.7
 Declared license: MIT
 Selected license: MIT
 Repository: git+https://github.com/colinhacks/zod.git
