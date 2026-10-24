@@ -442,14 +442,14 @@ export function ComposerModelPicker(props: {
         if (variant) return commit(() => externalConfiguration({ model: variant.modelId }));
       }}
     /> : props.renderThinkingControl?.(pending)}
-    {executor?.selection && selected?.readiness === 'ready' && !!selected.modes?.length && <Selector
+    {executor?.selection && !!selected?.modes?.length && <Selector
       label={copy.mode} isLabelHidden
       options={selected.modes.map(item => ({ value: item.id, label: item.name }))}
       value={mode} placeholder={copy.default}
       variant="ghost" size="sm" placement="above"
       presentation={props.presentation}
       isReadOnly={props.isReadOnly}
-      isDisabled={disabled || (!!executor.fixed && !selected.supportsModeChange)}
+      isDisabled={disabled || unavailable || (!!executor.fixed && !selected.supportsModeChange)}
       className="maka-executor-mode-selector"
       onChange={value => { void commit(() => externalConfiguration({ mode: value })); }}
     />}

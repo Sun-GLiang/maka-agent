@@ -415,3 +415,31 @@ test('inventory errors retry the roster even with a valid external selection', a
     assert.deepEqual(retried, [undefined], 'a successful single-agent read cannot repair the inventory');
   } finally { await dom.cleanup(); }
 });
+
+
+test('saved model, effort and mode controls retain their labels through restoration without permitting edits', async () => {
+  const dom = installTranscriptDom();
+  try {
+    let labels: string[] | undefined;
+    for (const readiness of ['restorable', 'restoring', 'restore_failed', 'ready'] as const) {
+      await dom.render(<LocaleProvider locale="en"><ComposerModelPicker label="Native" choices={choices}
+        executor={{ catalog: [{ ...catalog[0]!, readiness,
+          supportsModelChange: readiness === 'ready', supportsModeChange: readiness === 'ready' }],
+          fixed: true, restoreOnSend: true,
+          selection: { executorId: 'agent', configuration: { model: 'opaque-high', mode: 'plan' } },
+          onSelect() { assert.fail('restoration must not change saved configuration'); },
+          onSetup() {}, onRetry() {}, onNewTask() {}, onRestore() {} }}
+      /></LocaleProvider>);
+      const selectors = ['.maka-model-switcher-trigger', '.maka-thinking-level-selector', '.maka-executor-mode-selector'];
+      const buttons = selectors.map(selector => dom.document.querySelector<HTMLButtonElement>(selector + ' button'));
+      assert.ok(buttons.every(Boolean), `all three controls exist in ${readiness}`);
+      const current = buttons.map(button => button!.textContent!);
+      labels ??= current;
+      assert.deepEqual(current, labels);
+      for (const button of buttons) {
+        assert.equal(button!.getAttribute('aria-disabled') === 'true' || button!.disabled,
+          readiness !== 'ready', `only live capabilities allow changes in ${readiness}`);
+      }
+    }
+  } finally { await dom.cleanup(); }
+});

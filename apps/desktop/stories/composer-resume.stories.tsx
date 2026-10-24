@@ -31,9 +31,11 @@
  */
 
 import type { Meta, StoryObj } from '@storybook/react-vite';
+import { useState } from 'react';
 import { expect, fn, userEvent, within } from 'storybook/test';
 import type { SessionSummary } from '@maka/core/session';
 import { Composer } from '@maka/ui';
+import { describeAntigravityModels } from '../../../packages/antigravity-acp-plugin/src/model-presentation';
 
 const COMPOSER_INPUT = '.maka-composer-editor [contenteditable="true"]';
 
@@ -131,11 +133,16 @@ const externalRecoveryArgs = {
   executorPicker: {
     fixed: true,
     restoreOnSend: true,
-    selection: { executorId: 'antigravity', configuration: { model: 'gemini-3.8-flash-high' } },
+    selection: { executorId: 'antigravity', configuration: { model: 'gemini-3.8-flash-high', mode: 'default' } },
     catalog: [{
       id: 'antigravity', displayName: 'Antigravity', readiness: 'restorable',
       supportsModelChange: false, supportsAttachments: false,
-      models: [{ id: 'gemini-3.8-flash-high', name: 'gemini-3.8-flash-high' }],
+      ...describeAntigravityModels([
+        { id: 'gemini-3.8-flash-low', name: 'Gemini 3.8 Flash (Low)' },
+        { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash (High)' },
+      ]),
+      modes: [{ id: 'default', name: 'Default' }],
+      supportsModeChange: false,
     }],
     onSelect: fn(), onSetup: fn(), onRetry: fn(), onNewTask: fn(), onRestore: fn(),
   },
@@ -148,6 +155,18 @@ const renderExternalRecovery: Story['render'] = (args) => (
     <Composer {...args} onSend={fn()} onStop={fn()} />
   </div>
 );
+
+// The harness supplies the Host catalog transition; Composer owns all toolbar layout.
+function ExternalRestoreTransition(args: React.ComponentProps<typeof Composer>) {
+  const [ready, setReady] = useState(false);
+  return <div style={{ display: 'grid', alignContent: 'end', minHeight: 320 }}>
+    <Composer {...args} onSend={() => { setReady(true); }} onStop={fn()}
+      executorPicker={{ ...args.executorPicker!, catalog: args.executorPicker!.catalog.map(entry => ({
+        ...entry, readiness: ready ? 'ready' : 'restorable',
+        supportsModelChange: ready, supportsModeChange: ready,
+      })) }} />
+  </div>;
+}
 
 const checkRecoveryLayout: Story['play'] = async ({ canvasElement, args }) => {
   const card = canvasElement.querySelector<HTMLElement>('.maka-composer-astryx')!;
@@ -171,8 +190,31 @@ const checkRecoveryLayout: Story['play'] = async ({ canvasElement, args }) => {
 // Real path: reopen an external ACP conversation whose host projects readiness=restorable.
 export const ExternalSessionAutomaticRestore: Story = {
   args: externalRecoveryArgs,
-  render: renderExternalRecovery,
-  play: checkRecoveryLayout,
+  render: args => <ExternalRestoreTransition {...args} />,
+  play: async context => {
+    await checkRecoveryLayout!(context);
+    const { canvasElement } = context;
+    const selectors = ['.maka-model-switcher-trigger', '.maka-thinking-level-selector', '.maka-executor-mode-selector'];
+    const controls = selectors.map(selector => canvasElement.querySelector<HTMLElement>(selector)!);
+    for (const control of controls) {
+      await expect(control).toBeVisible();
+      const button = control.querySelector('button')!;
+      await expect(button.disabled || button.getAttribute('aria-disabled') === 'true').toBe(true);
+    }
+    const before = controls.map(control => ({ label: control.textContent, box: control.getBoundingClientRect() }));
+    const editor = canvasElement.querySelector<HTMLElement>(COMPOSER_INPUT)!;
+    await userEvent.type(editor, '继续');
+    await userEvent.click(canvasElement.querySelector('button[type="submit"]')!);
+    for (const [index, control] of controls.entries()) {
+      const button = control.querySelector('button')!;
+      await expect(button.disabled || button.getAttribute('aria-disabled') === 'true').toBe(false);
+      await expect(control.textContent).toBe(before[index]!.label);
+      const after = control.getBoundingClientRect();
+      for (const key of ['x', 'y', 'width', 'height'] as const) {
+        await expect(Math.abs(after[key] - before[index]!.box[key])).toBeLessThan(1);
+      }
+    }
+  },
 };
 
 // Real path: sending into an external conversation fails to restore its saved configuration.

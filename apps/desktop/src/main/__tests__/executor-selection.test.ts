@@ -29,7 +29,8 @@ import { executorComposerProps, executorSubmissionError, newTaskConfiguration } 
 
 const entry: ExecutorCatalogEntry = { id: 'external', displayName: 'External', readiness: 'ready', models: [{ id: 'selected', name: 'Selected' }], supportsAttachments: false, supportsModelChange: true };
 
-test('ready Session polling and events refresh silently while initial reads and retries show loading', async (context) => {
+for (const readiness of ['ready', 'restorable', 'restoring', 'restore_failed', 'history_gap', 'authentication_required', 'unavailable'] as const)
+test(`${readiness} Session polling and events refresh silently while initial reads and retries show loading`, async (context) => {
   const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
   const values = { document, window, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true };
   const originals = new Map(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
@@ -58,14 +59,14 @@ test('ready Session polling and events refresh silently while initial reads and 
     await act(async () => root.render(createElement(ConversationServicesProvider, { services, children: createElement(Probe) })));
     assert.equal(latest.loading, true);
     assert.deepEqual(latest.loadingIds, ['external']);
-    await settle([entry]);
+    await settle([{ ...entry, readiness }]);
     const selected = latest.selection;
     await act(async () => { context.mock.timers.tick(3000); });
     assert.equal(reads.length, 1, 'the periodic inspection still runs');
     assert.equal(latest.loading, false, 'background polling must not flash the picker');
     assert.deepEqual(latest.loadingIds, []);
     assert.deepEqual(latest.selection, selected);
-    const updated = { ...entry, models: [...entry.models, { id: 'new', name: 'New model' }] };
+    const updated = { ...entry, readiness, models: [...entry.models, { id: 'new', name: 'New model' }] };
     await settle([updated]);
     assert.deepEqual(latest.entry?.models, updated.models, 'silent inspection still updates model choices');
     await act(async () => { changed(session.id); });
