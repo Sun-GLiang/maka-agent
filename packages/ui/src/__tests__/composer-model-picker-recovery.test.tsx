@@ -367,6 +367,44 @@ test('draft refresh appears only for the selected external agent and preserves i
   } finally { await dom.cleanup(); }
 });
 
+for (const readiness of ['restore_failed', 'authentication_required', 'history_only', 'history_gap'] as const)
+test(`${readiness} keeps inspection failures actionable alongside the cached recovery action`, async () => {
+  const dom = installTranscriptDom();
+  const retried: Array<string | undefined> = [];
+  const recovered: string[] = [];
+  const render = (error?: string) => dom.render(<LocaleProvider locale="en"><Composer
+    activeSession={session('external')}
+    executorPicker={{ catalog: [{ ...catalog[0]!, readiness, supportsModelChange: false, supportsModeChange: false }],
+      fixed: true,
+      selection: { executorId: 'agent', configuration: { model: 'opaque-high', mode: 'plan' } }, error,
+      onSelect() { assert.fail('inspection retry must not configure the Agent'); },
+      onRestore() { recovered.push('restore'); }, onSetup() { recovered.push('setup'); },
+      onRetry: id => { retried.push(id); }, onNewTask() { recovered.push('new'); } }}
+    onSend={() => { assert.fail('inspection retry must not send a message'); }} onStop={() => undefined}
+  /></LocaleProvider>);
+  const recovery = () => dom.document.querySelector('.maka-executor-recovery');
+  try {
+    await render();
+    assert.equal(recovery()?.getAttribute('data-state'), readiness);
+    const recoveryText = recovery()?.textContent;
+    assert.equal(dom.document.querySelector('.maka-executor-notice'), null);
+    await render('Host inspection disconnected');
+    const notice = dom.document.querySelector('.maka-executor-notice');
+    assert.ok(notice, 'a failed inspection must not be hidden by the cached readiness');
+    assert.match(notice.textContent ?? '', /failed/);
+    await actions(dom).click(notice.querySelector('button'));
+    assert.deepEqual(retried, [undefined], 'retry only re-inspects the Session');
+    assert.deepEqual(recovered, [], 'inspection retry must not invoke the cached recovery action');
+    assert.equal(actions(dom).trigger()?.textContent, 'Family');
+    assert.equal(recovery()?.textContent, recoveryText);
+    await actions(dom).click(recovery()?.querySelector('button'));
+    assert.deepEqual(recovered, [readiness === 'restore_failed' ? 'restore' : readiness === 'authentication_required' ? 'setup' : 'new']);
+    await render();
+    assert.equal(dom.document.querySelector('.maka-executor-notice'), null, 'successful inspection clears only the read error');
+    assert.equal(recovery()?.textContent, recoveryText, 'the independent recovery action stays available');
+  } finally { await dom.cleanup(); }
+});
+
 for (const readiness of ['ready', 'restorable', 'restoring'] as const)
 test(`${readiness} inspections keep errors actionable without exposing automatic recovery`, async () => {
   const dom = installTranscriptDom();

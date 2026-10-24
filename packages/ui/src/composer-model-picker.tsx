@@ -384,9 +384,6 @@ export function ComposerModelPicker(props: {
     executor?.onSelect({ executorId: executor.selection!.executorId, configuration: executor.fixed || (configuration.model !== undefined && configuration.model !== selectedModel)
       ? configuration : { ...executor.selection!.configuration, ...configuration } });
   const mode = executor?.selection?.configuration.mode ?? selected?.currentMode;
-  // Automatic recovery has no card to carry inspection failures or its retry action.
-  const recoveryHidden = selected?.readiness === 'restorable' || selected?.readiness === 'restoring';
-  const executorError = executor?.error && (recoveryHidden || !(executor.fixed && selected && selected.readiness !== 'ready'));
   return <>
     {/* Keep portaled search clicks from focusing the composer editor. */}
     <Stack direction="horizontal" className="maka-model-picker-root"
@@ -470,7 +467,7 @@ export function ComposerModelPicker(props: {
     {executor && !executor.fixed && <ComposerExecutorRecovery
       executor={{ ...executor, catalog }} disabled={props.disabled || props.isReadOnly}
     />}
-    {(failed || invalid || executorError || (unavailable && !selected) || contribution?.error) && <span className="maka-executor-notice" role="status">
+    {(failed || invalid || executor?.error || (unavailable && !selected) || contribution?.error) && <span className="maka-executor-notice" role="status">
       {contribution?.error ? contribution.label + ': ' + copy.unavailable : unavailable && !selected ? copy.unavailable : invalid ? copy.invalid : copy.selectionFailed}
       {contribution?.error && <Button label={copy.retry} variant="ghost" size="sm" isLoading={contribution.loading} onClick={contribution.onLoad} />}
       {executor && !contribution?.error && <Button label={copy.retry} variant="ghost" size="sm" isLoading={executor.error ? executor.loading : !!executor.selection && isExecutorLoading(executor, executor.selection.executorId)} onClick={() => executor.onRetry(executor.error ? undefined : executor.selection?.executorId)} />}

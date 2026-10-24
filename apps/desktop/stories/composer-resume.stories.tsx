@@ -237,3 +237,32 @@ export const ExternalSessionRestoreFailed: Story = {
     await expect(card.scrollWidth).toBeLessThanOrEqual(card.clientWidth + 1);
   },
 };
+
+// Real path: a Session still shows its cached sign-in state after a Host inspection fails.
+export const ExternalSessionInspectionFailed: Story = {
+  args: {
+    ...externalRecoveryArgs,
+    sendBlocked: true,
+    executorPicker: {
+      ...externalRecoveryArgs.executorPicker,
+      error: 'Host inspection disconnected',
+      catalog: externalRecoveryArgs.executorPicker.catalog.map(entry => ({ ...entry, readiness: 'authentication_required' })),
+    },
+  },
+  render: renderExternalRecovery,
+  play: async ({ canvasElement, args }) => {
+    const recovery = canvasElement.querySelector<HTMLElement>('.maka-executor-recovery')!;
+    const notice = canvasElement.querySelector<HTMLElement>('.maka-executor-notice')!;
+    await expect(recovery).toBeVisible();
+    await expect(notice).toBeVisible();
+    await expect(within(recovery).getByRole('button', { name: '前往登录' })).toBeVisible();
+    const retry = within(notice).getByRole('button', { name: '重试' });
+    await userEvent.click(retry);
+    await expect(args.executorPicker!.onRetry).toHaveBeenCalledWith(undefined);
+    await expect(args.executorPicker!.onSetup).not.toHaveBeenCalled();
+    await expect(args.executorPicker!.onRestore).not.toHaveBeenCalled();
+    await expect(args.executorPicker!.onSelect).not.toHaveBeenCalled();
+    const card = canvasElement.querySelector<HTMLElement>('.maka-composer-astryx')!;
+    await expect(card.scrollWidth).toBeLessThanOrEqual(card.clientWidth + 1);
+  },
+};
