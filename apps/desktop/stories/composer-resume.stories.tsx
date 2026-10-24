@@ -132,7 +132,6 @@ const externalRecoveryArgs = {
   contextUsage: { reading: { kind: 'unavailable' }, onOpen: fn() },
   executorPicker: {
     fixed: true,
-    restoreOnSend: true,
     selection: { executorId: 'antigravity', configuration: { model: 'gemini-3.8-flash-high', mode: 'default' } },
     catalog: [{
       id: 'antigravity', displayName: 'Antigravity', readiness: 'restorable',

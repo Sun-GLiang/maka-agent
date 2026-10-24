@@ -174,29 +174,25 @@ test('fixed external sessions show only their executor and failed writes retain 
   } finally { await dom.cleanup(); }
 });
 
-test('unavailable agents cannot commit and use the existing sign-in or restore actions', async () => {
+test('existing Sessions keep authentication and history recovery actions in the Composer', async () => {
   const dom = installTranscriptDom();
   const setup: string[] = [];
-  let restored = 0;
+  let newTasks = 0;
   try {
-    for (const readiness of ['authentication_required', 'restorable', 'restoring'] as const) {
-      await dom.render(<LocaleProvider locale="en"><ComposerModelPicker label="Native" choices={choices}
-        executor={{ catalog: [{ ...catalog[0]!, readiness }], selection: { executorId: 'agent', configuration: { model: 'opaque-high' } }, fixed: true,
+    for (const readiness of ['authentication_required', 'history_only', 'history_gap'] as const) {
+      await dom.render(<LocaleProvider locale="en"><Composer activeSession={session('external')}
+        executorPicker={{ catalog: [{ ...catalog[0]!, readiness }], fixed: true,
+          selection: { executorId: 'agent', configuration: { model: 'opaque-high' } },
           onSelect() { assert.fail('unavailable model must never commit'); },
-          onSetup: id => { setup.push(id!); }, onRetry() {}, onNewTask() {}, onRestore: () => { restored++; } }}
+          onSetup: id => { setup.push(id!); }, onRetry() {}, onNewTask() { newTasks++; } }}
+        onSend={() => undefined} onStop={() => undefined}
       /></LocaleProvider>);
-      const { click } = actions(dom);
-      const buttons = [...dom.document.querySelectorAll('button')];
-      if (readiness === 'authentication_required') await click(buttons.find(el => el.textContent === 'Go to sign in'));
-      if (readiness === 'restorable') await click(buttons.find(el => el.textContent === 'Restore Session'));
-      if (readiness === 'restoring') {
-        const restoreButton = buttons.find(el => el.textContent === 'Restore Session')!;
-        assert.equal(restoreButton.disabled, true);
-        await click(restoreButton);
-      }
+      const recovery = dom.document.querySelector('.maka-executor-recovery');
+      assert.ok(recovery);
+      await actions(dom).click(recovery.querySelector('button'));
     }
     assert.deepEqual(setup, ['agent']);
-    assert.equal(restored, 1);
+    assert.equal(newTasks, 2);
   } finally { await dom.cleanup(); }
 });
 
@@ -243,7 +239,7 @@ test('external session recovery preserves the draft and releases pending state a
   try {
     await dom.render(<LocaleProvider locale="en"><Composer ref={ref}
       activeSession={session('external')} sendBlocked
-      executorPicker={{ catalog: [{ ...catalog[0]!, readiness: 'restore_failed' }], fixed: true, restoreOnSend: true,
+      executorPicker={{ catalog: [{ ...catalog[0]!, readiness: 'restore_failed' }], fixed: true,
         selection: { executorId: 'agent', configuration: { model: 'opaque-high' } },
         onRestore: () => { restores++; return new Promise<void>((_resolve, reject) => { rejectRestore = reject; }); },
         onSelect() {}, onSetup() {}, onRetry() {}, onNewTask() {} }}
@@ -265,45 +261,7 @@ test('external session recovery preserves the draft and releases pending state a
   } finally { await dom.cleanup(); }
 });
 
-test('automatic recovery submits once and keeps the draft when host preparation refuses', async () => {
-  const dom = installTranscriptDom();
-  dom.window.getSelection = () => null;
-  dom.document.getSelection = () => null;
-  const ref = createRef<ComposerHandle>();
-  let finish!: (sent: boolean) => void;
-  const sent: string[] = [];
-  try {
-    for (const readiness of ['restorable', 'restoring', 'restore_failed'] as const) {
-      await dom.render(<LocaleProvider locale="en"><Composer ref={ref}
-        activeSession={session('external')}
-        executorPicker={{ catalog: [{ ...catalog[0]!, readiness }], fixed: true, restoreOnSend: true,
-          selection: { executorId: 'agent', configuration: { model: 'opaque-high' } },
-          onRestore: () => { assert.fail('sending delegates restoration to the host submission owner'); },
-          onSelect() {}, onSetup() {}, onRetry() {}, onNewTask() {} }}
-        onSend={text => { sent.push(text); return new Promise<boolean>(resolve => { finish = resolve; }); }}
-        onStop={() => undefined}
-      /></LocaleProvider>);
-      if (readiness === 'restore_failed') {
-        assert.match(dom.document.querySelector('.maka-executor-recovery')?.textContent ?? '', /Restoration failed/);
-        assert.ok([...dom.document.querySelectorAll('button')].some(button => button.textContent === 'Restore Session'));
-      } else {
-        assert.equal(dom.document.querySelector('.maka-executor-recovery'), null);
-      }
-    }
-    await act(async () => { ref.current?.setText('Continue this task'); });
-    const submit = () => dom.document.querySelector('form')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
-    await act(async () => { submit(); submit(); });
-    assert.deepEqual(sent, ['Continue this task']);
-    await act(async () => { finish(false); });
-    assert.equal(ref.current?.getText(), 'Continue this task');
-    await act(async () => { submit(); });
-    await act(async () => { finish(true); });
-    assert.equal(ref.current?.getText(), '');
-  } finally { await dom.cleanup(); }
-});
-
-
-test('typing and focus preserve the draft without restoring; sending delegates recovery to the Host', async () => {
+test('typing never restores; automatic recovery submits once and preserves a refused draft', async () => {
   const dom = installTranscriptDom();
   dom.window.getSelection = () => null;
   dom.document.getSelection = () => null;
@@ -314,13 +272,14 @@ test('typing and focus preserve the draft without restoring; sending delegates r
   const ref = createRef<ComposerHandle>();
   let restores = 0;
   const sent: string[] = [];
+  let finish!: (sent: boolean) => void;
   try {
     await dom.render(<LocaleProvider locale="en"><Composer ref={ref}
       activeSession={session('external')}
-      executorPicker={{ catalog: [{ ...catalog[0]!, readiness: 'restorable' }], fixed: true, restoreOnSend: true,
+      executorPicker={{ catalog: [{ ...catalog[0]!, readiness: 'restorable' }], fixed: true,
         selection: { executorId: 'agent', configuration: { model: 'opaque-high' } },
         onRestore() { restores++; }, onSelect() { assert.fail('typing must not configure the Agent'); }, onSetup() {}, onRetry() {}, onNewTask() {} }}
-      onSend={text => { sent.push(text); return true; }} onStop={() => undefined}
+      onSend={text => { sent.push(text); return new Promise<boolean>(resolve => { finish = resolve; }); }} onStop={() => undefined}
     /></LocaleProvider>);
     const editor = dom.document.querySelector<HTMLElement>('[contenteditable="true"]')!;
     await act(async () => { editor.focus(); });
@@ -331,8 +290,14 @@ test('typing and focus preserve the draft without restoring; sending delegates r
     assert.equal(restores, 0);
     assert.equal(ref.current?.getText(), 'Continue this task');
     assert.equal(dom.document.querySelector('.maka-executor-recovery'), null);
-    await act(async () => { dom.document.querySelector('form')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
+    const submit = () => dom.document.querySelector('form')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await act(async () => { submit(); submit(); });
     assert.deepEqual(sent, ['Continue this task']);
+    assert.equal(restores, 0, 'sending delegates recovery to the Host');
+    await act(async () => { finish(false); });
+    assert.equal(ref.current?.getText(), 'Continue this task');
+    await act(async () => { submit(); });
+    await act(async () => { finish(true); });
     assert.equal(ref.current?.getText(), '');
   } finally { await dom.cleanup(); dom.window.Element.prototype.setAttribute = setAttribute; }
 });
@@ -402,14 +367,14 @@ test('draft refresh appears only for the selected external agent and preserves i
   } finally { await dom.cleanup(); }
 });
 
-for (const readiness of ['restorable', 'restoring'] as const)
-test(`${readiness} Sessions keep inspection failures actionable while automatic recovery stays hidden`, async () => {
+for (const readiness of ['ready', 'restorable', 'restoring'] as const)
+test(`${readiness} inspections keep errors actionable without exposing automatic recovery`, async () => {
   const dom = installTranscriptDom();
   const retried: Array<string | undefined> = [];
   const render = (error?: string) => dom.render(<LocaleProvider locale="en"><Composer
-    activeSession={session('external')}
+    activeSession={readiness === 'ready' ? undefined : session('external')}
     executorPicker={{ catalog: [{ ...catalog[0]!, readiness, supportsModelChange: false, supportsModeChange: false }],
-      fixed: true, restoreOnSend: true,
+      fixed: readiness !== 'ready',
       selection: { executorId: 'agent', configuration: { model: 'opaque-high', mode: 'plan' } }, error,
       onSelect() { assert.fail('inspection retry must not configure the Agent'); },
       onRestore() { assert.fail('inspection retry must not restore the Agent'); },
@@ -432,21 +397,6 @@ test(`${readiness} Sessions keep inspection failures actionable while automatic 
   } finally { await dom.cleanup(); }
 });
 
-test('inventory errors retry the roster even with a valid external selection', async () => {
-  const dom = installTranscriptDom();
-  const retried: Array<string | undefined> = [];
-  try {
-    await dom.render(<LocaleProvider locale="en"><ComposerModelPicker label="Native" choices={choices}
-      executor={{ catalog, selection: { executorId: 'agent', configuration: { model: 'opaque-high' } },
-        error: 'Inventory unavailable',
-        onSelect() {}, onSetup() {}, onRetry: id => { retried.push(id); }, onNewTask() {} }}
-    /></LocaleProvider>);
-    await actions(dom).click([...dom.document.querySelectorAll('button')].find(el => el.textContent === 'Retry'));
-    assert.deepEqual(retried, [undefined], 'a successful single-agent read cannot repair the inventory');
-  } finally { await dom.cleanup(); }
-});
-
-
 test('saved model, effort and mode controls retain their labels through restoration without permitting edits', async () => {
   const dom = installTranscriptDom();
   try {
@@ -455,7 +405,7 @@ test('saved model, effort and mode controls retain their labels through restorat
       await dom.render(<LocaleProvider locale="en"><ComposerModelPicker label="Native" choices={choices}
         executor={{ catalog: [{ ...catalog[0]!, readiness,
           supportsModelChange: readiness === 'ready', supportsModeChange: readiness === 'ready' }],
-          fixed: true, restoreOnSend: true,
+          fixed: true,
           selection: { executorId: 'agent', configuration: { model: 'opaque-high', mode: 'plan' } },
           onSelect() { assert.fail('restoration must not change saved configuration'); },
           onSetup() {}, onRetry() {}, onNewTask() {}, onRestore() {} }}

@@ -385,7 +385,6 @@ export function useExecutorSelection(input: {
     entry,
     select,
     restore,
-    submission: { executorSelection: selection, executorEntry: entry },
     refresh,
     adoptSession,
     changing: changingKey === key,

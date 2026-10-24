@@ -1925,7 +1925,6 @@ export const Composer = forwardRef<
     onNativeChange={props.onModelChange || props.onPickNewChatModel ? onNativeModelChange : undefined}
     renderThinkingControl={!props.executorTarget ? renderNativeThinkingControl : undefined}
     executor={props.executorPicker}
-    recoveryInComposer={props.executorPicker?.fixed}
     contribution={contribution}
     executorTarget={props.executorTarget}
     onExecutorTargetChange={props.onExecutorTargetChange}

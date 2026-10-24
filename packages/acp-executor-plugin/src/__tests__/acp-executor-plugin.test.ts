@@ -256,6 +256,28 @@ test('reopened Sessions retain presentation without starting a process or inheri
     });
     assert.deepEqual(unknown.models, [{ id: 'unknown', name: 'unknown' }]);
     assert.equal(unknown.currentMode, 'custom');
+    assert.deepEqual(unknown.modes, [{ id: 'custom', name: 'custom' }]);
+    for (const model of [undefined, 'removed-model']) {
+      state.values.set('session-a', {
+        ...recorded,
+        confirmedModel: model,
+        presentation: { version: 1, models: [], modes: live.modes },
+      });
+      const independent: typeof live = await uncached.inspectConversation({
+        ...input,
+        configuration: undefined,
+      });
+      assert.deepEqual(
+        independent.modes,
+        live.modes,
+        'mode labels do not depend on a matching model',
+      );
+      assert.deepEqual(independent.models, model ? [{ id: model, name: model }] : []);
+      assert.equal(independent.currentMode, 'auto');
+      assert.equal(independent.currentModel, model);
+      assert.equal(independent.supportsModeChange, false);
+      assert.equal(independent.supportsModelChange, false);
+    }
     assert.equal(protocol.connections, connections);
     state.values.set('session-a', recorded);
     const abort = new AbortController();
@@ -302,56 +324,6 @@ test('reopened Sessions retain presentation without starting a process or inheri
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
-
-for (const model of [undefined, 'removed-model'])
-  test(`reopened mode labels survive without a matching cached model (${model ?? 'mode-only'})`, async () => {
-    const storage = durableState();
-    const modes = [{ id: 'ask', name: 'Ask before editing' }];
-    const record: AcpContinuityRecord = {
-      version: 2,
-      cwd: process.cwd(),
-      binding: 'sha256:' + '0'.repeat(64),
-      phase: 'committed',
-      committedPrompts: 1,
-      sessionId: 'external-mode-only',
-      confirmedModel: model,
-      confirmedMode: 'ask',
-      presentation: { version: 1, models: [], modes },
-    };
-    storage.values.set('session-a', record);
-    const executor = new AcpExecutor(
-      adapter,
-      { executable: '/unused' },
-      {
-        state: storage.state,
-        createConnection: () => {
-          throw new Error('Inspection must not start an Agent');
-        },
-      },
-    );
-    try {
-      const input = { conversationKey: 'session-a', cwd: process.cwd() };
-      const entry = await executor.inspectConversation(input);
-      assert.equal(entry.readiness, 'restorable');
-      assert.deepEqual(entry.modes, modes);
-      assert.equal(entry.currentMode, 'ask');
-      assert.equal(entry.currentModel, model);
-      assert.deepEqual(entry.models, model ? [{ id: model, name: model }] : []);
-      assert.equal(entry.supportsModeChange, false, 'cached labels do not grant live capabilities');
-      assert.equal(entry.supportsModelChange, false);
-      const unknown = await executor.inspectConversation({
-        ...input,
-        configuration: { mode: 'unknown' },
-      });
-      assert.deepEqual(
-        unknown.modes,
-        [{ id: 'unknown', name: 'unknown' }],
-        'unmatched modes keep their saved IDs',
-      );
-    } finally {
-      await executor.dispose();
-    }
-  });
 
 test('execution restores the saved external conversation and retries a failed restore without duplicating prompts', async () => {
   const fixture = await executableFixture();

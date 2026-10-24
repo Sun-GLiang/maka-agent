@@ -55,9 +55,8 @@ export interface ComposerExecutorPicker {
   catalog: readonly ExecutorCatalogEntry[];
   selection?: ExecutorSelection;
   renderExecutorMark?(entry?: ExecutorCatalogEntry): ReactNode;
+  /** Existing Session: keep its executor fixed and restore its connection on send. */
   fixed?: boolean;
-  /** Restore the external connection during execution without a manual recovery prompt. */
-  restoreOnSend?: boolean;
   disabled?: boolean;
   loading?: boolean;
   loadingIds?: readonly string[];
@@ -193,7 +192,7 @@ export function ComposerExecutorRecovery(props: {
   const entries = executor.catalog.filter(entry => entry.readiness !== 'ready'
     && !(entry.readiness === 'unavailable' && isExecutorLoading(executor, entry.id))
     && (!executor.fixed || entry.id === executor.selection?.executorId)
-    && !(executor.restoreOnSend && ['restorable', 'restoring'].includes(entry.readiness)));
+    && !(executor.fixed && ['restorable', 'restoring'].includes(entry.readiness)));
   const restore = async () => {
     if (pending || disabled || !executor.onRestore) return;
     setPending(true);
@@ -278,7 +277,6 @@ export function ComposerModelPicker(props: {
   onNativeChange?(choice: { llmConnectionId: string; llmConnectionSlug: string; model: string }): void | Promise<void>;
   renderThinkingControl?(pending: boolean): ReactNode;
   executor?: ComposerExecutorPicker;
-  recoveryInComposer?: boolean;
   contribution?: ComposerModelContribution;
   executorTarget?: MakaClientExecutorTarget;
   onExecutorTargetChange?(target: MakaClientExecutorTarget): void | Promise<void>;
@@ -387,8 +385,8 @@ export function ComposerModelPicker(props: {
       ? configuration : { ...executor.selection!.configuration, ...configuration } });
   const mode = executor?.selection?.configuration.mode ?? selected?.currentMode;
   // Automatic recovery has no card to carry inspection failures or its retry action.
-  const recoveryHidden = executor?.restoreOnSend && (selected?.readiness === 'restorable' || selected?.readiness === 'restoring');
-  const executorError = executor?.error && (recoveryHidden || !(props.recoveryInComposer && selected && selected.readiness !== 'ready'));
+  const recoveryHidden = selected?.readiness === 'restorable' || selected?.readiness === 'restoring';
+  const executorError = executor?.error && (recoveryHidden || !(executor.fixed && selected && selected.readiness !== 'ready'));
   return <>
     {/* Keep portaled search clicks from focusing the composer editor. */}
     <Stack direction="horizontal" className="maka-model-picker-root"
@@ -469,7 +467,7 @@ export function ComposerModelPicker(props: {
       icon={<Settings size={ICON_SIZE.control} />} onClick={props.onOpenSettings} />}
     {executor && catalog.filter(entry => entry.refreshFailed && !isExecutorLoading(executor, entry.id)).map(entry =>
       <ExecutorRefreshFailure key={entry.id} name={entry.displayName} message={copy.refreshFailed} />)}
-    {executor && !props.recoveryInComposer && <ComposerExecutorRecovery
+    {executor && !executor.fixed && <ComposerExecutorRecovery
       executor={{ ...executor, catalog }} disabled={props.disabled || props.isReadOnly}
     />}
     {(failed || invalid || executorError || (unavailable && !selected) || contribution?.error) && <span className="maka-executor-notice" role="status">

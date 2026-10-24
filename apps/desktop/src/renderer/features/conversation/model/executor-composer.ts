@@ -46,7 +46,6 @@ export function executorComposerProps(
             renderExecutorMark: input.renderExecutorMark,
             selection: executor.selection,
             fixed,
-            restoreOnSend: fixed,
             disabled: executor.changing || !!input.sendPending || (fixed && input.turnActive),
             loading: executor.loading,
             loadingIds: executor.loadingIds,

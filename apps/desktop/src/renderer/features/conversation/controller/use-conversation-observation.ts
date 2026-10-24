@@ -134,9 +134,7 @@ export function useConversationObservation(options: {
     options.observationRef.current = observation;
     const transcript = controller.store;
     let displayReady = true;
-    let transcriptChanged = false;
     const publish = () => {
-      transcriptChanged = true;
       if (displayReady && !disposed) applyTranscript(activeId, controller, () => !disposed);
     };
     const preparation = prepareDisplay(activeId);
@@ -144,7 +142,7 @@ export function useConversationObservation(options: {
       displayReady = false;
       void preparation.catch(() => undefined).then(() => {
         displayReady = true;
-        if (transcriptChanged) publish();
+        if (!disposed && transcript.range().ready) publish();
       });
     }
     const unsubscribeTranscript = transcript.subscribe(publish);
