@@ -22,12 +22,13 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { it } from 'node:test';
 import {
-  applyMermaidRenderBudget,
+  markdownDiagramPlugin,
   MarkdownBody,
   MAX_AUTOMATIC_MERMAID_DIAGRAMS,
   MAX_AUTOMATIC_MERMAID_SOURCE_LENGTH,
   MAX_AUTOMATIC_MERMAID_TOTAL_SOURCE_LENGTH,
 } from '../markdown-body.js';
+import { parseMarkdownAst, visitMarkdownNodes } from '@astryxdesign/core/Markdown';
 import { AstryxLocaleProvider } from '../astryx-i18n.js';
 import { MakaUriContext, Markdown } from '../markdown.js';
 import { LocaleProvider } from '../locale-context.js';
@@ -540,17 +541,14 @@ it('defers Mermaid fences beyond the per-Markdown automatic diagram budget', () 
 
 it('enforces per-diagram and total automatic Mermaid source budgets', () => {
   const oversized = ['```mermaid', 'x'.repeat(MAX_AUTOMATIC_MERMAID_SOURCE_LENGTH + 1), '```'].join('\n');
-  assert.match(
-    applyMermaidRenderBudget(oversized),
-    /```makamermaiddeferred/,
-  );
+  assert.deepEqual(diagramLanguages(oversized), ['makamermaiddeferred']);
 
   const nearHalfTotal = 'x'.repeat(Math.floor(MAX_AUTOMATIC_MERMAID_TOTAL_SOURCE_LENGTH / 2) - 100);
   const source = [nearHalfTotal, nearHalfTotal, 'x'.repeat(250)]
     .map((code) => ['```mermaid', code, '```'].join('\n'))
     .join('\n\n');
   assert.equal(
-    applyMermaidRenderBudget(source).match(/```makamermaiddeferred/g)?.length,
+    diagramLanguages(source).filter(language => language === 'makamermaiddeferred').length,
     1,
   );
 });
@@ -644,16 +642,47 @@ it('memory citations route internally and never navigate as external URLs', () =
 });
 
 
-it('SVG auto-preview has a separate bounded budget without rewriting streaming source', () => {
-  const small = '```svg\n<svg/>\n```';
-  const budgeted = applyMermaidRenderBudget([small, small, small, small].join('\n\n'));
-  assert.equal((budgeted.match(/```svg\n/g) ?? []).length, 3);
-  assert.equal((budgeted.match(/```makasvgdeferred\n/g) ?? []).length, 1);
-  assert.match(applyMermaidRenderBudget('```svg\n<svg>' + ' '.repeat(65536) + '</svg>\n```'), /```makasvgdeferred/);
+function diagramLanguages(source: string): (string | null | undefined)[] {
+  const result: (string | null | undefined)[] = [];
+  visitMarkdownNodes(parseMarkdownAst(source, { plugins: [markdownDiagramPlugin] }), 'code', node => {
+    result.push(node.lang);
+  });
+  return result;
+}
+
+const svgFence = (language: string, code = '<svg/>') => ['```' + language, code, '```'].join('\n');
+
+it('SVG and XML SVG share a budget across top-level, blockquote and list code nodes', () => {
+  const source = [
+    svgFence('svg'),
+    svgFence('xml').split('\n').map(line => '> ' + line).join('\n'),
+    [svgFence('xml'), svgFence('svg')].map(fence => '- ' + fence.replaceAll('\n', '\n  ')).join('\n'),
+  ].join('\n\n');
+  assert.deepEqual(diagramLanguages(source), ['svg', 'svg', 'svg', 'makasvgdeferred']);
+  // Counts are scoped to each parse, not retained by the shared plugin.
+  assert.deepEqual(diagramLanguages(source), ['svg', 'svg', 'svg', 'makasvgdeferred']);
 });
 
+it('nested SVG cannot bypass single-block or total character budgets', () => {
+  const svg = (size: number) => '<svg>' + ' '.repeat(size - 11) + '</svg>';
+  const quoted = (source: string) => source.split('\n').map(line => '> ' + line).join('\n');
+  assert.deepEqual(diagramLanguages(quoted(svgFence('xml', svg(65537)))), ['makasvgdeferred']);
+  const source = [svgFence('xml', svg(65536)), svgFence('svg', svg(65536)), svgFence('xml')].join('\n\n');
+  assert.deepEqual(diagramLanguages(quoted(source)), ['svg', 'svg', 'makasvgdeferred']);
+});
 
-it('diagram budgets do not rewrite SVG examples nested in another code fence', () => {
+it('SVG examples inside other code and ordinary XML remain source code', () => {
   const example = '````markdown\n' + '```svg\n<svg/>\n```\n'.repeat(5) + '````';
-  assert.equal(applyMermaidRenderBudget(example), example);
+  assert.deepEqual(diagramLanguages(example), ['markdown']);
+  assert.deepEqual(diagramLanguages(svgFence('xml', '<document><svg/></document>')), ['xml']);
+  assert.deepEqual(diagramLanguages(svgFence('xml', '<svg-editor/>')), ['xml']);
+  assert.deepEqual(diagramLanguages(svgFence('xml', '<!-- drawing -->\n'.repeat(5000) + '<document/>')), ['xml']);
+  assert.deepEqual(diagramLanguages(svgFence('xml', '<!-- unclosed <svg/>')), ['xml']);
+  assert.deepEqual(diagramLanguages(svgFence('xml', '<?xml version="1.0"?>\n<!-- drawing -->\n<svg/>')), ['svg']);
+});
+
+it('Mermaid budget also covers container code nodes independently from SVG', () => {
+  const source = (svgFence('svg') + '\n\n' + Array.from({length:4}, () => svgFence('mermaid', 'graph TD; A-->B')).join('\n\n'))
+    .split('\n').map(line => '> ' + line).join('\n');
+  assert.deepEqual(diagramLanguages(source), ['svg', 'mermaid', 'mermaid', 'mermaid', 'makamermaiddeferred']);
 });

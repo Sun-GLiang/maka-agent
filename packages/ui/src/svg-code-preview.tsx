@@ -30,7 +30,8 @@ export default function SvgCodePreview(props: { code: string; autoRender?: boole
   const copy = getSharedUiCopy(useUiLocale()).markdown;
   const anchor = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(typeof IntersectionObserver === 'undefined');
-  const [requested, setRequested] = useState(props.autoRender !== false);
+  const [requestedCode, setRequestedCode] = useState<string>();
+  const requested = props.autoRender !== false || requestedCode === props.code;
   const [showSource, setShowSource] = useState(false);
   const [result, setResult] = useState<{ code: string; src?: string }>();
   useEffect(() => {
@@ -50,9 +51,9 @@ export default function SvgCodePreview(props: { code: string; autoRender?: boole
     return () => { cancelled = true; };
   }, [visible, requested, props.code]);
   const settled = result?.code === props.code;
-  const src = settled ? result.src : undefined;
+  const src = requested && settled ? result.src : undefined;
   return <div ref={anchor} className="maka-markdown-code" data-kind="svg-preview">
-    {!requested && <Button variant="ghost" size="sm" label={copy.svgPreview} onClick={() => setRequested(true)} />}
+    {!requested && <Button variant="ghost" size="sm" label={copy.svgPreview} onClick={() => setRequestedCode(props.code)} />}
     {src && <div>
       <Button variant="ghost" size="sm" label={showSource ? copy.svgPreview : copy.svgSource} onClick={() => setShowSource(value => !value)} />
       <a href={src} download="image.svg">{copy.svgDownload}</a>
@@ -60,6 +61,6 @@ export default function SvgCodePreview(props: { code: string; autoRender?: boole
     {src && !showSource
       ? <MediaImageDisplay src={src} alt="SVG" onError={() => setResult({ code: props.code })} />
       : <CodeBlock code={props.code} language="svg" highlightMode="spans" width="100%" isCollapsible collapsibleThreshold={10} />}
-    {visible && settled && !src && <span role="status">{copy.imageLoadFailed}</span>}
+    {visible && requested && settled && !src && <span role="status">{copy.imageLoadFailed}</span>}
   </div>;
 }

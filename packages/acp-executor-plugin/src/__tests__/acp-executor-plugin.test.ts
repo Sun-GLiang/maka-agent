@@ -3112,61 +3112,112 @@ for (const placement of ['message', 'tool'] as const) {
   });
 }
 
-test('ACP transport failure releases pending media before draining updates', async () => {
-  const fixture = await executableFixture();
-  const protocol = fakeProtocol();
-  const crashed = deferred<never>();
-  const prompt = deferred<{ stopReason: 'end_turn' }>();
-  const executor = new AcpExecutor(
-    adapter,
-    { executable: fixture.executable },
-    {
-      createConnection: (input) => {
-        const owner = protocol.factory(input);
-        const request = owner.connection.agent.request.bind(owner.connection.agent);
-        owner.connection.agent.request = (async (method: string, params: never) => {
-          if (method === methods.agent.session.prompt) {
-            protocol.notifyUpdate({
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'image', mimeType: 'image/png', data: 'AAAA' },
-            });
-            return prompt.promise;
-          }
-          return request(method as never, params);
-        }) as typeof owner.connection.agent.request;
-        return { ...owner, failed: crashed.promise };
+for (const placement of ['message', 'tool'] as const) {
+  test(`ACP transport failure drains received ${placement} updates and rejects late updates`, async () => {
+    const fixture = await executableFixture();
+    const protocol = fakeProtocol();
+    const crashed = deferred<never>();
+    const prompt = deferred<{ stopReason: 'end_turn' }>();
+    const executor = new AcpExecutor(
+      adapter,
+      { executable: fixture.executable },
+      {
+        createConnection: (input) => {
+          const owner = protocol.factory(input);
+          const request = owner.connection.agent.request.bind(owner.connection.agent);
+          owner.connection.agent.request = (async (method: string, params: never) => {
+            if (method === methods.agent.session.prompt) {
+              const content = { type: 'image', mimeType: 'image/png', data: 'AAAA' };
+              protocol.notifyUpdate(
+                placement === 'message'
+                  ? { sessionUpdate: 'agent_message_chunk', content }
+                  : {
+                      sessionUpdate: 'tool_call',
+                      toolCallId: 'draw',
+                      title: 'Draw',
+                      status: 'completed',
+                      content: [{ type: 'content', content }],
+                    },
+              );
+              protocol.notifyUpdate({
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'after image' },
+              });
+              protocol.notifyUpdate({
+                sessionUpdate: 'tool_call',
+                toolCallId: 'after',
+                title: 'After',
+                status: 'completed',
+                content: [{ type: 'content', content: { type: 'text', text: 'received result' } }],
+              });
+              return prompt.promise;
+            }
+            return request(method as never, params);
+          }) as typeof owner.connection.agent.request;
+          return {
+            ...owner,
+            failed: crashed.promise,
+            dispose: async () => {
+              protocol.notifyUpdate({
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'late text' },
+              });
+              await owner.dispose();
+            },
+          };
+        },
       },
-    },
-  );
-  const media = deferred<import('@maka/core/session-media').SessionContentPart>();
-  const started = deferred<void>();
-  const execution = executor.execute(request('crash-media'), {
-    ...executorContext([]),
-    publishMedia: () => {
-      started.resolve();
-      return media.promise;
-    },
+    );
+    const media = deferred<import('@maka/core/session-media').SessionContentPart>();
+    const started = deferred<void>();
+    const events: import('@maka/runtime/plugin-executor-service').PluginExecutorOutputEvent[] = [];
+    const execution = executor.execute(request('crash-media'), {
+      ...executorContext(events),
+      publishMedia: () => {
+        started.resolve();
+        return media.promise;
+      },
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await started.promise;
+      crashed.reject(new Error('ACP process exited'));
+      const result = await Promise.race([
+        execution,
+        new Promise<undefined>((resolve) => {
+          timeout = setTimeout(() => resolve(undefined), 1000);
+        }),
+      ]);
+      assert.equal(result?.status, 'failed', 'Transport failure must not wait for Host media');
+      assert.ok(
+        events.some((event) => event.type === 'output_delta' && event.text === 'after image'),
+        'Already-received text must survive transport failure',
+      );
+      assert.ok(
+        events.some((event) => event.type === 'tool_result' && event.toolCallId === 'after'),
+        'Already-received tool results must survive transport failure',
+      );
+      if (placement === 'tool')
+        assert.ok(
+          events.some((event) => event.type === 'tool_result' && event.toolCallId === 'draw'),
+        );
+      assert.ok(
+        !events.some((event) => event.type === 'output_delta' && event.text === 'late text'),
+      );
+      const settledEvents = structuredClone(events);
+      media.reject(new Error('late image failure'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(events, settledEvents);
+    } finally {
+      clearTimeout(timeout);
+      media.resolve({ kind: 'text', text: 'released' });
+      prompt.resolve({ stopReason: 'end_turn' });
+      await execution;
+      await executor.dispose();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
   });
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await started.promise;
-    crashed.reject(new Error('ACP process exited'));
-    const result = await Promise.race([
-      execution,
-      new Promise<undefined>((resolve) => {
-        timeout = setTimeout(() => resolve(undefined), 1000);
-      }),
-    ]);
-    assert.equal(result?.status, 'failed', 'Transport failure must not wait for Host media');
-  } finally {
-    clearTimeout(timeout);
-    media.resolve({ kind: 'text', text: 'released' });
-    prompt.resolve({ stopReason: 'end_turn' });
-    await execution;
-    await executor.dispose();
-    await rm(fixture.root, { recursive: true, force: true });
-  }
-});
+}
 
 test('repeated ACP tool snapshots retain their image without exhausting the media budget', async () => {
   const fixture = await executableFixture();

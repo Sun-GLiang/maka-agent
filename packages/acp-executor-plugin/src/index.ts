@@ -1154,7 +1154,7 @@ export class AcpExecutor implements PluginExecutorProvider {
   #configureClient(session: RetainedSession, app: ClientApp): void {
     app
       .onNotification(methods.client.session.update, ({ params }) => {
-        if (params.sessionId !== session.acpSessionId) return;
+        if (params.sessionId !== session.acpSessionId || session.lost || session.historyGap) return;
         const active = session.active;
         if (
           !active ||
@@ -1202,7 +1202,9 @@ export class AcpExecutor implements PluginExecutorProvider {
               ),
           };
         active.updates = active.updates
-          .then(() => this.#acceptUpdate(session, update))
+          // Admission belongs to notification receipt. A lost connection must not
+          // discard updates already accepted for this prompt or target a later prompt.
+          .then(() => this.#acceptPromptUpdate(active, update))
           .catch((error) => {
             active.updateError ??= error;
           });
@@ -1258,6 +1260,10 @@ export class AcpExecutor implements PluginExecutorProvider {
     }
     const active = session.active;
     if (!active) return;
+    await this.#acceptPromptUpdate(active, update);
+  }
+
+  async #acceptPromptUpdate(active: ActivePrompt, update: SessionUpdate): Promise<void> {
     if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
       active.text += update.content.text;
       emitText(active.context, 'output_delta', update.content.text);
