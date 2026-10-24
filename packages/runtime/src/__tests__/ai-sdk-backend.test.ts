@@ -114,9 +114,9 @@ import { MakaCompositionLoader } from '../plugin-composition-loader.js';
 import { PluginToolService } from '../plugin-tool-service.js';
 import { testInvocationOpening, testInvocationRecord } from './invocation-fixture.js';
 
-test('a plugin can reject natural turn finish and continue the same model loop', async () => {
+test('a finish-hook veto replays the draft and allows completion at the next step cap', async () => {
   const durable = durableTurnHarness('turn-finish-check', 'Follow through.');
-  const model = completionModel();
+  const model = textCompletionModel('Draft answer.');
   const checkedTurns: string[] = [];
   const backend = createBackend({
     connection: connection(),
@@ -132,11 +132,139 @@ test('a plugin can reject natural turn finish and continue the same model loop',
     },
   });
 
-  const events = await drainDurably(backend.send(durable.input()), durable);
+  const events = await drainDurably(backend.send(durable.input({ maxSteps: 2 })), durable);
   assert.deepEqual(checkedTurns, ['turn-finish-check', 'turn-finish-check']);
   assert.equal(model.doStreamCalls.length, 2);
+  assert.match(JSON.stringify(model.doStreamCalls[1]?.prompt), /Draft answer\./);
   assert.match(JSON.stringify(model.doStreamCalls[1]?.prompt), /Finish the remaining work first/);
-  assert.equal(events.filter((event) => event.type === 'complete').length, 1);
+  assert.deepEqual(
+    events.filter((event) => event.type === 'complete').map((event) => event.stopReason),
+    ['end_turn'],
+  );
+});
+
+test('a finish-hook veto at the step cap ends as step_limit', async () => {
+  const durable = durableTurnHarness('turn-capped-veto', 'Follow through.');
+  const model = textCompletionModel('Draft answer.');
+  let checks = 0;
+  const backend = createBackend({
+    connection: connection(),
+    modelId: 'mock-model-id',
+    modelFactory: () => model,
+    tools: [],
+    loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+    beforeTurnFinish: async () => {
+      checks++;
+      return { allow: false, feedback: 'The inbox is still pending.' };
+    },
+  });
+
+  const events = await drainDurably(backend.send(durable.input({ maxSteps: 1 })), durable);
+  assert.equal(checks, 1);
+  assert.equal(model.doStreamCalls.length, 1);
+  assert.deepEqual(
+    events.filter((event) => event.type === 'complete').map((event) => event.stopReason),
+    ['step_limit'],
+  );
+});
+
+for (const allow of [true, false]) {
+  test(`a finish hook without a durable reader is still consulted (allow=${allow})`, async () => {
+    const model = textCompletionModel('Draft answer.');
+    let checks = 0;
+    const backend = createBackend({
+      connection: connection(),
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [],
+      beforeTurnFinish: async () => {
+        checks++;
+        return allow ? { allow: true } : { allow: false, feedback: 'Keep working.' };
+      },
+    });
+    const events: SessionEvent[] = [];
+    await collectEvents(backend.send({ turnId: 'no-reader', text: 'hello', maxSteps: 2 }), events);
+    assert.equal(checks, 1);
+    assert.equal(model.doStreamCalls.length, 1);
+    assert.deepEqual(
+      events.filter((event) => event.type === 'complete').map((event) => event.stopReason),
+      [allow ? 'end_turn' : 'error'],
+    );
+    if (!allow) {
+      assert.match(
+        events.find((event) => event.type === 'error')?.message ?? '',
+        /durable current-run reader is required for turn continuation/,
+      );
+    }
+  });
+}
+
+test('an after-step stop during a finish-veto handoff prevents another request', async () => {
+  const durable = durableTurnHarness('turn-veto-stop', 'Follow through.');
+  const model = textCompletionModel('Draft answer.');
+  let checks = 0;
+  const backend = createBackend({
+    connection: connection(),
+    modelId: 'mock-model-id',
+    modelFactory: () => model,
+    tools: [],
+    loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+    beforeTurnFinish: async () => {
+      checks++;
+      return checks === 1 ? { allow: false, feedback: 'Continue.' } : { allow: true };
+    },
+  });
+  const events = await drainDurably(
+    backend.send(
+      durable.input({
+        maxSteps: 100,
+        handoffBoundary: async () => {
+          await backend.stop('user_stop', 'after_step');
+          return 'continue';
+        },
+      }),
+    ),
+    durable,
+  );
+  assert.equal(checks, 1);
+  assert.equal(model.doStreamCalls.length, 1);
+  assert.deepEqual(
+    events.filter((event) => event.type === 'complete').map((event) => event.stopReason),
+    ['user_stop'],
+  );
+});
+
+test('an after-step stop during provider retry sleep prevents another request', async () => {
+  const model = new MockLanguageModelV4({
+    doStream: async () => {
+      throw new APICallError({
+        message: 'retry me',
+        url: 'https://provider.invalid/v1/messages',
+        requestBodyValues: {},
+        statusCode: 503,
+      });
+    },
+  });
+  const backend = createBackend({
+    connection: connection(),
+    modelId: 'mock-model-id',
+    modelFactory: () => model,
+    tools: [],
+    providerRetrySleep: async () => {
+      await backend.stop('user_stop', 'after_step');
+    },
+  });
+  const events: SessionEvent[] = [];
+  await collectEvents(backend.send({ turnId: 'retry-stop', text: 'hello', maxSteps: 100 }), events);
+  assert.equal(model.doStreamCalls.length, 1);
+  assert.deepEqual(
+    events.filter((event) => event.type === 'provider_retry').map((event) => event.phase),
+    ['scheduled'],
+  );
+  assert.deepEqual(
+    events.filter((event) => event.type === 'complete').map((event) => event.stopReason),
+    ['user_stop'],
+  );
 });
 
 for (const scenario of ['complete', 'veto', 'failure', 'ordinary'] as const) {
@@ -6474,16 +6602,12 @@ describe('AiSdkBackend model history', () => {
     const loop = countingToolLoopModel();
     const durable = durableTurnHarness('turn-1', 'hi');
     let backend!: AiSdkBackend;
-    let stopRequested = false;
     const stoppingTool: MakaTool = {
       name: 'Read',
       description: 'Read description',
       parameters: z.object({ path: z.string() }),
       impl: async () => {
-        stopRequested = true;
-        await (
-          backend.stop as unknown as (reason: 'user_stop', mode: 'after_step') => Promise<void>
-        )('user_stop', 'after_step');
+        await backend.stop('user_stop', 'after_step');
         return { ok: true };
       },
     };
@@ -6494,15 +6618,10 @@ describe('AiSdkBackend model history', () => {
       tools: [stoppingTool],
       loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
     });
-    const events: SessionEvent[] = [];
+    const events = await drainDurably(backend.send(durable.input({ maxSteps: 100 })), durable);
 
-    for await (const event of backend.send(durable.input())) {
-      durable.record(event);
-      events.push(event);
-    }
-
-    assert.equal(stopRequested, true);
     assert.equal(loop.callCount(), 1);
+    assert.equal(events.find((event) => event.type === 'complete')?.stopReason, 'user_stop');
     assert.equal(
       events.some((event) => event.type === 'abort'),
       false,
@@ -10526,30 +10645,20 @@ describe('AiSdkBackend Anthropic prompt caching', () => {
     return { role, block: rest };
   };
 
-  test('keeps the cache breakpoint on durable history before request-only context', async () => {
+  test('keeps appended context in the cached history without repeating it after tools', async () => {
     const bodies = await runToolTurn(connection());
-
-    const breakpoints = bodies.map((body) => {
-      const flat = blocks(body);
-      const marked = flat.flatMap(({ block }, index) =>
-        block.cache_control !== undefined ? [index] : [],
-      );
-      assert.equal(marked.length, 1, JSON.stringify(body.messages));
-      const breakpoint = marked[0]!;
-      assert.deepEqual(flat[breakpoint]!.block.cache_control, body.cache_control);
-      assert.deepEqual(
-        flat.slice(breakpoint + 1).map(({ block }) => block.text),
-        ['REQUEST_ONLY_CONTEXT'],
-      );
-      return breakpoint;
-    });
-    const cachedPrefix = blocks(bodies[0]!)
-      .slice(0, breakpoints[0]! + 1)
-      .map(withoutCacheControl);
-    assert.deepEqual(
-      blocks(bodies[1]!).slice(0, cachedPrefix.length).map(withoutCacheControl),
-      cachedPrefix,
+    assert.ok(bodies[0]!.cache_control);
+    const first = blocks(bodies[0]!).map(withoutCacheControl);
+    const second = blocks(bodies[1]!).map(withoutCacheControl);
+    assert.deepEqual(second.slice(0, first.length), first);
+    assert.equal(
+      second.filter(
+        ({ block }) =>
+          typeof block.text === 'string' && block.text.includes('REQUEST_ONLY_CONTEXT'),
+      ).length,
+      1,
     );
+    assert.equal(second.at(-1)!.block.type, 'tool_result');
   });
 
   test('adds no cache breakpoint on Anthropic-protocol connections without automatic caching', async () => {

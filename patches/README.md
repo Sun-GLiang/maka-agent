@@ -114,7 +114,7 @@ that product code can configure.
 
 Delete the patch when upstream shares immutable paste strings across undo snapshots.
 
-## `zod@4.6.5`
+## `zod@4.6.7`
 
 Recursive schemas retain their last parse context and bucket in schema closures,
 keeping the input and output graphs alive for the schema's lifetime. Containers
@@ -129,7 +129,7 @@ Before upgrading Zod, re-verify allocation handoff, reentrant parsing, and cycle
 identity against the new memoizer and container implementations.
 The Runtime `zod-recursive-contract.test.ts` suite covers both shipped entry points.
 
-## `@modelcontextprotocol/client@2.2.0`
+## `@modelcontextprotocol/client@2.3.0`
 
 Pending transport sends retain settled request arguments and results through
 error observers, even after response, abort, timeout, or connection close.

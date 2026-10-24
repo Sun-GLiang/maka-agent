@@ -19,16 +19,38 @@
 
 import { isInteractionAnswerValidForRequest } from '@maka/core/interaction';
 import type { StoredMessage } from '@maka/core/session';
-import type { RuntimeHostConnection } from '@maka/runtime-host/client';
+import {
+  abortable,
+  readRuntimeHostConnectionCatalog,
+  type RuntimeHostConnection,
+} from '@maka/runtime-host/client';
 import { updateRuntimeHostSession } from './runtime-host-session-update.js';
 import type {
   InteractionPendingSnapshot,
+  SessionConfigurationPatch,
+  SessionCatalogProjection,
   SessionContinuitySnapshot,
 } from '@maka/runtime-host/protocol';
 import { RuntimeHostSessionChannel } from './runtime-host-session-channel.js';
 import type { MakaRunEnvironmentDeps, MakaRunOptions } from './run-command-core.js';
 import { RunSessionInterrupted, type MakaRunSessionResult } from './run-session-result.js';
 import { TurnOutcomeClassifier, acceptStoredTurn } from './run-turn-outcome.js';
+
+/** Session controls that must verify ownership before mutating a Host-owned Turn. */
+export function sessionControlRequiresExecutionBoundary(
+  options: Pick<
+    MakaRunOptions,
+    'prompt' | 'answers' | 'resumeExecution' | 'sandboxDecision' | 'stop'
+  >,
+): boolean {
+  return (
+    options.prompt !== undefined ||
+    options.answers !== undefined ||
+    options.resumeExecution === true ||
+    options.sandboxDecision !== undefined ||
+    options.stop === true
+  );
+}
 
 /** Session commands observe Host-owned execution; they never publish client MCP. */
 export async function runMakaSessionCommand(
@@ -41,22 +63,15 @@ export async function runMakaSessionCommand(
   const executing =
     options.prompt !== undefined || options.answers !== undefined || options.resumeExecution;
   const decidingSandbox = options.sandboxDecision !== undefined;
+  const controllingTurn = sessionControlRequiresExecutionBoundary(options);
   if ((executing || decidingSandbox) && !allowDetach)
     throw new Error(
       'Session control execution requires a persistent installation; use the blocking legacy run path for temporary npx invocations',
     );
   // Never silently discard options that the old turn.start path supports.
-  if (
-    options.graph ||
-    options.connection ||
-    options.model ||
-    options.thinking !== undefined ||
-    options.cwd ||
-    options.projectId ||
-    options.timeoutMs
-  ) {
+  if (options.graph || options.cwd || options.projectId || options.timeoutMs) {
     throw new Error(
-      'Session commands use the saved configuration; use the blocking legacy --resume <id> path for configuration, cwd, timeout or Graph options',
+      'Session workspace, timeout and Graph overrides require the blocking legacy --resume <id> path',
     );
   }
   if (
@@ -79,13 +94,49 @@ export async function runMakaSessionCommand(
   };
   try {
     assertActive();
+    const configured =
+      options.model !== undefined ||
+      options.connection !== undefined ||
+      options.thinking !== undefined
+        ? await configureSessionModel(connection, options, assertActive)
+        : undefined;
+    const configuration = configured
+      ? {
+          connection: configured.llmConnectionSlug,
+          model: configured.model,
+          thinking: configured.thinkingLevel ?? null,
+        }
+      : undefined;
     let target = observer.snapshot.rootTurn?.turnId;
+    if (options.recap) {
+      const result = await abortable(
+        () =>
+          connection.request('session.recap.generate', {
+            sessionId,
+            effectId: env.newId(),
+            reason: 'manual',
+          }),
+        cancelled.signal,
+      );
+      assertActive();
+      if (result.kind === 'failed') throw new Error(`Session recap failed: ${result.errorClass}`);
+      const executionBoundary = options.status
+        ? await connection.request('session.execution_boundary.query', { sessionId })
+        : undefined;
+      assertActive();
+      return {
+        ...observer.status(),
+        recap: result.text,
+        ...(configuration ? { configuration } : {}),
+        ...(executionBoundary ? { executionBoundary } : {}),
+      };
+    }
     let messageId: string | undefined;
     let submission: MakaRunSessionResult['submission'];
     let admittedQueueRevision: number | undefined;
     let admittedQueueEpoch: string | undefined;
     let fullAccess = false;
-    if (executing) {
+    if (controllingTurn) {
       const boundary = await connection.request('session.execution_boundary.query', { sessionId });
       assertActive();
       if (boundary.kind === 'external')
@@ -245,7 +296,11 @@ export async function runMakaSessionCommand(
         sessionId,
       });
       assertActive();
-      return { ...observer.status(), executionBoundary };
+      return {
+        ...observer.status(),
+        executionBoundary,
+        ...(configuration ? { configuration } : {}),
+      };
     }
     if (options.noWait) {
       if (submission !== 'queued' && submission !== 'steering')
@@ -312,6 +367,57 @@ export async function runMakaSessionCommand(
 
 function terminal(status: string): boolean {
   return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+async function configureSessionModel(
+  connection: RuntimeHostConnection,
+  options: MakaRunOptions,
+  assertActive: () => void,
+): Promise<SessionCatalogProjection> {
+  const selected =
+    options.connection !== undefined
+      ? (await readRuntimeHostConnectionCatalog(connection)).connections.find(
+          (candidate) => candidate.slug === options.connection,
+        )
+      : undefined;
+  if (options.connection !== undefined && !selected)
+    throw new Error(`Runtime Host model connection is unavailable: ${options.connection}`);
+  return updateRuntimeHostSession(
+    connection,
+    options.sessionId!,
+    (current) => {
+      const changesModel = options.model !== undefined || options.connection !== undefined;
+      let patch: SessionConfigurationPatch =
+        options.thinking !== undefined ? { thinkingLevel: options.thinking } : {};
+      if (changesModel) {
+        if (current.executorId && !selected) {
+          patch = { ...patch, executorConfig: { model: options.model! } };
+        } else {
+          const connectionId = selected?.connectionId ?? current.llmConnectionId;
+          if (!connectionId) throw new Error('Model selection requires an explicit --connection');
+          const changesTarget =
+            connectionId !== current.llmConnectionId ||
+            (options.model ?? current.model) !== current.model;
+          patch = {
+            ...patch,
+            ...(changesTarget && options.thinking === undefined ? { thinkingLevel: null } : {}),
+            modelTarget: {
+              kind: 'explicit',
+              connectionId,
+              connectionSlug: selected?.slug ?? current.llmConnectionSlug,
+              model: options.model ?? current.model,
+            },
+          };
+        }
+      }
+      return connection.request('session.configuration.update', {
+        sessionId: options.sessionId!,
+        expectedRevision: current.revision,
+        patch,
+      });
+    },
+    { operation: 'session.configuration.update', assertRequestAllowed: assertActive },
+  );
 }
 
 class SessionRunObserver {
@@ -461,13 +567,13 @@ class SessionRunObserver {
   }
 
   async result(turnId: string): Promise<MakaRunSessionResult | undefined> {
-    const classifier = new TurnOutcomeClassifier(turnId, { recoverStoredRetries: true });
+    const classifier = new TurnOutcomeClassifier(turnId);
     await this.#channel.replayTranscript(async (messages: readonly StoredMessage[]) => {
       acceptStoredTurn(classifier, messages, turnId);
     }, this.#signal);
     const outcome = classifier.outcome('pending');
     if (!outcome) return undefined;
-    if (outcome.status === 'completed' && outcome.sandboxBoundary === 'none') {
+    if (outcome.status === 'completed') {
       return {
         sessionId: this.#sessionId,
         status: 'completed',
@@ -477,10 +583,7 @@ class SessionRunObserver {
     return {
       sessionId: this.#sessionId,
       status: 'failed',
-      error:
-        outcome.sandboxBoundary === 'unresolved'
-          ? 'Turn encountered an unresolved sandbox boundary'
-          : (outcome.failure?.message ?? outcome.failure?.class ?? 'Turn failed'),
+      error: outcome.failure?.message ?? outcome.failure?.class ?? 'Turn failed',
     };
   }
 

@@ -225,6 +225,8 @@ export async function fixture(options: any = {}) {
       },
     },
   );
+  // Business-flow fixtures explicitly admit their coordinator; ordinary callers remain denied.
+  await native.remote('matters.authorize-session', { sessionId: 'owner' });
   ({ tools, prompts, turns } = native);
   const platform = native.platform;
   if (options.matters)
@@ -246,6 +248,7 @@ export async function fixture(options: any = {}) {
     workers,
     sessions,
     invokeAs,
+    filterTools: native.filterTools,
     remote: native.remote,
     send: (id: string, text: string) => native.send('owner', id, { text }),
     cancels: () => cancels,
