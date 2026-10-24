@@ -3828,7 +3828,7 @@ test('existing external conversations admit recoverable messages while retaining
   });
 });
 
-test('message admission waits for typing preparation and then starts the same external conversation', async () => {
+test('another client can submit while recovery holds admission and starts the same external conversation', async () => {
   const started = deferred<void>();
   let release: (() => void) | undefined;
   let restores = 0;
@@ -3925,7 +3925,7 @@ test('message admission waits for typing preparation and then starts the same ex
             content: { text: 'continue while restoration is pending' },
             placement: 'next_turn',
           },
-          context,
+          { ...context, connectionId: 'another-client' },
         ).then((result) => {
           admitted = true;
           return result;
@@ -3934,7 +3934,7 @@ test('message admission waits for typing preparation and then starts the same ex
         assert.equal(
           admitted,
           false,
-          'Host admission waits while the renderer can already show its saved message',
+          'Host admission waits for recovery regardless of which client saved the message',
         );
         release!();
         const configured = await preparation;

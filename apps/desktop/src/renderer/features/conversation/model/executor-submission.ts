@@ -42,8 +42,6 @@ export function createExecutorSessionActivator<Session extends SessionSummary>(
 }
 
 export interface ExecutorSubmission {
-  /** A speculative restore holds the Host admission gate, never local saving. */
-  executorPreparing?: boolean;
   executorSelection?: ExecutorSelection;
   executorEntry?: Pick<ExecutorCatalogEntry, 'readiness' | 'supportsAttachments'> &
     Partial<Pick<ExecutorCatalogEntry, 'models' | 'modes'>>;
@@ -67,6 +65,13 @@ const SUBMISSION_COPY = resolveUiMessageCatalog(defineShippedUiMessageCatalog<{ 
   },
 }));
 
+/** Local delivery may queue behind another client's restore; Host admission remains authoritative. */
+export function canSubmitToExecutor(readiness: ExecutorCatalogEntry['readiness'] | undefined, existingConversation: boolean): boolean {
+  return existingConversation
+    ? canExecuteExistingConversation(readiness) || readiness === 'restoring'
+    : readiness === 'ready';
+}
+
 export function executorSubmissionError(
   input: ExecutorSubmission,
   attachments: number,
@@ -75,9 +80,7 @@ export function executorSubmissionError(
 ): string | undefined {
   if (!input.executorSelection) return;
   const entry = input.executorEntry;
-  if (!entry || !(existingConversation
-    ? canExecuteExistingConversation(entry.readiness) || (input.executorPreparing && entry.readiness === 'restoring')
-    : entry.readiness === 'ready'))
+  if (!entry || !canSubmitToExecutor(entry.readiness, existingConversation))
     return SUBMISSION_COPY[locale].unavailable;
   if (attachments && !entry.supportsAttachments) return SUBMISSION_COPY[locale].attachments;
   // Disconnected catalogs can be empty. Execution validates the saved configuration after restoration.

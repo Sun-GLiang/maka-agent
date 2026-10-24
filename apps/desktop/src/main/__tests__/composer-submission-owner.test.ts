@@ -125,7 +125,7 @@ const row = (id: string): DesktopSessionSummary => ({
 const userTurn = (turnId: string, text: string): StoredMessage => ({ type: 'user', id: `message-${turnId}`, text, turnId, ts: 1 });
 
 /** Gate inputs with a ready executor selected; `overrides` adjust its selection state. */
-function selectedExecutor(overrides: { changing?: boolean; readiness?: 'ready' | 'restorable' | 'restore_failed' | 'restoring'; preparing?: boolean } = {}) {
+function selectedExecutor(overrides: { changing?: boolean; readiness?: 'ready' | 'restorable' | 'restore_failed' | 'restoring' } = {}) {
   const { readiness = 'ready', ...state } = overrides;
   const gateInputs = stubComposerGateInputs();
   gateInputs.executorComposer.selection = {
@@ -341,11 +341,10 @@ describe('ComposerSubmissionProvider', () => {
       const submitted: unknown[] = [];
       const saved = deferred<Awaited<ReturnType<ComposerSubmissionServices['submitMessage']>>>();
       const h = harness({
-        gateInputs: selectedExecutor({ readiness, preparing: readiness === 'restoring' }),
+        gateInputs: selectedExecutor({ readiness }),
         newTask: {
           executorSelection: { executorId: 'codex', configuration: { model: 'saved-model' } },
           executorEntry: { readiness, supportsAttachments: false, models: [] },
-          executorPreparing: readiness === 'restoring',
         },
         services: {
           submitMessage: async (sessionId, _placement, command) => {

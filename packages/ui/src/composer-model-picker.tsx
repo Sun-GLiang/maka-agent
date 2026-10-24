@@ -57,8 +57,6 @@ export interface ComposerExecutorPicker {
   fixed?: boolean;
   /** Restore the external connection during execution without a manual recovery prompt. */
   restoreOnSend?: boolean;
-  /** Begin speculative restoration on user input; never waits for it to finish. */
-  onPrepare?(): void;
   disabled?: boolean;
   loading?: boolean;
   error?: string;
@@ -170,7 +168,7 @@ export function ComposerExecutorRecovery(props: {
   useEffect(() => () => props.onPendingChange?.(false), [props.onPendingChange]);
   const entries = executor.catalog.filter(entry => entry.readiness !== 'ready'
     && (!executor.fixed || entry.id === executor.selection?.executorId)
-    && !(executor.restoreOnSend && ['restorable', 'restoring', 'restore_failed'].includes(entry.readiness)));
+    && !(executor.restoreOnSend && ['restorable', 'restoring'].includes(entry.readiness)));
   const restore = async () => {
     if (pending || disabled || !executor.onRestore) return;
     setPending(true);

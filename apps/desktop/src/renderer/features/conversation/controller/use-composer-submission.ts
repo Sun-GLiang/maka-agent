@@ -132,7 +132,6 @@ export function useComposerSubmission<Owner extends ComposerSurfaceOwner>(input:
     pendingNewChatThinkingLevel: newTask.thinkingLevel,
     executorSelection: newTask.executorSelection,
     executorEntry: newTask.executorEntry,
-    executorPreparing: newTask.executorPreparing,
     newChatPermissionChoice: newTask.permissionChoice,
     clearNewChatPermissionChoice: newTask.clearPermissionChoice,
     newChatCollaborationMode: newTask.collaborationMode,

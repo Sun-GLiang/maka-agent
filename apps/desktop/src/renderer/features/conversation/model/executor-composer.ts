@@ -17,14 +17,13 @@
  * under the License.
  */
 
-import { canExecuteExistingConversation } from '@maka/core/executor-catalog';
+import { canSubmitToExecutor } from './executor-submission.js';
 import type { ComposerProps } from '@maka/ui';
 import type { useExecutorSelection } from '../controller/use-executor-selection.js';
 
 export function executorComposerProps(
   executor: Pick<ReturnType<typeof useExecutorSelection>,
-    'catalog' | 'selection' | 'entry' | 'changing' | 'loading' | 'error' | 'select' | 'restore' | 'refresh'> &
-    Partial<Pick<ReturnType<typeof useExecutorSelection>, 'prepare' | 'preparing'>>,
+    'catalog' | 'selection' | 'entry' | 'changing' | 'loading' | 'error' | 'select' | 'restore' | 'refresh'>,
   input: {
     activeId: string | undefined;
     turnActive: boolean;
@@ -37,8 +36,7 @@ export function executorComposerProps(
   },
 ): Pick<ComposerProps, 'executorPicker' | 'sendBlocked' | 'noModelConnection'> {
   const fixed = !!input.activeId;
-  const canSend = fixed ? canExecuteExistingConversation(executor.entry?.readiness) ||
-    (executor.preparing && executor.entry?.readiness === 'restoring') : executor.entry?.readiness === 'ready';
+  const canSend = canSubmitToExecutor(executor.entry?.readiness, fixed);
   return {
     executorPicker:
       !fixed || executor.selection
@@ -48,8 +46,7 @@ export function executorComposerProps(
             selection: executor.selection,
             fixed,
             restoreOnSend: fixed,
-            onPrepare: fixed && !input.turnActive && !input.taskSubmissionHardBlocked ? executor.prepare : undefined,
-            disabled: executor.changing || executor.preparing || !!input.sendPending || (fixed && input.turnActive),
+            disabled: executor.changing || !!input.sendPending || (fixed && input.turnActive),
             loading: executor.loading,
             error: executor.error,
             onSelect: (selection) => executor.select(selection),

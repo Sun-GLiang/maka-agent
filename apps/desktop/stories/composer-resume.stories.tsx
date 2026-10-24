@@ -137,7 +137,7 @@ const externalRecoveryArgs = {
       supportsModelChange: false, supportsAttachments: false,
       models: [{ id: 'gemini-3.8-flash-high', name: 'gemini-3.8-flash-high' }],
     }],
-    onSelect: fn(), onSetup: fn(), onRetry: fn(), onNewTask: fn(), onRestore: fn(), onPrepare: fn(),
+    onSelect: fn(), onSetup: fn(), onRetry: fn(), onNewTask: fn(), onRestore: fn(),
   },
 } satisfies Partial<React.ComponentProps<typeof Composer>>;
 
@@ -154,9 +154,7 @@ const checkRecoveryLayout: Story['play'] = async ({ canvasElement, args }) => {
   await expect(canvasElement.querySelector('.maka-executor-recovery')).toBeNull();
   const editor = canvasElement.querySelector<HTMLElement>(COMPOSER_INPUT)!;
   await userEvent.click(editor);
-  await expect(args.executorPicker?.onPrepare).not.toHaveBeenCalled();
   await userEvent.type(editor, '继续');
-  await expect(args.executorPicker?.onPrepare).toHaveBeenCalled();
   await expect(args.executorPicker?.onRestore).not.toHaveBeenCalled();
   await expect(canvasElement.querySelector('button[type="submit"]')).not.toHaveAttribute('aria-disabled', 'true');
   await userEvent.clear(editor);
@@ -175,4 +173,26 @@ export const ExternalSessionAutomaticRestore: Story = {
   args: externalRecoveryArgs,
   render: renderExternalRecovery,
   play: checkRecoveryLayout,
+};
+
+// Real path: sending into an external conversation fails to restore its saved configuration.
+export const ExternalSessionRestoreFailed: Story = {
+  args: {
+    ...externalRecoveryArgs,
+    executorPicker: {
+      ...externalRecoveryArgs.executorPicker,
+      catalog: externalRecoveryArgs.executorPicker.catalog.map(entry => ({ ...entry, readiness: 'restore_failed' })),
+    },
+  },
+  render: renderExternalRecovery,
+  play: async ({ canvasElement }) => {
+    const recovery = canvasElement.querySelector<HTMLElement>('.maka-executor-recovery')!;
+    await expect(recovery).toBeVisible();
+    await expect(within(recovery).getByRole('button')).toBeEnabled();
+    const editor = canvasElement.querySelector<HTMLElement>(COMPOSER_INPUT)!;
+    await userEvent.type(editor, '继续');
+    await expect(canvasElement.querySelector('button[type="submit"]')).not.toHaveAttribute('aria-disabled', 'true');
+    const card = canvasElement.querySelector<HTMLElement>('.maka-composer-astryx')!;
+    await expect(card.scrollWidth).toBeLessThanOrEqual(card.clientWidth + 1);
+  },
 };

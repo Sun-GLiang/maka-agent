@@ -1614,8 +1614,6 @@ export const Composer = forwardRef<
   }
 
   function onInputChange(next: string) {
-    if (next.trim() && props.executorPicker?.fixed && props.executorPicker.restoreOnSend)
-      props.executorPicker.onPrepare?.();
     nextPrompt.dismiss();
     applyText(next);
     resetPromptHistoryNavigation();

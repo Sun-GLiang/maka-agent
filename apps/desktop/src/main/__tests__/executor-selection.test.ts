@@ -79,6 +79,8 @@ test('first send carries the selected catalog through inspection and Agent initi
   try {
     await render();
     await act(async () => latest.select({ executorId: 'external', configuration: { model: 'selected' } }));
+    assert.equal(executorSubmissionError(latest.submission, 0, 'en'), undefined,
+      'the actual submission contract must accept the selected Agent before a Session exists');
     const sending = executorComposerProps(latest, { activeId: undefined, turnActive: false, sendPending: true, taskSubmissionHardBlocked: false, connectionCount: 0, onSetup() {}, onNewTask() {} });
     assert.equal(sending.executorPicker?.disabled, true, 'controls lock before Host admission');
     assert.equal(sending.sendBlocked, true, 'Session handoff cannot admit a duplicate first send');
@@ -276,13 +278,13 @@ test('explicit restore confirms the saved model while preserving the current tas
       const input = { activeId: 'saved', turnActive: false, taskSubmissionHardBlocked: false, connectionCount: 0, onSetup() {}, onNewTask() {} };
       const selected = { ...latest, entry: { ...entry, readiness } };
       assert.equal(executorComposerProps(selected, input).sendBlocked,
-        !['ready', 'restorable', 'restore_failed'].includes(readiness));
+        !['ready', 'restorable', 'restore_failed', 'restoring'].includes(readiness));
       assert.equal(executorComposerProps(selected, { ...input, activeId: undefined }).sendBlocked,
         readiness !== 'ready', 'new tasks still require a ready Agent');
       const submission = { executorSelection: latest.selection, executorEntry: { ...entry, readiness, models: [] } };
       if (readiness !== 'ready') {
         assert.equal(executorSubmissionError(submission, 0, 'en', true) === undefined,
-          ['restorable', 'restore_failed'].includes(readiness));
+          ['restorable', 'restore_failed', 'restoring'].includes(readiness));
         assert.ok(executorSubmissionError(submission, 0, 'en'), 'new tasks require discovery');
       }
       assert.ok(executorSubmissionError({ ...submission, executorEntry: { ...submission.executorEntry, supportsAttachments: false } }, 1, 'en', true));
@@ -299,66 +301,6 @@ test('explicit restore confirms the saved model while preserving the current tas
     assert.equal(latest.selection?.executorId, 'external');
   } finally {
     await act(async () => root.unmount());
-    for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); }
-  }
-});
-
-for (const outcome of ['ready', 'failure', 'navigate'] as const) test(`typing prepares a saved Session once without blocking local sends: ${outcome}`, async () => {
-  const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
-  const values = { document, window, HTMLElement: window.HTMLElement, Node: window.Node, IS_REACT_ACT_ENVIRONMENT: true };
-  const originals = new Map(Object.keys(values).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
-  for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
-  const root = createRoot(document.getElementById('root')!);
-  let latest!: ReturnType<typeof useExecutorSelection>;
-  let readiness: ExecutorCatalogEntry['readiness'] = 'restorable';
-  let settle!: () => void;
-  const confirmation = new Promise<void>(resolve => { settle = resolve; });
-  const writes: string[] = [];
-  const services = {
-    subscribeChanges: () => () => {},
-    newTasks: { subscribeChanges: () => () => {} },
-    sessions: {
-      getExecutorState: async () => [{ ...entry, readiness, currentModel: 'selected' }],
-      setExecutorModelConfiguration: async (id: string, config: { model?: string }) => {
-        writes.push(id); readiness = 'restoring'; await confirmation;
-        readiness = outcome === 'failure' ? 'restore_failed' : 'ready';
-        if (outcome === 'failure') throw new Error('Agent offline');
-        return { ok: true, session: { executorConfig: config } };
-      },
-    },
-  } as unknown as ConversationServices;
-  function Probe({ id }: { id: string }) {
-    latest = useExecutorSelection({ key: id, cwd: '/fixture',
-      session: { id, executorId: 'external', executorConfig: { model: 'selected' } } as SessionSummary });
-    return null;
-  }
-  const render = (id: string) => root.render(createElement(ConversationServicesProvider, { services, children: createElement(Probe, { id }) }));
-  try {
-    await act(async () => render('saved'));
-    assert.deepEqual(writes, [], 'viewing history never starts restoration');
-    await act(async () => { latest.prepare(); latest.prepare(); });
-    await act(async () => latest.refresh());
-    assert.deepEqual(writes, ['saved']);
-    assert.equal(latest.preparing, true);
-    assert.equal(latest.changing, false);
-    const gates = executorComposerProps(latest, { activeId: 'saved', turnActive: false, taskSubmissionHardBlocked: false, connectionCount: 0, onSetup() {}, onNewTask() {} });
-    assert.equal(gates.sendBlocked, false);
-    assert.equal(gates.executorPicker?.disabled, true, 'model changes wait for preparation');
-    assert.equal(executorSubmissionError(latest.submission, 0, 'en', true), undefined);
-    assert.ok(executorSubmissionError({ ...latest.submission, executorPreparing: false }, 0, 'en', true), 'unowned restoration cannot bypass the send gate');
-    if (outcome === 'navigate') await act(async () => render('other'));
-    await act(async () => { settle(); await confirmation; });
-    assert.equal(latest.preparing, false);
-    assert.equal(latest.error, undefined, 'speculative failures do not interrupt typing');
-    if (outcome !== 'navigate') {
-      assert.equal(latest.entry?.readiness, outcome === 'ready' ? 'ready' : 'restore_failed');
-      await act(async () => latest.prepare());
-      assert.deepEqual(writes, ['saved'], 'typing never loops restoration after completion or failure');
-    } else {
-      assert.equal(latest.entry?.readiness, 'restoring', 'late preparation cannot replace the newly selected Session');
-    }
-  } finally {
-    settle(); await act(async () => root.unmount());
     for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); }
   }
 });
