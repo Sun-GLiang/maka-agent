@@ -64,6 +64,8 @@ export interface ConversationServices extends Pick<
     writeEnabled(enabled: boolean): void;
   };
   readonly sessions: {
+    /** Last inspected snapshot, scoped to the full Host-qualified Session ID. */
+    readCachedExecutorState?(sessionId: string): readonly import('@maka/core/executor-catalog').ExecutorCatalogEntry[] | undefined;
     getExecutorState?(sessionId: string): Promise<readonly import('@maka/core/executor-catalog').ExecutorCatalogEntry[]>;
     setExecutorModelConfiguration?(sessionId: string, config: import('@maka/core/executor-catalog').ExecutorConfiguration): Promise<import('../../../shared/desktop-session-projection.js').DesktopSessionUpdateResult<DesktopSessionSummary>>;
     readSnapshot(sessionId: string, options?: { readonly maxChars?: number }): Promise<SessionSnapshot>;

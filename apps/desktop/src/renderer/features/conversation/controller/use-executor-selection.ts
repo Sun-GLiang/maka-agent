@@ -119,7 +119,9 @@ export function useExecutorSelection(input: {
         return;
       }
       if (!sessionId && (!input.target || !input.cwd)) return;
-      const inherited = handoff.current?.key === key ? handoff.current : undefined;
+      const cached = sessionId ? services.sessions.readCachedExecutorState?.(sessionId) : undefined;
+      const inherited = handoff.current?.key === key ? handoff.current
+        : cached ? { key, catalog: cached, loading: false } : undefined;
       setSnapshot((previous) => {
         const seed = previous?.key === key ? previous : inherited;
         // Polling and Session events revalidate every settled state silently,
@@ -172,7 +174,7 @@ export function useExecutorSelection(input: {
         if (current.current === key && revision.current === attempt)
           setSnapshot(previous => ({
             key,
-            catalog: previous?.key === key ? previous.catalog : [],
+            catalog: previous?.key === key ? previous.catalog : inherited?.catalog ?? [],
             loading: false,
             loadingIds: [],
             error: error instanceof Error ? error.message : 'Executor unavailable',
@@ -249,7 +251,9 @@ export function useExecutorSelection(input: {
       confirmed.configuration.mode === input.session?.executorConfig?.mode)
       setConfirmed(undefined);
   }, [key, confirmed, input.session?.executorConfig?.model, input.session?.executorConfig?.mode]);
-  const currentSnapshot = snapshot?.key === key ? snapshot : handoff.current?.key === key ? handoff.current : undefined;
+  const cached = sessionId ? services.sessions.readCachedExecutorState?.(sessionId) : undefined;
+  const currentSnapshot = snapshot?.key === key ? snapshot : handoff.current?.key === key ? handoff.current
+    : cached ? { key, catalog: cached, loading: false } : undefined;
   const catalog = currentSnapshot?.catalog ?? [];
   const inspected = catalog.find(candidate => candidate.id === executorId);
   // The catalog describes observed Agent state. The saved Session config is the
