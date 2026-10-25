@@ -28,6 +28,7 @@ import {
 } from 'react';
 import type { ArtifactBinaryReadResult } from '@maka/core/artifacts';
 import { mediaImageSource } from './media-image-source.js';
+import { decideImageReadOutcome } from './artifact-preview-registry.js';
 
 /** Host capability for reading bytes from the Runtime Host attachment authority. */
 export type ReadAttachmentBytes = (
@@ -35,9 +36,11 @@ export type ReadAttachmentBytes = (
   artifactId: string,
 ) => Promise<ArtifactBinaryReadResult>;
 
+type LoadedImage = { src?: string; limited?: boolean };
+
 type SessionAttachmentContextValue = {
   sessionId: string;
-  loadImage: (sessionId: string, artifactId: string, retry?: boolean) => Promise<string | undefined>;
+  loadImage: (sessionId: string, artifactId: string, retry?: boolean) => Promise<LoadedImage>;
 };
 
 const SessionAttachmentContext = createContext<SessionAttachmentContextValue | undefined>(undefined);
@@ -52,31 +55,36 @@ export function SessionAttachmentProvider(props: {
     () => {
       const readBytes = props.readBytes;
       if (!readBytes) return undefined;
-      const pending = new Map<string, Promise<string | undefined>>();
-      const ready = new Map<string, string>();
+      const pending = new Map<string, Promise<LoadedImage>>();
+      const ready = new Map<string, LoadedImage>();
       let readyChars = 0;
       return {
         sessionId: props.sessionId,
         loadImage(sessionId: string, artifactId: string, retry = false) {
           const key = `${sessionId}\0${artifactId}`;
-          if (retry) { const previous = ready.get(key); if (previous) readyChars -= previous.length; ready.delete(key); }
+          if (retry) { readyChars -= ready.get(key)?.src?.length ?? 0; ready.delete(key); }
           const cached = ready.get(key);
           if (cached) { ready.delete(key); ready.set(key, cached); return Promise.resolve(cached); }
           const existing = pending.get(key);
           if (existing) return existing;
           const loaded = readBytes(sessionId, artifactId)
-            .then(mediaImageSource)
-            .then(source => {
-              if (source) {
-                ready.set(key, source); readyChars += source.length;
+            .then(async (result): Promise<LoadedImage> => {
+              const outcome = decideImageReadOutcome(result);
+              return outcome.kind === 'image'
+                ? { src: await mediaImageSource(result) }
+                : { limited: outcome.reason === 'oversize' };
+            })
+            .then(image => {
+              if (image.src) {
+                ready.set(key, image); readyChars += image.src.length;
                 while (ready.size > 32 || readyChars > 8 * 1024 * 1024) {
                   const oldest = ready.keys().next().value!;
-                  readyChars -= ready.get(oldest)!.length; ready.delete(oldest);
+                  readyChars -= ready.get(oldest)?.src?.length ?? 0; ready.delete(oldest);
                 }
               }
-              return source;
+              return image;
             })
-            .catch(() => undefined);
+            .catch((): LoadedImage => ({}));
           pending.set(key, loaded);
           void loaded.finally(() => {
             if (pending.get(key) === loaded) pending.delete(key);
@@ -132,7 +140,7 @@ export function useAttachmentImage(ref: {
     let cancelled = false;
     request.loadImage(request.sessionId, request.artifactId, request.attempt > 0)
       .then((loaded) => {
-        if (!cancelled) setResult({ request, status: loaded ? 'ready' : 'failed', src: loaded });
+        if (!cancelled) setResult({ request, status: loaded.src ? 'ready' : 'failed', src: loaded.src });
       });
     return () => {
       cancelled = true;

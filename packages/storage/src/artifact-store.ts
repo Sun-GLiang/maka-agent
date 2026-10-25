@@ -17,7 +17,6 @@
  * under the License.
  */
 
-import { prepareSvgPreview, isSvgPreviewCandidate } from '@maka/core/svg-preview';
 import { assertImageArchiveQuota, planImageArchive } from './artifact-image-storage.js';
 import {
   DEFAULT_IMAGE_ARCHIVE_LIMITS,
@@ -29,6 +28,7 @@ import {
   type ImageArchiveLimits,
 } from '@maka/core/image-delivery';
 import { createHash, randomUUID } from 'node:crypto';
+import { prepareSvgPreview, isSvgPreviewCandidate } from '@maka/core/svg-preview';
 import { isDeepStrictEqual } from 'node:util';
 import { type BigIntStats, constants as fsConstants } from 'node:fs';
 import {

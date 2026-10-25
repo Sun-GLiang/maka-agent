@@ -23,6 +23,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, realpath, rm, writeFile, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { ARTIFACT_IMAGE_PREVIEW_MAX_BYTES as AVATAR_IMAGE_PREVIEW_MAX_BYTES } from '@maka/core/artifacts';
 import { readWorkspaceFile, validateImageBytes } from '../image-file.js';
 import { LocalWorkspaceExecutor } from '../workspace-executor.js';
 import { executeFilesystemOperation } from '../filesystem-worker/operations.js';
@@ -61,7 +62,7 @@ test('avatars retain raster-only admission and preview limits independently of c
   assert.throws(() => validateImageBytes(svg, 'avatar'), /not a supported/);
   assert.equal(validateImageBytes(WIDE_PNG, 'avatar').mimeType, 'image/png');
   assert.throws(
-    () => validateImageBytes(Buffer.alloc(ARTIFACT_IMAGE_PREVIEW_MAX_BYTES + 1), 'avatar'),
+    () => validateImageBytes(Buffer.alloc(AVATAR_IMAGE_PREVIEW_MAX_BYTES + 1), 'avatar'),
     /Image exceeds/,
   );
   for (const [width, height] of [

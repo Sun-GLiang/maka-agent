@@ -30,6 +30,7 @@ import {
 } from '@maka/core/attachments';
 import { prepareSvgPreview, isSvgPreviewCandidate } from '@maka/core/svg-preview';
 import { ARTIFACT_IMAGE_PREVIEW_MAX_BYTES } from '@maka/core/artifacts';
+import { IMAGE_ARCHIVE_MAX_BYTES } from '@maka/core/image-delivery';
 
 export interface WorkspaceFileReadOptions {
   imagePurpose?: 'chat';
@@ -78,7 +79,7 @@ export async function readWorkspaceFile(
     if (options.imagePurpose === 'chat') {
       const size = await file.stat();
       if (!size.isFile()) throw new Error('Image path is not a file.');
-      if (size.size > ARTIFACT_IMAGE_PREVIEW_MAX_BYTES) throw imageTooLargeError('chat');
+      if (size.size > IMAGE_ARCHIVE_MAX_BYTES) throw imageTooLargeError('chat');
       return validateImageBytes(await file.readFile({ signal: options.abortSignal }), 'chat');
     }
     const prefix = Buffer.alloc(ATTACHMENT_MIME_SNIFF_BYTES);
@@ -104,7 +105,12 @@ export function validateImageBytes(
   mimeType: ImageMimeType;
 } {
   if (
-    bytes.length > (purpose === 'model' ? MAX_READ_IMAGE_BYTES : ARTIFACT_IMAGE_PREVIEW_MAX_BYTES)
+    bytes.length >
+    (purpose === 'chat'
+      ? IMAGE_ARCHIVE_MAX_BYTES
+      : purpose === 'avatar'
+        ? ARTIFACT_IMAGE_PREVIEW_MAX_BYTES
+        : MAX_READ_IMAGE_BYTES)
   )
     throw imageTooLargeError(purpose);
   const mimeType = sniffImageMime(bytes);
@@ -156,9 +162,11 @@ export function validateImageBytes(
 function imageTooLargeError(purpose: 'model' | 'chat' | 'avatar' = 'model'): Error {
   return new ImageFileError(
     'ERR_IMAGE_TOO_LARGE',
-    purpose !== 'model'
-      ? 'Image exceeds a chat preview limit (2 MiB, 16384px per edge, or 32 megapixels); resize it before publishing.'
-      : READ_IMAGE_TOO_LARGE_MESSAGE,
+    purpose === 'avatar'
+      ? 'Avatar exceeds a preview limit (2 MiB, 16384px per edge, or 32 megapixels).'
+      : purpose === 'chat'
+        ? `Image exceeds a chat archive limit (${IMAGE_ARCHIVE_MAX_BYTES / (1024 * 1024)} MiB, 16384px per edge, or 32 megapixels); resize it before publishing.`
+        : READ_IMAGE_TOO_LARGE_MESSAGE,
   );
 }
 
