@@ -95,7 +95,9 @@ function ImageResource(props: { src: string; redacted: boolean; alt: string; inl
   }, [visible]);
   const resource = useChatImageResource({ source: props.src, redacted: props.redacted, visible });
   const state = resource.presentation;
-  const message = state.kind === 'loading' ? copy.imageLoading
+  const [openFailed, setOpenFailed] = useState(false);
+  const message = state.kind === 'saved_without_preview' ? (openFailed ? copy.imageOpenSavedFailed : copy.imageSavedWithoutPreview)
+    : state.kind === 'loading' ? copy.imageLoading
     : state.kind === 'failed' ? state.reason === 'saved_bytes' ? copy.imageLoadFailed : copy.imageArchiveFailure(state.reason)
     : state.kind === 'unavailable' ? {
       attachment: copy.imageUnavailable,
@@ -104,12 +106,15 @@ function ImageResource(props: { src: string; redacted: boolean; alt: string; inl
       unsupported: copy.imageUnsupported,
     }[state.reason] : undefined;
   const actions = <span className="maka-markdown-image-actions">
+    {resource.openSaved && <Button variant="ghost" size="sm" label={copy.imageOpenSaved} onClick={() => {
+      void resource.openSaved!().then(result => setOpenFailed(!result.ok), () => setOpenFailed(true));
+    }} />}
     {resource.retry && <Button variant="ghost" size="sm" label={copy.imageRetry} onClick={resource.retry} />}
     {resource.openSource && <Link href={resource.openSource} isExternalLink type="inherit" hasUnderline>{copy.imageOpen}</Link>}
   </span>;
   return <span ref={anchor} className={`maka-markdown-image-resource ${props.inline ? 'maka-markdown-image-inline' : 'maka-markdown-image-block'}`}
     data-maka-image-state={state.kind === 'failed' ? 'failed' : state.kind === 'ready' ? 'ready' : 'loading'}>
-    {message && props.inline ? <Tooltip content={message}>
+    {message && props.inline && state.kind !== 'saved_without_preview' ? <Tooltip content={message}>
       <span className="maka-markdown-image-placeholder" role="status" aria-label={message}>
         {resource.retry
           ? <IconButton icon={<RotateCw size={14} />} size="sm" label={copy.imageRetry} onClick={resource.retry} />
@@ -119,7 +124,7 @@ function ImageResource(props: { src: string; redacted: boolean; alt: string; inl
     </Tooltip> : message ? <span className="maka-markdown-image-placeholder">
       {props.alt && <span className="maka-markdown-image-caption">{props.alt}</span>}
       <span role="status">{state.kind === 'loading' && <Spinner size="sm" shade="subtle" aria-hidden="true" />} {message}</span>
-      {state.kind === 'failed' && actions}
+      {(state.kind === 'failed' || state.kind === 'saved_without_preview') && actions}
     </span> : state.kind === 'ready' && <DisplayImage key={`${state.src}\0${resource.attempt}`} src={state.src} alt={props.alt} onError={resource.onDecodeError} />}
     {state.kind === 'unavailable' && resource.openSource && actions}
   </span>;

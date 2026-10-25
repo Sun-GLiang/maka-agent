@@ -3283,6 +3283,61 @@ test('repeated ACP tool snapshots retain their image without exhausting the medi
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+test('a seven MiB ACP image reaches Host publication', async () => {
+  const fixture = await executableFixture();
+  const protocol = fakeProtocol();
+  const executor = new AcpExecutor(
+    adapter,
+    { executable: fixture.executable },
+    { createConnection: protocol.factory },
+  );
+  const events: import('@maka/runtime/plugin-executor-service').PluginExecutorOutputEvent[] = [];
+  let publications = 0;
+  try {
+    const result = await executor.execute(request('repeated-image'), {
+      ...executorContext(events),
+      requestPermission: async () => {
+        // Base64 expansion must not make a valid original exceed the wire budget.
+        for (let i = 0; i < 1; i++)
+          protocol.notifyUpdate({
+            sessionUpdate: i === 0 ? 'tool_call' : 'tool_call_update',
+            toolCallId: 'draw',
+            title: 'Draw',
+            status: i === 0 ? 'completed' : 'in_progress',
+            content: [
+              {
+                type: 'content',
+                content: {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: Buffer.alloc(7 * 1024 * 1024).toString('base64'),
+                },
+              },
+            ],
+          });
+        return { outcome: 'selected', optionId: 'allow_once' };
+      },
+      publishMedia: async () => {
+        publications++;
+        return {
+          kind: 'image',
+          mimeType: 'image/png',
+          ref: { kind: 'session_file', sessionId: 'session-a', relativePath: 'saved-image' },
+        };
+      },
+    });
+    assert.equal(result.status, 'completed');
+    assert.equal(publications, 1);
+    const output = events.find(
+      (event) => event.type === 'tool_result' && event.toolCallId === 'draw',
+    );
+    assert.ok(output?.type === 'tool_result' && output.content.kind === 'content');
+    assert.equal(output.content.parts[0]?.kind, 'image');
+  } finally {
+    await executor.dispose();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
 
 for (const type of ['image', 'audio'] as const) {
   for (const placement of ['message', 'tool'] as const) {
@@ -3302,13 +3357,13 @@ for (const type of ['image', 'audio'] as const) {
           const result = await executor.execute(request('media-limit'), {
             ...executorContext(events),
             requestPermission: async () => {
-              const count = limit === 'count' ? 65 : limit === 'bytes' ? 5 : 1;
+              const count = limit === 'count' ? 65 : limit === 'bytes' ? 7 : 1;
               for (let i = 0; i < count; i++) {
                 const content = {
                   type,
                   mimeType: type === 'image' ? 'image/png' : 'audio/wav',
                   data: Buffer.alloc(
-                    limit === 'count' ? 3 : limit === 'bytes' ? 1.5 * 1024 * 1024 : 3 * 1024 * 1024,
+                    limit === 'count' ? 3 : limit === 'bytes' ? 1.5 * 1024 * 1024 : 9 * 1024 * 1024,
                     i,
                   ).toString('base64'),
                 };
@@ -3336,7 +3391,7 @@ for (const type of ['image', 'audio'] as const) {
           });
           assert.equal(
             publications,
-            type === 'audio' ? 0 : limit === 'count' ? 64 : limit === 'bytes' ? 3 : 0,
+            type === 'audio' ? 0 : limit === 'count' ? 64 : limit === 'bytes' ? 5 : 0,
           );
           assert.ok(result.status === 'completed');
           assert.match(

@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { IMAGE_ARCHIVE_MAX_BYTES } from './image-delivery.js';
 import type { StorageRef } from './events.js';
 import { isCanonicalArtifactEntityId } from './artifacts.js';
 import { formatAttachmentResourceRef } from './attachments.js';
@@ -32,7 +33,7 @@ export type SessionContentPart =
   | { kind: 'file_diff'; paths: string[]; diff: string };
 
 export const SESSION_CONTENT_MAX_PARTS = 64;
-export const SESSION_MEDIA_MAX_BYTES = 2 * 1024 * 1024;
+export const SESSION_MEDIA_MAX_BYTES = IMAGE_ARCHIVE_MAX_BYTES;
 export const SESSION_MEDIA_MAX_BASE64 = 4 * Math.ceil(SESSION_MEDIA_MAX_BYTES / 3);
 
 export function isSessionMediaInput(value: unknown): value is SessionMediaInput {

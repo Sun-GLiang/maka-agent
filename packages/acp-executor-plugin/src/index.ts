@@ -1187,7 +1187,7 @@ export class AcpExecutor implements PluginExecutorProvider {
           const key = createHash('sha256').update(serialized).digest('hex');
           const existing = active.media.get(key);
           if (existing) return existing;
-          if (active.media.size >= 64 || active.mediaBytes + size > 8 * 1024 * 1024)
+          if (active.media.size >= 64 || active.mediaBytes + size > 12 * 1024 * 1024)
             return { type: 'text', text: '[Media omitted: response media limit reached]' };
           active.media.set(key, block);
           active.mediaBytes += size;

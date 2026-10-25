@@ -62,7 +62,7 @@ export interface PluginExecutorBackendInput {
   readonly thinkingLevel?: ThinkingLevel;
   readonly binding: PluginExecutorBinding;
   readonly publishMedia?: (
-    owner: { sessionId: string; turnId: string; messageId: string },
+    owner: { sessionId: string; turnId: string; messageId: string; runId?: string },
     input: import('@maka/core/session-media').SessionMediaInput,
   ) => Promise<import('@maka/core/session-media').SessionContentPart>;
   readonly newId?: () => string;
@@ -218,7 +218,15 @@ export class PluginExecutorBackend implements AgentBackend {
           ...(this.#publishMedia
             ? {
                 onPublishMedia: (media: import('@maka/core/session-media').SessionMediaInput) =>
-                  this.#publishMedia!({ sessionId: this.sessionId, turnId, messageId }, media),
+                  this.#publishMedia!(
+                    {
+                      sessionId: this.sessionId,
+                      turnId,
+                      messageId,
+                      ...(input.runId ? { runId: input.runId } : {}),
+                    },
+                    media,
+                  ),
               }
             : {}),
           onSettled: () => {

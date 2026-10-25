@@ -35,9 +35,13 @@ export type ReadAttachmentBytes = (
   artifactId: string,
 ) => Promise<ArtifactBinaryReadResult>;
 
+type LoadedImage = { src?: string; limited?: boolean };
+export type OpenSavedImage = (sessionId: string, artifactId: string) => Promise<{ ok: boolean }>;
+
 type SessionAttachmentContextValue = {
   sessionId: string;
-  loadImage: (sessionId: string, artifactId: string) => Promise<string | undefined>;
+  openSavedImage?: OpenSavedImage;
+  loadImage: (sessionId: string, artifactId: string) => Promise<LoadedImage>;
 };
 
 const SessionAttachmentContext = createContext<SessionAttachmentContextValue | undefined>(undefined);
@@ -46,15 +50,17 @@ const SessionAttachmentContext = createContext<SessionAttachmentContextValue | u
 export function SessionAttachmentProvider(props: {
   sessionId: string;
   readBytes?: ReadAttachmentBytes;
+  openSavedImage?: OpenSavedImage;
   children: ReactNode;
 }) {
   const value = useMemo(
     () => {
       const readBytes = props.readBytes;
       if (!readBytes) return undefined;
-      const pending = new Map<string, Promise<string | undefined>>();
+      const pending = new Map<string, Promise<LoadedImage>>();
       return {
         sessionId: props.sessionId,
+        openSavedImage: props.openSavedImage,
         loadImage(sessionId: string, artifactId: string) {
           const key = `${sessionId}\0${artifactId}`;
           const existing = pending.get(key);
@@ -63,10 +69,10 @@ export function SessionAttachmentProvider(props: {
             .then((result) => {
               const outcome = decideImageReadOutcome(result);
               return outcome.kind === 'image'
-                ? `data:${outcome.safeMime};base64,${outcome.base64}`
-                : undefined;
+                ? { src: `data:${outcome.safeMime};base64,${outcome.base64}` }
+                : { limited: outcome.reason === 'oversize' };
             })
-            .catch(() => undefined);
+            .catch((): LoadedImage => ({}));
           pending.set(key, loaded);
           void loaded.finally(() => {
             if (pending.get(key) === loaded) pending.delete(key);
@@ -75,7 +81,7 @@ export function SessionAttachmentProvider(props: {
         },
       };
     },
-    [props.readBytes, props.sessionId],
+    [props.readBytes, props.sessionId, props.openSavedImage],
   );
   return (
     <SessionAttachmentContext.Provider value={value}>
@@ -112,24 +118,28 @@ export function useAttachmentImage(ref: {
   );
   const [result, setResult] = useState<{
     request: typeof request;
-    status: 'loading' | 'ready' | 'failed';
+    status: 'loading' | 'ready' | 'failed' | 'limited';
     src?: string;
   }>();
 
   useEffect(() => {
-    if (!request) return;
+    const openSaved = context?.openSavedImage && artifactId && sessionId
+    ? () => context.openSavedImage!(sessionId, artifactId) : undefined;
+  if (!request) return;
     setResult({ request, status: 'loading' });
     let cancelled = false;
     request.loadImage(request.sessionId, request.artifactId)
       .then((loaded) => {
-        if (!cancelled) setResult({ request, status: loaded ? 'ready' : 'failed', src: loaded });
+        if (!cancelled) setResult({ request, status: loaded.src ? 'ready' : loaded.limited ? 'limited' : 'failed', src: loaded.src });
       });
     return () => {
       cancelled = true;
     };
   }, [request]);
 
-  if (!request) return { status: 'unavailable' as const, src: undefined, retry };
-  if (result?.request !== request) return { status: 'loading' as const, src: undefined, retry };
-  return { status: result.status, src: result.src, retry };
+  const openSaved = context?.openSavedImage && artifactId && sessionId
+    ? () => context.openSavedImage!(sessionId, artifactId) : undefined;
+  if (!request) return { status: 'unavailable' as const, src: undefined, retry, openSaved };
+  if (result?.request !== request) return { status: 'loading' as const, src: undefined, retry, openSaved };
+  return { status: result.status, src: result.src, retry, openSaved };
 }
