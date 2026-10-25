@@ -615,7 +615,7 @@ test('copying a conversation carries delivery provenance and saved bytes; it doe
   }
 });
 test('source readers reject unsafe MIME and redirects to private networks', async (t) => {
-  assert.throws(() => checkedChatImage(Buffer.from('<svg><broken')), /unsupported_mime/);
+  assert.throws(() => checkedChatImage(Buffer.from('<svg/>')), /unsupported_mime/);
   const server = createServer((_req, res) => {
     res.writeHead(302, { location: 'http://169.254.169.254/latest/meta-data/' });
     res.end();
@@ -959,22 +959,19 @@ test('executor inline media and Markdown use the same archive, deduplicate and r
     const read = await f.authority.store.readBinaryInSession(owner.sessionId, a.ref.relativePath);
     assert.ok(read.ok);
     if (read.ok) assert.equal(read.base64, PNG.toString('base64'));
-    const file = join(f.root, 'drawing.svg');
-    await writeFile(
-      file,
-      '<!-- generated SVG -->\n<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="red"/></svg>',
-    );
-    const svg = await f.service.publish(owner, { kind: 'source', source: file });
-    assert.equal(svg.kind, 'image');
-    if (svg.kind !== 'image') throw new Error('SVG not published');
-    const svgRead = await f.authority.store.readBinaryInSession(
+    const file = join(f.root, 'drawing.png');
+    await writeFile(file, PNG);
+    const saved = await f.service.publish(owner, { kind: 'source', source: file });
+    assert.equal(saved.kind, 'image');
+    if (saved.kind !== 'image') throw new Error('Image not published');
+    const imageRead = await f.authority.store.readBinaryInSession(
       owner.sessionId,
-      svg.ref.relativePath,
+      saved.ref.relativePath,
     );
-    assert.ok(svgRead.ok);
-    if (svgRead.ok) assert.equal(svgRead.mimeType, 'image/svg+xml');
+    assert.ok(imageRead.ok);
+    if (imageRead.ok) assert.equal(imageRead.mimeType, 'image/png');
     await rm(file);
-    assert.deepEqual(await f.service.publish(owner, { kind: 'source', source: file }), svg);
+    assert.deepEqual(await f.service.publish(owner, { kind: 'source', source: file }), saved);
     assert.equal(f.reads, 1);
     assert.equal(f.leases, 0);
   } finally {

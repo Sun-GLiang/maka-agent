@@ -66,19 +66,6 @@ export function normalizeArtifactImagePreviewMime(
   return ARTIFACT_IMAGE_PREVIEW_MIME_BY_EXTENSION[name.slice(dot).toLowerCase()] ?? null;
 }
 
-/** Display-only formats. Model input admission remains raster-only. */
-export function normalizeMediaPreviewMime(
-  mimeType: string | undefined,
-  name?: string,
-): string | null {
-  if (
-    mimeType?.trim().toLowerCase() === 'image/svg+xml' ||
-    (!mimeType?.trim() && name?.toLowerCase().endsWith('.svg'))
-  )
-    return 'image/svg+xml';
-  return normalizeArtifactImagePreviewMime(mimeType, name);
-}
-
 /** One metadata policy shared by preview admission and renderer presentation. */
 export function resolveArtifactImagePreview(
   input: ArtifactImagePreviewInput,
@@ -90,11 +77,11 @@ export function resolveArtifactImagePreview(
     return { kind: 'unsupported', reason: 'oversize' };
   }
   if (input.mimeType) {
-    return normalizeMediaPreviewMime(input.mimeType)
+    return normalizeArtifactImagePreviewMime(input.mimeType)
       ? { kind: 'image', reason: 'mime_match' }
       : { kind: 'unsupported', reason: 'mime_disallowed' };
   }
-  return normalizeMediaPreviewMime(undefined, input.name)
+  return normalizeArtifactImagePreviewMime(undefined, input.name)
     ? { kind: 'image', reason: 'ext_fallback' }
     : { kind: 'unsupported', reason: 'no_mime_no_ext' };
 }

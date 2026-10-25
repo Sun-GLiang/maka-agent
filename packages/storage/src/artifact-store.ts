@@ -17,7 +17,6 @@
  * under the License.
  */
 
-import { prepareSvgPreview, isSvgPreviewCandidate } from '@maka/core/svg-preview';
 import { assertImageArchiveQuota, planImageArchive } from './artifact-image-storage.js';
 import {
   DEFAULT_IMAGE_ARCHIVE_LIMITS,
@@ -1416,17 +1415,16 @@ function isNotFound(error: unknown): boolean {
 }
 
 function sniffAllowedBinaryMime(bytes: Uint8Array): string | null {
+  // Core owns the binary signatures, shared with the attachment and image-read
+  // paths so the three cannot drift. SVG needs a wider text scan than a fixed
+  // prefix, so it stays local to this reader.
   const sniffed = sniffAttachmentMimeType(bytes);
   if (sniffed) return sniffed;
-  // Share SVG validation with capture and display, including XML declarations/comments.
-  if (isSvgPreviewCandidate(bytes)) {
-    try {
-      prepareSvgPreview(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-      return 'image/svg+xml';
-    } catch {
-      /* Unknown or unsupported file content. */
-    }
-  }
+  const leading = new TextDecoder('utf-8', { fatal: false })
+    .decode(bytes.slice(0, Math.min(bytes.length, 512)))
+    .trimStart();
+  if (/^<svg[\s>]/i.test(leading) || /^<\?xml[\s\S]*<svg[\s>]/i.test(leading))
+    return 'image/svg+xml';
   return null;
 }
 

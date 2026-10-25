@@ -30,14 +30,11 @@
  */
 
 import { MarkdownImage, createMarkdownImagePlugins } from './markdown-image.js';
-import { lazy, Suspense, useCallback, useContext, useMemo, useRef, type ReactNode } from 'react';
+import { useCallback, useContext, useMemo, useRef, type ReactNode } from 'react';
 import {
   Markdown as AstryxMarkdown,
   type MarkdownComponents,
-  type MarkdownAstNode,
-  type MarkdownAstRoot,
 } from '@astryxdesign/core/Markdown';
-import { createMarkdownPlugin, type MarkdownExtensionNode } from '@astryxdesign/core/Markdown/plugins';
 import { Link as AstryxLink } from '@astryxdesign/core/Link';
 import { CodeBlock } from '@astryxdesign/core/CodeBlock';
 import { useTranslator } from '@astryxdesign/core/i18n';
@@ -57,8 +54,6 @@ import {
   prepareMarkdownMath,
 } from './markdown-math.js';
 
-const SvgCodePreview = lazy(() => import('./svg-code-preview.js'));
-
 const BASE_MARKDOWN_COMPONENTS = {
   link: MarkdownLink,
   image: MarkdownImage,
@@ -70,74 +65,52 @@ export const MAX_AUTOMATIC_MERMAID_SOURCE_LENGTH = 4_000;
 export const MAX_AUTOMATIC_MERMAID_TOTAL_SOURCE_LENGTH = 8_000;
 const CODE_BLOCK_COLLAPSIBLE_THRESHOLD = 10;
 const DEFERRED_MERMAID_LANGUAGE = 'makamermaiddeferred';
-const DEFERRED_SVG_LANGUAGE = 'makasvgdeferred';
-export const MAX_AUTOMATIC_SVG_DIAGRAMS = 3;
-export const MAX_AUTOMATIC_SVG_SOURCE_LENGTH = 64 * 1024;
 
-/** Admit XML whose document element looks like SVG; the lazy sanitizer validates
- * the complete document before any preview bytes reach an image element. */
-function isSvgXml(code: string): boolean {
-  let offset = 0;
-  const skipWhitespace = () => {
-    while (offset < code.length && /\s/.test(code[offset]!)) offset++;
-  };
-  skipWhitespace();
-  if (code.startsWith('<?xml', offset) && /\s/.test(code[offset + 5] ?? '')) {
-    const end = code.indexOf('?>', offset + 5);
-    if (end < 0) return false;
-    offset = end + 2;
-    skipWhitespace();
+/**
+ * Mark settled Mermaid fences that exceed the per-document automatic-render
+ * budget. The private language marker survives Astryx parsing without changing
+ * the source shown to the user; the code renderer turns it into an explicit
+ * source + Render action instead of scheduling more main-thread layout work.
+ */
+export function applyMermaidRenderBudget(source: string): string {
+  const lines = source.split('\n');
+  let automaticCount = 0;
+  let automaticSourceLength = 0;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const opening = /^( {0,3})(`{3,}|~{3,})([^\n]*)$/.exec(lines[index] ?? '');
+    if (!opening) continue;
+    const [, indent = '', fence = '', info = ''] = opening;
+    const language = /^([ \t]*)mermaid(?=[ \t]|$)/i.exec(info);
+    if (!language) continue;
+
+    const fenceCharacter = fence[0];
+    if (!fenceCharacter) continue;
+    const closing = new RegExp(`^ {0,3}${fenceCharacter}{${fence.length},}[ \\t]*$`);
+    let closingIndex = index + 1;
+    while (closingIndex < lines.length && !closing.test(lines[closingIndex] ?? '')) {
+      closingIndex += 1;
+    }
+    if (closingIndex >= lines.length) continue;
+
+    const codeLength = lines.slice(index + 1, closingIndex).join('\n').length;
+    const withinBudget =
+      codeLength <= MAX_AUTOMATIC_MERMAID_SOURCE_LENGTH
+      && automaticCount < MAX_AUTOMATIC_MERMAID_DIAGRAMS
+      && automaticSourceLength + codeLength <= MAX_AUTOMATIC_MERMAID_TOTAL_SOURCE_LENGTH;
+
+    if (withinBudget) {
+      automaticCount += 1;
+      automaticSourceLength += codeLength;
+    } else {
+      const leadingWhitespace = language[1] ?? '';
+      lines[index] = `${indent}${fence}${leadingWhitespace}${DEFERRED_MERMAID_LANGUAGE}${info.slice(language[0].length)}`;
+    }
+    index = closingIndex;
   }
-  // Advance through each comment once; nested regex repetitions can backtrack
-  // exponentially on a long comment-only XML block without an SVG root.
-  while (code.startsWith('<!--', offset)) {
-    const end = code.indexOf('-->', offset + 4);
-    if (end < 0) return false;
-    offset = end + 3;
-    skipWhitespace();
-  }
-  return code.startsWith('<svg', offset) && /[\s/>]/.test(code[offset + 4] ?? '');
+
+  return lines.join('\n');
 }
-
-/** Budget actual code nodes in document order, including blockquotes and lists.
- * Source text stays unchanged, and streaming messages don't install this plugin. */
-export const markdownDiagramPlugin = createMarkdownPlugin({
-  name: 'maka-diagram-previews',
-  apiVersion: 1,
-  transform(document, context) {
-    if (!/mermaid|svg/i.test(context.source)) return document;
-    let svgCount = 0;
-    let svgLength = 0;
-    let mermaidCount = 0;
-    let mermaidLength = 0;
-    const rewrite = (node: MarkdownAstNode<MarkdownExtensionNode>): MarkdownAstNode<MarkdownExtensionNode> => {
-      if (node.type === 'code') {
-        const language = node.lang?.trim().toLowerCase();
-        const svg = language === 'svg' || (language === 'xml' && isSvgXml(node.value));
-        if (!svg && language !== 'mermaid') return node;
-        const size = node.value.length;
-        const withinBudget = svg
-          ? size <= MAX_AUTOMATIC_SVG_SOURCE_LENGTH && svgCount < MAX_AUTOMATIC_SVG_DIAGRAMS
-            && svgLength + size <= 2 * MAX_AUTOMATIC_SVG_SOURCE_LENGTH
-          : size <= MAX_AUTOMATIC_MERMAID_SOURCE_LENGTH && mermaidCount < MAX_AUTOMATIC_MERMAID_DIAGRAMS
-            && mermaidLength + size <= MAX_AUTOMATIC_MERMAID_TOTAL_SOURCE_LENGTH;
-        if (withinBudget) {
-          if (svg) { svgCount++; svgLength += size; }
-          else { mermaidCount++; mermaidLength += size; }
-        }
-        const lang = svg
-          ? withinBudget ? 'svg' : DEFERRED_SVG_LANGUAGE
-          : withinBudget ? 'mermaid' : DEFERRED_MERMAID_LANGUAGE;
-        return lang === node.lang ? node : { ...node, lang };
-      }
-      if (!('children' in node)) return node;
-      const children = node.children.map(rewrite);
-      return children.every((child, index) => child === node.children[index])
-        ? node : { ...node, children } as MarkdownAstNode<MarkdownExtensionNode>;
-    };
-    return rewrite(document) as MarkdownAstRoot<MarkdownExtensionNode>;
-  },
-});
 
 // Whether the prose (not code) of a markdown source is written in Han script.
 // The document `lang` is the UI locale, which says nothing about what the
@@ -183,9 +156,9 @@ export function MarkdownBody(props: {
   );
   const plugins = useMemo(() => [
     markdownCodeLanguagePlugin,
-    ...(props.streaming ? [] : [markdownDiagramPlugin]),
     ...createMarkdownImagePlugins(props.imageDisplay),
-  ], [props.imageDisplay, props.streaming]);
+  ], [props.imageDisplay]);
+  const budgetedText = props.streaming ? props.text : applyMermaidRenderBudget(props.text);
   const density = props.density ?? 'default';
   const components = props.streaming
     ? density === 'compact'
@@ -232,39 +205,39 @@ export function MarkdownBody(props: {
         settledText={props.settledText}
         transformSource={transformMathSource}
       >
-        {props.text}
+        {budgetedText}
       </AstryxMarkdown>
     </div>
   );
 }
 
 function MarkdownCodeDefault(props: { code: string; language?: string }) {
-  return <MarkdownCode {...props} density="default" renderDiagrams />;
+  return <MarkdownCode {...props} density="default" renderMermaid />;
 }
 
 function MarkdownCodeCompact(props: { code: string; language?: string }) {
-  return <MarkdownCode {...props} density="compact" renderDiagrams />;
+  return <MarkdownCode {...props} density="compact" renderMermaid />;
 }
 
 function MarkdownCodeStreamingDefault(props: { code: string; language?: string }) {
-  return <MarkdownCode {...props} density="default" renderDiagrams={false} streaming />;
+  return <MarkdownCode {...props} density="default" renderMermaid={false} streaming />;
 }
 
 function MarkdownCodeStreamingCompact(props: { code: string; language?: string }) {
-  return <MarkdownCode {...props} density="compact" renderDiagrams={false} streaming />;
+  return <MarkdownCode {...props} density="compact" renderMermaid={false} streaming />;
 }
 
 function MarkdownCode(props: {
   code: string;
   language?: string;
   density: 'default' | 'compact';
-  renderDiagrams: boolean;
+  renderMermaid: boolean;
   streaming?: boolean;
 }) {
   const t = useTranslator();
   const tokenizer = useMarkdownCodeTokenizer(props.code, props.language, props.streaming === true);
   const language = props.language?.trim().toLowerCase();
-  if (props.renderDiagrams && (language === 'mermaid' || language === DEFERRED_MERMAID_LANGUAGE)) {
+  if (props.renderMermaid && (language === 'mermaid' || language === DEFERRED_MERMAID_LANGUAGE)) {
     return (
       <MermaidDiagram
         code={props.code}
@@ -272,10 +245,6 @@ function MarkdownCode(props: {
         autoRender={language === 'mermaid'}
       />
     );
-  }
-
-  if (props.renderDiagrams && (language === 'svg' || language === DEFERRED_SVG_LANGUAGE)) {
-    return <Suspense fallback={<CodeBlock code={props.code} language="svg" width="100%" />}><SvgCodePreview code={props.code} autoRender={language === 'svg'} /></Suspense>;
   }
 
   const codeLines = props.code.split('\n');

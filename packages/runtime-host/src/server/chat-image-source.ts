@@ -39,12 +39,9 @@ export interface ChatImageBytes {
   readonly bytes: Uint8Array;
   readonly mimeType: string;
 }
-export function checkedChatImage(
-  bytes: Uint8Array,
-  purpose: 'chat' | 'avatar' = 'chat',
-): ChatImageBytes {
+export function checkedChatImage(bytes: Uint8Array): ChatImageBytes {
   try {
-    return validateImageBytes(bytes, purpose);
+    return validateImageBytes(bytes, 'chat');
   } catch (error) {
     if (!(error instanceof ImageFileError)) throw error;
     throw new ImageSourceError(imageFileFailureReason(error));
@@ -80,7 +77,7 @@ export async function downloadChatImage(
       const response = await fetch(url, {
         targetPolicy: 'public',
         signal,
-        headers: { accept: 'image/png,image/jpeg,image/webp,image/gif,image/svg+xml' },
+        headers: { accept: 'image/png,image/jpeg,image/webp,image/gif' },
         redirect: 'manual',
         credentials: 'omit',
       });

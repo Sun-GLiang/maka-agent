@@ -33,6 +33,7 @@
     "./provider-retry-countdown": "./dist/provider-retry-countdown.js",
     "./message-queue-order": "./dist/message-queue-order.js",
     "./interaction": "./dist/interaction.js",
+    "./session-media": "./dist/session-media.js",
     "./session": "./dist/session.js",
     "./turn-origin": "./dist/turn-origin.js",
     "./session-reference": "./dist/session-reference.js",
@@ -173,9 +174,7 @@
     "./maka-wordmark": "./dist/maka-wordmark.js",
     "./test-only/async-primitives": "./dist/test-only/async-primitives.js",
     "./workhub-action-result": "./dist/workhub-action-result.js",
-    "./workhub-routing": "./dist/workhub-routing.js",
-    "./session-media": "./dist/session-media.js",
-    "./svg-preview": "./dist/svg-preview.js"
+    "./workhub-routing": "./dist/workhub-routing.js"
   },
   "scripts": {
     "clean": "node ../../scripts/clean-paths.mjs dist tsconfig.tsbuildinfo src/model-metadata.generated.ts",
@@ -186,7 +185,6 @@
     "test:dist": "node --test \"dist/**/*.test.js\""
   },
   "dependencies": {
-    "@xmldom/xmldom": "^0.8.15",
     "intl-messageformat": "11.2.15",
     "marked": "18.0.11"
   }
