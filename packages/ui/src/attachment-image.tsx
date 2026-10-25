@@ -60,9 +60,9 @@ export function SessionAttachmentProvider(props: {
       let readyChars = 0;
       return {
         sessionId: props.sessionId,
-        loadImage(sessionId: string, artifactId: string, retry = false) {
+        loadImage(sessionId: string, artifactId: string, _retry = false) {
           const key = `${sessionId}\0${artifactId}`;
-          if (retry) { readyChars -= ready.get(key)?.src?.length ?? 0; ready.delete(key); }
+          if (_retry) { readyChars -= ready.get(key)?.src?.length ?? 0; ready.delete(key); }
           const cached = ready.get(key);
           if (cached) { ready.delete(key); ready.set(key, cached); return Promise.resolve(cached); }
           const existing = pending.get(key);
