@@ -17,10 +17,10 @@
  * under the License.
  */
 
-/** Original files may exceed the renderer preview budget. */
+/** Client-safe delivery contract. No filesystem or networking capabilities live here. */
+/** Original-file admission and renderer preview budgets are separate policies. */
 export const IMAGE_ARCHIVE_MAX_BYTES = 8 * 1024 * 1024;
 
-/** Client-safe delivery contract. No filesystem or networking capabilities live here. */
 export const IMAGE_DELIVERY_IDENTITY_MAX_LENGTH = 512;
 export const IMAGE_DELIVERY_SOURCE_MAX_LENGTH = 4096;
 /** JavaScript string length, shared by stream capture and Markdown consumers. */

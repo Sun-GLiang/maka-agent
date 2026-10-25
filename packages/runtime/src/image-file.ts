@@ -151,7 +151,7 @@ function imageTooLargeError(purpose: 'model' | 'chat' | 'avatar' = 'model'): Err
     purpose === 'avatar'
       ? 'Avatar exceeds a preview limit (2 MiB, 16384px per edge, or 32 megapixels).'
       : purpose === 'chat'
-        ? 'Image exceeds a chat archive limit (8 MiB, 16384px per edge, or 32 megapixels); resize it before publishing.'
+        ? `Image exceeds a chat archive limit (${IMAGE_ARCHIVE_MAX_BYTES / (1024 * 1024)} MiB, 16384px per edge, or 32 megapixels); resize it before publishing.`
         : READ_IMAGE_TOO_LARGE_MESSAGE,
   );
 }

@@ -41,7 +41,7 @@ export type OpenSavedImage = (sessionId: string, artifactId: string) => Promise<
 type SessionAttachmentContextValue = {
   sessionId: string;
   openSavedImage?: OpenSavedImage;
-  loadImage: (sessionId: string, artifactId: string) => Promise<LoadedImage>;
+  loadImage: (sessionId: string, artifactId: string, retry?: boolean) => Promise<LoadedImage>;
 };
 
 const SessionAttachmentContext = createContext<SessionAttachmentContextValue | undefined>(undefined);
@@ -61,7 +61,7 @@ export function SessionAttachmentProvider(props: {
       return {
         sessionId: props.sessionId,
         openSavedImage: props.openSavedImage,
-        loadImage(sessionId: string, artifactId: string) {
+        loadImage(sessionId: string, artifactId: string, _retry = false) {
           const key = `${sessionId}\0${artifactId}`;
           const existing = pending.get(key);
           if (existing) return existing;
@@ -123,12 +123,10 @@ export function useAttachmentImage(ref: {
   }>();
 
   useEffect(() => {
-    const openSaved = context?.openSavedImage && artifactId && sessionId
-    ? () => context.openSavedImage!(sessionId, artifactId) : undefined;
-  if (!request) return;
+    if (!request) return;
     setResult({ request, status: 'loading' });
     let cancelled = false;
-    request.loadImage(request.sessionId, request.artifactId)
+    request.loadImage(request.sessionId, request.artifactId, request.attempt > 0)
       .then((loaded) => {
         if (!cancelled) setResult({ request, status: loaded.src ? 'ready' : loaded.limited ? 'limited' : 'failed', src: loaded.src });
       });
