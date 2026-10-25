@@ -23,7 +23,7 @@ import {
   type SessionContentPart,
 } from '@maka/core/session-media';
 import { checkedChatImage } from './chat-image-source.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ImageFileReadError } from '@maka/runtime/image-file-reader';
 import type { TextCompleteEvent } from '@maka/core/events';
 import {
@@ -51,9 +51,13 @@ import {
   type ChatImageBytes,
 } from './chat-image-source.js';
 
-type DeliveryIdentity = ImageDeliveryIdentity & ImageDeliveryRequest;
+type DeliveryIdentity = ImageDeliveryIdentity &
+  ImageDeliveryRequest & {
+    /** Mutable sources are captured separately for each executor publication. */
+    readonly publicationId?: string;
+  };
 interface DeliveryJob {
-  readonly done: Promise<void>;
+  readonly done: Promise<ImageDeliveryResult | undefined>;
   run(): Promise<void>;
   cancel(): void;
 }
@@ -96,14 +100,22 @@ export class ChatImageDeliveryService {
       input.kind === 'source'
         ? input.source
         : `inline:base64-sha256:${createHash('sha256').update(input.base64, 'ascii').digest('hex')}`;
-    const identity = { ...owner, source, loadRemote: true };
-    const existing = await this.ports.artifacts.findImageDelivery(
-      owner.sessionId,
-      owner.turnId,
-      owner.messageId,
+    const identity: DeliveryIdentity = {
+      ...owner,
       source,
-    );
-    if (existing?.status !== 'ready') {
+      loadRemote: true,
+      ...(input.kind === 'source' ? { publicationId: randomUUID() } : {}),
+    };
+    let saved =
+      input.kind === 'inline'
+        ? await this.ports.artifacts.findImageDelivery(
+            owner.sessionId,
+            owner.turnId,
+            owner.messageId,
+            source,
+          )
+        : undefined;
+    if (saved?.status !== 'ready') {
       // Reserve queue capacity before decoding, including concurrent publishers waiting on metadata.
       if (
         !this.#jobs.has(deliveryKey(identity)) &&
@@ -123,14 +135,8 @@ export class ChatImageDeliveryService {
         return { kind: 'text', text: '[Media unavailable: invalid encoding]' };
       if (!this.#enqueue(identity, bytes))
         return { kind: 'text', text: '[Media unavailable: queue full]' };
-      await this.#jobs.get(deliveryKey(identity))?.done;
+      saved = await this.#jobs.get(deliveryKey(identity))?.done;
     }
-    const saved = await this.ports.artifacts.findImageDelivery(
-      owner.sessionId,
-      owner.turnId,
-      owner.messageId,
-      source,
-    );
     if (saved?.status !== 'ready')
       return {
         kind: 'text',
@@ -198,30 +204,31 @@ export class ChatImageDeliveryService {
     )
       return false;
     this.#inlineBytes += inline?.byteLength ?? 0;
-    let settle!: () => void;
-    const done = new Promise<void>((resolve) => {
+    let settle!: (result?: ImageDeliveryResult) => void;
+    const done = new Promise<ImageDeliveryResult | undefined>((resolve) => {
       settle = resolve;
     });
     const residency = this.ports.acquireResidency();
-    const finish = () => {
+    const finish = (result?: ImageDeliveryResult) => {
       this.#jobs.delete(key);
       this.#inlineBytes -= inline?.byteLength ?? 0;
       residency.release();
-      settle();
+      settle(result);
     };
     const job: DeliveryJob = {
       done,
       cancel: finish,
       run: async () => {
+        let result: ImageDeliveryResult | undefined;
         try {
-          await this.#capture(identity, inline);
+          result = await this.#capture(identity, inline);
         } catch (error) {
           if (!this.#abort.signal.aborted) {
             if (error instanceof ImagePersistenceError) this.ports.persistenceFailed(error.cause);
             else this.ports.presentationFailed(error);
           }
         } finally {
-          finish();
+          finish(result);
         }
       },
     };
@@ -240,15 +247,16 @@ export class ChatImageDeliveryService {
       });
     }
   }
-  async #capture(identity: DeliveryIdentity, inline?: Uint8Array): Promise<void> {
+  async #capture(
+    identity: DeliveryIdentity,
+    inline?: Uint8Array,
+  ): Promise<ImageDeliveryResult | undefined> {
     const { sessionId, turnId, messageId, source } = identity;
-    const existing = await this.ports.artifacts.findImageDelivery(
-      sessionId,
-      turnId,
-      messageId,
-      source,
-    );
-    if (existing?.status === 'ready' || (existing?.status === 'failed' && !identity.retry)) return;
+    const existing = identity.publicationId
+      ? undefined
+      : await this.ports.artifacts.findImageDelivery(sessionId, turnId, messageId, source);
+    if (existing?.status === 'ready' || (existing?.status === 'failed' && !identity.retry))
+      return existing;
     const metadata = { messageId, source };
     const resultId = `chat_image_result_${deliveryKey(identity)}`;
     const publish = async (write: () => Promise<unknown>) =>
@@ -263,8 +271,10 @@ export class ChatImageDeliveryService {
       });
     const publishAttempt = (attempt: ImageDeliveryAttempt) =>
       publish(() => this.ports.artifacts.setImageDeliveryAttempt(identity, attempt));
-    const publishFailure = (reason: ImageDeliveryFailure) =>
-      publishAttempt({ status: 'failed', reason });
+    const publishFailure = async (reason: ImageDeliveryFailure): Promise<ImageDeliveryResult> => {
+      await publishAttempt({ status: 'failed', reason });
+      return { status: 'failed', reason };
+    };
     await publishAttempt({ status: 'pending' });
     if (this.#abort.signal.aborted || !(await this.ports.isPresent(sessionId))) return;
     const readAbort = new AbortController();
@@ -285,15 +295,13 @@ export class ChatImageDeliveryService {
       }
     } catch (error) {
       if (this.#abort.signal.aborted) return;
-      await publishFailure(failureReason(error, source));
-      return;
+      return await publishFailure(failureReason(error, source));
     } finally {
       clearTimeout(deadline);
     }
     if (this.#abort.signal.aborted) return;
     if (signal.aborted) {
-      await publishFailure(failureReason(signal.reason, source));
-      return;
+      return await publishFailure(failureReason(signal.reason, source));
     }
     try {
       await publish(() =>
@@ -311,8 +319,9 @@ export class ChatImageDeliveryService {
       );
     } catch (error) {
       if (!(error instanceof ImageArchiveQuotaError)) throw error;
-      await publishFailure('quota_exceeded');
+      return await publishFailure('quota_exceeded');
     }
+    return { status: 'ready', artifactId: resultId };
   }
   beginDrain(): void {
     this.#closed = true;
@@ -330,7 +339,15 @@ export class ChatImageDeliveryService {
 class ImagePersistenceError extends Error {}
 function deliveryKey(i: DeliveryIdentity): string {
   return createHash('sha256')
-    .update(JSON.stringify([i.sessionId, i.turnId, i.messageId, i.source]))
+    .update(
+      JSON.stringify([
+        i.sessionId,
+        i.turnId,
+        i.messageId,
+        i.source,
+        ...(i.publicationId ? [i.publicationId] : []),
+      ]),
+    )
     .digest('hex');
 }
 function failureReason(error: unknown, source: string): ImageDeliveryFailure {

@@ -3336,7 +3336,7 @@ for (const type of ['image', 'audio'] as const) {
           });
           assert.equal(
             publications,
-            type === 'audio' ? 0 : limit === 'count' ? 64 : limit === 'bytes' ? 4 : 0,
+            type === 'audio' ? 0 : limit === 'count' ? 64 : limit === 'bytes' ? 3 : 0,
           );
           assert.ok(result.status === 'completed');
           assert.match(
@@ -3485,7 +3485,7 @@ for (const placement of ['first', 'last', 'replacement', 'status-only'] as const
   });
 }
 
-test('ACP discards unsupported thought media before the blocked publication queue', async () => {
+test('ACP discards ignored notifications and unused media metadata before the blocked publication queue', async () => {
   if (!global.gc) {
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
@@ -3498,7 +3498,7 @@ test('ACP discards unsupported thought media before the blocked publication queu
         '--expose-gc',
         '--test',
         '--test-reporter=tap',
-        '--test-name-pattern=^ACP discards unsupported thought media before the blocked publication queue$',
+        '--test-name-pattern=^ACP discards ignored notifications and unused media metadata before the blocked publication queue$',
         fileURLToPath(import.meta.url),
       ],
       { timeout: 15_000, env },
@@ -3518,6 +3518,7 @@ test('ACP discards unsupported thought media before the blocked publication queu
   const started = deferred<void>();
   const media = deferred<import('@maka/core/session-media').SessionContentPart>();
   const events: import('@maka/runtime/plugin-executor-service').PluginExecutorOutputEvent[] = [];
+  const publications: import('@maka/core/session-media').SessionMediaInput[] = [];
   const execution = executor.execute(request('thought-media'), {
     ...executorContext(events),
     requestPermission: async () => {
@@ -3531,14 +3532,15 @@ test('ACP discards unsupported thought media before the blocked publication queu
       });
       return { outcome: 'selected', optionId: 'allow_once' };
     },
-    publishMedia: () => {
+    publishMedia: (input) => {
+      publications.push(input);
       started.resolve();
       return media.promise;
     },
   });
   try {
     await started.promise;
-    const refs = Array.from({ length: 65 }, (_, i) => {
+    const refs: WeakRef<object>[] = Array.from({ length: 65 }, (_, i) => {
       const content = {
         type: 'audio',
         mimeType: 'audio/wav',
@@ -3547,6 +3549,27 @@ test('ACP discards unsupported thought media before the blocked publication queu
       protocol.notifyUpdate({ sessionUpdate: 'agent_thought_chunk', content });
       return new WeakRef(content);
     });
+    refs.push(
+      ...Array.from({ length: 4 }, (_, i) => {
+        const content = {
+          type: 'image',
+          mimeType: 'image/png',
+          data: Buffer.alloc(3 * 1024 * 1024, i).toString('base64'),
+        };
+        protocol.notifyUpdate({ sessionUpdate: 'user_message_chunk', content });
+        const metadata = { unused: 'x'.repeat(3 * 1024 * 1024) };
+        const link = {
+          type: 'resource_link',
+          uri: `/tmp/plot-${i}.png`,
+          name: 'plot',
+          mimeType: 'image/png',
+          _meta: metadata,
+          description: 'x'.repeat(3 * 1024 * 1024),
+        };
+        protocol.notifyUpdate({ sessionUpdate: 'agent_message_chunk', content: link });
+        return [new WeakRef(content), new WeakRef(link), new WeakRef(metadata)];
+      }).flat(),
+    );
     let retained = refs.length;
     for (let attempt = 0; attempt < 5 && retained; attempt++) {
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -3560,6 +3583,10 @@ test('ACP discards unsupported thought media before the blocked publication queu
     });
     media.resolve({ kind: 'text', text: 'published' });
     assert.equal((await execution).status, 'completed');
+    assert.deepEqual(
+      publications.slice(1),
+      Array.from({ length: 4 }, (_, i) => ({ kind: 'source', source: `/tmp/plot-${i}.png` })),
+    );
     assert.deepEqual(
       events.filter((event) => event.type === 'thinking_delta'),
       [{ type: 'thinking_delta', text: 'kept thought' }],

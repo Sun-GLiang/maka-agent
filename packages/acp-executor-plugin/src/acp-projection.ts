@@ -29,6 +29,7 @@ import {
   type SessionMediaInput,
   SESSION_CONTENT_MAX_PARTS,
   SESSION_MEDIA_MAX_BYTES,
+  SESSION_MEDIA_MAX_BASE64,
 } from '@maka/core/session-media';
 
 const MAX_EVENT_TEXT = 8_192;
@@ -269,4 +270,43 @@ export async function projectRichToolResult(
     parts.push(normalized);
   }
   return { kind: 'content', parts };
+}
+
+/** Retain only fields used by projection; provider metadata is never queue-owned. */
+export function normalizeQueuedContent(block: ContentBlock): ContentBlock {
+  const omitted: ContentBlock = {
+    type: 'text',
+    text: '[Media omitted: response media limit reached]',
+  };
+  if (block.type === 'text') return { type: 'text', text: block.text };
+  if (block.type === 'image' || block.type === 'audio') {
+    if (block.data.length > SESSION_MEDIA_MAX_BASE64 || block.mimeType.length > 128) return omitted;
+    return { type: block.type, data: block.data, mimeType: block.mimeType };
+  }
+  if (block.type === 'resource_link') {
+    if (
+      block.uri.length > 4096 ||
+      block.name.length > MAX_EVENT_TEXT ||
+      (block.mimeType?.length ?? 0) > 128
+    )
+      return omitted;
+    return {
+      type: 'resource_link',
+      uri: block.uri,
+      name: block.name,
+      ...(block.mimeType ? { mimeType: block.mimeType } : {}),
+    };
+  }
+  const resource = block.resource;
+  if (resource.uri.length > 4096 || (resource.mimeType?.length ?? 0) > 128) return omitted;
+  const payload = 'text' in resource ? resource.text : resource.blob;
+  if (payload.length > SESSION_MEDIA_MAX_BASE64) return omitted;
+  return {
+    type: 'resource',
+    resource: {
+      uri: resource.uri,
+      ...(resource.mimeType ? { mimeType: resource.mimeType } : {}),
+      ...('text' in resource ? { text: resource.text } : { blob: resource.blob }),
+    },
+  };
 }

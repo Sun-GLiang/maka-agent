@@ -971,7 +971,12 @@ test('executor inline media and Markdown use the same archive, deduplicate and r
     assert.ok(imageRead.ok);
     if (imageRead.ok) assert.equal(imageRead.mimeType, 'image/png');
     await rm(file);
-    assert.deepEqual(await f.service.publish(owner, { kind: 'source', source: file }), saved);
+    const replay = await f.authority.store.readBinaryInSession(
+      owner.sessionId,
+      saved.ref.relativePath,
+    );
+    assert.ok(replay.ok);
+    if (replay.ok) assert.equal(replay.base64, PNG.toString('base64'));
     assert.equal(f.reads, 1);
     assert.equal(f.leases, 0);
   } finally {
@@ -1002,6 +1007,93 @@ test('executor publication keeps invalid bytes, quota and network failures out o
     );
     assert.equal(f.leases, 0);
   } finally {
+    await f.close();
+  }
+});
+
+test('separate source publications archive changed bytes in the same turn and keep both references readable', async () => {
+  const f = await fixture();
+  const owner = { sessionId: 'session-1', turnId: 'turn-1', messageId: 'message-1' };
+  const file = join(f.root, 'plot.png');
+  const updated = Buffer.concat([PNG, Buffer.from('second version')]);
+  try {
+    await writeFile(file, PNG);
+    const first = await f.service.publish(owner, { kind: 'source', source: file });
+    await writeFile(file, updated);
+    const second = await f.service.publish(owner, { kind: 'source', source: file });
+    assert.equal(first.kind, 'image');
+    assert.equal(second.kind, 'image');
+    if (first.kind !== 'image' || second.kind !== 'image') throw new Error('Image not published');
+    assert.notEqual(first.ref.relativePath, second.ref.relativePath);
+    assert.equal(f.reads, 2);
+    await rm(file);
+    for (const [part, bytes] of [
+      [first, PNG],
+      [second, updated],
+    ] as const) {
+      const replay = await f.authority.store.readBinaryInSession(
+        owner.sessionId,
+        part.ref.relativePath,
+      );
+      assert.ok(replay.ok);
+      if (replay.ok) assert.equal(replay.base64, bytes.toString('base64'));
+    }
+    assert.equal((await f.service.publish(owner, { kind: 'source', source: file })).kind, 'text');
+    assert.equal(f.leases, 0);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    await f.close();
+  }
+});
+
+test('concurrent source publications return their own archive despite reversed capture order', {
+  timeout: 5000,
+}, async () => {
+  let release!: () => void;
+  let started!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const updated = Buffer.concat([PNG, Buffer.from('second version')]);
+  let reads = 0;
+  const f = await fixture(undefined, async () => {
+    if (++reads === 1) {
+      started();
+      await blocked;
+      return checkedChatImage(PNG);
+    }
+    return checkedChatImage(updated);
+  });
+  const owner = { sessionId: 'session-1', turnId: 'turn-1', messageId: 'message-1' };
+  try {
+    const firstPending = f.service.publish(owner, { kind: 'source', source: '/plot.png' });
+    await firstStarted;
+    const second = await f.service.publish(owner, { kind: 'source', source: '/plot.png' });
+    release();
+    const first = await firstPending;
+    assert.equal(first.kind, 'image');
+    assert.equal(second.kind, 'image');
+    if (first.kind !== 'image' || second.kind !== 'image') throw new Error('Image not published');
+    assert.notEqual(first.ref.relativePath, second.ref.relativePath);
+    for (const [part, bytes] of [
+      [first, PNG],
+      [second, updated],
+    ] as const) {
+      const saved = await f.authority.store.readBinaryInSession(
+        owner.sessionId,
+        part.ref.relativePath,
+      );
+      assert.ok(saved.ok);
+      if (saved.ok) assert.equal(saved.base64, bytes.toString('base64'));
+    }
+    assert.equal(reads, 2);
+    assert.equal(f.leases, 0);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    release();
     await f.close();
   }
 });

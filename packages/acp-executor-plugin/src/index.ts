@@ -17,11 +17,7 @@
  * under the License.
  */
 
-import {
-  sessionContentMarkdown,
-  SESSION_CONTENT_MAX_PARTS,
-  SESSION_MEDIA_MAX_BASE64,
-} from '@maka/core/session-media';
+import { sessionContentMarkdown, SESSION_CONTENT_MAX_PARTS } from '@maka/core/session-media';
 import { createHash } from 'node:crypto';
 import { constants, createReadStream } from 'node:fs';
 import { access, mkdir, mkdtemp, realpath, rm, stat } from 'node:fs/promises';
@@ -66,6 +62,7 @@ import {
   emitToolOutput,
   projectRichToolResult,
   projectContentBlock,
+  normalizeQueuedContent,
   promptText,
   summarizeToolContent,
   toolName,
@@ -1172,26 +1169,22 @@ export class AcpExecutor implements PluginExecutorProvider {
           void this.#acceptUpdate(session, params.update);
           return;
         }
-        // Unsupported thought media has no projection; do not retain it behind a slow image.
+        // Notifications without a live projection must not retain payloads behind slow media.
         if (
-          params.update.sessionUpdate === 'agent_thought_chunk' &&
-          params.update.content.type !== 'text'
+          !['agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update'].includes(
+            params.update.sessionUpdate,
+          ) ||
+          (params.update.sessionUpdate === 'agent_thought_chunk' &&
+            params.update.content.type !== 'text')
         )
           return;
         // Intern repeated snapshots before queuing: only unique media consumes the turn budget.
         const reserve = (block: ContentBlock): ContentBlock => {
+          block = normalizeQueuedContent(block);
           if (block.type === 'text') return block;
-          const size =
-            block.type === 'image' || block.type === 'audio'
-              ? block.data.length
-              : block.type === 'resource'
-                ? 'blob' in block.resource
-                  ? block.resource.blob.length
-                  : block.resource.text.length
-                : 0;
-          if (size > SESSION_MEDIA_MAX_BASE64)
-            return { type: 'text', text: '[Media omitted: response media limit reached]' };
-          const key = createHash('sha256').update(JSON.stringify(block)).digest('hex');
+          const serialized = JSON.stringify(block);
+          const size = Buffer.byteLength(serialized, 'utf8');
+          const key = createHash('sha256').update(serialized).digest('hex');
           const existing = active.media.get(key);
           if (existing) return existing;
           if (active.media.size >= 64 || active.mediaBytes + size > 8 * 1024 * 1024)
@@ -1219,7 +1212,7 @@ export class AcpExecutor implements PluginExecutorProvider {
           update = {
             ...update,
             content: content.map((item) =>
-              item.type === 'content' ? { ...item, content: reserve(item.content) } : item,
+              item.type === 'content' ? { type: 'content', content: reserve(item.content) } : item,
             ),
           };
         }
