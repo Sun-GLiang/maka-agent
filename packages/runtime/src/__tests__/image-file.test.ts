@@ -63,7 +63,7 @@ test('avatars retain raster-only admission and preview limits independently of c
   assert.equal(validateImageBytes(WIDE_PNG, 'avatar').mimeType, 'image/png');
   assert.throws(
     () => validateImageBytes(Buffer.alloc(AVATAR_IMAGE_PREVIEW_MAX_BYTES + 1), 'avatar'),
-    /Image exceeds/,
+    /Avatar exceeds/,
   );
   for (const [width, height] of [
     [16_385, 1],
@@ -72,7 +72,7 @@ test('avatars retain raster-only admission and preview limits independently of c
     const bytes = Buffer.from(ONE_PIXEL_PNG);
     bytes.writeUInt32BE(width!, 16);
     bytes.writeUInt32BE(height!, 20);
-    assert.throws(() => validateImageBytes(bytes, 'avatar'), /Image exceeds/);
+    assert.throws(() => validateImageBytes(bytes, 'avatar'), /Avatar exceeds/);
   }
 });
 
