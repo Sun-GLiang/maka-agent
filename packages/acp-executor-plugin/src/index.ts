@@ -604,8 +604,11 @@ export class AcpExecutor implements PluginExecutorProvider {
         sessionId: session.acpSessionId!,
         prompt: [{ type: 'text', text: promptText(request) }],
       });
+      // Keep observing this owner through media drain, even if prompt has already returned
+      // and the loss handler clears session.owner before the queued media settles.
+      const transportFailed = session.owner!.failed;
       const response = await this.#awaitPrompt(session, prompt, context.signal);
-      await active.updates;
+      await Promise.race([active.updates, transportFailed]);
       if (active.updateError) throw active.updateError;
       if (!response) return { status: 'cancelled', reason: 'timeout' };
       // A settled prompt can be checkpointed even when it was cancelled or failed.
@@ -1168,7 +1171,7 @@ export class AcpExecutor implements PluginExecutorProvider {
         const reserve = (block: ContentBlock): ContentBlock => {
           if (block.type === 'text') return block;
           const size =
-            block.type === 'image'
+            block.type === 'image' || block.type === 'audio'
               ? block.data.length
               : block.type === 'resource'
                 ? 'blob' in block.resource

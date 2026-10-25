@@ -123,3 +123,33 @@ test('static SVG class styles preserve generated diagram colors without external
   assert.match(result, /\.box\{fill:#4355d9;stroke:white\}/);
   assert.doesNotMatch(result, /https:|@import|background/);
 });
+
+test('static SVG styles preserve safe rules around comments and malformed rules', () => {
+  const result = prepareSvgPreview(
+    '<svg><style>/* leading */ .a{fill:/* paint */red} stray } .outer{.b{stroke:blue}} .c{fill:green} /* unterminated .hidden{fill:red}</style><rect class="a"/></svg>',
+  );
+  assert.match(result, /\.a\{fill:red\}/);
+  assert.match(result, /\.b\{stroke:blue\}/);
+  assert.match(result, /\.c\{fill:green\}/);
+  assert.doesNotMatch(result, /stray|outer|hidden|unterminated|leading/);
+});
+
+test('static SVG style parsing stays bounded for long malformed CSS', () => {
+  for (const css of ['x'.repeat(32000), '/*'.repeat(16000)]) {
+    const source =
+      '<svg width="40" height="20">' +
+      `<style>${css}</style>`.repeat(8) +
+      '<rect width="40" height="20" fill="blue"/></svg>';
+    assert.ok(source.length < SVG_PREVIEW_MAX_CHARS);
+    const started = process.cpuUsage();
+    const result = prepareSvgPreview(source);
+    const elapsed = process.cpuUsage(started);
+    // CPU time avoids wall-clock failures under load; the old scanner took seconds.
+    assert.ok(
+      elapsed.user + elapsed.system < 500_000,
+      'Malformed CSS must not consume 500 ms of CPU',
+    );
+    assert.doesNotMatch(result, /<style/);
+    assert.match(result, /fill="blue"/);
+  }
+});

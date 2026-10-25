@@ -74,13 +74,37 @@ function staticDeclarations(source: string): string {
 /** A deliberately small static CSS subset, scoped by the SVG image document. */
 function staticStylesheet(source: string): string {
   if (source.length > 32 * 1024) return '';
-  const css = source.replace(/\/\*[\s\S]*?\*\//g, '');
+  // Advance past each comment once, including an unterminated trailing comment.
+  // Unanchored regex searches can repeatedly rescan malformed CSS suffixes.
+  const segments: string[] = [];
+  let offset = 0;
+  while (offset < source.length) {
+    const start = source.indexOf('/*', offset);
+    if (start === -1) {
+      segments.push(source.slice(offset));
+      break;
+    }
+    segments.push(source.slice(offset, start));
+    const end = source.indexOf('*/', start + 2);
+    if (end === -1) break;
+    offset = end + 2;
+  }
+  const css = segments.join('');
   const rules: string[] = [];
-  for (const match of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    const selector = match[1]!.trim();
-    if (!/^[a-zA-Z_.*#][\w.*# ,>:+-]*$/.test(selector)) continue;
-    const declarations = staticDeclarations(match[2]!);
-    if (declarations) rules.push(`${selector}{${declarations}}`);
+  let start = 0;
+  let selector = '';
+  for (let i = 0; i < css.length; i++) {
+    if (css[i] === '{') {
+      selector = css.slice(start, i).trim();
+      start = i + 1;
+    } else if (css[i] === '}') {
+      if (/^[a-zA-Z_.*#][\w.*# ,>:+-]*$/.test(selector)) {
+        const declarations = staticDeclarations(css.slice(start, i));
+        if (declarations) rules.push(`${selector}{${declarations}}`);
+      }
+      selector = '';
+      start = i + 1;
+    }
   }
   return rules.join('');
 }
