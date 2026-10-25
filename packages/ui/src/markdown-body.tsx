@@ -57,6 +57,8 @@ import {
   prepareMarkdownMath,
 } from './markdown-math.js';
 
+import { SvgCodeSource } from './svg-code-source.js';
+
 const SvgCodePreview = lazy(() => import('./svg-code-preview.js'));
 
 const BASE_MARKDOWN_COMPONENTS = {
@@ -275,7 +277,7 @@ function MarkdownCode(props: {
   }
 
   if (props.renderDiagrams && (language === 'svg' || language === DEFERRED_SVG_LANGUAGE)) {
-    return <Suspense fallback={<CodeBlock code={props.code} language="svg" width="100%" />}><SvgCodePreview code={props.code} autoRender={language === 'svg'} /></Suspense>;
+    return <Suspense fallback={<SvgCodeSource code={props.code} />}><SvgCodePreview code={props.code} autoRender={language === 'svg'} /></Suspense>;
   }
 
   const codeLines = props.code.split('\n');

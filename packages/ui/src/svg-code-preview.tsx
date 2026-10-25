@@ -19,7 +19,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core';
-import { CodeBlock } from '@astryxdesign/core/CodeBlock';
+import { SvgCodeSource } from './svg-code-source.js';
 import { MediaImageDisplay } from './session-media-image.js';
 import { svgPreviewSource } from './media-image-source.js';
 import { getSharedUiCopy } from './shared-ui-copy.js';
@@ -60,7 +60,7 @@ export default function SvgCodePreview(props: { code: string; autoRender?: boole
     </div>}
     {src && !showSource
       ? <MediaImageDisplay src={src} alt="SVG" onError={() => setResult({ code: props.code })} />
-      : <CodeBlock code={props.code} language="svg" highlightMode="spans" width="100%" isCollapsible collapsibleThreshold={10} />}
+      : <SvgCodeSource code={props.code} />}
     {visible && requested && settled && !src && <span role="status">{copy.imageLoadFailed}</span>}
   </div>;
 }

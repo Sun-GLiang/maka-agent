@@ -6,7 +6,7 @@ Generated against `@astryxdesign/core@0.6.3` (195 component exports).
 
 Wiki bar: Design Conventions · API Use-the-System · Theming · Container Padding.
 
-**Totals:** 349 files — blocker 0, reimplementation 0, polish 5, aligned 344.
+**Totals:** 350 files — blocker 0, reimplementation 0, polish 5, aligned 345.
 
 ## Exclusions (explicit)
 
@@ -366,7 +366,8 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | `packages/ui/src/skills-panel.tsx` | module-hub | Button, DropdownMenu, DropdownMenuItem, DropdownMenuSubMenu, EmptyState, IconButton, List, Text, TextInput | aligned — uses Astryx (Button, DropdownMenu, DropdownMenuItem, DropdownMenuSubMenu, EmptyState, IconButton, List, Text) | aligned |
 | `packages/ui/src/status-label.tsx` | ui-composition | HStack, StatusDot, Text | aligned — uses Astryx (HStack, StatusDot, Text) | aligned |
 | `packages/ui/src/styles.css` | ui-composition | n/a (css) | aligned — no off-rhythm control heights flagged | aligned |
-| `packages/ui/src/svg-code-preview.tsx` | ui-composition | Button, CodeBlock | aligned — uses Astryx (Button, CodeBlock) | aligned |
+| `packages/ui/src/svg-code-preview.tsx` | ui-composition | Button | aligned — uses Astryx (Button) | aligned |
+| `packages/ui/src/svg-code-source.tsx` | ui-composition | CodeBlock | aligned — uses Astryx (CodeBlock) | aligned |
 | `packages/ui/src/titlebar-session-identity.tsx` | shell-chrome-or-panel | Button, DropdownMenu, DropdownMenuItem, IconButton | aligned — uses Astryx (Button, DropdownMenu, DropdownMenuItem, IconButton) | aligned |
 | `packages/ui/src/toast.tsx` | ui-composition | AlertDialog, Button, HStack, LayerProvider, Text, VStack | aligned — uses Astryx (AlertDialog, Button, HStack, LayerProvider, Text, VStack) | aligned |
 | `packages/ui/src/tool-activity.tsx` | ui-composition | Banner, Button, ChatToolCalls, List, ListItem, StatusDot, Text, VisuallyHidden | aligned — uses Astryx (Banner, Button, ChatToolCalls, List, ListItem, StatusDot, Text, VisuallyHidden) | aligned |
