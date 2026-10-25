@@ -522,6 +522,24 @@ test('ordinary XML stays source code', async () => {
   } finally { await page.close(); }
 });
 
+test('SVG input complexity falls back to source and a later valid preview recovers', async () => {
+  const page = await pageFor('svg-budget-update');
+  const dense = '<svg>' + '<a/>'.repeat(16000) + '</svg>';
+  assert.ok(dense.length < 64 * 1024, 'exercise the automatic preview path');
+  const replace = code => page.evaluate(value => window.replaceText(value), ['```svg', code, '```'].join('\n'));
+  try {
+    await page.locator('[data-kind="svg-preview"] img').waitFor();
+    await replace(dense);
+    await page.getByRole('status').filter({hasText: 'Could not load the image. Try again.'}).waitFor({timeout: 5000});
+    assert.equal(await page.locator('[data-kind="svg-preview"] img').count(), 0);
+    assert.equal(await page.getByRole('link', {name:'Download SVG'}).count(), 0);
+    assert.ok((await page.locator('[data-kind="svg-preview"]').textContent()).includes(dense), 'Original SVG source remains available');
+    await replace('<svg width="40" height="20"><rect width="40" height="20" fill="blue"/></svg>');
+    await page.waitForFunction(() => document.querySelector('[data-kind="svg-preview"] img')?.naturalWidth === 40);
+    assert.equal(await page.getByRole('status').filter({hasText: 'Could not load the image. Try again.'}).count(), 0);
+  } finally { await page.close(); }
+});
+
 
 test('a changed SVG block rechecks its budget and does not reuse manual admission', async () => {
   const page = await pageFor('svg-budget-update');

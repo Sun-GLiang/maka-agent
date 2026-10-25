@@ -109,6 +109,26 @@ function staticStylesheet(source: string): string {
   return rules.join('');
 }
 
+/** Bound the input before removing nodes: xmldom rebuilds sibling lists on every
+ * removal, so limiting only retained elements leaves discarded content unbounded.
+ * A separate total-node allowance preserves indentation around 4,000 elements. */
+function assertSvgInputComplexity(root: Element): void {
+  const pending: { node: Element; depth: number }[] = [{ node: root, depth: 0 }];
+  let elements = 1;
+  let nodes = 1;
+  while (pending.length) {
+    const { node, depth } = pending.pop()!;
+    for (let child = node.firstChild; child; child = child.nextSibling) {
+      if (++nodes > 2 * SVG_PREVIEW_MAX_NODES)
+        throw new Error('SVG complexity exceeds preview limits');
+      if (child.nodeType !== 1) continue;
+      if (++elements > SVG_PREVIEW_MAX_NODES || depth + 1 > 64)
+        throw new Error('SVG complexity exceeds preview limits');
+      pending.push({ node: child as Element, depth: depth + 1 });
+    }
+  }
+}
+
 /** Static SVG only. Never insert the returned document into the application's DOM. */
 export function prepareSvgPreview(source: string): string {
   if (!source || source.length > SVG_PREVIEW_MAX_CHARS || /<!DOCTYPE|<!ENTITY/i.test(source))
@@ -135,6 +155,7 @@ export function prepareSvgPreview(source: string): string {
     (root.namespaceURI && root.namespaceURI !== NS)
   )
     throw new Error('Invalid SVG document');
+  assertSvgInputComplexity(root);
   // Iterate rather than recurse: pathological nesting cannot exhaust the call stack.
   const pending: { node: Element; depth: number }[] = [{ node: root, depth: 0 }];
   let count = 0;

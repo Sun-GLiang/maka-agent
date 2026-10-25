@@ -17,7 +17,11 @@
  * under the License.
  */
 
-import { sessionContentMarkdown, SESSION_MEDIA_MAX_BASE64 } from '@maka/core/session-media';
+import {
+  sessionContentMarkdown,
+  SESSION_CONTENT_MAX_PARTS,
+  SESSION_MEDIA_MAX_BASE64,
+} from '@maka/core/session-media';
 import { createHash } from 'node:crypto';
 import { constants, createReadStream } from 'node:fs';
 import { access, mkdir, mkdtemp, realpath, rm, stat } from 'node:fs/promises';
@@ -165,6 +169,7 @@ interface ToolSnapshot {
   kind?: ToolCall['kind'];
   status?: ToolCall['status'];
   content: ToolCallContent[];
+  contentTruncated?: boolean;
   rawInput?: unknown;
   rawOutput?: unknown;
   output: string;
@@ -1167,6 +1172,12 @@ export class AcpExecutor implements PluginExecutorProvider {
           void this.#acceptUpdate(session, params.update);
           return;
         }
+        // Unsupported thought media has no projection; do not retain it behind a slow image.
+        if (
+          params.update.sessionUpdate === 'agent_thought_chunk' &&
+          params.update.content.type !== 'text'
+        )
+          return;
         // Intern repeated snapshots before queuing: only unique media consumes the turn budget.
         const reserve = (block: ContentBlock): ContentBlock => {
           if (block.type === 'text') return block;
@@ -1190,24 +1201,32 @@ export class AcpExecutor implements PluginExecutorProvider {
           return block;
         };
         let update = params.update;
+        let contentTruncated = false;
         if (update.sessionUpdate === 'agent_message_chunk')
           update = { ...update, content: reserve(update.content) };
         else if (
           (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') &&
           update.content
-        )
+        ) {
+          // Legacy text/diff results have their own size bound. Only mixed results
+          // consume the part budget, reserving one slot for an explicit omission.
+          contentTruncated =
+            update.content.length > SESSION_CONTENT_MAX_PARTS &&
+            update.content.some((item) => item.type === 'content' && item.content.type !== 'text');
+          const content = contentTruncated
+            ? update.content.slice(0, SESSION_CONTENT_MAX_PARTS - 1)
+            : update.content;
           update = {
             ...update,
-            content: update.content
-              .slice(0, 64)
-              .map((item) =>
-                item.type === 'content' ? { ...item, content: reserve(item.content) } : item,
-              ),
+            content: content.map((item) =>
+              item.type === 'content' ? { ...item, content: reserve(item.content) } : item,
+            ),
           };
+        }
         active.updates = active.updates
           // Admission belongs to notification receipt. A lost connection must not
           // discard updates already accepted for this prompt or target a later prompt.
-          .then(() => this.#acceptPromptUpdate(active, update))
+          .then(() => this.#acceptPromptUpdate(active, update, contentTruncated))
           .catch((error) => {
             active.updateError ??= error;
           });
@@ -1266,7 +1285,11 @@ export class AcpExecutor implements PluginExecutorProvider {
     await this.#acceptPromptUpdate(active, update);
   }
 
-  async #acceptPromptUpdate(active: ActivePrompt, update: SessionUpdate): Promise<void> {
+  async #acceptPromptUpdate(
+    active: ActivePrompt,
+    update: SessionUpdate,
+    contentTruncated = false,
+  ): Promise<void> {
     if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
       active.text += update.content.text;
       emitText(active.context, 'output_delta', update.content.text);
@@ -1284,8 +1307,10 @@ export class AcpExecutor implements PluginExecutorProvider {
       emitText(active.context, 'thinking_delta', update.content.text);
       return;
     }
-    if (update.sessionUpdate === 'tool_call') await this.#acceptTool(active, update);
-    if (update.sessionUpdate === 'tool_call_update') await this.#acceptTool(active, update);
+    if (update.sessionUpdate === 'tool_call')
+      await this.#acceptTool(active, update, contentTruncated);
+    if (update.sessionUpdate === 'tool_call_update')
+      await this.#acceptTool(active, update, contentTruncated);
   }
 
   #assertWorkspaceAccess(session: RetainedSession, sessionId: string): void {
@@ -1298,8 +1323,12 @@ export class AcpExecutor implements PluginExecutorProvider {
     }
   }
 
-  async #acceptTool(active: ActivePrompt, update: ToolCall | ToolCallUpdate): Promise<void> {
-    const snapshot = active.tools.get(update.toolCallId) ?? {
+  async #acceptTool(
+    active: ActivePrompt,
+    update: ToolCall | ToolCallUpdate,
+    contentTruncated = false,
+  ): Promise<void> {
+    const snapshot: ToolSnapshot = active.tools.get(update.toolCallId) ?? {
       id: update.toolCallId,
       title: 'External tool',
       content: [],
@@ -1312,7 +1341,10 @@ export class AcpExecutor implements PluginExecutorProvider {
     if (update.name != null) snapshot.name = update.name;
     if (update.kind != null) snapshot.kind = update.kind;
     if (update.status != null) snapshot.status = update.status;
-    if (update.content != null) snapshot.content = [...update.content];
+    if (update.content != null) {
+      snapshot.content = [...update.content];
+      snapshot.contentTruncated = contentTruncated;
+    }
     if (update.rawInput !== undefined) snapshot.rawInput = update.rawInput;
     if (update.rawOutput !== undefined) snapshot.rawOutput = update.rawOutput;
     active.tools.set(snapshot.id, snapshot);
@@ -1346,7 +1378,12 @@ export class AcpExecutor implements PluginExecutorProvider {
       active.context.emit({
         type: 'tool_result',
         toolCallId: snapshot.id,
-        content: await projectRichToolResult(snapshot.content, snapshot.rawOutput, active.context),
+        content: await projectRichToolResult(
+          snapshot.content,
+          snapshot.rawOutput,
+          active.context,
+          snapshot.contentTruncated,
+        ),
         ...(snapshot.status === 'failed' ? { isError: true } : {}),
       });
       snapshot.terminal = true;

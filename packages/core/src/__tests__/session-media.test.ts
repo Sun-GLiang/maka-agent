@@ -26,7 +26,7 @@ import {
   SESSION_MEDIA_MAX_BASE64,
 } from '../session-media.js';
 import { normalizeArtifactImagePreviewMime, normalizeMediaPreviewMime } from '../artifacts.js';
-import { prepareSvgPreview, SVG_PREVIEW_MAX_CHARS } from '../svg-preview.js';
+import { prepareSvgPreview, SVG_PREVIEW_MAX_CHARS, SVG_PREVIEW_MAX_NODES } from '../svg-preview.js';
 
 test('media transport bounds binary input and only publishes durable image references', () => {
   assert.ok(isSessionMediaInput({ kind: 'inline', mimeType: 'image/png', base64: 'AAAA' }));
@@ -152,4 +152,39 @@ test('static SVG style parsing stays bounded for long malformed CSS', () => {
     assert.doesNotMatch(result, /<style/);
     assert.match(result, /fill="blue"/);
   }
+});
+
+test('SVG bounds discarded elements and non-element nodes before sanitizing', () => {
+  for (const child of ['<a/>', '<!-- -->', '<?discard?>', '<style/>']) {
+    const source = '<svg>' + child.repeat(16000) + '</svg>';
+    assert.ok(source.length < SVG_PREVIEW_MAX_CHARS);
+    const started = process.cpuUsage();
+    assert.throws(() => prepareSvgPreview(source), /SVG complexity exceeds preview limits/);
+    const elapsed = process.cpuUsage(started);
+    assert.ok(
+      elapsed.user + elapsed.system < 500_000,
+      'Discarded nodes must not consume 500 ms of CPU',
+    );
+  }
+});
+
+test('SVG bounds discarded subtrees before reading their descendants', () => {
+  for (const parent of ['a', 'style']) {
+    assert.throws(
+      () => prepareSvgPreview(`<svg><${parent}>${'<g/>'.repeat(4000)}</${parent}></svg>`),
+      /SVG complexity exceeds preview limits/,
+    );
+    assert.throws(
+      () =>
+        prepareSvgPreview(
+          `<svg><${parent}>${'<g>'.repeat(65)}${'</g>'.repeat(65)}</${parent}></svg>`,
+        ),
+      /SVG complexity exceeds preview limits/,
+    );
+  }
+});
+
+test('SVG input budgets preserve the element boundary with indentation', () => {
+  const source = '<svg>\n' + '  <g/>\n'.repeat(SVG_PREVIEW_MAX_NODES - 1) + '</svg>';
+  assert.equal((prepareSvgPreview(source).match(/<g\/>/g) ?? []).length, SVG_PREVIEW_MAX_NODES - 1);
 });

@@ -229,8 +229,22 @@ export async function projectRichToolResult(
   content: readonly ToolCallContent[],
   rawOutput: unknown,
   context: PluginExecutorContext,
+  truncated = false,
 ): Promise<PluginExecutorToolResultContent> {
-  if (!content.some((item) => item.type === 'content' && item.content.type !== 'text'))
+  // The queue already discarded the tail. Preserve its omission even when that
+  // tail contained the only media and the retained prefix is entirely text/diff.
+  if (truncated)
+    content = [
+      ...content,
+      {
+        type: 'content',
+        content: { type: 'text', text: '[Additional tool content omitted]' },
+      },
+    ];
+  if (
+    !truncated &&
+    !content.some((item) => item.type === 'content' && item.content.type !== 'text')
+  )
     return projectToolResult(content, rawOutput);
   const parts: SessionContentPart[] = [];
   let budget = MAX_TOOL_RESULT_DIFF;
